@@ -49,3 +49,5 @@ This is an updated development package, not a certification that all 11 stages a
 - Customer creation is available to authenticated users according to the current backend permissions.
 - This version adds customer search but does not implement customer editing/deactivation because the supplied backend has no customer PATCH endpoint.
 - Check for an existing shop before creating a new record.
+
+\n## Stage 6: Company & Salesman Stock\n\nThis package adds the Stock screen and ledger-backed stock endpoints. Upload the repository contents while preserving `backend/` and `frontend/`. Keep Render environment variables and Secret Files unchanged. Before using stock movements, confirm `SalesmanStockLedger` exists with the exact headers in `docs/SALES_MANAGEMENT_SCHEMA.md`; enter opening company quantities first. Sales do not automatically deduct stock in this stage.\n
