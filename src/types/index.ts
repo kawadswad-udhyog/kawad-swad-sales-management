@@ -1,0 +1,204 @@
+export type UserRole = 'OWNER' | 'PA' | 'SALESMAN';
+
+export interface User {
+  user_id: string;
+  full_name: string;
+  username: string;
+  role: UserRole;
+  mobile: string;
+  email: string;
+  active: boolean;
+  created_at: string;
+  notes: string;
+  password?: string;
+}
+
+export interface Product {
+  product_id: string;
+  sku: string;
+  product_name: string;
+  category: 'Papad' | 'Masala' | 'Katran' | string;
+  variant: string;
+  pack_weight_g: number;
+  selling_unit: 'packet' | 'kg';
+  retail_pack_only: boolean;
+  active: boolean;
+  notes: string;
+}
+
+export type CustomerType = 'RETAIL' | 'RETAILER' | 'WHOLESALER' | 'DISTRIBUTOR';
+
+export interface Customer {
+  customer_id: string;
+  customer_type: CustomerType;
+  shop_name: string;
+  shopkeeper_name: string;
+  mobile: string;
+  alternate_mobile: string;
+  address: string;
+  locality_area: string;
+  city: string;
+  map_location: string;
+  active: boolean;
+  created_at: string;
+  notes: string;
+}
+
+export interface SaleItem {
+  sale_item_id: string;
+  sale_id: string;
+  product_id: string;
+  product_name_snapshot: string;
+  sku_snapshot: string;
+  pack_weight_g: number;
+  unit: string;
+  quantity: number;
+  actual_unit_price: number;
+  discount_amount: number;
+  line_total: number;
+  qualifying_kg: number;
+  created_at: string;
+  notes: string;
+}
+
+export interface Sale {
+  sale_id: string;
+  bill_number: string;
+  sale_datetime: string;
+  sales_type: CustomerType;
+  customer_id: string;
+  customer_name_snapshot: string;
+  entered_by_user_id: string;
+  salesman_user_id: string;
+  delivery_status: 'DELIVERED' | 'PENDING' | 'CANCELLED';
+  payment_status: 'PAID' | 'UNPAID';
+  subtotal: number;
+  discount_amount: number;
+  tax_amount: number;
+  bill_total: number;
+  bill_status: 'ISSUED' | 'CANCELLED';
+  created_at: string;
+  notes: string;
+  lines?: SaleItem[];
+}
+
+export interface Payment {
+  payment_id: string;
+  sale_id: string;
+  payment_datetime: string;
+  payment_method: 'CASH' | 'UPI' | 'BANK_TRANSFER' | 'OTHER';
+  amount: number;
+  reference_number: string;
+  received_by_user_id: string;
+  payment_status: 'RECEIVED';
+  notes: string;
+}
+
+export type StockTxnType =
+  | 'COMPANY_RECEIPT'
+  | 'COMPANY_ADJUSTMENT'
+  | 'ISSUED'
+  | 'RETURNED'
+  | 'SOLD'
+  | 'SALESMAN_ADJUSTMENT';
+
+export interface StockTransaction {
+  stock_txn_id: string;
+  txn_datetime: string;
+  salesman_user_id: string;
+  product_id: string;
+  sku_snapshot: string;
+  txn_type: StockTxnType;
+  quantity: number;
+  unit: string;
+  pack_weight_g: number;
+  related_sale_id: string;
+  issued_by_user_id: string;
+  received_by_user_id: string;
+  confirmed_by_user_id: string;
+  reference_id: string;
+  notes: string;
+}
+
+export interface Expense {
+  expense_id: string;
+  expense_datetime: string;
+  submitted_by_user_id: string;
+  salesman_user_id: string;
+  category: 'TRAVEL' | 'DELIVERY' | 'OTHER' | 'DIGITAL';
+  amount: number;
+  description: string;
+  receipt_link_or_file_ref: string;
+  approval_status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  approved_by_user_id: string;
+  approval_datetime: string;
+  cash_reducing_expense: boolean;
+  related_closing_id: string;
+  notes: string;
+}
+
+export interface ShopVisit {
+  visit_id: string;
+  visit_datetime: string;
+  salesman_user_id: string;
+  customer_id: string;
+  shop_name_snapshot: string;
+  visit_outcome: string;
+  order_taken: boolean;
+  follow_up_date: string;
+  next_action: string;
+  created_at: string;
+  notes: string;
+}
+
+export interface DailyClosing {
+  closing_id: string;
+  closing_date: string;
+  salesman_user_id: string;
+  opening_cash: number;
+  cash_collected: number;
+  approved_cash_expenses: number;
+  expected_cash_return: number;
+  physical_cash_returned: number;
+  cash_difference: number;
+  opening_stock_reference: string;
+  stock_discrepancy_flag: boolean;
+  closing_status: 'SUBMITTED' | 'CONFIRMED' | 'CORRECTION_REQUIRED';
+  submitted_at: string;
+  reviewed_by_user_id: string;
+  reviewed_at: string;
+  notes: string;
+}
+
+export interface SalaryIncentive {
+  record_id: string;
+  period_start: string;
+  period_end: string;
+  salesman_user_id: string;
+  record_type: 'TRIAL_INCENTIVE' | 'MONTHLY_INCENTIVE' | 'BASE_SALARY';
+  eligible_kg: number;
+  completed_100kg_blocks: number;
+  rate: number;
+  calculated_amount: number;
+  approved_amount: number;
+  approval_status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  approved_by_user_id: string;
+  paid_datetime: string;
+  payment_reference: string;
+  notes: string;
+}
+
+export interface AuditLog {
+  audit_id: string;
+  event_datetime: string;
+  actor_user_id: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  field_changed: string;
+  old_value: string;
+  new_value: string;
+  reason: string;
+  approved_by_user_id: string;
+  related_record_id: string;
+}

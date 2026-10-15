@@ -1,0 +1,7 @@
+{
+  "name": "Kawad Swad Sales Management",
+  "description": "Sales management, billing, stock ledger, expenses, and field salesman mobile workspace for Kawad Swad Udhyog.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

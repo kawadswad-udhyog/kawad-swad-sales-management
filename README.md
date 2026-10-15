@@ -1,39 +1,75 @@
-# Kawad Swad Sales Management System
+# Kawad Swad Sales Management System (React Application)
 
-This is a development starter application intended for manual upload to the separate `kawad-swad-sales-management` repository. It must not be connected to production ERP credentials or data.
+A modern, responsive React + TypeScript application for sales management, billing, stock ledgers, expenses, shop visits, daily cash closings, and salary incentives at **Kawad Swad Udhyog** (Nimar, Madhya Pradesh).
 
-## Included modules
-- Authentication using signed JWT access tokens and PBKDF2-SHA256 password hashes
-- Roles: `OWNER`, `PA`, `SALESMAN`
-- Product catalogue
-- Customer records
-- Sales and single-payment full-payment bills
-- PDF bill generation
-- Salesman stock issuance ledger
-- Shop visits
-- Expense submission and approval
-- Cash closing calculation
-- Dashboard and monthly report
-- XLSX exports
-- Responsive browser UI
+## Technology Stack
 
-## First-time setup
-1. Follow `docs/GOOGLE_SHEETS_SETUP.md`.
-2. Create `AuthUsers` worksheet with the exact headers shown there.
-3. Configure Render Secret File and environment variables.
-4. Create the first Owner locally using `backend/scripts/bootstrap_owner.py`.
-5. Serve the `frontend/` folder on a static host and configure the API base URL in `frontend/app.js`/hosting configuration.
-6. Add the exact frontend origin to `SALES_CORS_ORIGINS`.
+- **Framework**: React 18 with TypeScript
+- **Bundler & Dev Server**: Vite (running on port 3000)
+- **Styling**: Native CSS styled according to the Kawad Swad brand identity (`#183b35`, `#176b52`)
+- **Document Generators**:
+  - `jspdf` for on-demand customer invoice PDFs matching the ReportLab layout
+  - `xlsx` for Excel worksheet exports
+- **State & Persistence**: In-memory store with `localStorage` persistence and realistic seed data
 
-## Render backend
-Root directory: `backend`
-Build command: `pip install -r requirements.txt`
-Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-Health check path: `/health`
+## Ported Modules & Business Logic
 
-## Safety and completeness
-This is a broad initial implementation, not a certified production accounting/ERP system. Google Sheets lacks multi-row transactions and robust concurrent ID allocation. Sale creation currently supports one or more lines at the API level, but the included simple UI creates one line per bill. GST is intentionally not calculated because registration/tax configuration has not been confirmed. Authentication must be enabled and the unauthenticated starter endpoints should be replaced by this version before any real data is used. Review all permissions and test with a non-production spreadsheet before operational use.
+1. **Role-Based Workspaces**:
+   - **OWNER**: Full administrative dashboard, team member management, product & customer catalogue, reports & exports, stock adjustments, expense approvals, and daily closing reviews.
+   - **PA** (e.g. Mahi Sharma): Product/customer administration, stock movements, and expense reviews.
+   - **SALESMAN** (e.g. Ramesh Verma): Mobile-first field salesman workspace with quick actions (`New sale`, `Record visit`, `Add customer`, `Submit expense`, `My stock`, `Daily closing`) and daily checklists.
 
+2. **Product Catalogue**:
+   - SKU, product name, category (Papad, Masala, Katran), variant, pack weight in grams, selling units (packet, kg).
+   - Retail pack rules: retail packs cannot be sold by loose weight.
+   - Immutable SKU on edits to safeguard sales and billing history.
 
-## Latest stage
-See `STAGE_10_SALARY_INCENTIVES.md` for the development payroll/incentive module, its rules, and limitations.
+3. **Customer & Retailer Management**:
+   - Customer types: Retail, Retailer, Wholesaler, Distributor.
+   - Shop name, shopkeeper/contact name, phone numbers, area/locality, city, map location, and notes.
+
+4. **Sales, Billing & Payments**:
+   - Multi-item line builder with quantity and actual unit price per line.
+   - Bill-level discounts and automatic total calculation.
+   - Strict full-payment capture (Cash, UPI, Bank Transfer, Other) recorded at time of bill issue.
+   - Real PDF invoice generation and download.
+   - Instant search through bill history.
+
+5. **Company & Salesman Stock**:
+   - Derived stock balances from the immutable stock ledger (`SalesmanStockLedger`).
+   - Movement types: `COMPANY_RECEIPT`, `ISSUED`, `RETURNED`, `SOLD`, `COMPANY_ADJUSTMENT`, `SALESMAN_ADJUSTMENT`.
+   - Invariant enforcement: rejects issues greater than available company stock, and returns/sales greater than salesman stock.
+
+6. **Expenses & Approvals**:
+   - Expense submission with categories (Travel, Delivery, Other, Digital).
+   - Pending state prevents premature reduction of cash due back.
+   - Review workflow for Owner/PA with reason logging; approved cash expenses flag `cash_reducing_expense`.
+
+7. **Shop Visits**:
+   - Outcome logging, order-taken status, next action items, and follow-up dates.
+
+8. **Daily Cash Closing**:
+   - Server/store-derived expected cash return: `Opening Cash + Cash Collections - Approved Cash Expenses`.
+   - Salesman records physical cash returned; difference is computed and flagged for review.
+   - Manager confirmation and correction workflow.
+
+9. **Salary & Incentives (Stage 10)**:
+   - Configurable trial period, trial per-kg rates, monthly 100 kg volume blocks, and base salary.
+   - Approval and disbursement reference tracking.
+
+10. **Reports & Exports (Stage 11)**:
+    - Monthly breakdown by sales type, product, and salesman.
+    - One-click `.xlsx` downloads for all core ledgers.
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Start development server on port 3000
+npm run dev
+
+# Compile and build production bundle
+npm run build
+```
