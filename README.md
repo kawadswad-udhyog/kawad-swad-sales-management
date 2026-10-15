@@ -33,3 +33,7 @@ Health check path: `/health`
 
 ## Safety and completeness
 This is a broad initial implementation, not a certified production accounting/ERP system. Google Sheets lacks multi-row transactions and robust concurrent ID allocation. Sale creation currently supports one or more lines at the API level, but the included simple UI creates one line per bill. GST is intentionally not calculated because registration/tax configuration has not been confirmed. Authentication must be enabled and the unauthenticated starter endpoints should be replaced by this version before any real data is used. Review all permissions and test with a non-production spreadsheet before operational use.
+
+
+## Latest stage
+See `STAGE_10_SALARY_INCENTIVES.md` for the development payroll/incentive module, its rules, and limitations.
