@@ -1,0 +1,12 @@
+KAWAD SWAD SALES MANAGEMENT SYSTEM - MANUAL UPLOAD PACKAGE
+
+Upload the files preserving the exact relative paths:
+1. docs/SALES_MANAGEMENT_SCHEMA.md
+2. backend/app/services/sales_management_sheets.py
+3. backend/tests/test_sales_management_sheets.py
+4. docs/SALES_MANAGEMENT_DEVELOPMENT_SETUP.md
+
+This package does not include credentials or modify production configuration.
+Do not add the new module to backend/app/main.py yet.
+Do not deploy to production.
+The adapter is a starter and tests have not yet been run in your environment.
