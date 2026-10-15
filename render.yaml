@@ -1,0 +1,12 @@
+services:
+  - type: static
+    name: kawad-swad-sales-frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        value: https://kawad-swad-sales-dev.onrender.com
