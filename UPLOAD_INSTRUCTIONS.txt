@@ -1,0 +1,16 @@
+UPLOAD GUIDE: KAWAD SWAD SALES MANAGEMENT FULL SYSTEM
+
+1. Download and extract this ZIP.
+2. In GitHub repository kawad-swad-sales-management, use branch main.
+3. Upload the CONTENTS of the extracted folder to the repository root, preserving paths. Do not create an extra nested folder named Kawad_Swad_Sales_Management_Full_System.
+4. Replace existing backend/app/main.py, backend/app/security.py, backend/app/store.py, backend/app/services/sales_management_sheets.py, backend/requirements.txt and backend/tests with this package's versions. Add remaining missing files/folders.
+5. Commit changes.
+6. In Render, keep Root Directory backend, Build Command `pip install -r requirements.txt`, Start Command `uvicorn app.main:app --host 0.0.0.0 --port $PORT`, Health Check Path `/health`.
+7. Add Render environment variables SALES_GOOGLE_SPREADSHEET_ID, SALES_GOOGLE_SERVICE_ACCOUNT_FILE=/etc/secrets/sales-service-account.json, SALES_JWT_SECRET (random, 32+ characters), SALES_CORS_ORIGINS (exact frontend origin).
+8. Keep the service-account JSON only in Render Secret Files with filename sales-service-account.json. Never upload it to GitHub.
+9. Create the AuthUsers worksheet as described in docs/GOOGLE_SHEETS_SETUP.md.
+10. Bootstrap the first Owner account from a trusted local machine, not in Render startup. Instructions are in README.md and backend/scripts/bootstrap_owner.py.
+11. Host frontend/ on a static hosting service and configure the API base URL in frontend/app.js. Set that exact origin in SALES_CORS_ORIGINS.
+
+SECURITY / DEPLOYMENT CAUTION
+This is a broad initial implementation and must be reviewed and tested against a development-only spreadsheet before real business use. It does not yet provide transactional guarantees for multi-row Google Sheets writes, robust concurrent ID allocation, automated backups, or complete stock/sales reconciliation. The browser frontend is a static UI, not served by the FastAPI backend. Do not use production data until these controls and permissions have been verified.
