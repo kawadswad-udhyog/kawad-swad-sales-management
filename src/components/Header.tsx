@@ -1,17 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { UserRole } from '../types';
 
 export const Header: React.FC = () => {
-  const { currentUser, logout, users, login, resetToSampleData } = useStore();
-
-  const handleRoleQuickSwitch = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const selectedUserId = e.target.value;
-    const user = users.find((u) => u.user_id === selectedUserId);
-    if (user) {
-      login(user.username);
-    }
-  };
+  const { currentUser, logout, backendUrl, updateBackendUrl, isBackendConnected, refreshData } = useStore();
+  const [showConfig, setShowConfig] = useState(false);
+  const [tempUrl, setTempUrl] = useState(backendUrl);
 
   const getRoleBadgeStyle = (role?: UserRole) => {
     switch (role) {
@@ -26,70 +20,129 @@ export const Header: React.FC = () => {
     }
   };
 
+  const handleSaveUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (tempUrl.trim()) {
+      updateBackendUrl(tempUrl.trim());
+      setShowConfig(false);
+    }
+  };
+
   return (
-    <header>
-      <div className="brand">
-        Kawad Swad
-        <small>Sales Management</small>
-      </div>
+    <>
+      <header>
+        <div className="brand">
+          Kawad Swad
+          <small>Sales Management</small>
+        </div>
 
-      <div className="header-right">
-        {currentUser ? (
-          <>
-            <div className="user-badge" title="Active signed in user">
-              <span>{currentUser.full_name}</span>
-              <span
-                style={{
-                  ...getRoleBadgeStyle(currentUser.role),
-                  fontSize: '0.72rem',
-                  padding: '2px 7px',
-                  borderRadius: '999px',
-                  fontWeight: 800,
-                  textTransform: 'uppercase',
-                }}
-              >
-                {currentUser.role}
-              </span>
-            </div>
-
-            {/* Quick Switcher for easy testing during demo */}
-            <select
-              title="Switch user role for testing"
-              value={currentUser.user_id}
-              onChange={handleRoleQuickSwitch}
+        <div className="header-right">
+          {/* Connection status indicator */}
+          <div
+            onClick={() => setShowConfig(true)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              cursor: 'pointer',
+              fontSize: '0.78rem',
+              background: 'rgba(255, 255, 255, 0.1)',
+              padding: '5px 10px',
+              borderRadius: '999px',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+            }}
+            title={`Backend: ${backendUrl} (Click to change)`}
+          >
+            <span
               style={{
-                width: 'auto',
-                padding: '6px 10px',
-                margin: 0,
-                fontSize: '0.8rem',
-                background: '#235248',
-                color: '#fff',
-                borderColor: '#37685e',
-                cursor: 'pointer',
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                background: isBackendConnected ? '#4ade80' : '#fbbf24',
+                display: 'inline-block',
               }}
-            >
-              {users.map((u) => (
-                <option key={u.user_id} value={u.user_id} style={{ background: '#fff', color: '#000' }}>
-                  Switch to: {u.full_name} ({u.role})
-                </option>
-              ))}
-            </select>
+            />
+            <span style={{ color: '#fff', opacity: 0.9 }}>
+              {isBackendConnected ? 'Backend Live' : 'Connecting…'}
+            </span>
+          </div>
 
-            <button
-              onClick={resetToSampleData}
-              className="secondary"
-              title="Reset data to initial state"
-              style={{ fontSize: '0.8rem', padding: '6px 10px', background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)' }}
-            >
-              Reset Data
-            </button>
+          {currentUser ? (
+            <>
+              <div className="user-badge" title="Authenticated session">
+                <span>{currentUser.full_name}</span>
+                <span
+                  style={{
+                    ...getRoleBadgeStyle(currentUser.role),
+                    fontSize: '0.72rem',
+                    padding: '2px 7px',
+                    borderRadius: '999px',
+                    fontWeight: 800,
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {currentUser.role}
+                </span>
+              </div>
 
-            <button onClick={logout} className="secondary" style={{ padding: '6px 14px' }}>
-              Sign out
-            </button>
-          </>
-        ) : null}
-      </div>
-    </header>
+              <button
+                onClick={refreshData}
+                className="secondary"
+                title="Sync records from Google Sheets / FastAPI backend"
+                style={{ fontSize: '0.8rem', padding: '6px 10px', background: 'rgba(255,255,255,0.15)', color: '#fff' }}
+              >
+                ↻ Refresh
+              </button>
+
+              <button onClick={logout} className="secondary" style={{ padding: '6px 14px' }}>
+                Sign out
+              </button>
+            </>
+          ) : null}
+        </div>
+      </header>
+
+      {showConfig && (
+        <div className="modal-overlay" onClick={() => setShowConfig(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '480px' }}>
+            <h2 style={{ marginTop: 0 }}>Backend Service Settings</h2>
+            <p className="muted">
+              Configure the remote FastAPI backend URL hosted on Render or local proxy:
+            </p>
+
+            <form onSubmit={handleSaveUrl}>
+              <label>
+                API Base URL
+                <input
+                  type="url"
+                  value={tempUrl}
+                  onChange={(e) => setTempUrl(e.target.value)}
+                  placeholder="https://kawad-swad-sales-dev.onrender.com"
+                  required
+                />
+              </label>
+
+              <div className="actions" style={{ marginTop: '16px' }}>
+                <button type="submit">Save &amp; Reconnect</button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    setTempUrl('https://kawad-swad-sales-dev.onrender.com');
+                    updateBackendUrl('https://kawad-swad-sales-dev.onrender.com');
+                    setShowConfig(false);
+                  }}
+                >
+                  Reset Default
+                </button>
+                <button type="button" className="secondary" onClick={() => setShowConfig(false)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </>
   );
 };

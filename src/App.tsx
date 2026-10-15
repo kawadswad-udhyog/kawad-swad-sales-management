@@ -13,6 +13,7 @@ import { VisitsView } from './views/VisitsView';
 import { ClosingView } from './views/ClosingView';
 import { SalaryView } from './views/SalaryView';
 import { ReportsView } from './views/ReportsView';
+import { AuditView } from './views/AuditView';
 import { UsersView } from './views/UsersView';
 
 const MainAppContent: React.FC = () => {
@@ -52,6 +53,8 @@ const MainAppContent: React.FC = () => {
         return <SalaryView />;
       case 'reports':
         return <ReportsView />;
+      case 'audit':
+        return <AuditView />;
       case 'users':
         return <UsersView />;
       default:

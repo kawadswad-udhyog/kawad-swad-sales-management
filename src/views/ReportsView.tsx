@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { exportSheetToExcel } from '../utils/exportToExcel';
+import { Payment } from '../types';
 
 export const ReportsView: React.FC = () => {
   const {
@@ -12,6 +13,7 @@ export const ReportsView: React.FC = () => {
     salaryIncentives,
     stockTransactions,
     auditLogs,
+    payments,
   } = useStore();
 
   const currentYearMonth = new Date().toISOString().slice(0, 7);
@@ -35,6 +37,40 @@ export const ReportsView: React.FC = () => {
     }
     bySalesType[type].bills += 1;
     bySalesType[type].revenue += s.bill_total;
+  }
+
+  // Payment methods breakdown for the month
+  const monthSaleIds = new Set(monthSales.map((s) => s.sale_id));
+  const monthPayments = payments.filter((p: Payment) => monthSaleIds.has(p.sale_id));
+  const paymentBreakdown: Record<string, { count: number; total: number }> = {
+    CASH: { count: 0, total: 0 },
+    UPI: { count: 0, total: 0 },
+    BANK_TRANSFER: { count: 0, total: 0 },
+    OTHER: { count: 0, total: 0 },
+  };
+  for (const p of monthPayments) {
+    const method = p.payment_method || 'OTHER';
+    if (!paymentBreakdown[method]) {
+      paymentBreakdown[method] = { count: 0, total: 0 };
+    }
+    paymentBreakdown[method].count += 1;
+    paymentBreakdown[method].total += p.amount;
+  }
+
+  // Expense breakdown for the month
+  const monthExpenses = expenses.filter((e) => e.expense_datetime.slice(0, 7) === selectedMonth);
+  const expenseStatusBreakdown: Record<string, { count: number; total: number }> = {
+    APPROVED: { count: 0, total: 0 },
+    PENDING: { count: 0, total: 0 },
+    REJECTED: { count: 0, total: 0 },
+  };
+  for (const e of monthExpenses) {
+    const status = e.approval_status || 'PENDING';
+    if (!expenseStatusBreakdown[status]) {
+      expenseStatusBreakdown[status] = { count: 0, total: 0 };
+    }
+    expenseStatusBreakdown[status].count += 1;
+    expenseStatusBreakdown[status].total += e.amount;
   }
 
   // Product-wise breakdown from month sales lines
@@ -289,6 +325,70 @@ export const ReportsView: React.FC = () => {
                   </td>
                 </tr>
               )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Breakdown by Payment Method */}
+        <h3>Payment Method Collections</h3>
+        <div className="table-wrap" style={{ marginBottom: '20px' }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Payment Mode</th>
+                <th>Payment Transactions</th>
+                <th>Total Collected</th>
+                <th>Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(paymentBreakdown).map(([method, data]) => (
+                <tr key={method}>
+                  <td>
+                    <strong>{method}</strong>
+                  </td>
+                  <td>{data.count}</td>
+                  <td>₹{data.total.toFixed(2)}</td>
+                  <td>
+                    {totalRevenue > 0
+                      ? `${((data.total / totalRevenue) * 100).toFixed(1)}%`
+                      : '0%'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Breakdown by Expense Status */}
+        <h3>Field Expense Submissions</h3>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Approval Status</th>
+                <th>Expense Submissions</th>
+                <th>Total Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(expenseStatusBreakdown).map(([status, data]) => (
+                <tr key={status}>
+                  <td>
+                    <span
+                      className={`badge ${
+                        status === 'APPROVED' ? 'approved' : status === 'REJECTED' ? 'rejected' : 'pending'
+                      }`}
+                    >
+                      {status}
+                    </span>
+                  </td>
+                  <td>{data.count}</td>
+                  <td>
+                    <strong>₹{data.total.toFixed(2)}</strong>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

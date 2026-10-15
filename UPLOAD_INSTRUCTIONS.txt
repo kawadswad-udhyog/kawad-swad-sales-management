@@ -1,8 +1,0 @@
-KAWAD SWAD SALES MANAGEMENT — NEXT STAGE
-
-1. Open the GitHub repository: kawad-swad-sales-management.
-2. Upload the contents of this ZIP's kawad-swad-sales-management-main folder to the repository root, replacing matching files.
-3. Commit to branch main. Render service kawad-swad-sales-dev should redeploy automatically.
-4. Keep Render environment variables and Secret Files unchanged. Never upload sales-service-account.json, service-account credentials, JWT secrets, or setup secrets to GitHub.
-5. This stage adds multi-line sales bills, actual unit pricing, discount, full payment recording, recent-bill search and invoice PDF reprint/download.
-6. Automatic stock deduction and GST invoice logic are not included yet. See NEXT_STAGE_SALES_BILLING.md.

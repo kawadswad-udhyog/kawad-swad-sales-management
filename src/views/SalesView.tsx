@@ -11,7 +11,16 @@ interface CartLine {
 }
 
 export const SalesView: React.FC = () => {
-  const { customers, products, sales, createSale, getSaleWithItems, currentUser } = useStore();
+  const {
+    customers,
+    products,
+    sales,
+    createSale,
+    getSaleWithItems,
+    currentUser,
+    companyStockSummary,
+    salesmanStockSummary,
+  } = useStore();
 
   const activeCustomers = customers.filter((c) => c.active);
   const activeProducts = products.filter((p) => p.active);
@@ -26,6 +35,18 @@ export const SalesView: React.FC = () => {
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
   const [issuedSale, setIssuedSale] = useState<{ sale: Sale; paymentId: string } | null>(null);
   const [viewingSaleData, setViewingSaleData] = useState<{ sale: Sale; items: SaleItem[] } | null>(null);
+
+  const getAvailableStock = (productId: string) => {
+    if (currentUser?.role === 'SALESMAN') {
+      const sm = salesmanStockSummary.find(
+        (s) => s.product_id === productId && s.salesman_user_id === currentUser.user_id
+      );
+      return sm ? sm.quantity : 0;
+    } else {
+      const comp = companyStockSummary.find((c) => c.product_id === productId);
+      return comp ? comp.company_quantity : 0;
+    }
+  };
 
   // Cart state
   const [cart, setCart] = useState<CartLine[]>([
@@ -69,7 +90,7 @@ export const SalesView: React.FC = () => {
   );
   const billTotal = Math.max(0, subtotal - (Number(discountAmount) || 0));
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
     setIssuedSale(null);
@@ -88,7 +109,8 @@ export const SalesView: React.FC = () => {
     if (!window.confirm(confirmMsg)) return;
 
     try {
-      const result = createSale({
+      const idempotencyKey = `IDEMP-${Date.now()}-${customerId.slice(-4)}`;
+      const result = await createSale({
         customer_id: customerId,
         sales_type: salesType,
         payment_method: paymentMethod,
@@ -96,6 +118,7 @@ export const SalesView: React.FC = () => {
         discount_amount: Number(discountAmount) || 0,
         notes: notes.trim(),
         delivery_status: 'DELIVERED',
+        idempotency_key: idempotencyKey,
         lines: cart.map((line) => ({
           product_id: line.product_id,
           quantity: Number(line.quantity),
@@ -103,8 +126,8 @@ export const SalesView: React.FC = () => {
         })),
       });
 
-      setIssuedSale({ sale: result.sale, paymentId: result.payment.payment_id });
-      setNotice({ msg: `Bill #${result.sale.bill_number} issued and full payment verified.` });
+      setIssuedSale({ sale: result.sale, paymentId: result.paymentId || '' });
+      setNotice({ msg: `Bill #${result.sale.bill_number} issued, full payment recorded, and stock automatically deducted.` });
 
       // Reset cart
       setCart([
@@ -274,11 +297,14 @@ export const SalesView: React.FC = () => {
                           }
                           required
                         >
-                          {activeProducts.map((p) => (
-                            <option key={p.product_id} value={p.product_id}>
-                              {p.product_name} · {p.sku} {p.pack_weight_g ? `(${p.pack_weight_g}g)` : ''}
-                            </option>
-                          ))}
+                          {activeProducts.map((p) => {
+                            const avail = getAvailableStock(p.product_id);
+                            return (
+                              <option key={p.product_id} value={p.product_id}>
+                                {p.product_name} · {p.sku} (In stock: {avail} {p.selling_unit})
+                              </option>
+                            );
+                          })}
                         </select>
                       </td>
                       <td>

@@ -227,9 +227,16 @@ export const ExpensesView: React.FC = () => {
                             </button>
                           </div>
                         ) : (
-                          <span className="muted" style={{ fontSize: '0.8rem' }}>
-                            {exp.approved_by_user_id ? `By ${exp.approved_by_user_id}` : 'Closed'}
-                          </span>
+                          <div>
+                            <span className="muted" style={{ fontSize: '0.8rem' }}>
+                              {exp.approved_by_user_id ? `By ${exp.approved_by_user_id}` : 'Closed'}
+                            </span>
+                            {exp.notes && (
+                              <div style={{ fontSize: '0.75rem', color: '#66746f' }}>
+                                Reason: {exp.notes}
+                              </div>
+                            )}
+                          </div>
                         )}
                       </td>
                     )}

@@ -12,6 +12,7 @@ export type ViewType =
   | 'closing'
   | 'salary'
   | 'reports'
+  | 'audit'
   | 'users';
 
 interface NavigationProps {
@@ -34,6 +35,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentView, onSelectVie
     { view: 'closing', label: 'Daily Closing', roles: ['OWNER', 'PA', 'SALESMAN'] },
     { view: 'salary', label: 'Salary & Incentives', roles: ['OWNER', 'PA'] },
     { view: 'reports', label: 'Reports & Exports', roles: ['OWNER', 'PA'] },
+    { view: 'audit', label: 'Audit Log', roles: ['OWNER', 'PA'] },
     { view: 'users', label: 'Users', roles: ['OWNER'] },
   ];
 

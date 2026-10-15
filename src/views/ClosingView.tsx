@@ -27,12 +27,12 @@ export const ClosingView: React.FC = () => {
   );
   const liveDifference = physicalCashReturned - liveExpectedReturn;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
     try {
-      const closing = submitDailyClosing({
+      const closing = await submitDailyClosing({
         opening_cash: Number(openingCash),
         physical_cash_returned: Number(physicalCashReturned),
         notes: notes.trim(),

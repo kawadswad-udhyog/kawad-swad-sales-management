@@ -64,6 +64,7 @@ export interface SaleItem {
 export interface Sale {
   sale_id: string;
   bill_number: string;
+  idempotency_key?: string;
   sale_datetime: string;
   sales_type: CustomerType;
   customer_id: string;
@@ -97,6 +98,7 @@ export interface Payment {
 export type StockTxnType =
   | 'COMPANY_RECEIPT'
   | 'COMPANY_ADJUSTMENT'
+  | 'COMPANY_SOLD'
   | 'ISSUED'
   | 'RETURNED'
   | 'SOLD'

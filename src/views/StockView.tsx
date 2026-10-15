@@ -91,7 +91,6 @@ export const StockView: React.FC = () => {
                   <option value="COMPANY_RECEIPT">Company stock received / opening</option>
                   <option value="ISSUED">Issue to salesman</option>
                   <option value="RETURNED">Return from salesman</option>
-                  <option value="SOLD">Record salesman sale movement</option>
                   <option value="COMPANY_ADJUSTMENT">Company stock positive adjustment</option>
                   <option value="SALESMAN_ADJUSTMENT">Salesman stock positive adjustment</option>
                 </select>

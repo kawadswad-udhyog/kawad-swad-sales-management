@@ -7,26 +7,42 @@ interface DashboardViewProps {
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
-  const { currentUser, sales, expenses, dailyClosings, stockTransactions, customers, shopVisits } =
-    useStore();
+  const {
+    currentUser,
+    sales,
+    expenses,
+    dailyClosings,
+    stockTransactions,
+    customers,
+    shopVisits,
+    dashboardMetrics,
+  } = useStore();
 
   const isSalesman = currentUser?.role === 'SALESMAN';
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonthStr = todayStr.slice(0, 7);
 
-  // Metrics for Owner/PA
+  // Metrics for Owner/PA using backend dashboard data or live ledger records
   const todaySales = sales.filter(
     (s) => s.sale_datetime.slice(0, 10) === todayStr && s.bill_status === 'ISSUED'
   );
-  const todayRevenue = todaySales.reduce((sum, s) => sum + s.bill_total, 0);
-
   const monthSales = sales.filter(
     (s) => s.sale_datetime.slice(0, 7) === currentMonthStr && s.bill_status === 'ISSUED'
   );
-  const monthRevenue = monthSales.reduce((sum, s) => sum + s.bill_total, 0);
 
-  const pendingExpensesCount = expenses.filter((e) => e.approval_status === 'PENDING').length;
-  const pendingClosingsCount = dailyClosings.filter((c) => c.closing_status === 'SUBMITTED').length;
+  const todayBills = dashboardMetrics?.daily?.bills ?? todaySales.length;
+  const todayRevenue =
+    dashboardMetrics?.daily?.revenue ?? todaySales.reduce((sum, s) => sum + s.bill_total, 0);
+  const monthBills = dashboardMetrics?.monthly?.bills ?? monthSales.length;
+  const monthRevenue =
+    dashboardMetrics?.monthly?.revenue ?? monthSales.reduce((sum, s) => sum + s.bill_total, 0);
+
+  const pendingExpensesCount =
+    dashboardMetrics?.pending_expenses ??
+    expenses.filter((e) => e.approval_status === 'PENDING').length;
+  const pendingClosingsCount =
+    dashboardMetrics?.pending_closings ??
+    dailyClosings.filter((c) => c.closing_status === 'SUBMITTED').length;
 
   if (isSalesman) {
     // Stage 7: Mobile-first field salesman workspace
