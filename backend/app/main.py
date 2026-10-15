@@ -1,29 +1,25 @@
-"""Development-only FastAPI entry point for Kawad Swad Sales Management.
-
-This is a starter API. It deliberately does not import or mount the existing ERP routers.
-It only uses the dedicated SALES_GOOGLE_* configuration.
-"""
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from typing import Any, Optional
-from app.services.sales_management_sheets import SalesManagementSheets, SalesSheetsConfigError
+"""Isolated development FastAPI entry point for Kawad Swad Sales Management."""
+from fastapi import FastAPI, HTTPException, Query
+from typing import Any
+from app.services.sales_management_sheets import (
+    SalesGoogleSheets,
+    SalesSheetsConfigurationError,
+    SalesSheetsSchemaError,
+)
 
 app = FastAPI(
     title="Kawad Swad Sales Management API (Development)",
-    version="0.1.0",
-    description="Isolated development API for the Kawad Swad sales management system.",
+    version="0.1.1",
+    description="Isolated development starter; not the production ERP.",
 )
 
-_sheets: Optional[SalesManagementSheets] = None
-
-def get_sheets() -> SalesManagementSheets:
-    global _sheets
-    if _sheets is None:
-        try:
-            _sheets = SalesManagementSheets.from_environment()
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Sales Sheets configuration unavailable: {exc}") from exc
-    return _sheets
+def get_sheets() -> SalesGoogleSheets:
+    try:
+        return SalesGoogleSheets()
+    except (SalesSheetsConfigurationError, SalesSheetsSchemaError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Sales Sheets configuration unavailable") from exc
 
 @app.get("/")
 def root() -> dict[str, str]:
@@ -35,16 +31,22 @@ def health() -> dict[str, str]:
 
 @app.get("/api/sales/schema")
 def schema_status() -> dict[str, Any]:
-    """Return configured sales-sheet schema status without returning credentials."""
+    # Reports configured tabs/headers without exposing credentials or spreadsheet data.
     sheets = get_sheets()
-    try:
-        return sheets.check_schema()
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Unable to verify sales spreadsheet schema: {exc}") from exc
+    result = {}
+    for tab_name in sheets.headers:
+        try:
+            ws = sheets.worksheet(tab_name)
+            result[tab_name] = {"status": "ok", "header_count": len(ws.row_values(1))}
+        except Exception as exc:
+            result[tab_name] = {"status": "error", "error": str(exc)}
+    return {"sheets": result}
 
 @app.get("/api/sales/{sheet_name}")
-def list_sheet_records(sheet_name: str, limit: int = 100) -> dict[str, Any]:
-    """Development-only read endpoint for approved sales-management tabs."""
+def list_sheet_records(
+    sheet_name: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
     allowed = {
         "Users", "Products", "Customers", "Sales", "SaleItems", "Payments",
         "SalesmanStockLedger", "CashLedger", "Expenses", "ShopVisits",
@@ -52,10 +54,8 @@ def list_sheet_records(sheet_name: str, limit: int = 100) -> dict[str, Any]:
     }
     if sheet_name not in allowed:
         raise HTTPException(status_code=404, detail="Unknown sales-management sheet")
-    if limit < 1 or limit > 500:
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
-    sheets = get_sheets()
     try:
-        return {"sheet": sheet_name, "records": sheets.list_records(sheet_name, limit=limit)}
+        records = get_sheets().list_records(sheet_name)
+        return {"sheet": sheet_name, "records": records[:limit]}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Unable to read sales sheet: {exc}") from exc
