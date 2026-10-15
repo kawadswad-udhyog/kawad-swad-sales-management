@@ -5,11 +5,12 @@ from app.services.sales_management_sheets import (
     SalesGoogleSheets,
     SalesSheetsConfigurationError,
     SalesSheetsSchemaError,
+    SALES_HEADERS,
 )
 
 app = FastAPI(
     title="Kawad Swad Sales Management API (Development)",
-    version="0.1.1",
+    version="0.1.2",
     description="Isolated development starter; not the production ERP.",
 )
 
@@ -31,14 +32,15 @@ def health() -> dict[str, str]:
 
 @app.get("/api/sales/schema")
 def schema_status() -> dict[str, Any]:
-    # Reports configured tabs/headers without exposing credentials or spreadsheet data.
+    # Use the module-level schema contract; SalesGoogleSheets has no .headers attribute.
     sheets = get_sheets()
-    result = {}
-    for tab_name in sheets.headers:
+    result: dict[str, Any] = {}
+    for tab_name in SALES_HEADERS:
         try:
-            ws = sheets.worksheet(tab_name)
-            result[tab_name] = {"status": "ok", "header_count": len(ws.row_values(1))}
+            worksheet = sheets.worksheet(tab_name)
+            result[tab_name] = {"status": "ok", "header_count": len(worksheet.row_values(1))}
         except Exception as exc:
+            # Avoid returning credential details or other sensitive internals.
             result[tab_name] = {"status": "error", "error": str(exc)}
     return {"sheets": result}
 
@@ -47,12 +49,7 @@ def list_sheet_records(
     sheet_name: str,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
-    allowed = {
-        "Users", "Products", "Customers", "Sales", "SaleItems", "Payments",
-        "SalesmanStockLedger", "CashLedger", "Expenses", "ShopVisits",
-        "DailyClosing", "SalaryIncentives", "AuditLog", "Settings",
-    }
-    if sheet_name not in allowed:
+    if sheet_name not in SALES_HEADERS:
         raise HTTPException(status_code=404, detail="Unknown sales-management sheet")
     try:
         records = get_sheets().list_records(sheet_name)

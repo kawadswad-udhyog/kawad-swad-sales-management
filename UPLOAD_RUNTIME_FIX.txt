@@ -1,0 +1,11 @@
+RUNTIME FIX: AttributeError SalesGoogleSheets has no attribute headers
+
+Replace ONLY this file in GitHub:
+backend/app/main.py
+
+Keep the existing adapter file at:
+backend/app/services/sales_management_sheets.py
+
+Upload the new main.py from this package to that exact path, replacing the old one, and commit. Render should redeploy automatically if auto-deploy is enabled.
+
+This fixes the .headers AttributeError by importing SALES_HEADERS from the adapter module. It does not guarantee the sheet schema will pass; the next response will report each worksheet's status. Do not share service-account JSON or expose the unauthenticated read endpoints to real business data.
