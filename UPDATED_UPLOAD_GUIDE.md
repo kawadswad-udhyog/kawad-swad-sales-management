@@ -1,7 +1,9 @@
-# Stage 7 Upload Guide
+# Updated upload guide — Stage 8
 
-Upload the contents of this folder's `kawad-swad-sales-management-main/` directory to the root of the existing GitHub repository, replacing matching files, then commit to `main`. Render should redeploy from the existing repository configuration.
+1. Extract the ZIP.
+2. In the existing GitHub repository, upload the contents of `kawad-swad-sales-management-main/` to the repository root, preserving folder paths and replacing matching files.
+3. Commit to `main`; Render should redeploy from the connected branch.
+4. Keep existing Render environment variables and Secret Files unchanged. Never commit service-account JSON, tokens, or secrets.
+5. Review `STAGE_8_EXPENSES_APPROVAL.md` for the workflow and limitations.
 
-Do not change Render environment variables or Secret Files. Do not upload Google service-account credentials or secrets to GitHub.
-
-This update adds a mobile-first SALESMAN dashboard and touch-friendly responsive styling. It reuses existing backend routes; it does not claim offline support or automatic stock deduction on sales.
+This package adds the expenses list API and approval interface. It does not alter existing Google Sheets data during upload.
