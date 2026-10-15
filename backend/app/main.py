@@ -538,6 +538,14 @@ def schema_status(
 # PRODUCTS
 # ============================================================
 
+@app.get("/api/users")
+def get_users(
+    user=Depends(require_roles("OWNER", "PA")),
+    s: Store = Depends(store),
+):
+    return s.rows("Users")
+
+
 @app.get("/api/products")
 def get_products(
     q: str = "",
@@ -985,66 +993,151 @@ def invoice(
 # SALESMAN STOCK TRANSACTIONS
 # ============================================================
 
+@app.get("/api/stock/summary")
+def stock_summary(
+    user=Depends(current_user),
+    s: Store = Depends(store),
+):
+    """Derived stock balances from the append-only stock ledger.
+
+    COMPANY_RECEIPT and COMPANY_ADJUSTMENT increase company stock.
+    ISSUED transfers company stock to a salesman; RETURNED transfers it back.
+    SOLD reduces salesman stock. SALESMAN_ADJUSTMENT is a reviewed correction.
+    """
+    products = {str(p.get("product_id")): p for p in s.rows("Products")}
+    users = {str(u.get("user_id")): u for u in s.rows("Users")}
+    ledger = s.rows("SalesmanStockLedger")
+    company = {}
+    salesman = {}
+    for row in ledger:
+        pid = str(row.get("product_id", ""))
+        qty = as_float(row.get("quantity"))
+        typ = str(row.get("txn_type", "")).upper()
+        sid = str(row.get("salesman_user_id", ""))
+        if typ == "COMPANY_RECEIPT":
+            company[pid] = company.get(pid, 0) + qty
+        elif typ == "COMPANY_ADJUSTMENT":
+            company[pid] = company.get(pid, 0) + qty
+        elif typ == "ISSUED":
+            company[pid] = company.get(pid, 0) - qty
+            key = (sid, pid)
+            salesman[key] = salesman.get(key, 0) + qty
+        elif typ == "RETURNED":
+            company[pid] = company.get(pid, 0) + qty
+            key = (sid, pid)
+            salesman[key] = salesman.get(key, 0) - qty
+        elif typ == "SOLD":
+            key = (sid, pid)
+            salesman[key] = salesman.get(key, 0) - qty
+        elif typ == "SALESMAN_ADJUSTMENT":
+            key = (sid, pid)
+            salesman[key] = salesman.get(key, 0) + qty
+    company_rows = []
+    for pid, product in products.items():
+        company_rows.append({
+            "product_id": pid, "sku": product.get("sku", ""),
+            "product_name": product.get("product_name", ""),
+            "pack_weight_g": product.get("pack_weight_g", ""),
+            "company_quantity": round(company.get(pid, 0), 3),
+        })
+    salesman_rows = []
+    for (sid, pid), qty in salesman.items():
+        product = products.get(pid, {})
+        salesman_rows.append({
+            "salesman_user_id": sid,
+            "salesman_name": users.get(sid, {}).get("full_name", sid),
+            "product_id": pid, "sku": product.get("sku", ""),
+            "product_name": product.get("product_name", ""),
+            "quantity": round(qty, 3),
+        })
+    return {"company_stock": company_rows, "salesman_stock": salesman_rows}
+
+
+@app.get("/api/stock/transactions")
+def get_stock_transactions(
+    limit: int = Query(300, ge=1, le=1000),
+    user=Depends(current_user),
+    s: Store = Depends(store),
+):
+    rows = s.rows("SalesmanStockLedger")
+    rows.reverse()
+    if user.get("role") == "SALESMAN":
+        rows = [r for r in rows if str(r.get("salesman_user_id")) == str(user.get("sub"))]
+    return rows[:limit]
+
+
 @app.post("/api/stock/transactions", status_code=201)
 def stock_txn(
     body: StockIn,
     user=Depends(require_roles("OWNER", "PA")),
     s: Store = Depends(store),
 ):
-    if body.txn_type not in (
-        "ISSUED",
-        "RETURNED",
-        "ADJUSTMENT",
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid stock transaction type.",
-        )
-
-    product = next(
-        (
-            row
-            for row in s.rows("Products")
-            if str(row.get("product_id")) == body.product_id
-        ),
-        None,
+    allowed = (
+        "COMPANY_RECEIPT", "COMPANY_ADJUSTMENT", "ISSUED",
+        "RETURNED", "SOLD", "SALESMAN_ADJUSTMENT",
     )
-
+    txn_type = body.txn_type.strip().upper()
+    if txn_type not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid stock transaction type.")
+    products = {str(p.get("product_id")): p for p in s.rows("Products")}
+    product = products.get(body.product_id)
     if not product:
-        raise HTTPException(
-            status_code=404,
-            detail="Product not found.",
-        )
-
+        raise HTTPException(status_code=404, detail="Product not found.")
+    users = {str(u.get("user_id")): u for u in s.rows("Users")}
+    if txn_type in ("ISSUED", "RETURNED", "SOLD", "SALESMAN_ADJUSTMENT"):
+        target = users.get(body.salesman_user_id)
+        if not target or not is_active(target.get("active")):
+            raise HTTPException(status_code=404, detail="Active salesman not found.")
+        if str(target.get("role", "")).upper() != "SALESMAN":
+            raise HTTPException(status_code=400, detail="Stock recipient must have SALESMAN role.")
+    # Calculate current balances before recording a transfer.
+    ledger = s.rows("SalesmanStockLedger")
+    company_qty = 0.0
+    salesman_qty = 0.0
+    for r in ledger:
+        if str(r.get("product_id")) != body.product_id:
+            continue
+        typ = str(r.get("txn_type", "")).upper()
+        qty = as_float(r.get("quantity"))
+        if typ in ("COMPANY_RECEIPT", "COMPANY_ADJUSTMENT"):
+            company_qty += qty
+        elif typ == "ISSUED":
+            company_qty -= qty
+            if str(r.get("salesman_user_id")) == body.salesman_user_id: salesman_qty += qty
+        elif typ == "RETURNED":
+            company_qty += qty
+            if str(r.get("salesman_user_id")) == body.salesman_user_id: salesman_qty -= qty
+        elif typ == "SOLD" and str(r.get("salesman_user_id")) == body.salesman_user_id:
+            salesman_qty -= qty
+        elif typ == "SALESMAN_ADJUSTMENT" and str(r.get("salesman_user_id")) == body.salesman_user_id:
+            salesman_qty += qty
+    if txn_type == "ISSUED" and body.quantity > company_qty:
+        raise HTTPException(status_code=409, detail=f"Insufficient company stock. Available: {company_qty:g}.")
+    if txn_type in ("RETURNED", "SOLD") and body.quantity > salesman_qty:
+        raise HTTPException(status_code=409, detail=f"Insufficient salesman stock. Available: {salesman_qty:g}.")
+    if txn_type == "COMPANY_ADJUSTMENT" and company_qty + body.quantity < 0:
+        raise HTTPException(status_code=409, detail="Company adjustment cannot make stock negative.")
+    if txn_type == "SALESMAN_ADJUSTMENT" and salesman_qty + body.quantity < 0:
+        raise HTTPException(status_code=409, detail="Salesman adjustment cannot make stock negative.")
     row = {
         "stock_txn_id": s.next_id("SalesmanStockLedger"),
         "txn_datetime": now(),
-        "salesman_user_id": body.salesman_user_id,
+        "salesman_user_id": body.salesman_user_id if txn_type not in ("COMPANY_RECEIPT", "COMPANY_ADJUSTMENT") else "",
         "product_id": body.product_id,
         "sku_snapshot": product.get("sku", ""),
-        "txn_type": body.txn_type,
+        "txn_type": txn_type,
         "quantity": body.quantity,
-        "unit": body.unit,
-        "pack_weight_g": (
-            body.pack_weight_g or product.get("pack_weight_g", 0)
-        ),
+        "unit": body.unit or product.get("selling_unit", "packet"),
+        "pack_weight_g": body.pack_weight_g or product.get("pack_weight_g", 0),
         "related_sale_id": "",
-        "issued_by_user_id": user["sub"],
-        "received_by_user_id": "",
+        "issued_by_user_id": user["sub"] if txn_type == "ISSUED" else "",
+        "received_by_user_id": user["sub"] if txn_type in ("COMPANY_RECEIPT", "RETURNED") else "",
         "confirmed_by_user_id": "",
         "reference_id": "",
         "notes": body.notes,
     }
-
     s.append("SalesmanStockLedger", row)
-
-    s.append_audit(
-        user,
-        "CREATE",
-        "StockTransaction",
-        row["stock_txn_id"],
-    )
-
+    s.append_audit(user, "CREATE", "StockTransaction", row["stock_txn_id"], f"Stock transaction: {txn_type}")
     return row
 
 
