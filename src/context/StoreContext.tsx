@@ -235,25 +235,61 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setAuditLogs((prev) => [log, ...prev]);
   };
 
-  // Real Login via POST /api/auth/login
+  // Real Login via POST /api/auth/login with fallback to /auth/login
   const login = async (username: string, password: string): Promise<void> => {
     setIsLoading(true);
     try {
-      const res = await apiRequest<{
+      let res: {
         access_token: string;
-        token_type: string;
-        user: { user_id: string; full_name: string; role: string };
-      }>('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ username: username.trim(), password }),
-      });
+        token_type?: string;
+        user?: { user_id: string; full_name?: string; role?: string };
+        user_id?: string;
+        full_name?: string;
+        role?: string;
+      };
+
+      try {
+        res = await apiRequest<{
+          access_token: string;
+          token_type?: string;
+          user?: { user_id: string; full_name?: string; role?: string };
+          user_id?: string;
+          full_name?: string;
+          role?: string;
+        }>('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ username: username.trim(), password }),
+        });
+      } catch (err: unknown) {
+        if (err instanceof Error && err.message.includes('404')) {
+          res = await apiRequest<{
+            access_token: string;
+            token_type?: string;
+            user?: { user_id: string; full_name?: string; role?: string };
+            user_id?: string;
+            full_name?: string;
+            role?: string;
+          }>('/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ username: username.trim(), password }),
+          });
+        } else {
+          throw err;
+        }
+      }
 
       setAuthToken(res.access_token);
+      const userPayload = res.user || {
+        user_id: res.user_id || username.trim(),
+        full_name: res.full_name || username.trim(),
+        role: res.role || 'SALESMAN',
+      };
+
       setCurrentUser({
-        user_id: res.user.user_id,
-        full_name: res.user.full_name,
+        user_id: userPayload.user_id,
+        full_name: userPayload.full_name || username.trim(),
         username: username.trim(),
-        role: res.user.role as User['role'],
+        role: (userPayload.role || 'SALESMAN') as User['role'],
         mobile: '',
         email: '',
         active: true,
@@ -261,7 +297,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         notes: '',
       });
       setIsBackendConnected(true);
-      await loadInitialData(res.user.role);
+      await loadInitialData(userPayload.role);
     } finally {
       setIsLoading(false);
     }
@@ -329,12 +365,22 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       try {
-        const me = await apiRequest<{ user_id: string; full_name: string; role: string }>('/api/auth/me');
+        let me: { user_id: string; full_name?: string; role?: string };
+        try {
+          me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/api/auth/me');
+        } catch (err: unknown) {
+          if (err instanceof Error && err.message.includes('404')) {
+            me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/auth/me');
+          } else {
+            throw err;
+          }
+        }
+
         setCurrentUser({
           user_id: me.user_id,
-          full_name: me.full_name,
+          full_name: me.full_name || me.user_id,
           username: me.user_id,
-          role: me.role as User['role'],
+          role: (me.role || 'SALESMAN') as User['role'],
           mobile: '',
           email: '',
           active: true,

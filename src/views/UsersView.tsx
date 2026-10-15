@@ -6,7 +6,7 @@ export const UsersView: React.FC = () => {
   const { users, createUser, currentUser } = useStore();
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('password123');
+  const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('SALESMAN');
   const [mobile, setMobile] = useState('');
   const [email, setEmail] = useState('');
@@ -21,7 +21,7 @@ export const UsersView: React.FC = () => {
     );
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
@@ -32,7 +32,7 @@ export const UsersView: React.FC = () => {
 
     try {
       const newUserId = `USR-${role.slice(0, 3)}-${Date.now().toString().slice(-4)}`;
-      createUser({
+      await createUser({
         user_id: newUserId,
         full_name: fullName.trim(),
         username: username.trim().toLowerCase(),
@@ -47,6 +47,7 @@ export const UsersView: React.FC = () => {
       setNotice({ msg: `User ${fullName} (${username}) created successfully.` });
       setFullName('');
       setUsername('');
+      setPassword('');
       setMobile('');
       setEmail('');
       setNotes('');
