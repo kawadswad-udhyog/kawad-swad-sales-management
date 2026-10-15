@@ -10,3 +10,21 @@ services:
     envVars:
       - key: VITE_API_URL
         value: https://kawad-swad-sales-dev.onrender.com
+
+  - type: web
+    name: kawad-swad-sales-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SALES_GOOGLE_SPREADSHEET_ID
+        sync: false
+      - key: SALES_GOOGLE_SERVICE_ACCOUNT_FILE
+        value: /etc/secrets/sales-service-account.json
+      - key: SALES_JWT_SECRET
+        generateValue: true
+      - key: SALES_CORS_ORIGINS
+        value: "*"
+      - key: SALES_TOKEN_HOURS
+        value: "8"
