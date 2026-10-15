@@ -1,9 +1,10 @@
-# Updated upload guide — Stage 8
+# Stage 9 Upload Guide
 
-1. Extract the ZIP.
-2. In the existing GitHub repository, upload the contents of `kawad-swad-sales-management-main/` to the repository root, preserving folder paths and replacing matching files.
-3. Commit to `main`; Render should redeploy from the connected branch.
-4. Keep existing Render environment variables and Secret Files unchanged. Never commit service-account JSON, tokens, or secrets.
-5. Review `STAGE_8_EXPENSES_APPROVAL.md` for the workflow and limitations.
+1. Extract this ZIP.
+2. Open the existing GitHub repository and upload the package contents to the repository root, preserving `backend/` and `frontend/`.
+3. Replace matching files and commit to `main`.
+4. Allow Render to redeploy from GitHub.
+5. Keep Render environment variables and Secret Files unchanged. Never commit service-account JSON or secrets.
+6. Keep the Google Sheets `DailyClosing` and `AuditLog` headers exactly as documented.
 
-This package adds the expenses list API and approval interface. It does not alter existing Google Sheets data during upload.
+This package adds daily cash closing history and Owner/PA review. It is not a claim that physical stock reconciliation or duplicate-closing prevention is complete.
