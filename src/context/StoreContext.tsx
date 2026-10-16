@@ -41,7 +41,10 @@ export interface SalesmanStockItem {
 }
 
 export interface CreateSaleInput {
-  customer_id: string;
+  customer_id?: string;
+  customer_name_snapshot?: string;
+  customer_mobile?: string;
+  customer_gstin?: string;
   sales_type: CustomerType;
   payment_method: 'CASH' | 'UPI' | 'BANK_TRANSFER' | 'OTHER';
   payment_reference: string;
@@ -93,6 +96,8 @@ export interface StoreContextType {
   customers: Customer[];
   addCustomer: (customer: Omit<Customer, 'customer_id' | 'created_at'>) => Promise<Customer>;
   updateCustomer: (customer_id: string, updates: Partial<Customer>) => Promise<void>;
+  activeCustomerIdForBilling: string | null;
+  setActiveCustomerIdForBilling: (id: string | null) => void;
 
   sales: Sale[];
   payments: Payment[];
@@ -178,6 +183,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const [products, setProducts] = useState<Product[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [activeCustomerIdForBilling, setActiveCustomerIdForBilling] = useState<string | null>(null);
   const [sales, setSales] = useState<Sale[]>([]);
   const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -509,13 +515,28 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // Sales creation connected to FastAPI backend
   const createSale = async (input: CreateSaleInput): Promise<{ sale: Sale; paymentId?: string }> => {
+    const payload = {
+      ...input,
+      customer_id: input.customer_id || 'CUS-WALKIN',
+      customer_name_snapshot: input.customer_name_snapshot || 'Walk-in Customer',
+      customer_mobile: input.customer_mobile || '',
+      customer_gstin: input.customer_gstin || '',
+      items: input.lines.map((l) => ({
+        product_id: l.product_id,
+        quantity: l.quantity,
+        actual_unit_price: l.actual_unit_price,
+        line_total: l.quantity * l.actual_unit_price,
+      })),
+      lines: input.lines,
+    };
+
     const res = await apiRequest<{
       sale: Sale;
       payment_id: string;
       message: string;
     }>('/api/sales', {
       method: 'POST',
-      body: JSON.stringify(input),
+      body: JSON.stringify(payload),
     });
 
     const newSale = res.sale;
@@ -953,6 +974,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         customers,
         addCustomer,
         updateCustomer,
+        activeCustomerIdForBilling,
+        setActiveCustomerIdForBilling,
         sales,
         payments,
         createSale,

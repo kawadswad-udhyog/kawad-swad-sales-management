@@ -1,14 +1,31 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
 
+const CATEGORIES = ['ALL', 'Papad', 'Masala', 'Katran'] as const;
+
 export const ProductsView: React.FC = () => {
-  const { products, addProduct, updateProduct, toggleProductActive, currentUser } = useStore();
+  const {
+    products,
+    addProduct,
+    updateProduct,
+    toggleProductActive,
+    currentUser,
+    companyStockSummary,
+    salesmanStockSummary,
+  } = useStore();
+
   const isManager = currentUser?.role === 'OWNER' || currentUser?.role === 'PA';
 
   const [filter, setFilter] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [isFormOpen, setIsFormOpen] = useState(false);
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+
+  // Pagination to avoid long scrolling lists
+  const [currentPage, setCurrentPage] = useState(1);
+  const PAGE_SIZE = 12;
 
   // Form state
   const [sku, setSku] = useState('');
@@ -32,6 +49,7 @@ export const ProductsView: React.FC = () => {
     setRetailPackOnly(true);
     setActive(true);
     setNotes('');
+    setIsFormOpen(false);
   };
 
   const handleEditClick = (p: Product) => {
@@ -45,6 +63,7 @@ export const ProductsView: React.FC = () => {
     setRetailPackOnly(p.retail_pack_only);
     setActive(p.active);
     setNotes(p.notes || '');
+    setIsFormOpen(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -85,7 +104,7 @@ export const ProductsView: React.FC = () => {
           active,
           notes: notes.trim(),
         });
-        setNotice({ msg: 'Product added to catalogue.' });
+        setNotice({ msg: 'Product added to catalogue successfully.' });
         resetForm();
       }
     } catch (err: unknown) {
@@ -102,48 +121,120 @@ export const ProductsView: React.FC = () => {
     }
   };
 
-  const filtered = products.filter((p) =>
-    [p.sku, p.product_name, p.category, p.variant, p.notes]
-      .join(' ')
-      .toLowerCase()
-      .includes(filter.toLowerCase())
-  );
+  const getProductStock = (productId: string) => {
+    if (currentUser?.role === 'SALESMAN') {
+      const sm = salesmanStockSummary.find(
+        (s) => s.product_id === productId && s.salesman_user_id === currentUser.user_id
+      );
+      return { quantity: sm ? sm.quantity : 0, label: 'My Stock' };
+    }
+    const comp = companyStockSummary.find((c) => c.product_id === productId);
+    return { quantity: comp ? comp.company_quantity : 0, label: 'Warehouse Stock' };
+  };
+
+  const filtered = useMemo(() => {
+    return products.filter((p) => {
+      const matchesCategory =
+        selectedCategory === 'ALL' ||
+        p.category.toLowerCase() === selectedCategory.toLowerCase();
+      if (!matchesCategory) return false;
+
+      if (!filter.trim()) return true;
+      const q = filter.toLowerCase();
+      return (
+        p.sku.toLowerCase().includes(q) ||
+        p.product_name.toLowerCase().includes(q) ||
+        p.variant.toLowerCase().includes(q) ||
+        p.category.toLowerCase().includes(q) ||
+        (p.notes && p.notes.toLowerCase().includes(q))
+      );
+    });
+  }, [products, filter, selectedCategory]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const paginatedProducts = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, currentPage]);
 
   return (
     <div>
-      <h1>Product Catalogue</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '16px' }}>
+        <div>
+          <h1 style={{ margin: 0 }}>Product Catalogue &amp; Stock</h1>
+          <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.9rem' }}>
+            Fast SKU and pack search · Inventory visibility · Clean pagination
+          </p>
+        </div>
+        {isManager && (
+          <button
+            type="button"
+            onClick={() => {
+              if (isFormOpen && !editingId) {
+                setIsFormOpen(false);
+              } else {
+                resetForm();
+                setIsFormOpen(true);
+              }
+            }}
+            style={{
+              background: isFormOpen ? '#475569' : '#047857',
+              color: '#fff',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              fontSize: '0.88rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <span>{isFormOpen ? '✕ Close Form' : '➕ Add New Product'}</span>
+          </button>
+        )}
+      </div>
 
       {notice && (
-        <div className={notice.error ? 'notice-error' : 'notice-success'}>
+        <div className={notice.error ? 'notice-error' : 'notice-success'} style={{ marginBottom: '16px' }}>
           {notice.msg}
         </div>
       )}
 
-      {isManager && (
-        <div className="card">
-          <h2>{editingId ? 'Edit Product' : 'Add Product'}</h2>
+      {/* Product Form Card (Collapsible) */}
+      {isManager && isFormOpen && (
+        <div className="card" style={{ marginBottom: '20px', background: '#f8fafc', border: '1px solid #cbd5e1' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <h2 style={{ margin: 0, fontSize: '1.2rem' }}>
+              {editingId ? 'Edit Product Details' : 'Add New Product to Catalogue'}
+            </h2>
+            <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
+              SKU is immutable after creation to protect past sales records
+            </span>
+          </div>
+
           <form className="inline" onSubmit={handleSubmit}>
             <label>
-              SKU
+              SKU <span style={{ color: '#b91c1c' }}>*</span>
               <input
                 required
                 maxLength={60}
-                placeholder="KS-MMP-200"
+                placeholder="e.g. KS-MMP-200"
                 value={sku}
                 onChange={(e) => setSku(e.target.value)}
                 disabled={!!editingId}
+                style={{ padding: '8px', background: editingId ? '#f1f5f9' : '#fff' }}
                 title={editingId ? 'SKU cannot be altered to preserve billing history' : ''}
               />
             </label>
 
             <label>
-              Product name
+              Product Name <span style={{ color: '#b91c1c' }}>*</span>
               <input
                 required
                 maxLength={120}
-                placeholder="Moong Masala Papad 200g"
+                placeholder="e.g. Moong Masala Papad 200g"
                 value={productName}
                 onChange={(e) => setProductName(e.target.value)}
+                style={{ padding: '8px' }}
               />
             </label>
 
@@ -152,6 +243,7 @@ export const ProductsView: React.FC = () => {
               <select
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
+                style={{ padding: '8px' }}
               >
                 <option value="Papad">Papad</option>
                 <option value="Masala">Masala</option>
@@ -165,27 +257,56 @@ export const ProductsView: React.FC = () => {
                 required
                 value={variant}
                 onChange={(e) => setVariant(e.target.value)}
-                placeholder="Plain, Spicy, etc."
+                placeholder="e.g. Plain, Spicy, Jeera, Special"
+                style={{ padding: '8px' }}
               />
             </label>
 
             <label>
-              Pack weight (g)
-              <input
-                type="number"
-                min={1}
-                step={1}
-                required
-                value={packWeightG}
-                onChange={(e) => setPackWeightG(Number(e.target.value))}
-              />
+              Pack Weight (grams)
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  required
+                  value={packWeightG}
+                  onChange={(e) => setPackWeightG(Number(e.target.value))}
+                  style={{ width: '80px', padding: '8px' }}
+                />
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setPackWeightG(200)}
+                  style={{ padding: '4px 6px', fontSize: '0.75rem' }}
+                >
+                  200g
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setPackWeightG(500)}
+                  style={{ padding: '4px 6px', fontSize: '0.75rem' }}
+                >
+                  500g
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setPackWeightG(1000)}
+                  style={{ padding: '4px 6px', fontSize: '0.75rem' }}
+                >
+                  1kg
+                </button>
+              </div>
             </label>
 
             <label>
-              Selling unit
+              Selling Unit
               <select
                 value={sellingUnit}
                 onChange={(e) => setSellingUnit(e.target.value as 'packet' | 'kg')}
+                style={{ padding: '8px' }}
               >
                 <option value="packet">packet</option>
                 <option value="kg">kg</option>
@@ -207,106 +328,198 @@ export const ProductsView: React.FC = () => {
                 checked={active}
                 onChange={(e) => setActive(e.target.checked)}
               />
-              Active product
+              Active in sales
             </label>
 
             <label style={{ gridColumn: 'span 2' }}>
-              Notes
+              Notes / Packaging Specs
               <input
                 maxLength={500}
-                placeholder="Packaging details, target market..."
+                placeholder="Packaging notes, barcode details, target market..."
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
+                style={{ padding: '8px' }}
               />
             </label>
 
-            <div className="actions" style={{ gridColumn: 'span 2', marginTop: '8px' }}>
-              <button type="submit">
-                {editingId ? 'Save Changes' : 'Save Product'}
+            <div className="actions" style={{ gridColumn: 'span 2', marginTop: '10px', display: 'flex', gap: '10px' }}>
+              <button
+                type="submit"
+                style={{ background: '#047857', color: '#fff', padding: '10px 20px', fontWeight: 600 }}
+              >
+                {editingId ? '💾 Save Changes' : '💾 Save Product'}
               </button>
-              {editingId && (
-                <button type="button" className="secondary" onClick={resetForm}>
-                  Cancel Edit
-                </button>
-              )}
+              <button
+                type="button"
+                className="secondary"
+                onClick={resetForm}
+                style={{ padding: '10px 16px' }}
+              >
+                Cancel
+              </button>
             </div>
           </form>
-          <p className="muted">
-            SKU must be unique. To protect sales history, editing a product does not change its SKU.
-          </p>
         </div>
       )}
 
+      {/* Catalogue List & Filters */}
       <div className="card">
-        <div className="toolbar">
-          <h2>
-            Catalogue <span className="count">{filtered.length}</span>
-          </h2>
-          <input
-            placeholder="Search SKU, product, variant..."
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '14px' }}>
+          {/* Category Filter Buttons */}
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+            {CATEGORIES.map((cat) => {
+              const isSelected = selectedCategory === cat;
+              return (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => {
+                    setSelectedCategory(cat);
+                    setCurrentPage(1);
+                  }}
+                  style={{
+                    padding: '6px 14px',
+                    fontSize: '0.84rem',
+                    borderRadius: '6px',
+                    border: isSelected ? '1px solid #047857' : '1px solid #cbd5e1',
+                    background: isSelected ? '#047857' : '#ffffff',
+                    color: isSelected ? '#ffffff' : '#475569',
+                    fontWeight: isSelected ? 600 : 500,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {cat === 'ALL' ? 'All Products' : cat}
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ minWidth: '260px', flex: '1', maxWidth: '380px' }}>
+            <input
+              type="text"
+              placeholder="🔍 Search product name, SKU, variant..."
+              value={filter}
+              onChange={(e) => {
+                setFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              style={{ width: '100%', padding: '8px 12px', fontSize: '0.9rem' }}
+            />
+          </div>
         </div>
 
-        {filtered.length > 0 ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>SKU</th>
-                  <th>Product</th>
-                  <th>Category</th>
-                  <th>Variant</th>
-                  <th>Pack g</th>
-                  <th>Unit</th>
-                  <th>Status</th>
-                  {isManager && <th>Actions</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((p) => (
-                  <tr key={p.product_id}>
-                    <td>
-                      <strong>{p.sku}</strong>
-                    </td>
-                    <td>{p.product_name}</td>
-                    <td>{p.category}</td>
-                    <td>{p.variant}</td>
-                    <td>{p.pack_weight_g}</td>
-                    <td>{p.selling_unit}</td>
-                    <td>
-                      <span className={`badge ${p.active ? 'on' : 'off'}`}>
-                        {p.active ? 'Active' : 'Inactive'}
-                      </span>
-                    </td>
-                    {isManager && (
-                      <td>
-                        <div className="actions">
-                          <button
-                            className="secondary"
-                            onClick={() => handleEditClick(p)}
-                            style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            className="secondary"
-                            onClick={() => handleToggleActive(p)}
-                            style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-                          >
-                            {p.active ? 'Deactivate' : 'Activate'}
-                          </button>
-                        </div>
-                      </td>
-                    )}
+        {paginatedProducts.length > 0 ? (
+          <>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>SKU</th>
+                    <th>Product &amp; Variant</th>
+                    <th>Category</th>
+                    <th>Pack Size</th>
+                    <th>Unit</th>
+                    <th>Live Stock</th>
+                    <th>Status</th>
+                    {isManager && <th style={{ textAlign: 'right' }}>Actions</th>}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {paginatedProducts.map((p) => {
+                    const stockInfo = getProductStock(p.product_id);
+                    return (
+                      <tr key={p.product_id}>
+                        <td>
+                          <code>{p.sku}</code>
+                        </td>
+                        <td>
+                          <strong>{p.product_name}</strong>
+                          <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                            Variant: {p.variant}
+                          </div>
+                        </td>
+                        <td>
+                          <span style={{ fontSize: '0.78rem', background: '#f1f5f9', padding: '3px 8px', borderRadius: '4px', color: '#475569' }}>
+                            {p.category}
+                          </span>
+                        </td>
+                        <td>{p.pack_weight_g}g</td>
+                        <td>{p.selling_unit}</td>
+                        <td>
+                          <strong style={{ color: stockInfo.quantity > 0 ? '#15803d' : '#b91c1c' }}>
+                            {stockInfo.quantity}
+                          </strong>{' '}
+                          <small style={{ color: '#64748b' }}>{p.selling_unit}</small>
+                        </td>
+                        <td>
+                          <span className={`badge ${p.active ? 'on' : 'off'}`}>
+                            {p.active ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        {isManager && (
+                          <td style={{ textAlign: 'right' }}>
+                            <div className="actions" style={{ justifyContent: 'flex-end', gap: '6px' }}>
+                              <button
+                                className="secondary"
+                                onClick={() => handleEditClick(p)}
+                                style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className="secondary"
+                                onClick={() => handleToggleActive(p)}
+                                style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                              >
+                                {p.active ? 'Deactivate' : 'Activate'}
+                              </button>
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls */}
+            {totalPages > 1 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px', paddingTop: '10px', borderTop: '1px solid #f1f5f9' }}>
+                <span style={{ fontSize: '0.84rem', color: '#64748b' }}>
+                  Showing {(currentPage - 1) * PAGE_SIZE + 1} -{' '}
+                  {Math.min(currentPage * PAGE_SIZE, filtered.length)} of {filtered.length} products
+                </span>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={currentPage === 1}
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    style={{ padding: '5px 12px', fontSize: '0.82rem' }}
+                  >
+                    ◀ Previous
+                  </button>
+                  <span style={{ padding: '5px 10px', fontSize: '0.85rem', fontWeight: 600 }}>
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={currentPage === totalPages}
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    style={{ padding: '5px 12px', fontSize: '0.82rem' }}
+                  >
+                    Next ▶
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
-          <p className="muted">No matching products found in the catalogue.</p>
+          <p className="muted" style={{ padding: '20px 0', textAlign: 'center' }}>
+            No matching products found in catalogue.
+          </p>
         )}
       </div>
     </div>

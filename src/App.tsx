@@ -38,7 +38,7 @@ const MainAppContent: React.FC = () => {
       case 'products':
         return <ProductsView />;
       case 'customers':
-        return <CustomersView />;
+        return <CustomersView onNavigate={(v) => setCurrentView(v)} />;
       case 'sales':
         return <SalesView />;
       case 'stock':

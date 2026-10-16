@@ -51,7 +51,10 @@ export function generateInvoicePdf(sale: Sale, items: SaleItem[]): void {
   doc.setFont('helvetica', 'bold');
   doc.text('Customer:', 110, 58);
   doc.setFont('helvetica', 'normal');
-  doc.text(sale.customer_name_snapshot, 135, 58);
+  const displayCustomer = (sale.customer_name_snapshot && sale.customer_name_snapshot !== 'None')
+    ? sale.customer_name_snapshot
+    : 'Walk-in Customer';
+  doc.text(displayCustomer, 135, 58);
 
   doc.setFont('helvetica', 'bold');
   doc.text('Sales Type:', 110, 65);

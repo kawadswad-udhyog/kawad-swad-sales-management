@@ -32,16 +32,17 @@ export interface Customer {
   customer_id: string;
   customer_type: CustomerType;
   shop_name: string;
-  shopkeeper_name: string;
-  mobile: string;
-  alternate_mobile: string;
-  address: string;
-  locality_area: string;
-  city: string;
-  map_location: string;
+  shopkeeper_name?: string;
+  mobile?: string;
+  alternate_mobile?: string;
+  address?: string;
+  locality_area?: string;
+  city?: string;
+  gstin?: string;
+  map_location?: string;
   active: boolean;
   created_at: string;
-  notes: string;
+  notes?: string;
 }
 
 export interface SaleItem {
@@ -58,7 +59,7 @@ export interface SaleItem {
   line_total: number;
   qualifying_kg: number;
   created_at: string;
-  notes: string;
+  notes?: string;
 }
 
 export interface Sale {
@@ -67,8 +68,10 @@ export interface Sale {
   idempotency_key?: string;
   sale_datetime: string;
   sales_type: CustomerType;
-  customer_id: string;
+  customer_id?: string;
   customer_name_snapshot: string;
+  customer_mobile?: string;
+  customer_gstin?: string;
   entered_by_user_id: string;
   salesman_user_id: string;
   delivery_status: 'DELIVERED' | 'PENDING' | 'CANCELLED';
@@ -79,7 +82,7 @@ export interface Sale {
   bill_total: number;
   bill_status: 'ISSUED' | 'CANCELLED';
   created_at: string;
-  notes: string;
+  notes?: string;
   lines?: SaleItem[];
 }
 

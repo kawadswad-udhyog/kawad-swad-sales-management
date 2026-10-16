@@ -76,26 +76,28 @@ class Customer(BaseModel):
     customer_id: str
     customer_type: str = "RETAILER"
     shop_name: str
-    shopkeeper_name: str
-    mobile: str
+    shopkeeper_name: Optional[str] = ""
+    mobile: Optional[str] = ""
     alternate_mobile: Optional[str] = ""
-    address: str
+    address: Optional[str] = ""
     locality_area: Optional[str] = ""
     city: Optional[str] = "Bhilwara"
+    gstin: Optional[str] = ""
     map_location: Optional[str] = ""
     active: bool = True
     created_at: Optional[str] = ""
     notes: Optional[str] = ""
 
 class CustomerCreate(BaseModel):
-    customer_type: str = "RETAILER"
+    customer_type: Optional[str] = "RETAILER"
     shop_name: str
-    shopkeeper_name: str
-    mobile: str
+    shopkeeper_name: Optional[str] = ""
+    mobile: Optional[str] = ""
     alternate_mobile: Optional[str] = ""
-    address: str
+    address: Optional[str] = ""
     locality_area: Optional[str] = ""
     city: Optional[str] = "Bhilwara"
+    gstin: Optional[str] = ""
     map_location: Optional[str] = ""
     notes: Optional[str] = ""
 
@@ -104,29 +106,34 @@ class SaleItemCreate(BaseModel):
     product_id: str
     product_name_snapshot: Optional[str] = ""
     sku_snapshot: Optional[str] = ""
-    pack_weight_g: int = 500
-    unit: str = "PACKET"
+    pack_weight_g: Optional[int] = 500
+    unit: Optional[str] = "PACKET"
     quantity: int = 1
     actual_unit_price: float
-    discount_amount: float = 0.0
-    line_total: float
-    qualifying_kg: float = 0.0
+    discount_amount: Optional[float] = 0.0
+    line_total: Optional[float] = None
+    qualifying_kg: Optional[float] = 0.0
     notes: Optional[str] = ""
 
 class SaleCreate(BaseModel):
-    sales_type: str = "Retailer Sale"
-    customer_id: str
-    customer_name_snapshot: str
+    sales_type: Optional[str] = "Retailer Sale"
+    customer_id: Optional[str] = ""
+    customer_name_snapshot: Optional[str] = ""
+    customer_mobile: Optional[str] = ""
+    customer_email: Optional[str] = ""
+    customer_address: Optional[str] = ""
+    customer_gstin: Optional[str] = ""
     salesman_user_id: Optional[str] = ""
-    delivery_status: str = "DELIVERED"
-    payment_method: str = "CASH"
-    payment_status: str = "PAID"
-    subtotal: float
-    discount_amount: float = 0.0
-    tax_amount: float = 0.0
-    bill_total: float
+    delivery_status: Optional[str] = "DELIVERED"
+    payment_method: Optional[str] = "CASH"
+    payment_status: Optional[str] = "PAID"
+    subtotal: Optional[float] = None
+    discount_amount: Optional[float] = 0.0
+    tax_amount: Optional[float] = 0.0
+    bill_total: Optional[float] = None
     notes: Optional[str] = ""
-    items: List[SaleItemCreate]
+    items: Optional[List[SaleItemCreate]] = None
+    lines: Optional[List[SaleItemCreate]] = None
 
 class SaleItem(BaseModel):
     sale_item_id: str
@@ -149,8 +156,10 @@ class Sale(BaseModel):
     bill_number: str
     sale_datetime: str
     sales_type: str
-    customer_id: str
-    customer_name_snapshot: str
+    customer_id: Optional[str] = ""
+    customer_name_snapshot: Optional[str] = ""
+    customer_mobile: Optional[str] = ""
+    customer_gstin: Optional[str] = ""
     entered_by_user_id: str
     salesman_user_id: str
     delivery_status: str

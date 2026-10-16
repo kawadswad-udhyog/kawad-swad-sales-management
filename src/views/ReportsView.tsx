@@ -113,8 +113,10 @@ export const ReportsView: React.FC = () => {
           bill_number: s.bill_number,
           sale_datetime: s.sale_datetime,
           sales_type: s.sales_type,
-          customer_id: s.customer_id,
-          customer_name_snapshot: s.customer_name_snapshot,
+          customer_id: s.customer_id || 'CUS-WALKIN',
+          customer_name_snapshot: (s.customer_name_snapshot && s.customer_name_snapshot !== 'None')
+            ? s.customer_name_snapshot
+            : 'Walk-in Customer',
           entered_by_user_id: s.entered_by_user_id,
           salesman_user_id: s.salesman_user_id,
           delivery_status: s.delivery_status,
