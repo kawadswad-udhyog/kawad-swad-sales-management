@@ -71,6 +71,61 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
     user_id = current_user.get("user_id")
     salesman_id = req.salesman_user_id or user_id
 
+    # Duplicate submission guard: prevent double-clicks within 20 seconds
+    recent_sales = db.get_records("Sales")
+    if recent_sales:
+        last = recent_sales[-1]
+        if (str(last.get("customer_id")) == req.customer_id and
+            str(last.get("salesman_user_id")) == salesman_id and
+            abs(float(last.get("bill_total", 0.0)) - float(req.bill_total)) < 0.01):
+            last_created = str(last.get("created_at", ""))
+            try:
+                diff_sec = (datetime.utcnow() - datetime.fromisoformat(last_created.replace("Z", ""))).total_seconds()
+                if diff_sec < 20:
+                    # Return existing sale to prevent double-billing
+                    all_items = db.get_records("SaleItems")
+                    s_items = [
+                        SaleItem(
+                            sale_item_id=str(it.get("sale_item_id", "")),
+                            sale_id=str(it.get("sale_id", "")),
+                            product_id=str(it.get("product_id", "")),
+                            product_name_snapshot=str(it.get("product_name_snapshot", "")),
+                            sku_snapshot=str(it.get("sku_snapshot", "")),
+                            pack_weight_g=int(it.get("pack_weight_g", 500) or 500),
+                            unit=str(it.get("unit", "PACKET")),
+                            quantity=int(it.get("quantity", 1) or 1),
+                            actual_unit_price=float(it.get("actual_unit_price", 0.0) or 0.0),
+                            discount_amount=float(it.get("discount_amount", 0.0) or 0.0),
+                            line_total=float(it.get("line_total", 0.0) or 0.0),
+                            qualifying_kg=float(it.get("qualifying_kg", 0.0) or 0.0),
+                            created_at=str(it.get("created_at", "")),
+                            notes=str(it.get("notes", "")),
+                        )
+                        for it in all_items if str(it.get("sale_id")) == str(last.get("sale_id"))
+                    ]
+                    return Sale(
+                        sale_id=str(last.get("sale_id")),
+                        bill_number=str(last.get("bill_number")),
+                        sale_datetime=str(last.get("sale_datetime")),
+                        sales_type=str(last.get("sales_type")),
+                        customer_id=str(last.get("customer_id")),
+                        customer_name_snapshot=str(last.get("customer_name_snapshot")),
+                        entered_by_user_id=str(last.get("entered_by_user_id")),
+                        salesman_user_id=str(last.get("salesman_user_id")),
+                        delivery_status=str(last.get("delivery_status")),
+                        payment_status=str(last.get("payment_status")),
+                        subtotal=float(last.get("subtotal", 0.0)),
+                        discount_amount=float(last.get("discount_amount", 0.0)),
+                        tax_amount=float(last.get("tax_amount", 0.0)),
+                        bill_total=float(last.get("bill_total", 0.0)),
+                        bill_status=str(last.get("bill_status")),
+                        created_at=str(last.get("created_at")),
+                        notes=str(last.get("notes", "")),
+                        items=s_items,
+                    )
+            except Exception:
+                pass
+
     sale_id = db.generate_id("Sales")
     now_iso = datetime.utcnow().isoformat()
     sales_count = len(db.get_records("Sales")) + 1

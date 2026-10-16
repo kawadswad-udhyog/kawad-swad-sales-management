@@ -17,7 +17,7 @@ import { AuditView } from './views/AuditView';
 import { UsersView } from './views/UsersView';
 
 const MainAppContent: React.FC = () => {
-  const { currentUser } = useStore();
+  const { currentUser, syncError, clearSyncError, refreshData } = useStore();
   const [currentView, setCurrentView] = useState<ViewType>('dashboard');
 
   if (!currentUser) {
@@ -65,6 +65,51 @@ const MainAppContent: React.FC = () => {
   return (
     <div>
       <Header />
+      {syncError && (
+        <div style={{
+          background: '#fef2f2',
+          borderBottom: '1px solid #fecaca',
+          padding: '10px 20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          color: '#991b1b',
+          fontSize: '0.88rem'
+        }}>
+          <div>
+            <strong>⚠️ Database Sync Warning:</strong> {syncError}
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => refreshData()}
+              style={{
+                padding: '4px 10px',
+                fontSize: '0.8rem',
+                background: '#dc2626',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer'
+              }}
+            >
+              Retry Sync
+            </button>
+            <button
+              onClick={clearSyncError}
+              style={{
+                padding: '4px 8px',
+                fontSize: '0.8rem',
+                background: 'transparent',
+                color: '#991b1b',
+                border: 'none',
+                cursor: 'pointer'
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
       <main>
         <Navigation currentView={currentView} onSelectView={setCurrentView} />
         {renderView()}

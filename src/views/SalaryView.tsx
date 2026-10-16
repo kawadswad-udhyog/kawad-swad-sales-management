@@ -22,7 +22,7 @@ export const SalaryView: React.FC = () => {
   const [baseSalary, setBaseSalary] = useState(7000);
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
 
-  const handleCalculate = (e: React.FormEvent) => {
+  const handleCalculate = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
@@ -32,7 +32,7 @@ export const SalaryView: React.FC = () => {
     }
 
     try {
-      const generated = calculatePayroll({
+      const generated = await calculatePayroll({
         period_start: periodStart,
         period_end: periodEnd,
         salesman_user_id: salesmanId,
@@ -42,13 +42,13 @@ export const SalaryView: React.FC = () => {
         base_salary: Number(baseSalary),
       });
 
-      if (generated.length === 0) {
+      if (!generated || generated.length === 0) {
         setNotice({
           msg: 'No new calculations were needed, or records for this period already exist.',
         });
       } else {
         setNotice({
-          msg: `Calculated ${generated.length} payroll item(s) successfully for period ${periodStart} to ${periodEnd}.`,
+          msg: `Calculated and saved ${generated.length} payroll item(s) successfully for period ${periodStart} to ${periodEnd}.`,
         });
       }
     } catch (err: unknown) {
@@ -57,20 +57,20 @@ export const SalaryView: React.FC = () => {
     }
   };
 
-  const handleApprove = (item: SalaryIncentive) => {
-    approveSalaryIncentive(item.record_id);
-    setNotice({ msg: `Approved ${item.record_type} for ₹${item.calculated_amount}.` });
+  const handleApprove = async (item: SalaryIncentive) => {
+    await approveSalaryIncentive(item.record_id);
+    setNotice({ msg: `Approved ${item.record_type} for ₹${item.calculated_amount}. Persisted to records.` });
   };
 
-  const handlePay = (item: SalaryIncentive) => {
+  const handlePay = async (item: SalaryIncentive) => {
     const ref = window.prompt(
       'Enter bank transfer / NEFT / UPI payment reference:',
       `NEFT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-01`
     );
     if (!ref || !ref.trim()) return;
 
-    markSalaryIncentivePaid(item.record_id, ref.trim());
-    setNotice({ msg: `Marked paid with reference: ${ref.trim()}.` });
+    await markSalaryIncentivePaid(item.record_id, ref.trim());
+    setNotice({ msg: `Marked paid with reference: ${ref.trim()}. Persisted to records.` });
   };
 
   return (

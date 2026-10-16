@@ -15,6 +15,7 @@ from app.routers import (
     closing,
     salary,
     dashboard,
+    audit,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +52,7 @@ app.include_router(visits.router)
 app.include_router(closing.router)
 app.include_router(salary.router)
 app.include_router(dashboard.router)
+app.include_router(audit.router)
 
 @app.get("/health", tags=["System"])
 def health_check():

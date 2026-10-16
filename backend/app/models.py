@@ -294,6 +294,51 @@ class SalaryRecord(BaseModel):
     payment_reference: Optional[str] = ""
     notes: Optional[str] = ""
 
+class SalaryCreateRequest(BaseModel):
+    period_start: str
+    period_end: str
+    salesman_user_id: str
+    record_type: str
+    eligible_kg: float = 0.0
+    completed_100kg_blocks: int = 0
+    rate: float = 0.0
+    calculated_amount: float
+    approved_amount: Optional[float] = None
+    notes: Optional[str] = ""
+
+class SalaryApproveRequest(BaseModel):
+    approved_amount: Optional[float] = None
+    notes: Optional[str] = ""
+
+class SalaryPayRequest(BaseModel):
+    payment_reference: str
+    notes: Optional[str] = ""
+
+# Audit Log Models
+class AuditLogItem(BaseModel):
+    audit_id: str
+    event_datetime: str
+    actor_user_id: str
+    action: str
+    entity_type: str
+    entity_id: str
+    field_changed: Optional[str] = ""
+    old_value: Optional[str] = ""
+    new_value: Optional[str] = ""
+    reason: Optional[str] = ""
+    approved_by_user_id: Optional[str] = ""
+    related_record_id: Optional[str] = ""
+
+class AuditLogCreate(BaseModel):
+    action: str
+    entity_type: str
+    entity_id: str
+    field_changed: Optional[str] = ""
+    old_value: Optional[str] = ""
+    new_value: Optional[str] = ""
+    reason: Optional[str] = ""
+    related_record_id: Optional[str] = ""
+
 # Dashboard Models
 class DashboardMetrics(BaseModel):
     today_sales: float = 0.0
@@ -302,3 +347,4 @@ class DashboardMetrics(BaseModel):
     low_stock_items: int = 0
     active_salesmen: int = 0
     total_bills_today: int = 0
+

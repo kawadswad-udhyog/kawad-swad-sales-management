@@ -157,12 +157,14 @@ export interface StoreContextType {
     trial_rate_per_kg: number;
     monthly_rate_per_100kg: number;
     base_salary: number;
-  }) => SalaryIncentive[];
-  approveSalaryIncentive: (record_id: string, approved_amount?: number) => void;
-  markSalaryIncentivePaid: (record_id: string, reference: string) => void;
+  }) => Promise<SalaryIncentive[]> | SalaryIncentive[];
+  approveSalaryIncentive: (record_id: string, approved_amount?: number) => Promise<void>;
+  markSalaryIncentivePaid: (record_id: string, reference: string) => Promise<void>;
 
   dashboardMetrics: DashboardMetrics | null;
   auditLogs: AuditLog[];
+  syncError: string | null;
+  clearSyncError: () => void;
   refreshData: () => Promise<void>;
 }
 
@@ -189,6 +191,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  const clearSyncError = () => setSyncError(null);
 
   const updateBackendUrl = (url: string) => {
     setApiBaseUrl(url);
@@ -233,6 +238,23 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       related_record_id: entityId,
     };
     setAuditLogs((prev) => [log, ...prev]);
+
+    // Asynchronously persist to backend audit router and Google Sheets
+    apiRequest<AuditLog>('/api/audit-logs', {
+      method: 'POST',
+      body: JSON.stringify({
+        action,
+        entity_type: entityType,
+        entity_id: entityId,
+        field_changed: fieldChanged,
+        old_value: oldValue,
+        new_value: newValue,
+        reason,
+        related_record_id: entityId,
+      }),
+    }).catch((err) => {
+      console.warn('Backend audit log sync warning:', err);
+    });
   };
 
   // Real Login via POST /api/auth/login with fallback to /auth/login
@@ -310,18 +332,49 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     try {
       const activeRole = role || currentUser?.role;
+      let hadSyncError = false;
 
-      // Parallel fetch for core tables
-      const [prodsData, custsData, salesData, stockSummaryData, stockTxnsData] = await Promise.all([
-        apiRequest<Product[]>('/api/products').catch(() => []),
-        apiRequest<Customer[]>('/api/customers').catch(() => []),
-        apiRequest<Sale[]>('/api/sales').catch(() => []),
+      // Parallel fetch for all core tables
+      const [
+        prodsData,
+        custsData,
+        salesData,
+        stockSummaryData,
+        stockTxnsData,
+        salariesData,
+        auditData,
+        closingsData,
+      ] = await Promise.all([
+        apiRequest<Product[]>('/api/products').catch((err) => {
+          console.error('Failed to load products:', err);
+          hadSyncError = true;
+          return [] as Product[];
+        }),
+        apiRequest<Customer[]>('/api/customers').catch((err) => {
+          console.error('Failed to load customers:', err);
+          hadSyncError = true;
+          return [] as Customer[];
+        }),
+        apiRequest<Sale[]>('/api/sales').catch((err) => {
+          console.error('Failed to load sales:', err);
+          hadSyncError = true;
+          return [] as Sale[];
+        }),
         apiRequest<{ company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] }>('/api/stock/summary').catch(() => ({
           company_stock: [],
           salesman_stock: [],
         })),
         apiRequest<StockTransaction[]>('/api/stock/transactions?limit=250').catch(() => []),
+        apiRequest<SalaryIncentive[]>('/api/salary').catch(() => []),
+        apiRequest<AuditLog[]>('/api/audit-logs').catch(() => []),
+        apiRequest<DailyClosing[]>('/api/closing').catch(() => []),
       ]);
+
+      if (hadSyncError) {
+        setSyncError('Could not sync some records with the backend API. Please verify backend service and Google Sheets connection.');
+      } else {
+        setSyncError(null);
+      }
 
       setProducts(prodsData);
       setCustomers(custsData);
@@ -329,6 +382,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setCompanyStockSummary(stockSummaryData.company_stock || []);
       setSalesmanStockSummary(stockSummaryData.salesman_stock || []);
       setStockTransactions(stockTxnsData);
+      if (salariesData.length > 0) setSalaryIncentives(salariesData);
+      if (auditData.length > 0) setAuditLogs(auditData);
+      if (closingsData.length > 0) setDailyClosings(closingsData);
 
       // Fetch expenses (using correct endpoint /api/expenses)
       const expensesData = await apiRequest<Expense[]>('/api/expenses').catch(() => []);
@@ -351,6 +407,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setIsBackendConnected(true);
     } catch (err) {
       console.warn('Backend live sync warning:', err);
+      setSyncError('Network error connecting to backend API.');
     }
   }, [currentUser?.role]);
 
@@ -629,24 +686,35 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     decision: 'CONFIRMED' | 'CORRECTION_REQUIRED',
     notes: string = ''
   ) => {
-    setDailyClosings((prev) =>
-      prev.map((c) =>
-        c.closing_id === closing_id
-          ? {
-              ...c,
-              closing_status: decision,
-              reviewed_by_user_id: currentUser?.user_id || 'MANAGER',
-              reviewed_at: new Date().toISOString(),
-              notes: notes || c.notes,
-            }
-          : c
-      )
-    );
-    addAuditLog('REVIEW', 'DailyClosing', closing_id, `Review decision: ${decision}`);
+    try {
+      const updated = await apiRequest<DailyClosing>(`/api/closing/${encodeURIComponent(closing_id)}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ confirmed: decision === 'CONFIRMED', notes }),
+      });
+      setDailyClosings((prev) =>
+        prev.map((c) => (c.closing_id === closing_id ? { ...c, ...updated } : c))
+      );
+    } catch (err) {
+      console.warn('Backend closing review warning:', err);
+      setDailyClosings((prev) =>
+        prev.map((c) =>
+          c.closing_id === closing_id
+            ? {
+                ...c,
+                closing_status: decision,
+                reviewed_by_user_id: currentUser?.user_id || 'MANAGER',
+                reviewed_at: new Date().toISOString(),
+                notes: notes || c.notes,
+              }
+            : c
+        )
+      );
+    }
+    addAuditLog('REVIEW', 'DailyClosing', closing_id, `Review decision: ${decision} - ${notes}`);
   };
 
-  // Salary & Incentive calculations
-  const calculatePayroll = (params: {
+  // Salary & Incentive calculations with backend persistence
+  const calculatePayroll = async (params: {
     period_start: string;
     period_end: string;
     salesman_user_id: string;
@@ -654,7 +722,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     trial_rate_per_kg: number;
     monthly_rate_per_100kg: number;
     base_salary: number;
-  }): SalaryIncentive[] => {
+  }): Promise<SalaryIncentive[]> => {
     const salesman = users.find((u) => u.user_id === params.salesman_user_id);
     const joinDate = salesman ? new Date(salesman.created_at) : new Date(params.period_start);
     const trialEndDate = new Date(joinDate.getTime() + params.trial_days * 24 * 60 * 60 * 1000);
@@ -759,10 +827,42 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return [...newItems, ...prev];
     });
 
+    // Asynchronously persist new proposed calculations to backend
+    if (results.length > 0) {
+      try {
+        const payload = results.map((r) => ({
+          period_start: r.period_start,
+          period_end: r.period_end,
+          salesman_user_id: r.salesman_user_id,
+          record_type: r.record_type,
+          eligible_kg: r.eligible_kg,
+          completed_100kg_blocks: r.completed_100kg_blocks,
+          rate: r.rate,
+          calculated_amount: r.calculated_amount,
+          approved_amount: r.approved_amount,
+          notes: r.notes,
+        }));
+        const persisted = await apiRequest<SalaryIncentive[]>('/api/salary', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        if (persisted && persisted.length > 0) {
+          setSalaryIncentives((prev) => {
+            const existingIds = new Set(prev.map((p) => p.record_id));
+            const fresh = persisted.filter((p) => !existingIds.has(p.record_id));
+            return [...fresh, ...prev];
+          });
+          return persisted;
+        }
+      } catch (err) {
+        console.warn('Backend salary calculation sync warning:', err);
+      }
+    }
+
     return results;
   };
 
-  const approveSalaryIncentive = (record_id: string, approved_amount?: number) => {
+  const approveSalaryIncentive = async (record_id: string, approved_amount?: number) => {
     setSalaryIncentives((prev) =>
       prev.map((r) =>
         r.record_id === record_id
@@ -775,10 +875,21 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           : r
       )
     );
+    try {
+      const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({ approved_amount, notes: 'Approved in management portal' }),
+      });
+      setSalaryIncentives((prev) =>
+        prev.map((r) => (r.record_id === record_id ? { ...r, ...updated } : r))
+      );
+    } catch (err) {
+      console.warn('Backend salary approval sync warning:', err);
+    }
     addAuditLog('APPROVE', 'SalaryIncentive', record_id, 'Approved salary/incentive payment');
   };
 
-  const markSalaryIncentivePaid = (record_id: string, reference: string) => {
+  const markSalaryIncentivePaid = async (record_id: string, reference: string) => {
     setSalaryIncentives((prev) =>
       prev.map((r) =>
         r.record_id === record_id
@@ -790,6 +901,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           : r
       )
     );
+    try {
+      const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/pay`, {
+        method: 'POST',
+        body: JSON.stringify({ payment_reference: reference }),
+      });
+      setSalaryIncentives((prev) =>
+        prev.map((r) => (r.record_id === record_id ? { ...r, ...updated } : r))
+      );
+    } catch (err) {
+      console.warn('Backend salary pay sync warning:', err);
+    }
     addAuditLog('PAY', 'SalaryIncentive', record_id, `Marked paid with ref: ${reference}`);
   };
 
@@ -855,6 +977,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         markSalaryIncentivePaid,
         dashboardMetrics,
         auditLogs,
+        syncError,
+        clearSyncError,
         refreshData,
       }}
     >
