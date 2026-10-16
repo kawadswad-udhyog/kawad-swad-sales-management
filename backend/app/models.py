@@ -6,6 +6,20 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+class OwnerSetupRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50, description="Owner username (alphanumeric, min 3 chars)")
+    full_name: str = Field(..., min_length=2, max_length=100, description="Owner full name")
+    password: str = Field(..., min_length=12, max_length=128, description="Strong password, at least 12 characters")
+
+class OwnerSetupResponse(BaseModel):
+    success: bool = True
+    message: str
+    user_id: str
+    username: str
+    full_name: str
+    role: str = "OWNER"
+    created_at: str
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

@@ -102,8 +102,8 @@ class SheetsDatabase:
                 return self.memory_store.get(tab_name, [])
         return self.memory_store.get(tab_name, [])
 
-    def append_record(self, tab_name: str, record: Dict[str, Any]) -> None:
-        """Append a record to a worksheet."""
+    def append_record(self, tab_name: str, record: Dict[str, Any], raise_on_error: bool = False) -> bool:
+        """Append a record to a worksheet. Returns True on success, False or raises on failure."""
         self.memory_store.setdefault(tab_name, []).append(record)
 
         if self.is_connected and self.spreadsheet:
@@ -115,8 +115,37 @@ class SheetsDatabase:
                     worksheet.append_row(headers)
                 row = [record.get(h, "") for h in headers]
                 worksheet.append_row(row)
+                return True
             except Exception as e:
                 logger.error(f"Error appending to {tab_name} in Google Sheet: {e}")
+                if raise_on_error:
+                    raise e
+                return False
+        return True
+
+    def delete_record(self, tab_name: str, id_field: str, id_value: str) -> bool:
+        """Delete a record from memory store and Google Sheets (used for rollback/recovery)."""
+        found = False
+        items = self.memory_store.get(tab_name, [])
+        initial_len = len(items)
+        self.memory_store[tab_name] = [
+            item for item in items if str(item.get(id_field)) != str(id_value)
+        ]
+        if len(self.memory_store[tab_name]) < initial_len:
+            found = True
+
+        if self.is_connected and self.spreadsheet:
+            try:
+                worksheet = self.spreadsheet.worksheet(tab_name)
+                records = worksheet.get_all_records()
+                for idx, r in enumerate(records, start=2):
+                    if str(r.get(id_field)) == str(id_value):
+                        worksheet.delete_rows(idx)
+                        return True
+            except Exception as e:
+                logger.error(f"Error deleting record in {tab_name}: {e}")
+
+        return found
 
     def update_record(self, tab_name: str, id_field: str, id_value: str, updates: Dict[str, Any]) -> bool:
         """Update a record in the memory store and in Google Sheets if connected."""
