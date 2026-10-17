@@ -6,13 +6,13 @@ and robust boolean parsing.
 """
 
 import sys
-import types
 import os
 import unittest
-import asyncio
 
-# Setup test harness mocks for FastAPI/Pydantic/JWT if not globally installed
-if "fastapi" not in sys.modules:
+os.environ.setdefault("SALES_TESTING", "1")
+os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
+
+if False and "fastapi" not in sys.modules:
     class MockFastAPIModule(types.ModuleType):
         class APIRouter:
             def __init__(self, *args, **kwargs):

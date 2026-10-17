@@ -26,6 +26,7 @@ class TokenResponse(BaseModel):
     user_id: str
     full_name: str
     role: str
+    must_change_password: bool = False
 
 class UserProfile(BaseModel):
     user_id: str
@@ -127,7 +128,7 @@ class SaleItemCreate(BaseModel):
     notes: Optional[str] = ""
 
 class SaleCreate(BaseModel):
-    idempotency_key: Optional[str] = Field(None, max_length=120, description="Client idempotency key for preventing duplicate billing")
+    idempotency_key: Optional[str] = Field(None, description="Client idempotency key for preventing duplicate billing")
     sales_type: Optional[str] = "Retailer Sale"
     customer_id: Optional[str] = ""
     customer_name_snapshot: Optional[str] = ""
@@ -144,6 +145,7 @@ class SaleCreate(BaseModel):
     tax_amount: Optional[float] = 0.0
     bill_total: Optional[float] = None
     notes: Optional[str] = ""
+    payment_reference: Optional[str] = ""
     items: Optional[List[SaleItemCreate]] = None
     lines: Optional[List[SaleItemCreate]] = None
 
@@ -185,6 +187,10 @@ class Sale(BaseModel):
     created_at: str
     notes: Optional[str] = ""
     items: Optional[List[SaleItem]] = []
+    lines: Optional[List[SaleItem]] = None
+    txn_status: Optional[str] = "COMPLETE"
+    payment_method: Optional[str] = ""
+    payment_reference: Optional[str] = ""
 
 # Stock Models
 class CompanyStockItem(BaseModel):
@@ -193,6 +199,9 @@ class CompanyStockItem(BaseModel):
     product_name: str
     current_stock: int
     unit: str = "PACKET"
+    company_quantity: int = 0
+    quantity: int = 0
+    pack_weight_g: int = 500
 
 class SalesmanStockItem(BaseModel):
     salesman_user_id: str
@@ -201,6 +210,9 @@ class SalesmanStockItem(BaseModel):
     product_name: str
     current_stock: int
     unit: str = "PACKET"
+    quantity: int = 0
+    salesman_name: str = ""
+    pack_weight_g: int = 500
 
 class StockSummaryResponse(BaseModel):
     company_stock: List[CompanyStockItem]
@@ -301,12 +313,17 @@ class DailyClosing(BaseModel):
     reviewed_by_user_id: Optional[str] = ""
     reviewed_at: Optional[str] = ""
     notes: Optional[str] = ""
+    upi_collected: float = 0
+    bank_collected: float = 0
+    other_collected: float = 0
 
 class DailyClosingCreate(BaseModel):
     opening_cash: float
     physical_cash_returned: float
     opening_stock_reference: Optional[str] = ""
     notes: Optional[str] = ""
+    idempotency_key: Optional[str] = ""
+    physical_stock: Optional[List[Dict[str, Any]]] = None
 
 class ClosingReviewRequest(BaseModel):
     confirmed: bool

@@ -25,6 +25,8 @@ services:
       - key: SALES_JWT_SECRET
         generateValue: true
       - key: SALES_CORS_ORIGINS
-        value: "*"
+        value: https://kawad-swad-sales-frontend.onrender.com,http://localhost:3000
+      - key: SALES_ENV
+        value: production
       - key: SALES_TOKEN_HOURS
         value: "8"

@@ -1,14 +1,17 @@
 from datetime import datetime
 from typing import List
 from fastapi import APIRouter, HTTPException, status, Depends
+from pydantic import BaseModel, Field
 from app.models import UserProfile, UserCreate
 from app.sheets import db
 from app.auth import get_current_user, hash_password
+from app.permissions import is_manager, is_owner, require_manager, require_owner
 
 router = APIRouter(prefix="/api/users", tags=["Users"])
 
 @router.get("", response_model=List[UserProfile])
 async def list_users(current_user: dict = Depends(get_current_user)):
+    require_manager(current_user)
     records = db.get_records("Users")
     users = []
     for r in records:
@@ -27,9 +30,12 @@ async def list_users(current_user: dict = Depends(get_current_user)):
 
 @router.post("", response_model=UserProfile)
 async def create_user(req: UserCreate, current_user: dict = Depends(get_current_user)):
-    caller_role = current_user.get("role", "").upper()
-    if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owner or PA can create users")
+    require_manager(current_user)
+    requested = str(req.role or "SALESMAN").upper()
+    if requested in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="Only the owner can create another owner account.")
+    if requested not in {"OWNER", "OWNER_ADMIN", "PA", "SALESMAN", "FIELD_SALESMAN"}:
+        raise HTTPException(status_code=422, detail="Role must be OWNER, PA, or SALESMAN.")
 
     user_id = db.generate_id("Users")
     auth_id = db.generate_id("AuthUsers")
@@ -45,7 +51,8 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
         "created_at": now_iso,
         "notes": req.notes or "",
     }
-    db.append_record("Users", user_record)
+    if not db.append_record("Users", user_record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="The user record was not saved.")
 
     hashed_pw = hash_password(req.password)
     auth_record = {
@@ -58,7 +65,8 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
         "created_at": now_iso,
         "must_change_password": "false",
     }
-    db.append_record("AuthUsers", auth_record)
+    if not db.append_record("AuthUsers", auth_record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="The login record was not saved. Retry before using this username.")
 
     db.log_audit(
         actor=current_user.get("user_id"),
@@ -79,3 +87,21 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
         created_at=now_iso,
         notes=req.notes or "",
     )
+
+
+class PasswordResetRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/{user_id}/reset-password")
+async def reset_password(user_id: str, req: PasswordResetRequest, current_user: dict = Depends(get_current_user)):
+    """Owner recovery path for a legacy or forgotten password. Does not reveal the old hash."""
+    require_owner(current_user)
+    if not db.update_record("AuthUsers", "user_id", user_id, {
+        "password_hash": hash_password(req.new_password),
+        "must_change_password": "true",
+        "active": "true",
+    }):
+        raise HTTPException(status_code=404, detail="Login account was not found or the sheet update failed.")
+    db.log_audit(current_user.get("user_id"), "RESET_PASSWORD", "AuthUsers", user_id, reason="Owner reset a password")
+    return {"ok": True, "must_change_password": True}

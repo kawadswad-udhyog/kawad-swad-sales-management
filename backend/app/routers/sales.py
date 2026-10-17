@@ -1,416 +1,459 @@
 import asyncio
 import re
-from datetime import datetime
 from typing import List, Optional
+
 from fastapi import APIRouter, HTTPException, status, Depends
+
 from app.models import Sale, SaleCreate, SaleItem
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
+from app.permissions import is_manager, is_salesman
+from app.stock_math import salesman_available
+from app.timeutil import now_iso
 
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
 _sales_lock = asyncio.Lock()
+_MONEY = 0.05
+
+
+def _clean(value) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"none", "null", "undefined"}:
+        return ""
+    return text
+
+
+def _money(value) -> float:
+    return round(float(value or 0), 2)
+
+
+def _find_sale_by_key(sales: List[dict], key: str) -> Optional[dict]:
+    for row in reversed(sales):
+        stored = _clean(row.get("idempotency_key"))
+        notes = str(row.get("notes", ""))
+        if stored == key or f"[idemp:{key}]" in notes:
+            return row
+    return None
+
+
+def _items_for(sale_id: str) -> List[dict]:
+    return [row for row in db.get_records("SaleItems", fresh=True) if str(row.get("sale_id")) == sale_id]
+
+
+def _payments_for(sale_id: str) -> List[dict]:
+    return [row for row in db.get_records("Payments", fresh=True) if str(row.get("sale_id")) == sale_id]
+
+
+def _stock_for(sale_id: str) -> List[dict]:
+    return [
+        row for row in db.get_records("SalesmanStockLedger", fresh=True)
+        if str(row.get("related_sale_id")) == sale_id and str(row.get("txn_type", "")).upper() in {"SOLD_DELIVERY", "SALE_DELIVERY"}
+    ]
+
+
+def _cash_for(sale_id: str) -> List[dict]:
+    return [
+        row for row in db.get_records("CashLedger", fresh=True)
+        if str(row.get("related_sale_id")) == sale_id and str(row.get("txn_type", "")).upper() == "SALE_COLLECTION"
+    ]
+
+
+def _to_item(row: dict) -> SaleItem:
+    return SaleItem(
+        sale_item_id=str(row.get("sale_item_id", "")),
+        sale_id=str(row.get("sale_id", "")),
+        product_id=str(row.get("product_id", "")),
+        product_name_snapshot=str(row.get("product_name_snapshot", "")),
+        sku_snapshot=str(row.get("sku_snapshot", "")),
+        pack_weight_g=int(float(row.get("pack_weight_g", 500) or 500)),
+        unit=str(row.get("unit", "PACKET")),
+        quantity=int(float(row.get("quantity", 1) or 1)),
+        actual_unit_price=float(row.get("actual_unit_price", 0) or 0),
+        discount_amount=float(row.get("discount_amount", 0) or 0),
+        line_total=float(row.get("line_total", 0) or 0),
+        qualifying_kg=float(row.get("qualifying_kg", 0) or 0),
+        created_at=str(row.get("created_at", "")),
+        notes=_clean(row.get("notes")),
+    )
+
+
+def _to_sale(row: dict, items: List[SaleItem], key: str = "") -> Sale:
+    notes = re.sub(r"\[idemp:[^\]]+\]\s*", "", str(row.get("notes", ""))).strip()
+    notes = re.sub(r"\[txn:[^\]]+\]\s*", "", notes).strip()
+    payment = _payments_for(str(row.get("sale_id", "")))
+    method = _clean(row.get("payment_method")) or (str(payment[0].get("payment_method", "")) if payment else "")
+    reference = _clean(row.get("payment_reference"))
+    if payment and not reference:
+        reference = _clean(payment[0].get("reference_number"))
+        if reference == str(row.get("bill_number", "")):
+            reference = _clean(payment[0].get("notes")) if "ref:" in str(payment[0].get("notes", "")) else reference
+    return Sale(
+        sale_id=str(row.get("sale_id", "")),
+        bill_number=str(row.get("bill_number", "")),
+        idempotency_key=key or _clean(row.get("idempotency_key")),
+        sale_datetime=str(row.get("sale_datetime", "")),
+        sales_type=str(row.get("sales_type", "Retailer Sale")),
+        customer_id=_clean(row.get("customer_id")) or "CUS-WALKIN",
+        customer_name_snapshot=_clean(row.get("customer_name_snapshot")) or "Walk-in Customer",
+        customer_mobile=_clean(row.get("customer_mobile")),
+        customer_gstin=_clean(row.get("customer_gstin")),
+        entered_by_user_id=str(row.get("entered_by_user_id", "")),
+        salesman_user_id=str(row.get("salesman_user_id", "")),
+        delivery_status=str(row.get("delivery_status", "DELIVERED")),
+        payment_status=str(row.get("payment_status", "PAID")),
+        subtotal=float(row.get("subtotal", 0) or 0),
+        discount_amount=float(row.get("discount_amount", 0) or 0),
+        tax_amount=float(row.get("tax_amount", 0) or 0),
+        bill_total=float(row.get("bill_total", 0) or 0),
+        bill_status=str(row.get("bill_status", "ISSUED")),
+        created_at=str(row.get("created_at", "")),
+        notes=_clean(notes),
+        items=items,
+        txn_status=str(row.get("txn_status", "COMPLETE") or "COMPLETE"),
+        payment_method=method,
+        payment_reference=reference if reference != str(row.get("bill_number", "")) else _clean(row.get("payment_reference")),
+        lines=items,
+    )
+
+
+def _must_write(tab: str, record: dict):
+    if not db.append_record(tab, record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail=f"Could not save {tab}. The sale is incomplete and can be retried with the same idempotency key.")
+
+
+def _sale_is_complete(sale_id: str, line_count: int, payment_method: str) -> bool:
+    if len(_items_for(sale_id)) < line_count:
+        return False
+    if len(_stock_for(sale_id)) < line_count:
+        return False
+    if not _payments_for(sale_id):
+        return False
+    if payment_method == "CASH" and not _cash_for(sale_id):
+        return False
+    return True
+
 
 @router.get("", response_model=List[Sale])
 async def list_sales(current_user: dict = Depends(get_current_user)):
-    user_id = current_user.get("user_id")
-    role = current_user.get("role", "").upper()
-
+    user_id = str(current_user.get("user_id", ""))
     sales_records = db.get_records("Sales")
     items_records = db.get_records("SaleItems")
-
+    payments = db.get_records("Payments")
+    pay_by_sale = {}
+    for payment in payments:
+        pay_by_sale.setdefault(str(payment.get("sale_id", "")), payment)
     items_by_sale = {}
-    for itm in items_records:
-        s_id = str(itm.get("sale_id", ""))
-        item_obj = SaleItem(
-            sale_item_id=str(itm.get("sale_item_id", "")),
-            sale_id=s_id,
-            product_id=str(itm.get("product_id", "")),
-            product_name_snapshot=str(itm.get("product_name_snapshot", "")),
-            sku_snapshot=str(itm.get("sku_snapshot", "")),
-            pack_weight_g=int(itm.get("pack_weight_g", 500) or 500),
-            unit=str(itm.get("unit", "PACKET")),
-            quantity=int(itm.get("quantity", 1) or 1),
-            actual_unit_price=float(itm.get("actual_unit_price", 0.0) or 0.0),
-            discount_amount=float(itm.get("discount_amount", 0.0) or 0.0),
-            line_total=float(itm.get("line_total", 0.0) or 0.0),
-            qualifying_kg=float(itm.get("qualifying_kg", 0.0) or 0.0),
-            created_at=str(itm.get("created_at", "")),
-            notes="" if str(itm.get("notes", "")).lower() in ["none", "null", "undefined"] else str(itm.get("notes", "")),
-        )
-        items_by_sale.setdefault(s_id, []).append(item_obj)
-
-    sales = []
-    for r in sales_records:
-        salesman_id = str(r.get("salesman_user_id", ""))
-        # Filter if salesman role: can only view their own sales
-        if role not in ["OWNER", "OWNER_ADMIN", "PA"] and salesman_id != user_id:
+    for row in items_records:
+        items_by_sale.setdefault(str(row.get("sale_id", "")), []).append(_to_item(row))
+    result = []
+    for row in sales_records:
+        salesman_id = str(row.get("salesman_user_id", ""))
+        if not is_manager(current_user) and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
             continue
+        if str(row.get("txn_status", "COMPLETE")).upper() == "INCOMPLETE":
+            continue
+        if str(row.get("bill_status", "ISSUED")).upper() == "CANCELLED":
+            continue
+        sale_id = str(row.get("sale_id", ""))
+        if pay_by_sale.get(sale_id) and not row.get("payment_method"):
+            row = dict(row)
+            row["payment_method"] = pay_by_sale[sale_id].get("payment_method", "")
+            row["payment_reference"] = pay_by_sale[sale_id].get("reference_number", "")
+        result.append(_to_sale(row, items_by_sale.get(sale_id, [])))
+    return result
 
-        sale_id = str(r.get("sale_id", ""))
-        cust_name = str(r.get("customer_name_snapshot", "")).strip()
-        if not cust_name or cust_name.lower() in ["none", "null", "undefined"]:
-            cust_name = "Walk-in Customer"
 
-        cust_id = str(r.get("customer_id", "")).strip()
-        if cust_id.lower() in ["none", "null", "undefined"]:
-            cust_id = "CUS-WALKIN"
+@router.get("/payments")
+async def list_payments(current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id", ""))
+    sales = {str(row.get("sale_id")): row for row in db.get_records("Sales")}
+    payments = []
+    for row in db.get_records("Payments"):
+        sale = sales.get(str(row.get("sale_id")), {})
+        salesman_id = str(sale.get("salesman_user_id", ""))
+        if not is_manager(current_user) and salesman_id not in {user_id, ""} and str(sale.get("entered_by_user_id", "")) != user_id:
+            continue
+        if str(sale.get("txn_status", "COMPLETE")).upper() == "INCOMPLETE":
+            continue
+        payments.append({
+            "payment_id": str(row.get("payment_id", "")),
+            "sale_id": str(row.get("sale_id", "")),
+            "payment_datetime": str(row.get("payment_datetime", "")),
+            "payment_method": str(row.get("payment_method", "CASH")),
+            "amount": float(row.get("amount", 0) or 0),
+            "reference_number": str(row.get("reference_number", "")),
+            "received_by_user_id": str(row.get("received_by_user_id", "")),
+            "payment_status": "RECEIVED" if str(row.get("payment_status", "PAID")).upper() in {"PAID", "RECEIVED"} else str(row.get("payment_status", "")),
+            "notes": _clean(row.get("notes")),
+            "bill_number": str(sale.get("bill_number", "")),
+        })
+    return payments
 
-        raw_key = str(r.get("idempotency_key", "")).strip()
-        raw_note = str(r.get("notes", ""))
-        if not raw_key:
-            m = re.search(r"\[idemp:([^\]]+)\]", raw_note)
-            if m:
-                raw_key = m.group(1).strip()
-        clean_note = re.sub(r"\[idemp:[^\]]+\]\s*", "", raw_note).strip()
-        if clean_note.lower() in ["none", "null", "undefined"]:
-            clean_note = ""
-
-        sales.append(Sale(
-            sale_id=sale_id,
-            bill_number=str(r.get("bill_number", "")),
-            idempotency_key=raw_key,
-            sale_datetime=str(r.get("sale_datetime", "")),
-            sales_type=str(r.get("sales_type", "Retailer Sale")),
-            customer_id=cust_id,
-            customer_name_snapshot=cust_name,
-            customer_mobile="" if str(r.get("customer_mobile", "")).lower() in ["none", "null", "undefined"] else str(r.get("customer_mobile", "")),
-            customer_gstin="" if str(r.get("customer_gstin", "")).lower() in ["none", "null", "undefined"] else str(r.get("customer_gstin", "")),
-            entered_by_user_id=str(r.get("entered_by_user_id", "")),
-            salesman_user_id=salesman_id,
-            delivery_status=str(r.get("delivery_status", "DELIVERED")),
-            payment_status=str(r.get("payment_status", "PAID")),
-            subtotal=float(r.get("subtotal", 0.0) or 0.0),
-            discount_amount=float(r.get("discount_amount", 0.0) or 0.0),
-            tax_amount=float(r.get("tax_amount", 0.0) or 0.0),
-            bill_total=float(r.get("bill_total", 0.0) or 0.0),
-            bill_status=str(r.get("bill_status", "ISSUED")),
-            created_at=str(r.get("created_at", "")),
-            notes=clean_note,
-            items=items_by_sale.get(sale_id, []),
-        ))
-    return sales
 
 @router.post("", response_model=Sale, dependencies=[Depends(require_sheets_connection)])
 async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_user)):
-    user_id = current_user.get("user_id")
-    salesman_id = (req.salesman_user_id or user_id).strip()
+    user_id = str(current_user.get("user_id") or "")
+    requested_salesman = _clean(req.salesman_user_id) or user_id
+    if is_salesman(current_user) and requested_salesman != user_id:
+        raise HTTPException(status_code=403, detail="A salesman can only record a sale against their own user id.")
+    if not is_manager(current_user) and not is_salesman(current_user):
+        raise HTTPException(status_code=403, detail="You do not have permission to record a sale.")
 
-    # 1. Essential business validation: Line items
     raw_items = req.items or req.lines or []
     if not raw_items:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Sale must contain at least one valid product line.",
-        )
+        raise HTTPException(status_code=422, detail="Sale must contain at least one valid product line.")
 
-    # Validate idempotency_key format
-    clean_idempotency_key = ""
-    if req.idempotency_key is not None:
-        clean_idempotency_key = str(req.idempotency_key).strip()
-        if len(clean_idempotency_key) > 120:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="idempotency_key must not exceed 120 characters.",
-            )
-        if re.search(r"[\r\n\t]", clean_idempotency_key):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="idempotency_key contains invalid control characters.",
-            )
+    clean_key = _clean(req.idempotency_key)
+    if req.idempotency_key is not None and not clean_key:
+        clean_key = ""
+    if clean_key:
+        if len(clean_key) > 120:
+            raise HTTPException(status_code=422, detail="idempotency_key must not exceed 120 characters.")
+        if re.search(r"[\r\n\t]", clean_key):
+            raise HTTPException(status_code=422, detail="idempotency_key contains invalid control characters.")
 
-    products_db = {str(p.get("product_id")): p for p in db.get_records("Products")}
-    validated_items_data = []
-    calc_subtotal = 0.0
+    method = _clean(req.payment_method or "CASH").upper() or "CASH"
+    if method not in {"CASH", "UPI", "BANK_TRANSFER", "OTHER"}:
+        raise HTTPException(status_code=422, detail="Payment method must be CASH, UPI, BANK_TRANSFER, or OTHER.")
+    if str(req.payment_status or "PAID").upper() not in {"PAID", "RECEIVED"}:
+        raise HTTPException(status_code=422, detail="Only a fully paid sale can be issued. Credit and partial payment are not enabled.")
 
-    for idx, item in enumerate(raw_items):
-        pid = (item.product_id or "").strip()
-        if not pid:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Line {idx+1}: Product selection is mandatory.",
-            )
-        if item.quantity is None or item.quantity <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Line {idx+1}: Quantity must be greater than zero.",
-            )
-        if item.actual_unit_price is None or item.actual_unit_price < 0:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Line {idx+1}: Price cannot be negative.",
-            )
-
-        prd = products_db.get(pid, {})
-        name_snapshot = (item.product_name_snapshot or prd.get("product_name") or prd.get("sku") or pid).strip()
-        sku_snapshot = (item.sku_snapshot or prd.get("sku") or pid).strip()
-        pack_weight_g = int(item.pack_weight_g or prd.get("pack_weight_g") or 500)
-        unit = (item.unit or prd.get("selling_unit") or "PACKET").strip()
+    products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
+    validated = []
+    subtotal = 0.0
+    demand = {}
+    for index, item in enumerate(raw_items):
+        product_id = _clean(item.product_id)
+        product = products.get(product_id)
+        if not product:
+            if not product_id:
+                raise HTTPException(status_code=422, detail=f"Line {index + 1}: Product selection is mandatory.")
+            raise HTTPException(status_code=422, detail=f"Line {index + 1}: product {product_id} does not exist.")
+        active = str(product.get("active", "true")).strip().lower()
+        if active in {"false", "0", "no", "inactive"}:
+            raise HTTPException(status_code=422, detail=f"Line {index + 1}: {product.get('product_name') or product_id} is inactive.")
+        if item.quantity is None or int(item.quantity) <= 0:
+            raise HTTPException(status_code=422, detail=f"Line {index + 1}: Quantity must be greater than zero.")
+        if item.actual_unit_price is None or float(item.actual_unit_price) < 0:
+            raise HTTPException(status_code=422, detail=f"Line {index + 1}: Price cannot be negative.")
         qty = int(item.quantity)
-        price = float(item.actual_unit_price)
-        discount = float(item.discount_amount or 0.0)
-        line_total = float(item.line_total if item.line_total is not None and item.line_total > 0 else (qty * price - discount))
-        qualifying_kg = float(item.qualifying_kg or ((pack_weight_g * qty) / 1000.0 if "kg" not in unit.lower() else qty))
-
-        calc_subtotal += line_total
-        validated_items_data.append({
-            "product_id": pid,
-            "product_name_snapshot": name_snapshot,
-            "sku_snapshot": sku_snapshot,
-            "pack_weight_g": pack_weight_g,
+        price = _money(item.actual_unit_price)
+        discount = _money(item.discount_amount or 0)
+        if discount < 0 or discount > _money(qty * price):
+            raise HTTPException(status_code=422, detail=f"Line {index + 1}: discount cannot exceed the line amount.")
+        line_total = _money(qty * price - discount)
+        if item.line_total is not None and abs(_money(item.line_total) - line_total) > _MONEY:
+            raise HTTPException(status_code=422, detail=f"Line {index + 1}: line total does not match quantity × price − discount. The server total is ₹{line_total:.2f}.")
+        pack = int(float(item.pack_weight_g or product.get("pack_weight_g") or 500))
+        unit = _clean(item.unit or product.get("selling_unit") or "PACKET") or "PACKET"
+        sales_type = _clean(req.sales_type or "Retailer Sale")
+        if sales_type.lower() == "retail sale" and pack not in {200, 500, 1000}:
+            raise HTTPException(status_code=422, detail="A retail packet sale must use a 200 g, 500 g, or 1000 g pack.")
+        qualifying_kg = round((pack * qty) / 1000.0, 3) if "kg" not in unit.lower() else float(qty)
+        subtotal = _money(subtotal + line_total)
+        demand[product_id] = demand.get(product_id, 0) + qty
+        validated.append({
+            "line_no": index,
+            "product_id": product_id,
+            "product_name_snapshot": _clean(item.product_name_snapshot or product.get("product_name") or product_id),
+            "sku_snapshot": _clean(item.sku_snapshot or product.get("sku") or product_id),
+            "pack_weight_g": pack,
             "unit": unit,
             "quantity": qty,
             "actual_unit_price": price,
             "discount_amount": discount,
             "line_total": line_total,
             "qualifying_kg": qualifying_kg,
-            "notes": (item.notes or "").strip(),
+            "notes": _clean(item.notes),
         })
 
-    subtotal = float(req.subtotal) if req.subtotal is not None and req.subtotal >= 0 else calc_subtotal
-    discount_amount = float(req.discount_amount or 0.0)
-    if discount_amount > subtotal:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Discount cannot exceed subtotal.",
-        )
+    discount_amount = _money(req.discount_amount or 0)
+    if discount_amount < 0 or discount_amount > subtotal:
+        raise HTTPException(status_code=422, detail="Discount cannot exceed subtotal.")
+    tax_amount = _money(req.tax_amount or 0)
+    if tax_amount < 0:
+        raise HTTPException(status_code=422, detail="Tax amount cannot be negative. GST rates are not configured; do not send a negative adjustment.")
+    bill_total = _money(subtotal - discount_amount + tax_amount)
+    if req.bill_total is not None and abs(_money(req.bill_total) - bill_total) > _MONEY:
+        raise HTTPException(status_code=422, detail=f"Bill total does not match the server calculation of ₹{bill_total:.2f}.")
+    if req.subtotal is not None and abs(_money(req.subtotal) - subtotal) > _MONEY:
+        raise HTTPException(status_code=422, detail=f"Subtotal does not match the server calculation of ₹{subtotal:.2f}.")
 
-    tax_amount = float(req.tax_amount or 0.0)
-    calculated_total = max(0.0, subtotal - discount_amount + tax_amount)
-    bill_total = float(req.bill_total) if req.bill_total is not None and req.bill_total >= 0 else calculated_total
+    customer_id = _clean(req.customer_id)
+    customer_name = _clean(req.customer_name_snapshot)
+    if not customer_id or customer_id in {"WALK-IN", "CUS-WALKIN"}:
+        customer_id = "CUS-WALKIN"
+        customer_name = customer_name or "Walk-in Customer"
+    elif not customer_name:
+        match = next((c for c in db.get_records("Customers") if str(c.get("customer_id")) == customer_id), None)
+        customer_name = _clean(match.get("shop_name")) if match else "Walk-in Customer"
+        customer_name = customer_name or "Walk-in Customer"
 
-    # 2. Payment method validation
-    clean_payment_method = (req.payment_method or "CASH").upper().strip()
-    if clean_payment_method not in ["CASH", "UPI", "BANK_TRANSFER", "OTHER"]:
-        clean_payment_method = "CASH"
-
-    # 3. Buyer info normalization (supports anonymous / quick retail sales)
-    clean_cust_id = (req.customer_id or "").strip()
-    clean_cust_name = (req.customer_name_snapshot or "").strip()
-
-    if not clean_cust_id or clean_cust_id in ["WALK-IN", "CUS-WALKIN"]:
-        clean_cust_id = "CUS-WALKIN"
-        if not clean_cust_name or clean_cust_name.lower() in ["none", "null", "undefined"]:
-            clean_cust_name = "Walk-in Customer"
-    elif not clean_cust_name or clean_cust_name.lower() in ["none", "null", "undefined"]:
-        # Find customer name by customer_id if available
-        cust_records = db.get_records("Customers")
-        match_c = next((c for c in cust_records if str(c.get("customer_id")) == clean_cust_id), None)
-        if match_c:
-            clean_cust_name = str(match_c.get("shop_name", "Walk-in Customer")).strip()
-        else:
-            clean_cust_name = "Walk-in Customer"
-
-    clean_mobile = "" if str(req.customer_mobile or "").lower() in ["none", "null", "undefined"] else str(req.customer_mobile or "").strip()
-    clean_gstin = "" if str(req.customer_gstin or "").lower() in ["none", "null", "undefined"] else str(req.customer_gstin or "").strip()
-    clean_sales_type = (req.sales_type or "Retailer Sale").strip()
-
-    # 4. Critical Section under _sales_lock for concurrent idempotency check and atomic persistence
+    reference = _clean(getattr(req, "payment_reference", "") or "")
     async with _sales_lock:
-        # Check idempotency key: if matching sale already exists, return original sale immediately
-        if clean_idempotency_key:
-            all_sales = db.get_records("Sales")
-            matched_sale = None
-            for s in reversed(all_sales):
-                k = str(s.get("idempotency_key", "")).strip()
-                n = str(s.get("notes", ""))
-                if (k and k == clean_idempotency_key) or f"[idemp:{clean_idempotency_key}]" in n:
-                    matched_sale = s
-                    break
+        if clean_key:
+            existing = _find_sale_by_key(db.get_records("Sales", fresh=True), clean_key)
+            if existing:
+                owner = str(existing.get("salesman_user_id", ""))
+                entered = str(existing.get("entered_by_user_id", ""))
+                if not is_manager(current_user) and user_id not in {owner, entered}:
+                    raise HTTPException(status_code=409, detail="This idempotency key already belongs to another user.")
+                sale_id = str(existing.get("sale_id"))
+                if _sale_is_complete(sale_id, len(validated), method) or _sale_is_complete(sale_id, len(_items_for(sale_id)) or len(validated), str(existing.get("payment_method") or method).upper()):
+                    if str(existing.get("txn_status", "")).upper() != "COMPLETE":
+                        if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE"}):
+                            raise HTTPException(status_code=503, detail="The sale rows exist but the completion flag could not be saved. Retry the same request.")
+                        existing["txn_status"] = "COMPLETE"
+                    items = [_to_item(row) for row in _items_for(sale_id)]
+                    return _to_sale(existing, items, clean_key)
+                return await _resume_sale(existing, validated, method, reference, bill_total, user_id, clean_key)
 
-            if matched_sale:
-                matched_sale_id = str(matched_sale.get("sale_id", ""))
-                all_items = db.get_records("SaleItems")
-                s_items = [
-                    SaleItem(
-                        sale_item_id=str(it.get("sale_item_id", "")),
-                        sale_id=str(it.get("sale_id", "")),
-                        product_id=str(it.get("product_id", "")),
-                        product_name_snapshot=str(it.get("product_name_snapshot", "")),
-                        sku_snapshot=str(it.get("sku_snapshot", "")),
-                        pack_weight_g=int(it.get("pack_weight_g", 500) or 500),
-                        unit=str(it.get("unit", "PACKET")),
-                        quantity=int(it.get("quantity", 1) or 1),
-                        actual_unit_price=float(it.get("actual_unit_price", 0.0) or 0.0),
-                        discount_amount=float(it.get("discount_amount", 0.0) or 0.0),
-                        line_total=float(it.get("line_total", 0.0) or 0.0),
-                        qualifying_kg=float(it.get("qualifying_kg", 0.0) or 0.0),
-                        created_at=str(it.get("created_at", "")),
-                        notes="" if str(it.get("notes", "")).lower() in ["none", "null", "undefined"] else str(it.get("notes", "")),
-                    )
-                    for it in all_items if str(it.get("sale_id")) == matched_sale_id
-                ]
-                raw_n = str(matched_sale.get("notes", ""))
-                clean_n = re.sub(r"\[idemp:[^\]]+\]\s*", "", raw_n).strip()
-                if clean_n.lower() in ["none", "null", "undefined"]:
-                    clean_n = ""
-
-                return Sale(
-                    sale_id=matched_sale_id,
-                    bill_number=str(matched_sale.get("bill_number", "")),
-                    idempotency_key=clean_idempotency_key,
-                    sale_datetime=str(matched_sale.get("sale_datetime", "")),
-                    sales_type=str(matched_sale.get("sales_type", "Retailer Sale")),
-                    customer_id=str(matched_sale.get("customer_id", "")),
-                    customer_name_snapshot=str(matched_sale.get("customer_name_snapshot", "")),
-                    customer_mobile="" if str(matched_sale.get("customer_mobile", "")).lower() in ["none", "null", "undefined"] else str(matched_sale.get("customer_mobile", "")),
-                    customer_gstin="" if str(matched_sale.get("customer_gstin", "")).lower() in ["none", "null", "undefined"] else str(matched_sale.get("customer_gstin", "")),
-                    entered_by_user_id=str(matched_sale.get("entered_by_user_id", "")),
-                    salesman_user_id=str(matched_sale.get("salesman_user_id", "")),
-                    delivery_status=str(matched_sale.get("delivery_status", "DELIVERED")),
-                    payment_status=str(matched_sale.get("payment_status", "PAID")),
-                    subtotal=float(matched_sale.get("subtotal", 0.0) or 0.0),
-                    discount_amount=float(matched_sale.get("discount_amount", 0.0) or 0.0),
-                    tax_amount=float(matched_sale.get("tax_amount", 0.0) or 0.0),
-                    bill_total=float(matched_sale.get("bill_total", 0.0) or 0.0),
-                    bill_status=str(matched_sale.get("bill_status", "ISSUED")),
-                    created_at=str(matched_sale.get("created_at", "")),
-                    notes=clean_n,
-                    items=s_items,
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        for product_id, qty in demand.items():
+            available = salesman_available(ledger, requested_salesman, product_id)
+            if qty > available:
+                name = products[product_id].get("product_name") or product_id
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Insufficient stock for {name}. Available {available}, requested {qty}. Issue stock to this salesman before billing.",
                 )
 
-        # 4. Generate new identifiers and proceed with sale issuance
+        now = now_iso()
         sale_id = db.generate_id("Sales")
-        now_iso = datetime.utcnow().isoformat()
-        sales_count = len(db.get_records("Sales")) + 1
-        bill_number = f"KS-BILL-{datetime.utcnow().strftime('%Y%m')}-{str(sales_count).zfill(5)}"
-
-        # 5. Append Sale record
-        stored_notes = (req.notes or "").strip()
-        if clean_idempotency_key and f"[idemp:{clean_idempotency_key}]" not in stored_notes:
-            stored_notes = f"[idemp:{clean_idempotency_key}] {stored_notes}".strip()
-
+        bill_number = db.allocate_bill_number()
+        notes = _clean(req.notes)
+        if clean_key:
+            notes = f"[idemp:{clean_key}] [txn:INCOMPLETE] {notes}".strip()
         sale_record = {
             "sale_id": sale_id,
             "bill_number": bill_number,
-            "idempotency_key": clean_idempotency_key,
-            "sale_datetime": now_iso,
-            "sales_type": clean_sales_type,
-            "customer_id": clean_cust_id,
-            "customer_name_snapshot": clean_cust_name,
-            "customer_mobile": clean_mobile,
-            "customer_gstin": clean_gstin,
+            "idempotency_key": clean_key,
+            "txn_status": "INCOMPLETE",
+            "sale_datetime": now,
+            "sales_type": _clean(req.sales_type or "Retailer Sale") or "Retailer Sale",
+            "customer_id": customer_id,
+            "customer_name_snapshot": customer_name,
+            "customer_mobile": _clean(req.customer_mobile),
+            "customer_gstin": _clean(req.customer_gstin),
             "entered_by_user_id": user_id,
-            "salesman_user_id": salesman_id,
+            "salesman_user_id": requested_salesman,
             "delivery_status": req.delivery_status or "DELIVERED",
-            "payment_status": req.payment_status or "PAID",
+            "payment_status": "PAID",
+            "payment_method": method,
+            "payment_reference": reference,
             "subtotal": subtotal,
             "discount_amount": discount_amount,
             "tax_amount": tax_amount,
             "bill_total": bill_total,
             "bill_status": "ISSUED",
-            "created_at": now_iso,
-            "notes": stored_notes,
+            "created_at": now,
+            "notes": notes,
         }
-        db.append_record("Sales", sale_record, raise_on_error=True)
+        try:
+            _must_write("Sales", sale_record)
+            _write_children(sale_record, validated, method, reference, user_id, now)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Sale {sale_id} is incomplete and was not issued. Retry the same idempotency key. {exc}",
+            ) from exc
+        if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE", "notes": notes.replace("[txn:INCOMPLETE]", "[txn:COMPLETE]")}):
+            raise HTTPException(status_code=503, detail=f"Sale {sale_id} rows were written but completion could not be marked. Retry the same idempotency key.")
+        sale_record["txn_status"] = "COMPLETE"
+        db.log_audit(user_id, "ISSUE_BILL", "Sales", sale_id, reason=f"Issued bill {bill_number} for ₹{bill_total:.2f} to {customer_name}")
+        items = [_to_item(row) for row in _items_for(sale_id)]
+        return _to_sale(sale_record, items, clean_key)
 
-        # 6. Append SaleItems & create stock movements
-        created_items: List[SaleItem] = []
-        for it_data in validated_items_data:
-            sale_item_id = db.generate_id("SaleItems")
-            item_record = {
-                "sale_item_id": sale_item_id,
+
+async def _resume_sale(existing: dict, validated: list, method: str, reference: str, bill_total: float, user_id: str, clean_key: str) -> Sale:
+    sale_id = str(existing.get("sale_id"))
+    if abs(_money(existing.get("bill_total")) - _money(bill_total)) > _MONEY:
+        raise HTTPException(status_code=409, detail="This idempotency key belongs to a different bill total. Start a new bill.")
+    now = now_iso()
+    try:
+        _write_children(existing, validated, method or str(existing.get("payment_method") or "CASH"), reference or _clean(existing.get("payment_reference")), user_id, now)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Recovery of sale {sale_id} is still incomplete. Retry the same idempotency key. {exc}") from exc
+    notes = str(existing.get("notes", "")).replace("[txn:INCOMPLETE]", "[txn:COMPLETE]")
+    if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE", "notes": notes}):
+        raise HTTPException(status_code=503, detail=f"Sale {sale_id} was recovered but completion could not be marked. Retry.")
+    existing["txn_status"] = "COMPLETE"
+    db.log_audit(user_id, "RECOVER_BILL", "Sales", sale_id, reason="Completed missing sale rows on retry")
+    return _to_sale(existing, [_to_item(row) for row in _items_for(sale_id)], clean_key)
+
+
+def _write_children(sale: dict, validated: list, method: str, reference: str, user_id: str, now: str):
+    sale_id = str(sale.get("sale_id"))
+    bill_number = str(sale.get("bill_number"))
+    salesman_id = str(sale.get("salesman_user_id"))
+    existing_items = _items_for(sale_id)
+    existing_stock = _stock_for(sale_id)
+    for line in validated:
+        marker = f"[line:{line['line_no']}]"
+        if not any(marker in str(row.get("notes", "")) for row in existing_items):
+            item_id = db.generate_id("SaleItems")
+            item_notes = f"{marker} {line['notes']}".strip()
+            _must_write("SaleItems", {
+                "sale_item_id": item_id,
                 "sale_id": sale_id,
-                "product_id": it_data["product_id"],
-                "product_name_snapshot": it_data["product_name_snapshot"],
-                "sku_snapshot": it_data["sku_snapshot"],
-                "pack_weight_g": it_data["pack_weight_g"],
-                "unit": it_data["unit"],
-                "quantity": it_data["quantity"],
-                "actual_unit_price": it_data["actual_unit_price"],
-                "discount_amount": it_data["discount_amount"],
-                "line_total": it_data["line_total"],
-                "qualifying_kg": it_data["qualifying_kg"],
-                "created_at": now_iso,
-                "notes": it_data["notes"],
-            }
-            db.append_record("SaleItems", item_record, raise_on_error=True)
-            created_items.append(SaleItem(**item_record))
-
-            # Update Salesman Stock Ledger for sale delivery
-            stock_txn_id = db.generate_id("SalesmanStockLedger")
-            stock_record = {
-                "stock_txn_id": stock_txn_id,
-                "txn_datetime": now_iso,
+                "product_id": line["product_id"],
+                "product_name_snapshot": line["product_name_snapshot"],
+                "sku_snapshot": line["sku_snapshot"],
+                "pack_weight_g": line["pack_weight_g"],
+                "unit": line["unit"],
+                "quantity": line["quantity"],
+                "actual_unit_price": line["actual_unit_price"],
+                "discount_amount": line["discount_amount"],
+                "line_total": line["line_total"],
+                "qualifying_kg": line["qualifying_kg"],
+                "created_at": now,
+                "notes": item_notes,
+            })
+        if not any(marker in str(row.get("notes", "")) or str(row.get("reference_id")) == f"{bill_number}#{line['line_no']}" for row in existing_stock):
+            _must_write("SalesmanStockLedger", {
+                "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+                "txn_datetime": now,
                 "salesman_user_id": salesman_id,
-                "product_id": it_data["product_id"],
-                "sku_snapshot": it_data["sku_snapshot"],
+                "product_id": line["product_id"],
+                "sku_snapshot": line["sku_snapshot"],
                 "txn_type": "SOLD_DELIVERY",
-                "quantity": -it_data["quantity"],
-                "unit": it_data["unit"],
-                "pack_weight_g": it_data["pack_weight_g"],
+                "quantity": -line["quantity"],
+                "unit": line["unit"],
+                "pack_weight_g": line["pack_weight_g"],
                 "related_sale_id": sale_id,
                 "issued_by_user_id": user_id,
-                "received_by_user_id": clean_cust_id,
+                "received_by_user_id": str(sale.get("customer_id", "")),
                 "confirmed_by_user_id": salesman_id,
-                "reference_id": bill_number,
-                "notes": f"Sale delivery against bill {bill_number}",
-            }
-            db.append_record("SalesmanStockLedger", stock_record)
-
-        # 7. Append Payments record
-        payment_id = db.generate_id("Payments")
-        payment_record = {
-            "payment_id": payment_id,
+                "reference_id": f"{bill_number}#{line['line_no']}",
+                "notes": f"{marker} Sale delivery against bill {bill_number}",
+            })
+    if not _payments_for(sale_id):
+        _must_write("Payments", {
+            "payment_id": db.generate_id("Payments"),
             "sale_id": sale_id,
-            "payment_datetime": now_iso,
-            "payment_method": clean_payment_method,
-            "amount": bill_total,
-            "reference_number": bill_number,
+            "payment_datetime": now,
+            "payment_method": method,
+            "amount": _money(sale.get("bill_total")),
+            "reference_number": reference or bill_number,
             "received_by_user_id": salesman_id,
             "payment_status": "PAID",
-            "notes": f"Full payment for bill {bill_number}",
-        }
-        db.append_record("Payments", payment_record)
-
-        # 8. If cash payment, record in CashLedger
-        if clean_payment_method == "CASH":
-            csh_id = db.generate_id("CashLedger")
-            cash_record = {
-                "cash_txn_id": csh_id,
-                "txn_datetime": now_iso,
-                "salesman_user_id": salesman_id,
-                "txn_type": "SALE_COLLECTION",
-                "amount": bill_total,
-                "payment_method": "CASH",
-                "related_sale_id": sale_id,
-                "related_expense_id": "",
-                "issued_by_user_id": clean_cust_id,
-                "received_by_user_id": salesman_id,
-                "confirmed_by_user_id": salesman_id,
-                "reference_id": bill_number,
-                "notes": f"Cash collection for bill {bill_number}",
-            }
-            db.append_record("CashLedger", cash_record)
-
-        # 9. Audit Log
-        db.log_audit(
-            actor=user_id,
-            action="ISSUE_BILL",
-            entity_type="Sales",
-            entity_id=sale_id,
-            reason=f"Issued bill {bill_number} for ₹{bill_total} to {clean_cust_name}"
-        )
-
-        return Sale(
-            sale_id=sale_id,
-            bill_number=bill_number,
-            idempotency_key=clean_idempotency_key,
-            sale_datetime=now_iso,
-            sales_type=clean_sales_type,
-            customer_id=clean_cust_id,
-            customer_name_snapshot=clean_cust_name,
-            customer_mobile=clean_mobile,
-            customer_gstin=clean_gstin,
-            entered_by_user_id=user_id,
-            salesman_user_id=salesman_id,
-            delivery_status=req.delivery_status or "DELIVERED",
-            payment_status=req.payment_status or "PAID",
-            subtotal=subtotal,
-            discount_amount=discount_amount,
-            tax_amount=tax_amount,
-            bill_total=bill_total,
-            bill_status="ISSUED",
-            created_at=now_iso,
-            notes=(req.notes or "").strip(),
-            items=created_items,
-        )
+            "notes": f"ref:{reference}" if reference else f"Full payment for bill {bill_number}",
+        })
+    if method == "CASH" and not _cash_for(sale_id):
+        _must_write("CashLedger", {
+            "cash_txn_id": db.generate_id("CashLedger"),
+            "txn_datetime": now,
+            "salesman_user_id": salesman_id,
+            "txn_type": "SALE_COLLECTION",
+            "amount": _money(sale.get("bill_total")),
+            "payment_method": "CASH",
+            "related_sale_id": sale_id,
+            "related_expense_id": "",
+            "issued_by_user_id": str(sale.get("customer_id", "")),
+            "received_by_user_id": salesman_id,
+            "confirmed_by_user_id": salesman_id,
+            "reference_id": bill_number,
+            "notes": f"Cash collection for bill {bill_number}",
+        })

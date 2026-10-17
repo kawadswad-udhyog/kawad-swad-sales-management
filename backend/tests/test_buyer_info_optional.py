@@ -6,13 +6,13 @@ Mandatory internal business data (product, quantity, price, payments, stock) rem
 """
 
 import sys
-import types
 import os
 import unittest
-import asyncio
 
-# Setup test harness mocks for FastAPI/Pydantic/JWT if not globally installed
-if "fastapi" not in sys.modules:
+os.environ.setdefault("SALES_TESTING", "1")
+os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
+
+if False and "fastapi" not in sys.modules:
     class MockFastAPIModule(types.ModuleType):
         class APIRouter:
             def __init__(self, *args, **kwargs):
@@ -82,7 +82,13 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
         db.memory_store["SaleItems"] = []
         db.memory_store["Payments"] = []
         db.memory_store["CashLedger"] = []
-        db.memory_store["SalesmanStockLedger"] = []
+        db.memory_store["SalesmanStockLedger"] = [{
+            "stock_txn_id": "STK-SEED",
+            "salesman_user_id": "USR-000001",
+            "product_id": "PRD-000001",
+            "txn_type": "SALESMAN_POSITIVE_ADJUSTMENT",
+            "quantity": 1000,
+        }]
         db.memory_store["AuditLog"] = []
         db.memory_store["Products"] = [
             {
@@ -142,9 +148,9 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cash[0]["amount"], 120.0)
 
         # Check stock deduction
-        stock = db.get_records("SalesmanStockLedger")
+        stock = [row for row in db.get_records("SalesmanStockLedger") if row.get("txn_type") == "SOLD_DELIVERY"]
         self.assertEqual(len(stock), 1)
-        self.assertEqual(stock[0]["quantity"], -2)
+        self.assertEqual(int(stock[0]["quantity"]), -2)
 
     async def test_02_retail_billing_with_customer_name_only(self):
         """Sale succeeds with customer name provided but no contact/address/GSTIN info."""

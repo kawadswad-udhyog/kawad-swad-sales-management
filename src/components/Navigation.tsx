@@ -13,7 +13,8 @@ export type ViewType =
   | 'salary'
   | 'reports'
   | 'audit'
-  | 'users';
+  | 'users'
+  | 'production';
 
 interface NavigationProps {
   currentView: ViewType;
@@ -33,6 +34,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentView, onSelectVie
     { view: 'expenses', label: 'Expenses', roles: ['OWNER', 'PA', 'SALESMAN'] },
     { view: 'visits', label: 'Shop Visits', roles: ['OWNER', 'PA', 'SALESMAN'] },
     { view: 'closing', label: 'Daily Closing', roles: ['OWNER', 'PA', 'SALESMAN'] },
+    { view: 'production', label: 'Production', roles: ['OWNER', 'PA'] },
     { view: 'salary', label: 'Salary & Incentives', roles: ['OWNER', 'PA'] },
     { view: 'reports', label: 'Reports & Exports', roles: ['OWNER', 'PA'] },
     { view: 'audit', label: 'Audit Log', roles: ['OWNER', 'PA'] },

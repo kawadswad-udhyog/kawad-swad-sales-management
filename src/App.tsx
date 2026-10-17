@@ -15,6 +15,7 @@ import { SalaryView } from './views/SalaryView';
 import { ReportsView } from './views/ReportsView';
 import { AuditView } from './views/AuditView';
 import { UsersView } from './views/UsersView';
+import { ProductionView } from './views/ProductionView';
 
 const MainAppContent: React.FC = () => {
   const { currentUser, syncError, clearSyncError, refreshData, isLoading, isRefreshing } = useStore();
@@ -85,6 +86,8 @@ const MainAppContent: React.FC = () => {
         return <AuditView />;
       case 'users':
         return <UsersView />;
+      case 'production':
+        return <ProductionView />;
       default:
         return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
     }

@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.config import SALES_CORS_ORIGINS
+from app.config import SALES_CORS_ORIGINS, assert_runtime_config
 from app.sheets import db
 from app.routers import (
     auth,
@@ -16,6 +16,8 @@ from app.routers import (
     salary,
     dashboard,
     audit,
+    production,
+    workspace,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +55,16 @@ app.include_router(closing.router)
 app.include_router(salary.router)
 app.include_router(dashboard.router)
 app.include_router(audit.router)
+app.include_router(production.router)
+app.include_router(workspace.router)
+
+
+@app.on_event("startup")
+def _check_configuration():
+    import os
+    if os.getenv("SALES_TESTING", "").strip() == "1":
+        return
+    assert_runtime_config()
 
 @app.get("/health", tags=["System"])
 def health_check():

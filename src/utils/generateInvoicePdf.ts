@@ -64,7 +64,9 @@ export function generateInvoicePdf(sale: Sale, items: SaleItem[]): void {
   doc.setFont('helvetica', 'bold');
   doc.text('Payment:', 110, 72);
   doc.setFont('helvetica', 'normal');
-  doc.text(`PAID (${sale.payment_status})`, 135, 72);
+  const method = (sale as Sale & { payment_method?: string }).payment_method || 'PAID';
+  const reference = (sale as Sale & { payment_reference?: string }).payment_reference || '';
+  doc.text(`${method}${reference ? ` · ${reference}` : ''} (${sale.payment_status})`, 135, 72);
 
   // Table Header
   const startY = 82;

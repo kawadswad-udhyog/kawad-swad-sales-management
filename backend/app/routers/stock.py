@@ -4,74 +4,55 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import StockSummaryResponse, StockTransaction, StockIssueCreate, CompanyStockItem, SalesmanStockItem
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
+from app.permissions import is_manager
+from app.stock_math import balances, salesman_available
 
 router = APIRouter(prefix="/api/stock", tags=["Stock"])
 
 @router.get("/summary", response_model=StockSummaryResponse)
 async def get_stock_summary(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
-    role = current_user.get("role", "").upper()
 
-    products = db.get_records("Products")
-    transactions = db.get_records("SalesmanStockLedger")
-
-    # Company stock balance per product
-    company_balances: Dict[str, int] = {}
-    salesman_balances: Dict[str, Dict[str, int]] = {}
-
+    products = db.get_records("Products", fresh=True)
+    transactions = db.get_records("SalesmanStockLedger", fresh=True)
+    users = {str(u.get("user_id")): str(u.get("full_name") or u.get("user_id")) for u in db.get_records("Users")}
+    company_balances, salesman_pairs = balances(transactions)
     for prod in products:
-        p_id = str(prod.get("product_id"))
-        company_balances[p_id] = 0
-
-    for txn in transactions:
-        p_id = str(txn.get("product_id", ""))
-        s_user = str(txn.get("salesman_user_id", ""))
-        t_type = str(txn.get("txn_type", "")).upper()
-        qty = int(txn.get("quantity", 0) or 0)
-
-        # Company movements
-        if t_type == "COMPANY_RECEIPT":
-            company_balances[p_id] = company_balances.get(p_id, 0) + abs(qty)
-        elif t_type == "ISSUE_TO_SALESMAN":
-            company_balances[p_id] = company_balances.get(p_id, 0) - abs(qty)
-            salesman_balances.setdefault(s_user, {})[p_id] = salesman_balances.get(s_user, {}).get(p_id, 0) + abs(qty)
-        elif t_type == "RETURN_FROM_SALESMAN":
-            company_balances[p_id] = company_balances.get(p_id, 0) + abs(qty)
-            salesman_balances.setdefault(s_user, {})[p_id] = salesman_balances.get(s_user, {}).get(p_id, 0) - abs(qty)
-        elif t_type in ["SOLD_DELIVERY", "SALE_DELIVERY"]:
-            salesman_balances.setdefault(s_user, {})[p_id] = salesman_balances.get(s_user, {}).get(p_id, 0) - abs(qty)
-        elif t_type == "POSITIVE_ADJUSTMENT":
-            company_balances[p_id] = company_balances.get(p_id, 0) + abs(qty)
-        elif t_type == "SALESMAN_POSITIVE_ADJUSTMENT":
-            salesman_balances.setdefault(s_user, {})[p_id] = salesman_balances.get(s_user, {}).get(p_id, 0) + abs(qty)
-
+        company_balances.setdefault(str(prod.get("product_id")), 0)
     prod_map = {str(p.get("product_id")): p for p in products}
 
     company_stock = []
     for p_id, bal in company_balances.items():
         p_info = prod_map.get(p_id, {})
+        pack = int(float(p_info.get("pack_weight_g", 500) or 500))
         company_stock.append(CompanyStockItem(
             product_id=p_id,
             sku=str(p_info.get("sku", p_id)),
             product_name=str(p_info.get("product_name", "Papad")),
             current_stock=bal,
+            company_quantity=bal,
+            quantity=bal,
+            pack_weight_g=pack,
             unit=str(p_info.get("selling_unit", "PACKET")),
         ))
 
     salesman_stock = []
-    for s_user, p_bals in salesman_balances.items():
-        if role not in ["OWNER", "OWNER_ADMIN", "PA"] and s_user != user_id:
+    for (s_user, p_id), bal in salesman_pairs.items():
+        if not is_manager(current_user) and s_user != user_id:
             continue
-        for p_id, bal in p_bals.items():
-            p_info = prod_map.get(p_id, {})
-            salesman_stock.append(SalesmanStockItem(
-                salesman_user_id=s_user,
-                product_id=p_id,
-                sku=str(p_info.get("sku", p_id)),
-                product_name=str(p_info.get("product_name", "Papad")),
-                current_stock=bal,
-                unit=str(p_info.get("selling_unit", "PACKET")),
-            ))
+        p_info = prod_map.get(p_id, {})
+        pack = int(float(p_info.get("pack_weight_g", 500) or 500))
+        salesman_stock.append(SalesmanStockItem(
+            salesman_user_id=s_user,
+            salesman_name=users.get(s_user, s_user),
+            product_id=p_id,
+            sku=str(p_info.get("sku", p_id)),
+            product_name=str(p_info.get("product_name", "Papad")),
+            current_stock=bal,
+            quantity=bal,
+            pack_weight_g=pack,
+            unit=str(p_info.get("selling_unit", "PACKET")),
+        ))
 
     return StockSummaryResponse(
         company_stock=company_stock,
@@ -151,6 +132,18 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     sku = str(p_info.get("sku", req.product_id))
     unit = str(p_info.get("selling_unit", "PACKET"))
     pack_weight_g = int(p_info.get("pack_weight_g", 500) or 500)
+    ledger = db.get_records("SalesmanStockLedger", fresh=True)
+    company_balances, _pairs = balances(ledger)
+    if txn_type in {"ISSUE_TO_SALESMAN", "POSITIVE_ADJUSTMENT"} or txn_type == "COMPANY_RECEIPT":
+        pass
+    if txn_type == "ISSUE_TO_SALESMAN":
+        available = company_balances.get(req.product_id, 0)
+        if req.quantity > available:
+            raise HTTPException(status_code=422, detail=f"Insufficient company stock. Available {available}, requested {req.quantity}.")
+    if txn_type == "RETURN_FROM_SALESMAN":
+        available = salesman_available(ledger, req.salesman_user_id, req.product_id)
+        if req.quantity > available:
+            raise HTTPException(status_code=422, detail=f"Insufficient salesman stock to return. Available {available}, requested {req.quantity}.")
 
     record = {
         "stock_txn_id": stock_txn_id,

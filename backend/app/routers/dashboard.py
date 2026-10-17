@@ -1,14 +1,16 @@
-from datetime import date
 from fastapi import APIRouter, Depends
 from app.models import DashboardMetrics
 from app.sheets import db
 from app.auth import get_current_user
+from app.permissions import require_manager
+from app.timeutil import business_today
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
 @router.get("", response_model=DashboardMetrics)
 async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
-    today_str = date.today().isoformat()
+    require_manager(current_user)
+    today_str = business_today()
 
     sales = db.get_records("Sales")
     cash_ledger = db.get_records("CashLedger")
@@ -19,13 +21,17 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
     today_sales_total = 0.0
     total_bills_today = 0
     for s in sales:
-        if str(s.get("sale_datetime", "")).startswith(today_str):
+        if str(s.get("txn_status", "COMPLETE")).upper() == "INCOMPLETE" or str(s.get("bill_status", "")).upper() == "CANCELLED":
+            continue
+        from app.timeutil import business_date_of
+        if business_date_of(str(s.get("sale_datetime", ""))) == today_str:
             today_sales_total += float(s.get("bill_total", 0.0) or 0.0)
             total_bills_today += 1
 
     today_cash_total = 0.0
     for c in cash_ledger:
-        if str(c.get("txn_datetime", "")).startswith(today_str):
+        from app.timeutil import business_date_of as _biz
+        if _biz(str(c.get("txn_datetime", ""))) == today_str:
             if str(c.get("txn_type", "")).upper() == "SALE_COLLECTION":
                 today_cash_total += float(c.get("amount", 0.0) or 0.0)
 

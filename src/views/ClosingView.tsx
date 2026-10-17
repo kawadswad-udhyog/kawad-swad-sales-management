@@ -48,7 +48,7 @@ export const ClosingView: React.FC = () => {
     }
   };
 
-  const handleReview = (closing: DailyClosing, decision: 'CONFIRMED' | 'CORRECTION_REQUIRED') => {
+  const handleReview = async (closing: DailyClosing, decision: 'CONFIRMED' | 'CORRECTION_REQUIRED') => {
     const reviewNote = window.prompt(
       decision === 'CONFIRMED'
         ? 'Confirm daily closing? (Optional notes):'
@@ -58,8 +58,12 @@ export const ClosingView: React.FC = () => {
       setNotice({ msg: 'A note explaining the discrepancy is required.', error: true });
       return;
     }
-    reviewDailyClosing(closing.closing_id, decision, reviewNote || '');
-    setNotice({ msg: `Daily closing #${closing.closing_id} marked as ${decision}.` });
+    try {
+      await reviewDailyClosing(closing.closing_id, decision, reviewNote || '');
+      setNotice({ msg: `Daily closing #${closing.closing_id} marked as ${decision}.` });
+    } catch (err: unknown) {
+      setNotice({ msg: err instanceof Error ? err.message : 'Closing review was not saved.', error: true });
+    }
   };
 
   const visibleClosings = currentUser?.role === 'SALESMAN'

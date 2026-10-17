@@ -1,21 +1,21 @@
 import os
-import time
 import base64
 import hashlib
 import hmac
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from app.config import SALES_JWT_SECRET, SALES_TOKEN_HOURS
+from app.config import jwt_secret, SALES_TOKEN_HOURS
 
 security = HTTPBearer(auto_error=False)
+_PBKDF2_PREFIX = "pbkdf2:sha256:"
+
 
 def hash_password(password: str) -> str:
-    """Hash password using PBKDF2-SHA256 as required by Google Sheets auth contract."""
     salt = os.urandom(16)
     iterations = 100000
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
@@ -23,66 +23,81 @@ def hash_password(password: str) -> str:
     dk_b64 = base64.b64encode(dk).decode("utf-8")
     return f"pbkdf2:sha256:{iterations}${salt_b64}${dk_b64}"
 
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify plain password against PBKDF2-SHA256 hashed password."""
-    if not hashed_password:
+    """Accept only PBKDF2-SHA256. Plaintext and raw SHA-256 are never valid."""
+    if not hashed_password or not str(hashed_password).startswith(_PBKDF2_PREFIX):
         return False
     try:
-        parts = hashed_password.split("$")
-        if len(parts) == 3 and parts[0].startswith("pbkdf2:sha256"):
-            iterations = int(parts[0].split(":")[2])
-            salt = base64.b64decode(parts[1])
-            expected_dk = base64.b64decode(parts[2])
-            calc_dk = hashlib.pbkdf2_hmac("sha256", plain_password.encode("utf-8"), salt, iterations)
-            return hmac.compare_digest(expected_dk, calc_dk)
-        # Fallback comparison for plain or sha256
-        if plain_password == hashed_password:
-            return True
-        return hashlib.sha256(plain_password.encode("utf-8")).hexdigest() == hashed_password
+        parts = str(hashed_password).split("$")
+        if len(parts) != 3:
+            return False
+        iterations = int(parts[0].split(":")[2])
+        if iterations < 10000 or iterations > 2000000:
+            return False
+        salt = base64.b64decode(parts[1])
+        expected_dk = base64.b64decode(parts[2])
+        calc_dk = hashlib.pbkdf2_hmac("sha256", plain_password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(expected_dk, calc_dk)
     except Exception:
         return False
 
+
+def password_needs_reset(hashed_password: str) -> bool:
+    return not str(hashed_password or "").startswith(_PBKDF2_PREFIX)
+
+
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
-    """Generate JWT access token."""
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(hours=SALES_TOKEN_HOURS)
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(hours=SALES_TOKEN_HOURS))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SALES_JWT_SECRET, algorithm="HS256")
-    return encoded_jwt
+    return jwt.encode(to_encode, jwt_secret(), algorithm="HS256")
+
 
 def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
-    """Decode and validate JWT access token."""
     try:
-        payload = jwt.decode(token, SALES_JWT_SECRET, algorithms=["HS256"])
-        return payload
+        return jwt.decode(token, jwt_secret(), algorithms=["HS256"])
     except Exception:
         return None
 
+
+def _auth_row_for(user_id: str) -> Optional[dict]:
+    from app.sheets import db
+    for row in db.get_records("AuthUsers"):
+        if str(row.get("user_id", "")).strip() == str(user_id).strip():
+            return row
+    return None
+
+
 async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
-    """Dependency for securing endpoints."""
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization header",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    token = credentials.credentials
-    payload = decode_access_token(token)
-    if not payload:
+    payload = decode_access_token(credentials.credentials)
+    if not payload or not payload.get("user_id"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired or invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    row = _auth_row_for(str(payload.get("user_id")))
+    if row is not None:
+        if str(row.get("active", "true")).lower() == "false":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is deactivated")
+        payload = dict(payload)
+        payload["role"] = row.get("role") or payload.get("role")
+        payload["full_name"] = row.get("full_name") or payload.get("full_name")
+        payload["must_change_password"] = str(row.get("must_change_password", "false")).lower() == "true"
     return payload
 
+
 async def require_sheets_connection() -> bool:
-    """Fail closed for writes when Google Sheets is unavailable; memory-only writes are not durable."""
+    from app.config import SALES_GOOGLE_SPREADSHEET_ID
     from app.sheets import db
-    if not getattr(db, "is_connected", False) or getattr(db, "spreadsheet", None) is None:
+    if SALES_GOOGLE_SPREADSHEET_ID and (not getattr(db, "is_connected", False) or getattr(db, "spreadsheet", None) is None):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google Sheets is disconnected. No transaction was saved. Reconnect Sheets before retrying.",

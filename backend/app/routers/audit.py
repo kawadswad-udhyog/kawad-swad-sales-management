@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, Query
 from app.models import AuditLogItem, AuditLogCreate
 from app.sheets import db
 from app.auth import get_current_user
+from app.permissions import require_manager
 
 router = APIRouter(prefix="/api/audit-logs", tags=["Audit Log"])
 
@@ -12,6 +13,7 @@ async def list_audit_logs(
     entity_type: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
+    require_manager(current_user)
     records = db.get_records("AuditLog")
     items: List[AuditLogItem] = []
     for r in records:
@@ -39,6 +41,7 @@ async def create_audit_log(
     req: AuditLogCreate,
     current_user: dict = Depends(get_current_user)
 ):
+    require_manager(current_user)
     actor = current_user.get("user_id", "SYSTEM")
     audit_id = db.generate_id("AuditLog")
     now_iso = db.get_records("AuditLog") # trigger or fetch

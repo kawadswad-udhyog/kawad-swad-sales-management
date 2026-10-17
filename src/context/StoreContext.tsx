@@ -308,7 +308,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }>('/api/auth/login', {
           method: 'POST',
           body: JSON.stringify({ username: username.trim(), password }),
-          timeoutMs: 70000,
+          timeoutMs: 40000,
         });
       } catch (err: unknown) {
         if (err instanceof Error && err.message.includes('404')) {
@@ -322,7 +322,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }>('/auth/login', {
             method: 'POST',
             body: JSON.stringify({ username: username.trim(), password }),
-            timeoutMs: 70000,
+            timeoutMs: 40000,
           });
         } else {
           throw err;
@@ -375,48 +375,38 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       let hadSyncError = false;
 
       // Parallel fetch for all core tables
-      const [
-        prodsData,
-        custsData,
-        salesData,
-        stockSummaryData,
-        stockTxnsData,
-        salariesData,
-        auditData,
-        closingsData,
-        expensesData,
-        visitsData,
-        ownerData,
-      ] = await Promise.all([
-        apiRequest<Product[]>('/api/products').catch((err) => {
-          console.error('Failed to load products:', err);
-          hadSyncError = true;
-          return [] as Product[];
-        }),
-        apiRequest<Customer[]>('/api/customers').catch((err) => {
-          console.error('Failed to load customers:', err);
-          hadSyncError = true;
-          return [] as Customer[];
-        }),
-        apiRequest<Sale[]>('/api/sales').catch((err) => {
-          console.error('Failed to load sales:', err);
-          hadSyncError = true;
-          return [] as Sale[];
-        }),
-        apiRequest<{ company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] }>('/api/stock/summary').catch(() => ({ company_stock: [], salesman_stock: [] })),
-        apiRequest<StockTransaction[]>('/api/stock/transactions?limit=250').catch(() => []),
-        apiRequest<SalaryIncentive[]>('/api/salary').catch(() => []),
-        apiRequest<AuditLog[]>('/api/audit-logs').catch(() => []),
-        apiRequest<DailyClosing[]>('/api/closing').catch(() => []),
-        apiRequest<Expense[]>('/api/expenses').catch(() => []),
-        apiRequest<ShopVisit[]>('/api/visits').catch(() => []),
-        (activeRole === 'OWNER' || activeRole === 'PA')
-          ? Promise.all([
-              apiRequest<DashboardMetrics>('/api/dashboard').catch(() => null),
-              apiRequest<User[]>('/api/users').catch(() => [] as User[]),
-            ]).then(([dashboard, userList]) => ({ dashboard, userList }))
-          : Promise.resolve({ dashboard: null, userList: [] as User[] }),
-      ]);
+      const workspace = await apiRequest<{
+        products: Product[];
+        customers: Customer[];
+        sales: Sale[];
+        payments: Payment[];
+        stock: { company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] };
+        stock_transactions: StockTransaction[];
+        expenses: Expense[];
+        visits: ShopVisit[];
+        closings: DailyClosing[];
+        salary: SalaryIncentive[];
+        dashboard: DashboardMetrics | null;
+        users: User[];
+      }>('/api/workspace');
+      const prodsData = workspace.products || [];
+      const custsData = workspace.customers || [];
+      const salesData = (workspace.sales || []).map((sale) => ({
+        ...sale,
+        lines: sale.lines && sale.lines.length ? sale.lines : sale.items || [],
+      }));
+      const stockSummaryData = workspace.stock || { company_stock: [], salesman_stock: [] };
+      const stockTxnsData = workspace.stock_transactions || [];
+      const salariesData = workspace.salary || [];
+      const auditData: AuditLog[] = activeRole === 'OWNER' || activeRole === 'PA'
+        ? await apiRequest<AuditLog[]>('/api/audit-logs').catch(() => [])
+        : [];
+      const closingsData = workspace.closings || [];
+      const expensesData = workspace.expenses || [];
+      const visitsData = workspace.visits || [];
+      const ownerData = { dashboard: workspace.dashboard, userList: workspace.users || [] };
+      setPayments(workspace.payments || []);
+      setSaleItems(salesData.flatMap((sale) => sale.lines || []));
 
       if (hadSyncError) {
         setSyncError('Could not sync some records with the backend API. Please verify backend service and Google Sheets connection.');
@@ -435,9 +425,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setCompanyStockSummary(stockSummaryData.company_stock || []);
       setSalesmanStockSummary(stockSummaryData.salesman_stock || []);
       setStockTransactions(stockTxnsData);
-      if (salariesData.length > 0) setSalaryIncentives(salariesData);
-      if (auditData.length > 0) setAuditLogs(auditData);
-      if (closingsData.length > 0) setDailyClosings(closingsData);
+      setSalaryIncentives(salariesData);
+      setAuditLogs(auditData);
+      setDailyClosings(closingsData);
 
       setExpenses(expensesData);
       setShopVisits(visitsData);
@@ -635,6 +625,23 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
 
     const newSale: Sale = res.sale || res;
+    newSale.lines = newSale.lines && newSale.lines.length ? newSale.lines : newSale.items || input.lines.map((line, index) => ({
+      sale_item_id: `${newSale.sale_id}-${index}`,
+      sale_id: newSale.sale_id,
+      product_id: line.product_id,
+      product_name_snapshot: '',
+      sku_snapshot: '',
+      pack_weight_g: 0,
+      unit: 'PACKET',
+      quantity: line.quantity,
+      actual_unit_price: line.actual_unit_price,
+      discount_amount: 0,
+      line_total: line.quantity * line.actual_unit_price,
+      qualifying_kg: 0,
+      created_at: newSale.created_at,
+    }));
+    newSale.payment_method = input.payment_method;
+    newSale.payment_reference = input.payment_reference;
     setSales((prev) => {
       const existsIdx = prev.findIndex((s) => s.sale_id === newSale.sale_id);
       if (existsIdx >= 0) {
@@ -645,8 +652,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return [newSale, ...prev];
     });
 
-    // Refresh stock balances and dashboard automatically after sale issue
-    loadInitialData();
+    setSaleItems((prev) => [...(newSale.lines || []), ...prev.filter((item) => item.sale_id !== newSale.sale_id)]);
+    if (input.payment_method) {
+      setPayments((prev) => [{
+        payment_id: res.payment_id || newSale.bill_number,
+        sale_id: newSale.sale_id,
+        payment_datetime: newSale.sale_datetime,
+        payment_method: input.payment_method,
+        amount: newSale.bill_total,
+        reference_number: input.payment_reference || newSale.bill_number,
+        received_by_user_id: newSale.salesman_user_id,
+        payment_status: 'RECEIVED',
+        notes: '',
+      }, ...prev.filter((payment) => payment.sale_id !== newSale.sale_id)]);
+    }
+    apiRequest<{ company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] }>('/api/stock/summary')
+      .then((summary) => {
+        setCompanyStockSummary(summary.company_stock || []);
+        setSalesmanStockSummary(summary.salesman_stock || []);
+      })
+      .catch(() => undefined);
 
     addAuditLog(
       'CREATE',
@@ -662,7 +687,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const sale = sales.find((s) => s.sale_id === sale_id || s.bill_number === sale_id);
     if (!sale) return null;
     const items = saleItems.filter((i) => i.sale_id === sale.sale_id);
-    return { sale, items: items.length > 0 ? items : (sale.lines || []) };
+    return { sale, items: items.length > 0 ? items : (sale.lines || sale.items || []) };
   };
 
   // Stock movement connected to FastAPI backend
@@ -810,30 +835,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     decision: 'CONFIRMED' | 'CORRECTION_REQUIRED',
     notes: string = ''
   ) => {
-    try {
-      const updated = await apiRequest<DailyClosing>(`/api/closing/${encodeURIComponent(closing_id)}/review`, {
-        method: 'POST',
-        body: JSON.stringify({ confirmed: decision === 'CONFIRMED', notes }),
-      });
-      setDailyClosings((prev) =>
-        prev.map((c) => (c.closing_id === closing_id ? { ...c, ...updated } : c))
-      );
-    } catch (err) {
-      console.warn('Backend closing review warning:', err);
-      setDailyClosings((prev) =>
-        prev.map((c) =>
-          c.closing_id === closing_id
-            ? {
-                ...c,
-                closing_status: decision,
-                reviewed_by_user_id: currentUser?.user_id || 'MANAGER',
-                reviewed_at: new Date().toISOString(),
-                notes: notes || c.notes,
-              }
-            : c
-        )
-      );
-    }
+    const updated = await apiRequest<DailyClosing>(`/api/closing/${encodeURIComponent(closing_id)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmed: decision === 'CONFIRMED', notes }),
+    });
+    setDailyClosings((prev) =>
+      prev.map((c) => (c.closing_id === closing_id ? { ...c, ...updated } : c))
+    );
     addAuditLog('REVIEW', 'DailyClosing', closing_id, `Review decision: ${decision} - ${notes}`);
   };
 
@@ -861,7 +869,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
 
     const relevantSaleIds = new Set(relevantSales.map((s) => s.sale_id));
-    const items = saleItems.filter((i) => relevantSaleIds.has(i.sale_id));
+    const items = relevantSales.flatMap((sale) => sale.lines || sale.items || saleItems.filter((i) => i.sale_id === sale.sale_id));
 
     let trialKg = 0;
     let postTrialKg = 0;
@@ -987,55 +995,24 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const approveSalaryIncentive = async (record_id: string, approved_amount?: number) => {
+    const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approved_amount, notes: 'Approved in management portal' }),
+    });
     setSalaryIncentives((prev) =>
-      prev.map((r) =>
-        r.record_id === record_id
-          ? {
-              ...r,
-              approval_status: 'APPROVED',
-              approved_amount: approved_amount !== undefined ? approved_amount : r.calculated_amount,
-              approved_by_user_id: currentUser?.user_id || 'OWNER',
-            }
-          : r
-      )
+      prev.map((r) => (r.record_id === record_id ? { ...r, ...updated, approval_status: 'APPROVED' } : r))
     );
-    try {
-      const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/approve`, {
-        method: 'POST',
-        body: JSON.stringify({ approved_amount, notes: 'Approved in management portal' }),
-      });
-      setSalaryIncentives((prev) =>
-        prev.map((r) => (r.record_id === record_id ? { ...r, ...updated } : r))
-      );
-    } catch (err) {
-      console.warn('Backend salary approval sync warning:', err);
-    }
     addAuditLog('APPROVE', 'SalaryIncentive', record_id, 'Approved salary/incentive payment');
   };
 
   const markSalaryIncentivePaid = async (record_id: string, reference: string) => {
+    const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/pay`, {
+      method: 'POST',
+      body: JSON.stringify({ payment_reference: reference }),
+    });
     setSalaryIncentives((prev) =>
-      prev.map((r) =>
-        r.record_id === record_id
-          ? {
-              ...r,
-              paid_datetime: new Date().toISOString(),
-              payment_reference: reference || 'PAID-BANK-TRANSFER',
-            }
-          : r
-      )
+      prev.map((r) => (r.record_id === record_id ? { ...r, ...updated } : r))
     );
-    try {
-      const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/pay`, {
-        method: 'POST',
-        body: JSON.stringify({ payment_reference: reference }),
-      });
-      setSalaryIncentives((prev) =>
-        prev.map((r) => (r.record_id === record_id ? { ...r, ...updated } : r))
-      );
-    } catch (err) {
-      console.warn('Backend salary pay sync warning:', err);
-    }
     addAuditLog('PAY', 'SalaryIncentive', record_id, `Marked paid with ref: ${reference}`);
   };
 

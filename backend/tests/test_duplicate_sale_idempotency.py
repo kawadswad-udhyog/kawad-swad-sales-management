@@ -5,13 +5,14 @@ in Kawad Swad Sales Management.
 """
 
 import sys
-import types
 import os
 import unittest
 import asyncio
 
-# Setup test harness mocks for FastAPI/Pydantic/JWT if not globally installed
-if "fastapi" not in sys.modules:
+os.environ.setdefault("SALES_TESTING", "1")
+os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
+
+if False and "fastapi" not in sys.modules:
     class MockFastAPIModule(types.ModuleType):
         class APIRouter:
             def __init__(self, *args, **kwargs):
@@ -89,7 +90,13 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         db.memory_store["SaleItems"] = []
         db.memory_store["Payments"] = []
         db.memory_store["CashLedger"] = []
-        db.memory_store["SalesmanStockLedger"] = []
+        db.memory_store["SalesmanStockLedger"] = [{
+            "stock_txn_id": "STK-SEED",
+            "salesman_user_id": "USR-000001",
+            "product_id": "PRD-000001",
+            "txn_type": "SALESMAN_POSITIVE_ADJUSTMENT",
+            "quantity": 1000,
+        }]
         db.memory_store["AuditLog"] = []
         db.memory_store["Products"] = [
             {
@@ -137,7 +144,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db.memory_store["SaleItems"]), 1)
         self.assertEqual(len(db.memory_store["Payments"]), 1)
         self.assertEqual(len(db.memory_store["CashLedger"]), 1)
-        self.assertEqual(len(db.memory_store["SalesmanStockLedger"]), 1)
+        self.assertEqual(len([r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]), 1)
 
         # 2. Replayed execution with SAME idempotency key (simulating retry after timeout)
         second_sale = await sales_router.create_sale(req, current_user=self.mock_user)
@@ -152,7 +159,8 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db.memory_store["SaleItems"]), 1, "SaleItems must NOT have duplicate line items")
         self.assertEqual(len(db.memory_store["Payments"]), 1, "Payments must NOT be charged twice")
         self.assertEqual(len(db.memory_store["CashLedger"]), 1, "CashLedger must NOT have duplicate entries")
-        self.assertEqual(len(db.memory_store["SalesmanStockLedger"]), 1, "Stock ledger must NOT deduct stock twice")
+        sold = [r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]
+        self.assertEqual(len(sold), 1, "Stock ledger must NOT deduct stock twice")
 
     async def test_02_legitimate_sales_with_different_keys_are_both_accepted(self):
         """Two legitimate sales with identical customer, salesman, product and total are both accepted with different keys."""
@@ -197,7 +205,8 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(sale1.bill_number, sale2.bill_number)
         self.assertEqual(len(db.memory_store["Sales"]), 2, "Both legitimate sales must be recorded")
         self.assertEqual(len(db.memory_store["Payments"]), 2, "Both payments must be recorded")
-        self.assertEqual(len(db.memory_store["SalesmanStockLedger"]), 2, "Both stock deductions must be recorded")
+        sold = [r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]
+        self.assertEqual(len(sold), 2, "Both stock deductions must be recorded")
 
     async def test_03_malformed_and_oversized_keys_rejected(self):
         """idempotency_key exceeding 120 chars or containing control characters must be rejected."""
@@ -253,7 +262,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db.memory_store["Sales"]), 1)
         self.assertEqual(len(db.memory_store["SaleItems"]), 1)
         self.assertEqual(len(db.memory_store["Payments"]), 1)
-        self.assertEqual(len(db.memory_store["SalesmanStockLedger"]), 1)
+        self.assertEqual(len([r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]), 1)
 
 
 if __name__ == "__main__":

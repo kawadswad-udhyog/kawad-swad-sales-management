@@ -29,7 +29,7 @@ async def list_salary_records(current_user: dict = Depends(get_current_user)):
             rate=float(r.get("rate", 0.0) or 0.0),
             calculated_amount=float(r.get("calculated_amount", 0.0) or 0.0),
             approved_amount=float(r.get("approved_amount", 0.0) or 0.0),
-            approval_status=str(r.get("approval_status", "PROPOSED")),
+            approval_status="PENDING" if str(r.get("approval_status", "PROPOSED")).upper() == "PROPOSED" else str(r.get("approval_status", "PENDING")),
             approved_by_user_id=str(r.get("approved_by_user_id", "")),
             paid_datetime=str(r.get("paid_datetime", "")),
             payment_reference=str(r.get("payment_reference", "")),
@@ -74,13 +74,14 @@ async def propose_salary_records(
             "rate": item.rate,
             "calculated_amount": item.calculated_amount,
             "approved_amount": item.approved_amount if item.approved_amount is not None else item.calculated_amount,
-            "approval_status": "PROPOSED",
+            "approval_status": "PENDING",
             "approved_by_user_id": "",
             "paid_datetime": "",
             "payment_reference": "",
             "notes": item.notes or "",
         }
-        db.append_record("SalaryIncentives", rec_data)
+        if not db.append_record("SalaryIncentives", rec_data, raise_on_error=True):
+            raise HTTPException(status_code=503, detail="The salary record was not saved.")
         created_records.append(SalaryRecord(**rec_data))
 
         db.log_audit(
@@ -118,7 +119,8 @@ async def approve_salary_record(
     if req.notes:
         updates["notes"] = req.notes
 
-    db.update_record("SalaryIncentives", "record_id", record_id, updates)
+    if not db.update_record("SalaryIncentives", "record_id", record_id, updates):
+        raise HTTPException(status_code=503, detail="Salary approval was not saved.")
     matched.update(updates)
 
     db.log_audit(
@@ -171,7 +173,8 @@ async def mark_salary_paid(
     if req.notes:
         updates["notes"] = req.notes
 
-    db.update_record("SalaryIncentives", "record_id", record_id, updates)
+    if not db.update_record("SalaryIncentives", "record_id", record_id, updates):
+        raise HTTPException(status_code=503, detail="Salary payment was not saved.")
     matched.update(updates)
 
     db.log_audit(

@@ -84,6 +84,10 @@ export interface Sale {
   created_at: string;
   notes?: string;
   lines?: SaleItem[];
+  items?: SaleItem[];
+  payment_method?: 'CASH' | 'UPI' | 'BANK_TRANSFER' | 'OTHER' | string;
+  payment_reference?: string;
+  txn_status?: string;
 }
 
 export interface Payment {
@@ -186,7 +190,7 @@ export interface SalaryIncentive {
   rate: number;
   calculated_amount: number;
   approved_amount: number;
-  approval_status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  approval_status: 'PENDING' | 'PROPOSED' | 'APPROVED' | 'REJECTED';
   approved_by_user_id: string;
   paid_datetime: string;
   payment_reference: string;

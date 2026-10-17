@@ -1,15 +1,17 @@
 import os
 import json
 import logging
-import time
-from datetime import datetime
-from typing import Dict, List, Any, Optional
+import re
+import threading
+import uuid
+from typing import Dict, List, Any
 
 from app.config import (
     SALES_GOOGLE_SPREADSHEET_ID,
     SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
     SALES_GOOGLE_SERVICE_ACCOUNT_JSON,
 )
+from app.timeutil import now_iso
 
 logger = logging.getLogger("kawad_swad.sheets")
 
@@ -27,103 +29,164 @@ ID_PREFIXES = {
     "DailyClosing": "CLOSE",
     "SalaryIncentives": "SAL",
     "AuditLog": "AUD",
+    "AuthUsers": "AUTH",
+    "Workers": "WRK",
+    "WorkerAttendance": "ATT",
+    "Recipes": "RCP",
+    "ProductionBatches": "PRB",
+    "PackagingBatches": "PKG",
+    "ProductionStockLedger": "PST",
+    "ProductionDispatches": "DSP",
+    "RawMaterialLedger": "RML",
+    "RawMaterials": "RWM",
+    "IdAllocations": "ALC",
 }
 
+REQUIRED_TABS = {
+    "IdAllocations": ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
+    "AuthUsers": ["auth_id", "user_id", "username", "password_hash", "role", "active", "created_at", "must_change_password"],
+    "Sales": [
+        "sale_id", "bill_number", "idempotency_key", "txn_status", "sale_datetime", "sales_type",
+        "customer_id", "customer_name_snapshot", "customer_mobile", "customer_gstin",
+        "entered_by_user_id", "salesman_user_id", "delivery_status", "payment_status",
+        "payment_method", "payment_reference", "subtotal", "discount_amount", "tax_amount",
+        "bill_total", "bill_status", "created_at", "notes",
+    ],
+    "Payments": [
+        "payment_id", "sale_id", "payment_datetime", "payment_method", "amount",
+        "reference_number", "received_by_user_id", "payment_status", "notes",
+    ],
+}
+
+
 class SheetsDatabase:
-    """Manages connection to Google Sheets or in-memory fallback."""
+    """Google Sheets adapter with an in-memory fallback for tests."""
 
     def __init__(self):
         self.client = None
         self.spreadsheet = None
         self.is_connected = False
-        # Short-lived per-tab cache prevents dashboard and list endpoints from
-        # repeatedly reading the same Google worksheet during one refresh.
-        # All backend writes invalidate the affected tab immediately.
-        self._records_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
-        self._records_cache_ttl_seconds = 10.0
-        self.memory_store: Dict[str, List[Dict[str, Any]]] = {
-            "AuthUsers": [],
-            "Users": [],
-            "Products": [],
-            "Customers": [],
-            "Sales": [],
-            "SaleItems": [],
-            "Payments": [],
-            "SalesmanStockLedger": [],
-            "CashLedger": [],
-            "Expenses": [],
-            "ShopVisits": [],
-            "DailyClosing": [],
-            "SalaryIncentives": [],
-            "AuditLog": [],
-            "Settings": [],
-        }
+        self._records_cache: Dict[str, tuple] = {}
+        self._records_cache_ttl_seconds = 8.0
+        self._lock = threading.Lock()
+        self._inflight: Dict[str, threading.Event] = {}
+        self._fail_once: Dict[str, int] = {}
+        self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self.init_connection()
 
     def init_connection(self):
         if not SALES_GOOGLE_SPREADSHEET_ID:
             logger.warning("SALES_GOOGLE_SPREADSHEET_ID not provided. Using in-memory fallback.")
             return
-
         try:
             import gspread
             from google.oauth2.service_account import Credentials
 
-            scopes = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ]
-
+            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
             creds = None
             if SALES_GOOGLE_SERVICE_ACCOUNT_JSON:
-                try:
-                    info = json.loads(SALES_GOOGLE_SERVICE_ACCOUNT_JSON)
-                    creds = Credentials.from_service_account_info(info, scopes=scopes)
-                except Exception as ex:
-                    logger.error(f"Error parsing SALES_GOOGLE_SERVICE_ACCOUNT_JSON: {ex}")
-
+                info = json.loads(SALES_GOOGLE_SERVICE_ACCOUNT_JSON)
+                creds = Credentials.from_service_account_info(info, scopes=scopes)
             if not creds and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE):
-                creds = Credentials.from_service_account_file(
-                    SALES_GOOGLE_SERVICE_ACCOUNT_FILE, scopes=scopes
-                )
+                creds = Credentials.from_service_account_file(SALES_GOOGLE_SERVICE_ACCOUNT_FILE, scopes=scopes)
+            if not creds:
+                logger.warning("No Google service account credentials found. Operating in-memory.")
+                return
+            self.client = gspread.authorize(creds)
+            self.spreadsheet = self.client.open_by_key(SALES_GOOGLE_SPREADSHEET_ID)
+            self.is_connected = True
+            logger.info("Connected to the configured Google Sheet.")
+            self.ensure_required_tabs()
+        except Exception as exc:
+            logger.error("Failed to connect to Google Sheets: %s. Falling back to in-memory.", exc)
 
-            if creds:
-                self.client = gspread.authorize(creds)
-                self.spreadsheet = self.client.open_by_key(SALES_GOOGLE_SPREADSHEET_ID)
-                self.is_connected = True
-                logger.info(f"Successfully connected to Google Sheet ID: {SALES_GOOGLE_SPREADSHEET_ID}")
-            else:
-                logger.warning("No valid Google service account credentials found. Operating in-memory.")
-        except Exception as e:
-            logger.error(f"Failed to connect to Google Sheets: {e}. Falling back to in-memory.")
+    def ensure_required_tabs(self):
+        """Create missing bookkeeping tabs and append missing headers. Never clears rows."""
+        if not (self.is_connected and self.spreadsheet):
+            return
+        for tab, headers in REQUIRED_TABS.items():
+            try:
+                try:
+                    worksheet = self.spreadsheet.worksheet(tab)
+                except Exception:
+                    worksheet = self.spreadsheet.add_worksheet(title=tab, rows=1000, cols=max(26, len(headers) + 2))
+                self._ensure_headers(worksheet, headers)
+            except Exception as exc:
+                logger.error("Could not ensure tab %s: %s", tab, exc)
+
+    def _ensure_headers(self, worksheet, headers: List[str]):
+        current = worksheet.row_values(1)
+        if not current:
+            worksheet.update("A1", [headers])
+            return
+        missing = [h for h in headers if h not in current]
+        if missing:
+            start = len(current) + 1
+            end = start + len(missing) - 1
+            worksheet.update(self._a1(start, 1, end), [missing])
+
+    @staticmethod
+    def _a1(start_col: int, row: int, end_col: int) -> str:
+        def col_name(index: int) -> str:
+            name = ""
+            while index:
+                index, rem = divmod(index - 1, 26)
+                name = chr(65 + rem) + name
+            return name
+        return f"{col_name(start_col)}{row}:{col_name(end_col)}{row}"
 
     def _invalidate_records_cache(self, tab_name: str) -> None:
-        self._records_cache.pop(tab_name, None)
+        with self._lock:
+            self._records_cache.pop(tab_name, None)
 
-    def get_records(self, tab_name: str) -> List[Dict[str, Any]]:
-        """Fetch worksheet rows with a short cache for repeated dashboard reads."""
+    def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
+        if not (self.is_connected and self.spreadsheet):
+            return [dict(row) for row in self.memory_store.get(tab_name, [])]
+        import time
         now = time.monotonic()
-        # Cache only live Google Sheets reads. Test and in-memory mode must
-        # always reflect direct fixture updates immediately.
-        if self.is_connected and self.spreadsheet:
-            cached = self._records_cache.get(tab_name)
-            if cached and now - cached[0] < self._records_cache_ttl_seconds:
-                return [dict(row) for row in cached[1]]
-            try:
-                worksheet = self.spreadsheet.worksheet(tab_name)
-                records = worksheet.get_all_records()
-                safe_records = [dict(row) for row in records]
-                self._records_cache[tab_name] = (now, safe_records)
-                return [dict(row) for row in safe_records]
-            except Exception as e:
-                logger.warning(f"Error reading {tab_name} from sheet: {e}")
-                return [dict(row) for row in self.memory_store.get(tab_name, [])]
-        return [dict(row) for row in self.memory_store.get(tab_name, [])]
+        if not fresh:
+            with self._lock:
+                cached = self._records_cache.get(tab_name)
+                if cached and now - cached[0] < self._records_cache_ttl_seconds:
+                    return [dict(row) for row in cached[1]]
+                event = self._inflight.get(tab_name)
+                if event is None:
+                    event = threading.Event()
+                    self._inflight[tab_name] = event
+                    leader = True
+                else:
+                    leader = False
+            if not leader:
+                event.wait(timeout=30)
+                with self._lock:
+                    cached = self._records_cache.get(tab_name)
+                    if cached:
+                        return [dict(row) for row in cached[1]]
+        try:
+            worksheet = self.spreadsheet.worksheet(tab_name)
+            records = worksheet.get_all_records()
+            safe_records = [dict(row) for row in records]
+            with self._lock:
+                self._records_cache[tab_name] = (time.monotonic(), safe_records)
+            return [dict(row) for row in safe_records]
+        except Exception as exc:
+            logger.warning("Error reading %s from sheet: %s", tab_name, exc)
+            raise RuntimeError(f"Could not read {tab_name} from Google Sheets.") from exc
+        finally:
+            with self._lock:
+                event = self._inflight.pop(tab_name, None)
+                if event:
+                    event.set()
 
     def append_record(self, tab_name: str, record: Dict[str, Any], raise_on_error: bool = False) -> bool:
-        """Append a record to a worksheet. Returns True on success, False or raises on failure."""
         self._invalidate_records_cache(tab_name)
-        self.memory_store.setdefault(tab_name, []).append(record)
+        failures = self._fail_once.get(tab_name, 0)
+        if failures > 0:
+            self._fail_once[tab_name] = failures - 1
+            logger.error("Injected write failure for %s", tab_name)
+            if raise_on_error:
+                raise RuntimeError(f"Injected failure writing {tab_name}")
+            return False
 
         if self.is_connected and self.spreadsheet:
             try:
@@ -131,99 +194,146 @@ class SheetsDatabase:
                 headers = worksheet.row_values(1)
                 if not headers:
                     headers = list(record.keys())
-                    worksheet.append_row(headers)
+                    worksheet.update("A1", [headers])
+                else:
+                    missing = [k for k in record.keys() if k not in headers]
+                    if missing:
+                        self._ensure_headers(worksheet, headers + missing)
+                        headers = headers + missing
                 row = [record.get(h, "") for h in headers]
-                worksheet.append_row(row)
+                worksheet.append_row(row, value_input_option="USER_ENTERED")
+                self.memory_store.setdefault(tab_name, []).append(dict(record))
                 return True
-            except Exception as e:
-                logger.error(f"Error appending to {tab_name} in Google Sheet: {e}")
+            except Exception as exc:
+                logger.error("Error appending to %s in Google Sheet: %s", tab_name, exc)
                 if raise_on_error:
-                    raise e
+                    raise
                 return False
+        self.memory_store.setdefault(tab_name, []).append(dict(record))
         return True
 
-    def delete_record(self, tab_name: str, id_field: str, id_value: str) -> bool:
-        """Delete a record from memory store and Google Sheets (used for rollback/recovery)."""
-        self._invalidate_records_cache(tab_name)
-        found = False
-        items = self.memory_store.get(tab_name, [])
-        initial_len = len(items)
-        self.memory_store[tab_name] = [
-            item for item in items if str(item.get(id_field)) != str(id_value)
-        ]
-        if len(self.memory_store[tab_name]) < initial_len:
-            found = True
-
-        if self.is_connected and self.spreadsheet:
-            try:
-                worksheet = self.spreadsheet.worksheet(tab_name)
-                records = worksheet.get_all_records()
-                for idx, r in enumerate(records, start=2):
-                    if str(r.get(id_field)) == str(id_value):
-                        worksheet.delete_rows(idx)
-                        return True
-            except Exception as e:
-                logger.error(f"Error deleting record in {tab_name}: {e}")
-
-        return found
-
     def update_record(self, tab_name: str, id_field: str, id_value: str, updates: Dict[str, Any]) -> bool:
-        """Update a record in the memory store and in Google Sheets if connected."""
         self._invalidate_records_cache(tab_name)
         found = False
-        items = self.memory_store.get(tab_name, [])
-        for item in items:
-            val = item.get(id_field)
-            if val is None:
-                for ik, iv in item.items():
-                    if str(ik).strip().lower() == str(id_field).strip().lower():
-                        val = iv
-                        break
-            if str(val) == str(id_value):
+        for item in self.memory_store.get(tab_name, []):
+            if str(item.get(id_field)) == str(id_value):
                 item.update(updates)
                 found = True
                 break
+        if not (self.is_connected and self.spreadsheet):
+            return found
+        try:
+            worksheet = self.spreadsheet.worksheet(tab_name)
+            records = worksheet.get_all_records()
+            headers = worksheet.row_values(1)
+            header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers)}
+            missing = [k for k in updates if k not in header_map]
+            if missing:
+                self._ensure_headers(worksheet, headers + missing)
+                headers = headers + missing
+                header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers)}
+            for idx, row in enumerate(records, start=2):
+                if str(row.get(id_field)) != str(id_value):
+                    continue
+                cells = []
+                for key, value in updates.items():
+                    col = header_map.get(key)
+                    if col:
+                        cells.append({"range": self._a1(col, idx, col), "values": [[value]]})
+                if cells:
+                    worksheet.batch_update([{"range": c["range"], "values": c["values"]} for c in cells])
+                return True
+        except Exception as exc:
+            logger.error("Error updating record in %s: %s", tab_name, exc)
+        return False
 
-        if self.is_connected and self.spreadsheet:
-            try:
-                worksheet = self.spreadsheet.worksheet(tab_name)
-                records = worksheet.get_all_records()
-                headers = worksheet.row_values(1)
-                header_map = {str(h).strip().lower(): i + 1 for i, h in enumerate(headers)}
-                for idx, r in enumerate(records, start=2):
-                    val = r.get(id_field)
-                    if val is None:
-                        for ik, iv in r.items():
-                            if str(ik).strip().lower() == str(id_field).strip().lower():
-                                val = iv
-                                break
-                    if str(val) == str(id_value):
-                        for k, v in updates.items():
-                            k_lower = str(k).strip().lower()
-                            if k_lower in header_map:
-                                col_idx = header_map[k_lower]
-                                worksheet.update_cell(idx, col_idx, v)
-                        return True
-            except Exception as e:
-                logger.error(f"Error updating record in {tab_name}: {e}")
-
-        return found
+    def _max_sequence(self, tab_name: str, prefix: str) -> int:
+        pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$")
+        highest = 0
+        sources = list(self.get_records(tab_name, fresh=True))
+        try:
+            sources.extend(self.get_records("IdAllocations", fresh=True))
+        except Exception:
+            sources.extend(self.memory_store.get("IdAllocations", []))
+        for row in sources:
+            values = [row.get("allocated_id", "")] if row.get("tab_name") else row.values()
+            if row.get("tab_name") and str(row.get("tab_name")) != tab_name:
+                continue
+            for value in values:
+                match = pattern.match(str(value).strip())
+                if match:
+                    highest = max(highest, int(match.group(1)))
+        return highest
 
     def generate_id(self, tab_name: str) -> str:
-        """Generate human-readable sequential ID (e.g. SALE-000001)."""
-        prefix = ID_PREFIXES.get(tab_name, tab_name[:3].upper())
-        records = self.get_records(tab_name)
-        seq = len(records) + 1
-        return f"{prefix}-{str(seq).zfill(6)}"
+        """Allocate PREFIX-000001 from the highest existing value, claimed before use.
+
+        Two servers can request the same next number. Each appends a claim. The
+        earliest claim for that exact id wins; the other caller retries.
+        Existing historical ids are never renumbered.
+        """
+        prefix = ID_PREFIXES.get(tab_name, "ID")
+        for _ in range(12):
+            candidate = f"{prefix}-{self._max_sequence(tab_name, prefix) + 1:06d}"
+            nonce = uuid.uuid4().hex
+            claim = {
+                "allocation_id": f"ALC-{nonce[:12]}",
+                "tab_name": tab_name,
+                "allocated_id": candidate,
+                "nonce": nonce,
+                "created_at": now_iso(),
+            }
+            if not self.append_record("IdAllocations", claim, raise_on_error=True):
+                raise RuntimeError("Could not record an id allocation.")
+            claims = [
+                row for row in self.get_records("IdAllocations", fresh=True)
+                if str(row.get("tab_name")) == tab_name and str(row.get("allocated_id")) == candidate
+            ]
+            if claims and str(claims[0].get("nonce")) == nonce:
+                return candidate
+        raise RuntimeError(f"Could not allocate a unique id for {tab_name}.")
+
+    def allocate_bill_number(self) -> str:
+        from app.timeutil import business_month
+        month = business_month()
+        prefix = f"KS-BILL-{month}"
+        pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$")
+        highest = 0
+        for row in self.get_records("Sales", fresh=True):
+            match = pattern.match(str(row.get("bill_number", "")).strip())
+            if match:
+                highest = max(highest, int(match.group(1)))
+        for _ in range(12):
+            candidate = f"{prefix}-{highest + 1:05d}"
+            nonce = uuid.uuid4().hex
+            claim = {
+                "allocation_id": f"ALC-{nonce[:12]}",
+                "tab_name": "BillNumbers",
+                "allocated_id": candidate,
+                "nonce": nonce,
+                "created_at": now_iso(),
+            }
+            if not self.append_record("IdAllocations", claim, raise_on_error=True):
+                raise RuntimeError("Could not allocate a bill number.")
+            claims = [
+                row for row in self.get_records("IdAllocations", fresh=True)
+                if str(row.get("allocated_id")) == candidate
+            ]
+            if claims and str(claims[0].get("nonce")) == nonce:
+                return candidate
+            highest += 1
+        raise RuntimeError("Could not allocate a unique bill number.")
 
     def log_audit(self, actor: str, action: str, entity_type: str, entity_id: str,
                   field_changed: str = "", old_val: str = "", new_val: str = "",
                   reason: str = "", approved_by: str = "", related_id: str = ""):
-        """Append an entry to the AuditLog."""
-        audit_id = self.generate_id("AuditLog")
+        try:
+            audit_id = self.generate_id("AuditLog")
+        except Exception:
+            audit_id = f"AUD-{uuid.uuid4().hex[:12]}"
         record = {
             "audit_id": audit_id,
-            "event_datetime": datetime.utcnow().isoformat(),
+            "event_datetime": now_iso(),
             "actor_user_id": actor,
             "action": action,
             "entity_type": entity_type,
@@ -235,6 +345,10 @@ class SheetsDatabase:
             "approved_by_user_id": approved_by,
             "related_record_id": related_id,
         }
-        self.append_record("AuditLog", record)
+        try:
+            self.append_record("AuditLog", record, raise_on_error=False)
+        except Exception as exc:
+            logger.error("Audit log write failed: %s", exc)
+
 
 db = SheetsDatabase()

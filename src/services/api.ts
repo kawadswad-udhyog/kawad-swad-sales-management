@@ -7,7 +7,7 @@
 export const DEFAULT_API_BASE_URL =
   (typeof window !== 'undefined' && (window as unknown as { KAWAD_API_URL?: string }).KAWAD_API_URL) ||
   (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: { VITE_API_URL?: string } })?.env?.VITE_API_URL) ||
-  'https://kawad-swad-sales-dev.onrender.com';
+  '';
 
 const STORAGE_API_KEY = 'ks_backend_api_url';
 const STORAGE_TOKEN_KEY = 'ks_token';
@@ -50,7 +50,7 @@ export interface ApiRequestOptions extends RequestInit {
 export async function apiRequest<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const baseUrl = getApiBaseUrl();
   const token = getAuthToken();
-  const timeoutMs = options.timeoutMs ?? 25000;
+  const timeoutMs = options.timeoutMs ?? 20000;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',

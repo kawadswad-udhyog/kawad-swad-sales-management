@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import Expense, ExpenseCreate, ExpenseApproveRequest
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
+from app.permissions import is_manager, is_salesman
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
 
@@ -42,6 +43,8 @@ async def list_expenses(current_user: dict = Depends(get_current_user)):
 async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
     salesman_id = req.salesman_user_id or user_id
+    if is_salesman(current_user) and salesman_id != user_id:
+        raise HTTPException(status_code=403, detail="A salesman can only submit an expense for themselves.")
     now_iso = datetime.utcnow().isoformat()
     expense_id = db.generate_id("Expenses")
 
@@ -61,7 +64,8 @@ async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_cu
         "related_closing_id": "",
         "notes": req.notes or "",
     }
-    db.append_record("Expenses", record)
+    if not db.append_record("Expenses", record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="The expense was not saved.")
 
     db.log_audit(
         actor=user_id,
@@ -90,7 +94,8 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
         "cash_reducing_expense": "true" if req.approved else "false",
         "notes": req.notes or "",
     }
-    db.update_record("Expenses", "expense_id", expense_id, updates)
+    if not db.update_record("Expenses", "expense_id", expense_id, updates):
+        raise HTTPException(status_code=503, detail="The expense decision was not saved. It is still pending.")
 
     db.log_audit(
         actor=user_id,

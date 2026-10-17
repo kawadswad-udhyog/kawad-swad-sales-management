@@ -1,6 +1,8 @@
 # Kawad Swad Sales Management System (React Application)
 
-A modern, responsive React + TypeScript application for sales management, billing, stock ledgers, expenses, shop visits, daily cash closings, and salary incentives at **Kawad Swad Udhyog** (Nimar, Madhya Pradesh).
+A React + TypeScript application, with a FastAPI backend, for sales, stock, expenses, closings, incentives, and factory production at **Kawad Swad Udhyog** (Nimar, Madhya Pradesh).
+
+Read `FINAL_SUMMARY.md` before using it for real bills. Deployment steps are in `MANUAL_DEPLOYMENT_GUIDE.md`. The backend address comes from `VITE_API_URL`. Do not commit secrets.
 
 ## Technology Stack
 

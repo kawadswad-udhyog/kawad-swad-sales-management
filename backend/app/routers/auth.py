@@ -1,78 +1,81 @@
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
-from app.models import (
-    LoginRequest,
-    TokenResponse,
-    UserProfile,
-)
+from pydantic import BaseModel, Field
+
+from app.models import LoginRequest, TokenResponse
 from app.sheets import db
-from app.auth import verify_password, create_access_token, get_current_user, hash_password
+from app.auth import verify_password, create_access_token, get_current_user, hash_password, password_needs_reset
+from app.permissions import ui_role
 
 router = APIRouter(tags=["Authentication"])
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+def _token_for(row: dict) -> TokenResponse:
+    user_id = str(row.get("user_id") or "")
+    role = ui_role(str(row.get("role") or "SALESMAN"))
+    full_name = str(row.get("full_name") or user_id)
+    must_change = str(row.get("must_change_password", "false")).lower() == "true"
+    token = create_access_token({
+        "sub": user_id,
+        "user_id": user_id,
+        "full_name": full_name,
+        "role": str(row.get("role") or role),
+        "must_change_password": must_change,
+    })
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user_id=user_id,
+        full_name=full_name,
+        role=role,
+        must_change_password=must_change,
+    )
 
 
 @router.post("/api/auth/login", response_model=TokenResponse)
 @router.post("/auth/login", response_model=TokenResponse)
 async def login(req: LoginRequest, background_tasks: BackgroundTasks):
-    auth_records = db.get_records("AuthUsers")
-    user_match = None
-
+    username = req.username.strip().lower()
+    if not username or not req.password:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    auth_records = db.get_records("AuthUsers", fresh=True)
+    if not auth_records:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No login accounts exist yet. The owner must create the first account with the local reset/bootstrap script. Passwordless login is disabled.",
+        )
+    match = None
     for auth in auth_records:
-        if auth.get("username", "").strip().lower() == req.username.strip().lower():
-            if str(auth.get("active", "true")).lower() == "false":
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is deactivated")
-            if verify_password(req.password, auth.get("password_hash", "")):
-                user_match = auth
-                break
-
-    if not user_match:
-        # Check standard Users tab for development fallback
-        users = db.get_records("Users")
-        for u in users:
-            if u.get("user_id", "").strip().lower() == req.username.strip().lower() or \
-               u.get("full_name", "").strip().lower() == req.username.strip().lower():
-                # Allow dev login if no AuthUsers records exist yet
-                if len(auth_records) == 0:
-                    user_match = {
-                        "user_id": u.get("user_id"),
-                        "username": req.username,
-                        "full_name": u.get("full_name"),
-                        "role": u.get("role", "SALESMAN"),
-                    }
-                    break
-
-    if not user_match:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
-
-    user_id = user_match.get("user_id")
-    role = user_match.get("role", "SALESMAN")
-    full_name = user_match.get("full_name", user_id)
-
-    token_data = {
-        "sub": user_id,
-        "user_id": user_id,
-        "full_name": full_name,
-        "role": role,
-    }
-    access_token = create_access_token(token_data)
-
-    # Authentication must not wait for a Google Sheets audit write. Sheets
-    # latency can otherwise make valid credentials look like failed logins.
+        if str(auth.get("username", "")).strip().lower() != username:
+            continue
+        if str(auth.get("active", "true")).lower() == "false":
+            raise HTTPException(status_code=403, detail="Account is deactivated")
+        stored = str(auth.get("password_hash", ""))
+        if password_needs_reset(stored):
+            raise HTTPException(
+                status_code=403,
+                detail="This account still has a legacy password and cannot sign in. An owner must set a new password with backend/scripts/reset_password.py.",
+            )
+        if verify_password(req.password, stored):
+            match = auth
+            break
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not match:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
     background_tasks.add_task(
         db.log_audit,
-        actor=user_id,
+        actor=match.get("user_id"),
         action="LOGIN",
         entity_type="AuthUsers",
-        entity_id=user_id,
+        entity_id=str(match.get("user_id")),
         reason="User successfully authenticated",
     )
+    return _token_for(match)
 
-    return TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user_id=user_id,
-        full_name=full_name,
-        role=role,
-    )
 
 @router.get("/api/auth/me")
 @router.get("/auth/me")
@@ -80,5 +83,27 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     return {
         "user_id": current_user.get("user_id"),
         "full_name": current_user.get("full_name"),
-        "role": current_user.get("role"),
+        "role": ui_role(str(current_user.get("role") or "")),
+        "must_change_password": bool(current_user.get("must_change_password")),
     }
+
+
+@router.post("/api/auth/change-password")
+async def change_password(req: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id") or "")
+    rows = db.get_records("AuthUsers", fresh=True)
+    match = next((row for row in rows if str(row.get("user_id")) == user_id), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Login account not found")
+    if not verify_password(req.current_password, str(match.get("password_hash", ""))):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if req.new_password == req.current_password:
+        raise HTTPException(status_code=422, detail="Choose a different password")
+    updated = db.update_record("AuthUsers", "user_id", user_id, {
+        "password_hash": hash_password(req.new_password),
+        "must_change_password": "false",
+    })
+    if not updated:
+        raise HTTPException(status_code=503, detail="Password was not saved. Try again.")
+    db.log_audit(user_id, "CHANGE_PASSWORD", "AuthUsers", user_id, reason="User changed password")
+    return {"ok": True}

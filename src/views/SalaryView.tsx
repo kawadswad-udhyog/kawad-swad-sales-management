@@ -253,7 +253,7 @@ export const SalaryView: React.FC = () => {
                     <td className="muted">{r.payment_reference || '—'}</td>
                     <td>
                       <div className="actions">
-                        {r.approval_status === 'PENDING' && (
+                        {(r.approval_status === 'PENDING' || r.approval_status === 'PROPOSED') && (
                           <button
                             className="secondary"
                             style={{ padding: '3px 8px', fontSize: '0.78rem', background: '#dcfce7', color: '#166534' }}
