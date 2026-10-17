@@ -73,6 +73,7 @@ export const SalesView: React.FC = () => {
 
   const handleSaleTypeChange = (type: CustomerType) => {
     setSalesType(type);
+    invalidateDraftKey();
     try {
       sessionStorage.setItem('ks_last_sales_type', type);
     } catch {
@@ -106,6 +107,13 @@ export const SalesView: React.FC = () => {
   const [discountAmount, setDiscountAmount] = useState<number>(0);
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submissionIdempotencyKey, setSubmissionIdempotencyKey] = useState<string | null>(null);
+
+  const invalidateDraftKey = () => {
+    if (submissionIdempotencyKey) {
+      setSubmissionIdempotencyKey(null);
+    }
+  };
 
   // Fast Product Search Input State
   const [productSearch, setProductSearch] = useState('');
@@ -188,6 +196,7 @@ export const SalesView: React.FC = () => {
   }, []);
 
   const addOrIncrementProduct = (productId: string) => {
+    invalidateDraftKey();
     const existingIndex = cart.findIndex((line) => line.product_id === productId);
     if (existingIndex >= 0) {
       setCart((prev) =>
@@ -215,6 +224,7 @@ export const SalesView: React.FC = () => {
   };
 
   const addLine = () => {
+    invalidateDraftKey();
     if (activeProducts.length === 0) {
       setNotice({ msg: 'Add an active product in Catalogue before creating a bill.', error: true });
       return;
@@ -231,11 +241,13 @@ export const SalesView: React.FC = () => {
   };
 
   const removeLine = (index: number) => {
+    invalidateDraftKey();
     if (cart.length <= 1) return;
     setCart((prev) => prev.filter((_, i) => i !== index));
   };
 
   const updateLine = (index: number, updates: Partial<CartLine>) => {
+    invalidateDraftKey();
     setCart((prev) =>
       prev.map((line, i) => {
         if (i !== index) return line;
@@ -294,6 +306,7 @@ export const SalesView: React.FC = () => {
     setPaymentReference('');
     setDiscountAmount(0);
     setNotes('');
+    setSubmissionIdempotencyKey(null);
     const firstP = activeProducts[0];
     setCart([
       {
@@ -330,8 +343,15 @@ export const SalesView: React.FC = () => {
       customerMode === 'registered' ? selectedCustomer?.mobile || '' : walkInMobile.trim();
 
     setIsSubmitting(true);
+    // Reuse the active idempotency key for retries of this exact bill, preventing duplicate sales
+    const idempotencyKey =
+      submissionIdempotencyKey ||
+      `IDEMP-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}-${(resolvedCustId || 'WALKIN').slice(-4)}`;
+    if (!submissionIdempotencyKey) {
+      setSubmissionIdempotencyKey(idempotencyKey);
+    }
+
     try {
-      const idempotencyKey = `IDEMP-${Date.now()}-${(resolvedCustId || 'WALKIN').slice(-4)}`;
       const result = await createSale({
         customer_id: resolvedCustId,
         customer_name_snapshot: resolvedCustName,
@@ -349,6 +369,9 @@ export const SalesView: React.FC = () => {
           actual_unit_price: Number(line.actual_unit_price),
         })),
       });
+
+      // Clear the idempotency key once successfully completed
+      setSubmissionIdempotencyKey(null);
 
       setIssuedSale({ sale: result.sale, paymentId: result.paymentId || '' });
       if (resolvedMobile) {

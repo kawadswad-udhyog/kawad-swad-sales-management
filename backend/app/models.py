@@ -116,6 +116,7 @@ class SaleItemCreate(BaseModel):
     notes: Optional[str] = ""
 
 class SaleCreate(BaseModel):
+    idempotency_key: Optional[str] = Field(None, max_length=120, description="Client idempotency key for preventing duplicate billing")
     sales_type: Optional[str] = "Retailer Sale"
     customer_id: Optional[str] = ""
     customer_name_snapshot: Optional[str] = ""
@@ -154,6 +155,7 @@ class SaleItem(BaseModel):
 class Sale(BaseModel):
     sale_id: str
     bill_number: str
+    idempotency_key: Optional[str] = ""
     sale_datetime: str
     sales_type: str
     customer_id: Optional[str] = ""

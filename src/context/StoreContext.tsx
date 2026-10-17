@@ -531,16 +531,24 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
 
     const res = await apiRequest<{
-      sale: Sale;
-      payment_id: string;
-      message: string;
-    }>('/api/sales', {
+      sale?: Sale;
+      payment_id?: string;
+      message?: string;
+    } & Sale>('/api/sales', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
 
-    const newSale = res.sale;
-    setSales((prev) => [newSale, ...prev]);
+    const newSale: Sale = res.sale || res;
+    setSales((prev) => {
+      const existsIdx = prev.findIndex((s) => s.sale_id === newSale.sale_id);
+      if (existsIdx >= 0) {
+        const next = [...prev];
+        next[existsIdx] = newSale;
+        return next;
+      }
+      return [newSale, ...prev];
+    });
 
     // Refresh stock balances and dashboard automatically after sale issue
     loadInitialData();
@@ -552,7 +560,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       `Issued bill ${newSale.bill_number} for ₹${newSale.bill_total} with full payment.`
     );
 
-    return { sale: newSale, paymentId: res.payment_id };
+    return { sale: newSale, paymentId: res.payment_id || newSale.bill_number };
   };
 
   const getSaleWithItems = (sale_id: string): { sale: Sale; items: SaleItem[] } | null => {
