@@ -16,12 +16,14 @@ class ChangePasswordRequest(BaseModel):
 
 def _token_for(row: dict) -> TokenResponse:
     user_id = str(row.get("user_id") or "")
+    username = str(row.get("username") or user_id)
     role = ui_role(str(row.get("role") or "SALESMAN"))
     full_name = str(row.get("full_name") or user_id)
     must_change = str(row.get("must_change_password", "false")).lower() == "true"
     token = create_access_token({
         "sub": user_id,
         "user_id": user_id,
+        "username": username,
         "full_name": full_name,
         "role": str(row.get("role") or role),
         "must_change_password": must_change,
@@ -30,6 +32,7 @@ def _token_for(row: dict) -> TokenResponse:
         access_token=token,
         token_type="bearer",
         user_id=user_id,
+        username=username,
         full_name=full_name,
         role=role,
         must_change_password=must_change,
@@ -78,6 +81,24 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     if not match:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Match login credentials to exactly one staff profile using immutable user_id.
+    try:
+        profiles = db.get_records("Users", fresh=False)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not verify the staff profile. Please retry shortly.") from exc
+    user_id = str(match.get("user_id") or "").strip()
+    profile_matches = [r for r in profiles if str(r.get("user_id") or "").strip() == user_id]
+    if len(profile_matches) != 1:
+        raise HTTPException(status_code=409, detail="Account mismatch: login account must match exactly one staff profile. Ask the owner to review Users and AuthUsers.")
+    profile = profile_matches[0]
+    if str(profile.get("active", "true")).strip().lower() in {"false", "0", "no", "inactive"}:
+        raise HTTPException(status_code=403, detail="Staff profile is deactivated")
+    auth_role = ui_role(str(match.get("role") or ""))
+    profile_role = ui_role(str(profile.get("role") or ""))
+    if auth_role != profile_role:
+        raise HTTPException(status_code=409, detail="Account mismatch: login role and staff profile role differ. Ask the owner to review Users and AuthUsers.")
+    match = {**match, "full_name": profile.get("full_name") or user_id, "role": profile.get("role") or match.get("role")}
     background_tasks.add_task(
         db.log_audit,
         actor=match.get("user_id"),
@@ -94,6 +115,7 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
 async def get_me(current_user: dict = Depends(get_current_user)):
     return {
         "user_id": current_user.get("user_id"),
+        "username": current_user.get("username") or current_user.get("user_id"),
         "full_name": current_user.get("full_name"),
         "role": ui_role(str(current_user.get("role") or "")),
         "must_change_password": bool(current_user.get("must_change_password")),

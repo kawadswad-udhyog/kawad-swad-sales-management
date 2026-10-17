@@ -24,6 +24,7 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: str
+    username: str = ""
     full_name: str
     role: str
     must_change_password: bool = False

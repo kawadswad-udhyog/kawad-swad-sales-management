@@ -89,6 +89,7 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is deactivated")
         payload = dict(payload)
         payload["role"] = row.get("role") or payload.get("role")
+        payload["username"] = row.get("username") or payload.get("username") or payload.get("user_id")
         payload["full_name"] = row.get("full_name") or payload.get("full_name")
         payload["must_change_password"] = str(row.get("must_change_password", "false")).lower() == "true"
     return payload

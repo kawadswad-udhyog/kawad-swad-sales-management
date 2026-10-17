@@ -340,7 +340,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       let res: {
         access_token: string;
         token_type?: string;
-        user?: { user_id: string; full_name?: string; role?: string };
+        user?: { user_id: string; username?: string; full_name?: string; role?: string };
         user_id?: string;
         full_name?: string;
         role?: string;
@@ -350,7 +350,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         res = await apiRequest<{
           access_token: string;
           token_type?: string;
-          user?: { user_id: string; full_name?: string; role?: string };
+          user?: { user_id: string; username?: string; full_name?: string; role?: string };
           user_id?: string;
           full_name?: string;
           role?: string;
@@ -364,7 +364,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           res = await apiRequest<{
             access_token: string;
             token_type?: string;
-            user?: { user_id: string; full_name?: string; role?: string };
+            user?: { user_id: string; username?: string; full_name?: string; role?: string };
             user_id?: string;
             full_name?: string;
             role?: string;
@@ -388,7 +388,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const newUser: User = {
         user_id: userPayload.user_id,
         full_name: userPayload.full_name || username.trim(),
-        username: username.trim(),
+        username: ('username' in userPayload && userPayload.username) ? userPayload.username : username.trim(),
         role: (userPayload.role || 'SALESMAN') as User['role'],
         mobile: '',
         email: '',
@@ -486,7 +486,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setIsBackendConnected(true);
     } catch (err) {
       console.warn('Backend live sync warning:', err);
-      setSyncError('Network error connecting to backend API.');
+      setSyncError(err instanceof Error && err.message.toLowerCase().includes('quota') ? 'Google Sheets is temporarily rate-limiting requests. Your saved data has not been confirmed as synced. Wait briefly and retry.' : 'Workspace sync failed. Check backend and Google Sheets connectivity, then retry.')
     }
   }, [currentUser?.role]);
 
@@ -501,12 +501,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       try {
-        let me: { user_id: string; full_name?: string; role?: string };
+        let me: { user_id: string; username?: string; full_name?: string; role?: string };
         try {
-          me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/api/auth/me');
+          me = await apiRequest<{ user_id: string; username?: string; full_name?: string; role?: string }>('/api/auth/me');
         } catch (err: unknown) {
           if (err instanceof Error && err.message.includes('404')) {
-            me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/auth/me');
+            me = await apiRequest<{ user_id: string; username?: string; full_name?: string; role?: string }>('/auth/me');
           } else {
             throw err;
           }
@@ -515,7 +515,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const verifiedUser: User = {
           user_id: me.user_id,
           full_name: me.full_name || me.user_id,
-          username: me.user_id,
+          username: me.username || me.user_id,
           role: (me.role || 'SALESMAN') as User['role'],
           mobile: '',
           email: '',

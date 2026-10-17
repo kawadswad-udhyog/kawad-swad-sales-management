@@ -24,8 +24,8 @@ class TestSheetsQuotaHandling(unittest.TestCase):
         db.is_connected = False
         db.spreadsheet = None
 
-    def test_stale_cache_served_on_429_quota_exceeded_for_non_fresh_read(self):
-        """When Google Sheets throws 429 Quota Exceeded and fresh=False, get_records serves cached data to prevent crash."""
+    def test_critical_auth_cache_is_not_served_on_429_quota_error(self):
+        """Authentication must not silently use stale AuthUsers data after a quota failure."""
         # 1. Prime cache with existing AuthUsers
         db._records_cache["AuthUsers"] = (
             time.monotonic() - 100, # expired cache
@@ -43,10 +43,10 @@ class TestSheetsQuotaHandling(unittest.TestCase):
 
         db.spreadsheet = QuotaMockSpreadsheet()
 
-        # 3. Reading AuthUsers with fresh=False should catch 429 and return cached record
-        records = db.get_records("AuthUsers", fresh=False)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["username"], "ankit")
+        # AuthUsers is a critical tab: stale cached identity must be rejected.
+        with self.assertRaises(RuntimeError) as ctx:
+            db.get_records("AuthUsers", fresh=False)
+        self.assertIn("quota", str(ctx.exception).lower())
 
     def test_fresh_read_rejects_stale_cache_on_429_quota_error(self):
         """When fresh=True is requested, stale cache must NOT be returned on 429 quota error to prevent hiding connectivity issues."""

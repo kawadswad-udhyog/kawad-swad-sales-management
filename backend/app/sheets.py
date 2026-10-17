@@ -114,9 +114,18 @@ class SheetsDatabase:
         self._records_cache: Dict[str, tuple] = {}
         self._records_cache_ttl_seconds = 30.0
         self._worksheets: Dict[str, Any] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        # One leader owns each worksheet read until all retries finish.
         self._inflight: Dict[str, threading.Event] = {}
         self._fail_once: Dict[str, int] = {}
+        self._read_gate = threading.Semaphore(1)
+        self._critical_tabs = {
+            "Users", "AuthUsers", "Products", "Sales", "SaleItems", "Payments",
+            "SalesmanStockLedger", "CashLedger", "Expenses", "DailyClosing",
+            "IdAllocations", "RawMaterials", "Recipes", "ProductionBatches",
+            "PackagingBatches", "ProductionStockLedger", "ProductionDispatches",
+            "RawMaterialLedger",
+        }
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self.init_connection()
 
@@ -278,86 +287,84 @@ class SheetsDatabase:
         return ws
 
     def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
+        """Read records with single-flight coordination and safe quota behaviour."""
         if not (self.is_connected and self.spreadsheet):
             if self.allow_in_memory_fallback:
                 return [dict(row) for row in self.memory_store.get(tab_name, [])]
-            err_msg = (
-                f"Persistent storage is unavailable: Google Sheets is disconnected ({self.last_connection_error or 'not connected'}). "
-                f"Cannot retrieve records for '{tab_name}'."
-            )
+            err_msg = (f"Persistent storage is unavailable: Google Sheets is disconnected "
+                       f"({self.last_connection_error or 'not connected'}). Cannot retrieve records for '{tab_name}'.")
             logger.error(err_msg)
             raise RuntimeError(err_msg)
 
+        import random
         import time
         now = time.monotonic()
         with self._lock:
             cached = self._records_cache.get(tab_name)
-        if not fresh:
-            if cached and now - cached[0] < self._records_cache_ttl_seconds:
+            if not fresh and cached and now - cached[0] < self._records_cache_ttl_seconds:
                 return [dict(row) for row in cached[1]]
-            with self._lock:
-                event = self._inflight.get(tab_name)
-                if event is None:
-                    event = threading.Event()
-                    self._inflight[tab_name] = event
-                    leader = True
-                else:
-                    leader = False
-            if not leader:
-                event.wait(timeout=30)
-                with self._lock:
-                    cached = self._records_cache.get(tab_name)
-                    if cached:
-                        return [dict(row) for row in cached[1]]
+            event = self._inflight.get(tab_name)
+            if event is None:
+                event = threading.Event()
+                self._inflight[tab_name] = event
+                leader = True
+            else:
+                leader = False
 
-        # Read from Google Sheets with retry on 429 quota errors
-        max_retries = 3
+        if not leader:
+            if event.wait(timeout=35):
+                with self._lock:
+                    updated = self._records_cache.get(tab_name)
+                if updated and (not fresh or updated[0] >= now):
+                    return [dict(row) for row in updated[1]]
+            if not fresh and tab_name not in self._critical_tabs:
+                with self._lock:
+                    fallback = self._records_cache.get(tab_name)
+                if fallback and fallback[1]:
+                    logger.warning("Using cached non-critical data for %s after read coordination timeout", tab_name)
+                    return [dict(row) for row in fallback[1]]
+            raise RuntimeError(f"Google Sheets read for {tab_name} is still in progress or unavailable. Please retry shortly.")
+
         last_exc = None
-        for attempt in range(max_retries + 1):
-            try:
-                worksheet = self._get_worksheet(tab_name)
-                records = worksheet.get_all_records()
-                safe_records = [dict(row) for row in records]
-                with self._lock:
-                    self._records_cache[tab_name] = (time.monotonic(), safe_records)
-                return [dict(row) for row in safe_records]
-            except Exception as exc:
-                last_exc = exc
-                err_str = str(exc).lower()
-                is_quota_error = "429" in err_str or "quota" in err_str or "rate limit" in err_str
-                if is_quota_error:
-                    logger.warning(
-                        "Google Sheets rate limit/429 for %s (attempt %d/%d): %s",
-                        tab_name, attempt + 1, max_retries + 1, exc
-                    )
-                    # ONLY serve cached data when fresh=False was requested!
-                    if not fresh and cached and cached[1]:
-                        logger.info("Serving stale cached records for %s due to Google Sheets rate limit", tab_name)
-                        return [dict(row) for row in cached[1]]
+        max_retries = 3
+        try:
+            for attempt in range(max_retries + 1):
+                try:
+                    with self._read_gate:
+                        worksheet = self._get_worksheet(tab_name)
+                        records = worksheet.get_all_records()
+                    safe_records = [dict(row) for row in records]
+                    with self._lock:
+                        self._records_cache[tab_name] = (time.monotonic(), safe_records)
+                    return [dict(row) for row in safe_records]
+                except Exception as exc:
+                    last_exc = exc
+                    err_str = str(exc).lower()
+                    is_quota_error = "429" in err_str or "quota" in err_str or "rate limit" in err_str
+                    if not is_quota_error:
+                        with self._lock:
+                            self._worksheets.pop(tab_name, None)
+                        break
+                    logger.warning("Google Sheets rate limit/429 for %s (attempt %d/%d): %s", tab_name, attempt + 1, max_retries + 1, exc)
                     if attempt < max_retries:
-                        sleep_time = 0.01 if os.getenv("SALES_TESTING", "").strip() == "1" else (2 ** attempt) * 1.5 + 0.5
-                        time.sleep(sleep_time)
-                        continue
-                else:
+                        delay = 0.01 if os.getenv("SALES_TESTING", "").strip() == "1" else min(12.0, (2 ** attempt) * 1.5 + random.uniform(0.25, 1.25))
+                        time.sleep(delay)
+            err_str = str(last_exc).lower() if last_exc else ""
+            if "429" in err_str or "quota" in err_str or "rate limit" in err_str:
+                if not fresh and tab_name not in self._critical_tabs:
                     with self._lock:
-                        self._worksheets.pop(tab_name, None)
-                    break
-            finally:
-                if not fresh:
-                    with self._lock:
-                        event = self._inflight.pop(tab_name, None)
-                        if event:
-                            event.set()
-
-        err_str = str(last_exc).lower() if last_exc else ""
-        if "429" in err_str or "quota" in err_str:
-            if not fresh and cached and cached[1]:
-                return [dict(row) for row in cached[1]]
-            logger.error("Exhausted retries on 429 quota error for %s: %s", tab_name, last_exc)
-            raise RuntimeError(f"Google Sheets API quota temporarily exceeded for {tab_name}. Please retry in a few seconds.") from last_exc
-
-        logger.warning("Error reading %s from sheet: %s", tab_name, last_exc)
-        raise RuntimeError(f"Could not read {tab_name} from Google Sheets.") from last_exc
+                        fallback = self._records_cache.get(tab_name)
+                    if fallback and fallback[1]:
+                        logger.warning("Serving stale cached records for non-critical tab %s after quota exhaustion", tab_name)
+                        return [dict(row) for row in fallback[1]]
+                raise RuntimeError(f"Google Sheets API quota temporarily exceeded for {tab_name}. Please retry in a few seconds.") from last_exc
+            logger.warning("Error reading %s from sheet: %s", tab_name, last_exc)
+            raise RuntimeError(f"Could not read {tab_name} from Google Sheets.") from last_exc
+        finally:
+            with self._lock:
+                if self._inflight.get(tab_name) is event:
+                    self._inflight.pop(tab_name, None)
+                    event.set()
 
     def append_record(self, tab_name: str, record: Dict[str, Any], raise_on_error: bool = False) -> bool:
         self._invalidate_records_cache(tab_name)
