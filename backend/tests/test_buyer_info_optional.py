@@ -8,11 +8,12 @@ Mandatory internal business data (product, quantity, price, payments, stock) rem
 import sys
 import os
 import unittest
+import types
 
 os.environ.setdefault("SALES_TESTING", "1")
 os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
 
-if False and "fastapi" not in sys.modules:
+if "fastapi" not in sys.modules:
     class MockFastAPIModule(types.ModuleType):
         class APIRouter:
             def __init__(self, *args, **kwargs):
@@ -40,12 +41,37 @@ if False and "fastapi" not in sys.modules:
             HTTP_422_UNPROCESSABLE_ENTITY = 422
             HTTP_500_INTERNAL_SERVER_ERROR = 500
             HTTP_503_SERVICE_UNAVAILABLE = 503
+        class FastAPI:
+            def __init__(self, *args, **kwargs):
+                self.middleware = []
+            def add_middleware(self, mw, **kwargs):
+                self.middleware.append((mw, kwargs))
+            def include_router(self, *args, **kwargs): pass
+            def on_event(self, *args, **kwargs): return lambda f: f
+            def get(self, *args, **kwargs): return lambda f: f
+            def post(self, *args, **kwargs): return lambda f: f
+        class BackgroundTasks:
+            def add_task(self, *args, **kwargs): pass
         @staticmethod
         def Depends(f): return f
         @staticmethod
         def Header(default=None, alias=None): return default
+        @staticmethod
+        def Query(default=None, **kwargs): return default
 
-    sys.modules["fastapi"] = MockFastAPIModule("fastapi")
+    mock_mod = MockFastAPIModule("fastapi")
+    mock_mod.FastAPI = MockFastAPIModule.FastAPI
+    mock_mod.BackgroundTasks = MockFastAPIModule.BackgroundTasks
+    mock_mod.Query = MockFastAPIModule.Query
+
+    mock_mw = types.ModuleType("fastapi.middleware")
+    mock_cors = types.ModuleType("fastapi.middleware.cors")
+    mock_cors.CORSMiddleware = type("CORSMiddleware", (), {})
+    mock_mod.middleware = mock_mw
+
+    sys.modules["fastapi"] = mock_mod
+    sys.modules["fastapi.middleware"] = mock_mw
+    sys.modules["fastapi.middleware.cors"] = mock_cors
     sys.modules["fastapi.security"] = types.ModuleType("security")
     sys.modules["fastapi.security"].HTTPBearer = lambda **kwargs: None
     sys.modules["fastapi.security"].HTTPAuthorizationCredentials = None
@@ -53,6 +79,7 @@ if False and "fastapi" not in sys.modules:
     sys.modules["jwt"].encode = lambda payload, secret, algorithm="HS256": "mock-jwt"
     sys.modules["jwt"].decode = lambda token, secret, algorithms=["HS256"]: {"sub": "USR-000001", "role": "SALESMAN"}
 
+if "pydantic" not in sys.modules:
     class MockBaseModel:
         def __init__(self, **kwargs):
             for k, v in kwargs.items():

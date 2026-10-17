@@ -50,8 +50,9 @@ export const LoginModal: React.FC = () => {
 
       <div style={{ margin: '14px 0', padding: '10px 12px', background: '#edf4f1', borderRadius: '8px', fontSize: '0.82rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <span style={{ color: '#176b52', fontWeight: 700 }}>Backend API:</span>{' '}
-          <span style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>{backendUrl}</span>
+          <span style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
+            {backendUrl || 'https://kawad-swad-sales-dev.onrender.com (Proxied)'}
+          </span>
         </div>
         <button
           type="button"

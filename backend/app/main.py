@@ -30,16 +30,21 @@ app = FastAPI(
 )
 
 # Configure CORS
-origins = [o.strip() for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
-if not origins or "*" in origins:
-    origins = ["*"]
+configured_origins = [o.strip().rstrip("/") for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
+default_origins = {
+    "https://kawad-swad-sales-frontend.onrender.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+}
+origins = list(default_origins.union(configured_origins))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True if "*" not in origins else False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Register Routers

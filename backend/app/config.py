@@ -6,7 +6,8 @@ SALES_GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv(
 ).strip()
 SALES_GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("SALES_GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 SALES_CORS_ORIGINS = os.getenv(
-    "SALES_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    "SALES_CORS_ORIGINS",
+    "https://kawad-swad-sales-frontend.onrender.com,http://localhost:3000,http://127.0.0.1:3000",
 ).strip()
 SALES_TOKEN_HOURS = int(os.getenv("SALES_TOKEN_HOURS", "8"))
 SALES_ENV = os.getenv("SALES_ENV", "development").strip().lower()

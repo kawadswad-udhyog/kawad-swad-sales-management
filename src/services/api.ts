@@ -14,10 +14,22 @@ const STORAGE_TOKEN_KEY = 'ks_token';
 
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
+    const isProduction = window.location.hostname.includes('kawad-swad-sales-frontend.onrender.com');
     const saved = localStorage.getItem(STORAGE_API_KEY);
-    if (saved) return saved.replace(/\/$/, '');
+    if (saved) {
+      if (
+        saved === 'https://kawad-swad-sales-dev.onrender.com' &&
+        !isProduction
+      ) {
+        return '';
+      }
+      return saved.replace(/\/$/, '');
+    }
+    if (!isProduction && !DEFAULT_API_BASE_URL) {
+      return '';
+    }
   }
-  return DEFAULT_API_BASE_URL.replace(/\/$/, '');
+  return (DEFAULT_API_BASE_URL || 'https://kawad-swad-sales-dev.onrender.com').replace(/\/$/, '');
 }
 
 export function setApiBaseUrl(url: string): void {
@@ -64,12 +76,33 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  const targetUrl = baseUrl ? `${baseUrl}${path}` : path;
+
   try {
-    const res = await fetch(`${baseUrl}${path}`, {
-      ...options,
-      headers,
-      signal: controller.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(targetUrl, {
+        ...options,
+        headers,
+        signal: controller.signal,
+      });
+    } catch (primaryErr: unknown) {
+      // If direct call to external baseUrl fails (e.g. CORS preflight blocked on Render),
+      // seamlessly retry via the local same-origin dev proxy
+      if (baseUrl && (baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
+        try {
+          res = await fetch(path, {
+            ...options,
+            headers,
+            signal: controller.signal,
+          });
+        } catch {
+          throw primaryErr;
+        }
+      } else {
+        throw primaryErr;
+      }
+    }
 
     clearTimeout(timeoutId);
 
@@ -102,10 +135,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     clearTimeout(timeoutId);
     if (err instanceof Error) {
       if (err.name === 'AbortError') {
-        throw new Error(`Request timed out after ${timeoutMs / 1000}s connecting to ${baseUrl}. If using Render free tier, the service may be spinning up.`);
+        throw new Error(`Request timed out after ${timeoutMs / 1000}s connecting to backend. If using Render free tier, the service may be spinning up.`);
       }
       if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-        throw new Error(`Unable to reach backend at ${baseUrl}. Please check network connection or verify CORS configuration.`);
+        throw new Error(`Unable to reach backend API. Please check your network connection or backend service status.`);
       }
       throw err;
     }
