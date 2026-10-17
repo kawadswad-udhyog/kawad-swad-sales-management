@@ -70,11 +70,3 @@ No tests were skipped by pytest.
 ## Environment note
 
 The first `npm install` attempts hung because Node reported `UNABLE_TO_VERIFY_LEAF_SIGNATURE` against `registry.npmjs.org`. PowerShell could reach the same address. The successful install and build used the Windows certificate store (`--use-system-ca`). That setting was used only on this PC for the build. It is not written into the project.
-
-## Follow-up safety-hardening run (17 October 2026)
-
-After the critical-sheet freshness change, the backend suite was run again from `backend`:
-
-`SALES_TESTING=1 SALES_JWT_SECRET=test-only-secret-do-not-use-for-deployment-32 python -m pytest tests -q --tb=short`
-
-Result: **54 passed, 5 warnings**. The added quota-handling tests verify that critical sheets such as `AuthUsers` and `Products` do not use stale cache data when a fresh Google Sheets read is required. This run used test mode and did not contact a live spreadsheet. The frontend was not rebuilt as part of this follow-up patch.
