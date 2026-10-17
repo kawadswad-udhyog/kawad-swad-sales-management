@@ -132,7 +132,9 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         const text = await res.text();
         if (text) errorMsg = text.slice(0, 150);
       }
-      throw new Error(errorMsg);
+      const err = new Error(errorMsg) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
     }
 
     if (contentType.includes('application/pdf') || contentType.includes('spreadsheetml')) {
