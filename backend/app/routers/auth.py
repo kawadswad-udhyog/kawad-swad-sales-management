@@ -42,7 +42,19 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
     username = req.username.strip().lower()
     if not username or not req.password:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    auth_records = db.get_records("AuthUsers", fresh=True)
+    try:
+        auth_records = db.get_records("AuthUsers", fresh=False)
+    except Exception as exc:
+        err_str = str(exc).lower()
+        if "429" in err_str or "quota" in err_str:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Google Sheets API quota temporarily exceeded. Please wait 10-15 seconds and try signing in again.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not verify login credentials with Google Sheets: {exc}",
+        )
     if not auth_records:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
