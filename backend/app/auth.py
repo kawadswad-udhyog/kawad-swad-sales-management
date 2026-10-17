@@ -96,9 +96,11 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
         raise
     except Exception as exc:
         message = str(exc).lower()
+        # Distinguish quota/rate-limit from other connectivity problems so
+        # the frontend can preserve a valid session during temporary quota events.
         if "429" in message or "quota" in message or "rate limit" in message:
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Google Sheets is temporarily rate-limiting account verification. Retry shortly; your session has not been verified.",
             ) from exc
         raise HTTPException(
