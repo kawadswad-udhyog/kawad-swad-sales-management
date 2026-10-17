@@ -126,6 +126,8 @@ class SheetsDatabase:
             "PackagingBatches", "ProductionStockLedger", "ProductionDispatches",
             "RawMaterialLedger",
         }
+        # Diagnostics per-tab for operators
+        self._diagnostics: Dict[str, Dict[str, Any]] = {}
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self.init_connection()
 
@@ -288,6 +290,10 @@ class SheetsDatabase:
 
     def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
         """Read records with single-flight coordination and safe quota behaviour."""
+        # Diagnostics init
+        with self._lock:
+            diag = self._diagnostics.setdefault(tab_name, {"quota_errors": 0, "last_successful_read": None, "last_error": None})
+
         if not (self.is_connected and self.spreadsheet):
             if self.allow_in_memory_fallback:
                 return [dict(row) for row in self.memory_store.get(tab_name, [])]
@@ -336,11 +342,20 @@ class SheetsDatabase:
                     safe_records = [dict(row) for row in records]
                     with self._lock:
                         self._records_cache[tab_name] = (time.monotonic(), safe_records)
+                        # update diagnostics
+                        diag["last_successful_read"] = now_iso()
+                        diag["last_error"] = None
+                        diag["quota_errors"] = 0
                     return [dict(row) for row in safe_records]
                 except Exception as exc:
                     last_exc = exc
                     err_str = str(exc).lower()
                     is_quota_error = "429" in err_str or "quota" in err_str or "rate limit" in err_str
+                    # update diagnostics on error
+                    with self._lock:
+                        diag["last_error"] = str(exc)
+                        if is_quota_error:
+                            diag["quota_errors"] = diag.get("quota_errors", 0) + 1
                     if not is_quota_error:
                         with self._lock:
                             self._worksheets.pop(tab_name, None)
@@ -566,6 +581,11 @@ class SheetsDatabase:
             self.append_record("AuditLog", record, raise_on_error=False)
         except Exception as exc:
             logger.error("Audit log write failed: %s", exc)
+
+    def get_tab_diagnostics(self, tab_name: str) -> Dict[str, Any]:
+        """Return operator-facing diagnostics for a worksheet."""
+        with self._lock:
+            return dict(self._diagnostics.get(tab_name, {"quota_errors": 0, "last_successful_read": None, "last_error": None}))
 
 
 db = SheetsDatabase()
