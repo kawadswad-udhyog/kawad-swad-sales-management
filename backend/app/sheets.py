@@ -56,6 +56,49 @@ REQUIRED_TABS = {
         "payment_id", "sale_id", "payment_datetime", "payment_method", "amount",
         "reference_number", "received_by_user_id", "payment_status", "notes",
     ],
+    "Recipes": [
+        "recipe_id", "product_id", "product_name_snapshot", "product_family", "version",
+        "approved", "expected_yield_kg", "items_json", "notes", "created_at", "created_by",
+        "approved_by", "approved_at",
+    ],
+    "RawMaterials": [
+        "raw_material_id", "material_name", "current_stock", "unit", "rate_per_unit",
+        "rate_status", "category", "created_at", "created_by",
+    ],
+    "ProductionBatches": [
+        "production_id", "production_date", "product_id", "product_name_snapshot",
+        "quantity_kg", "wastage_kg", "net_quantity_kg", "flour_base_used_kg",
+        "benchmark_yield_kg", "actual_yield_ratio", "yield_variance_kg", "recipe_id",
+        "status", "notes", "created_at", "created_by", "approved_by", "approved_at",
+        "approval_notes",
+    ],
+    "PackagingBatches": [
+        "packaging_id", "packaging_date", "product_id", "product_name_snapshot",
+        "bulk_kg_used", "packets_200g", "packets_500g", "packets_1000g", "total_packets",
+        "expected_kg", "difference_kg", "difference_status", "status", "notes",
+        "created_at", "created_by",
+    ],
+    "ProductionStockLedger": [
+        "movement_id", "txn_datetime", "movement_type", "product_id", "bulk_product_key",
+        "product_name_snapshot", "sku_snapshot", "pack_weight_g", "quantity_kg",
+        "quantity_packets", "channel", "reference_id", "destination", "created_by", "notes",
+    ],
+    "ProductionDispatches": [
+        "dispatch_id", "dispatch_datetime", "product_id", "product_name_snapshot",
+        "channel", "destination", "quantity_packets", "reference", "status",
+        "created_by", "notes",
+    ],
+    "RawMaterialLedger": [
+        "raw_material_txn_id", "txn_datetime", "material_name", "raw_material_id",
+        "movement_type", "quantity", "unit", "production_id", "created_by", "notes",
+    ],
+    "Workers": [
+        "worker_id", "worker_name", "mobile", "daily_wage", "active", "notes", "created_at",
+    ],
+    "WorkerAttendance": [
+        "attendance_id", "worker_id", "worker_name_snapshot", "attendance_date",
+        "status", "daily_wage_snapshot", "wage_accrued", "notes", "created_at", "created_by",
+    ],
 }
 
 
