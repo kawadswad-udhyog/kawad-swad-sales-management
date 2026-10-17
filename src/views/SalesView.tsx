@@ -110,9 +110,7 @@ export const SalesView: React.FC = () => {
   const [submissionIdempotencyKey, setSubmissionIdempotencyKey] = useState<string | null>(null);
 
   const invalidateDraftKey = () => {
-    if (submissionIdempotencyKey) {
-      setSubmissionIdempotencyKey(null);
-    }
+    setSubmissionIdempotencyKey(null);
   };
 
   // Fast Product Search Input State
@@ -398,7 +396,18 @@ export const SalesView: React.FC = () => {
       setProductSearch('');
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to issue bill';
-      setNotice({ msg: errorMsg, error: true });
+      const isTimeoutOrNetwork =
+        errorMsg.toLowerCase().includes('time') ||
+        errorMsg.toLowerCase().includes('network') ||
+        errorMsg.toLowerCase().includes('fetch') ||
+        errorMsg.toLowerCase().includes('spin') ||
+        errorMsg.toLowerCase().includes('connect');
+      setNotice({
+        msg: isTimeoutOrNetwork
+          ? `${errorMsg}. Your cart and payment details are safely preserved. Click "Retry Bill Submission" to safely resubmit with duplicate protection.`
+          : errorMsg,
+        error: true,
+      });
     } finally {
       setIsSubmitting(false);
     }
@@ -614,6 +623,7 @@ export const SalesView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
+                  invalidateDraftKey();
                   setCustomerMode('walkin');
                   setCustomerId('');
                 }}
@@ -632,6 +642,7 @@ export const SalesView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
+                  invalidateDraftKey();
                   setCustomerMode('registered');
                   if (activeCustomers[0] && !customerId) {
                     setCustomerId(activeCustomers[0].customer_id);
@@ -665,7 +676,10 @@ export const SalesView: React.FC = () => {
                     maxLength={100}
                     placeholder="e.g. Cash Counter / Walk-in Customer"
                     value={walkInName}
-                    onChange={(e) => setWalkInName(e.target.value)}
+                    onChange={(e) => {
+                      invalidateDraftKey();
+                      setWalkInName(e.target.value);
+                    }}
                     style={{ width: '100%', marginTop: '3px', padding: '8px 10px' }}
                   />
                 </label>
@@ -678,7 +692,10 @@ export const SalesView: React.FC = () => {
                     maxLength={20}
                     placeholder="10-digit mobile for WhatsApp bill"
                     value={walkInMobile}
-                    onChange={(e) => setWalkInMobile(e.target.value)}
+                    onChange={(e) => {
+                      invalidateDraftKey();
+                      setWalkInMobile(e.target.value);
+                    }}
                     style={{ width: '100%', marginTop: '3px', padding: '8px 10px' }}
                   />
                 </label>
@@ -727,6 +744,7 @@ export const SalesView: React.FC = () => {
                     type="button"
                     className="secondary"
                     onClick={() => {
+                      invalidateDraftKey();
                       setCustomerId('');
                       setCustomerSearchQuery('');
                     }}
@@ -742,6 +760,7 @@ export const SalesView: React.FC = () => {
                       <div
                         key={c.customer_id}
                         onClick={() => {
+                          invalidateDraftKey();
                           setCustomerId(c.customer_id);
                           handleSaleTypeChange(c.customer_type || 'RETAILER');
                           setCustomerSearchQuery('');
@@ -1094,7 +1113,10 @@ export const SalesView: React.FC = () => {
                   <button
                     key={method}
                     type="button"
-                    onClick={() => setPaymentMethod(method)}
+                    onClick={() => {
+                      invalidateDraftKey();
+                      setPaymentMethod(method);
+                    }}
                     style={{
                       padding: '14px 16px',
                       borderRadius: '8px',
@@ -1129,7 +1151,10 @@ export const SalesView: React.FC = () => {
                   maxLength={150}
                   placeholder="e.g. UPI Ref / Bank UTR / Payment slip"
                   value={paymentReference}
-                  onChange={(e) => setPaymentReference(e.target.value)}
+                  onChange={(e) => {
+                    invalidateDraftKey();
+                    setPaymentReference(e.target.value);
+                  }}
                   style={{ width: '100%', marginTop: '3px', padding: '8px 10px' }}
                 />
               </label>
@@ -1156,7 +1181,10 @@ export const SalesView: React.FC = () => {
                     value={discountAmount || ''}
                     placeholder="0"
                     onFocus={(e) => e.target.select()}
-                    onChange={(e) => setDiscountAmount(Math.max(0, Number(e.target.value) || 0))}
+                    onChange={(e) => {
+                      invalidateDraftKey();
+                      setDiscountAmount(Math.max(0, Number(e.target.value) || 0));
+                    }}
                     style={{ width: '100%', marginTop: '3px', padding: '7px 10px' }}
                   />
                 </label>
@@ -1181,7 +1209,10 @@ export const SalesView: React.FC = () => {
                   maxLength={500}
                   placeholder="Delivery remarks, driver details, or shop notes..."
                   value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
+                  onChange={(e) => {
+                    invalidateDraftKey();
+                    setNotes(e.target.value);
+                  }}
                   style={{ width: '100%', marginTop: '3px', padding: '7px 10px' }}
                 />
               </label>
@@ -1189,32 +1220,60 @@ export const SalesView: React.FC = () => {
           </div>
 
           {/* Action Submit Button */}
-          <button
-            type="submit"
-            disabled={isSubmitting}
-            style={{
-              width: '100%',
-              padding: '16px 24px',
-              fontSize: '1.15rem',
-              fontWeight: 700,
-              background: '#047857',
-              color: '#fff',
-              borderRadius: '8px',
-              cursor: isSubmitting ? 'not-allowed' : 'pointer',
-              opacity: isSubmitting ? 0.7 : 1,
-              boxShadow: '0 4px 12px rgba(4, 120, 87, 0.25)',
-              display: 'flex',
-              justifyContent: 'center',
-              alignItems: 'center',
-              gap: '10px',
-            }}
-          >
-            {isSubmitting ? (
-              <span>⏳ Processing &amp; Saving Bill...</span>
-            ) : (
-              <span>✅ Save Bill &amp; Record Full Payment (₹{billTotal.toFixed(2)})</span>
+          <div style={{ display: 'flex', gap: '8px', flexDirection: 'column' }}>
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              style={{
+                width: '100%',
+                padding: '16px 24px',
+                fontSize: '1.15rem',
+                fontWeight: 700,
+                background: submissionIdempotencyKey ? '#b45309' : '#047857',
+                color: '#fff',
+                borderRadius: '8px',
+                cursor: isSubmitting ? 'not-allowed' : 'pointer',
+                opacity: isSubmitting ? 0.7 : 1,
+                boxShadow: submissionIdempotencyKey
+                  ? '0 4px 12px rgba(180, 83, 9, 0.25)'
+                  : '0 4px 12px rgba(4, 120, 87, 0.25)',
+                display: 'flex',
+                justifyContent: 'center',
+                alignItems: 'center',
+                gap: '10px',
+              }}
+            >
+              {isSubmitting ? (
+                <span>⏳ Processing &amp; Saving Bill...</span>
+              ) : submissionIdempotencyKey ? (
+                <span>🔄 Retry Bill Submission Safely (₹{billTotal.toFixed(2)})</span>
+              ) : (
+                <span>✅ Save Bill &amp; Record Full Payment (₹{billTotal.toFixed(2)})</span>
+              )}
+            </button>
+            {submissionIdempotencyKey && !isSubmitting && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 2px' }}>
+                <span style={{ fontSize: '0.8rem', color: '#b45309', fontWeight: 600 }}>
+                  🔒 Bill draft preserved with duplicate protection
+                </span>
+                <button
+                  type="button"
+                  onClick={resetFormDeliberately}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#64748b',
+                    fontSize: '0.82rem',
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                    padding: 0,
+                  }}
+                >
+                  Discard draft &amp; start new bill
+                </button>
+              </div>
             )}
-          </button>
+          </div>
         </form>
       </div>
 
