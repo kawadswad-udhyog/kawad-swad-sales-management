@@ -63,10 +63,17 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
 
 def _auth_row_for(user_id: str) -> Optional[dict]:
     from app.sheets import db
-    for row in db.get_records("AuthUsers"):
-        if str(row.get("user_id", "")).strip() == str(user_id).strip():
-            return row
-    return None
+    rows = db.get_records("AuthUsers")
+    matches = [
+        row for row in rows
+        if str(row.get("user_id", "")).strip() == str(user_id).strip()
+    ]
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Duplicate authentication records detected for this account. Ask the owner to resolve AuthUsers records.",
+        )
+    return matches[0] if matches else None
 
 
 async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
@@ -83,15 +90,35 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             detail="Session expired or invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    row = _auth_row_for(str(payload.get("user_id")))
-    if row is not None:
-        if str(row.get("active", "true")).lower() == "false":
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is deactivated")
-        payload = dict(payload)
-        payload["role"] = row.get("role") or payload.get("role")
-        payload["username"] = row.get("username") or payload.get("username") or payload.get("user_id")
-        payload["full_name"] = row.get("full_name") or payload.get("full_name")
-        payload["must_change_password"] = str(row.get("must_change_password", "false")).lower() == "true"
+    try:
+        row = _auth_row_for(str(payload.get("user_id")))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        message = str(exc).lower()
+        if "429" in message or "quota" in message or "rate limit" in message:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Google Sheets is temporarily rate-limiting account verification. Retry shortly; your session has not been verified.",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify your account with Google Sheets. Retry shortly.",
+        ) from exc
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This login account no longer exists. Please contact the owner.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    active_value = str(row.get("active", "true")).strip().lower()
+    if active_value in {"false", "0", "no", "inactive", "disabled"}:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is deactivated")
+    payload = dict(payload)
+    payload["role"] = row.get("role") or payload.get("role")
+    payload["username"] = row.get("username") or payload.get("username") or payload.get("user_id")
+    payload["full_name"] = row.get("full_name") or payload.get("full_name")
+    payload["must_change_password"] = str(row.get("must_change_password", "false")).strip().lower() == "true"
     return payload
 
 

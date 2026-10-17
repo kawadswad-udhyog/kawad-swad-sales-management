@@ -63,23 +63,31 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No login accounts exist yet. The owner must create the first account with the local reset/bootstrap script. Passwordless login is disabled.",
         )
-    match = None
-    for auth in auth_records:
-        if str(auth.get("username", "")).strip().lower() != username:
-            continue
-        if str(auth.get("active", "true")).lower() == "false":
-            raise HTTPException(status_code=403, detail="Account is deactivated")
-        stored = str(auth.get("password_hash", ""))
-        if password_needs_reset(stored):
-            raise HTTPException(
-                status_code=403,
-                detail="This account still has a legacy password and cannot sign in. An owner must set a new password with backend/scripts/reset_password.py.",
-            )
-        if verify_password(req.password, stored):
-            match = auth
-            break
+    # Usernames must be unique. Never select the first of multiple matching rows,
+    # because row order must not determine which account is authenticated.
+    username_matches = [
+        row for row in auth_records
+        if str(row.get("username", "")).strip().casefold() == username.casefold()
+    ]
+    if not username_matches:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    if not match:
+    if len(username_matches) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Duplicate login username detected. Ask the owner to resolve duplicate AuthUsers records before signing in.",
+        )
+
+    match = username_matches[0]
+    active_value = str(match.get("active", "true")).strip().lower()
+    if active_value in {"false", "0", "no", "inactive", "disabled"}:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+    stored = str(match.get("password_hash", ""))
+    if password_needs_reset(stored):
+        raise HTTPException(
+            status_code=403,
+            detail="This account still has a legacy password and cannot sign in. An owner must set a new password with backend/scripts/reset_password.py.",
+        )
+    if not verify_password(req.password, stored):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     # Match login credentials to exactly one staff profile using immutable user_id.
