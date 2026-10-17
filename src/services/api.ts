@@ -107,9 +107,18 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     clearTimeout(timeoutId);
 
     if (res.status === 401) {
-      setAuthToken('');
-      window.dispatchEvent(new CustomEvent('ks_auth_expired'));
-      throw new Error('Session expired or unauthorized. Please sign in again.');
+      // A failed login is a normal credential error, not an expired session.
+      // Only authenticated API requests should trigger the global logout flow.
+      const isLoginRequest = /\/(api\/)?auth\/login\/?$/i.test(path);
+      if (!isLoginRequest && token) {
+        setAuthToken('');
+        try {
+          sessionStorage.setItem('ks_auth_error', 'Your session was rejected by the backend. Please sign in again.');
+        } catch {
+          // Storage may be disabled; the event still clears the invalid session.
+        }
+        window.dispatchEvent(new CustomEvent('ks_auth_expired'));
+      }
     }
 
     const contentType = res.headers.get('content-type') || '';
