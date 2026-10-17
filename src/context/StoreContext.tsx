@@ -173,6 +173,11 @@ export interface StoreContextType {
   clearSyncError: () => void;
   refreshData: () => Promise<void>;
   isRefreshing: boolean;
+  isGoogleSheetsConnected: boolean;
+  persistentWritesEnabled: boolean;
+  connectionError: string | null;
+  checkHealth: () => Promise<void>;
+  reconnectGoogleSheets: () => Promise<{ success: boolean; message: string }>;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
@@ -216,8 +221,52 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [users, setUsers] = useState<User[]>([]);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [isGoogleSheetsConnected, setIsGoogleSheetsConnected] = useState<boolean>(true);
+  const [persistentWritesEnabled, setPersistentWritesEnabled] = useState<boolean>(true);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const clearSyncError = () => setSyncError(null);
+
+  const checkHealth = useCallback(async () => {
+    try {
+      const res = await apiRequest<{
+        status: string;
+        google_sheets_connected: boolean;
+        persistent_writes_enabled: boolean;
+        last_connection_error?: string;
+      }>('/api/health');
+      setIsBackendConnected(true);
+      setIsGoogleSheetsConnected(res.google_sheets_connected ?? true);
+      setPersistentWritesEnabled(res.persistent_writes_enabled ?? true);
+      setConnectionError(res.last_connection_error || null);
+    } catch {
+      setIsBackendConnected(false);
+      setIsGoogleSheetsConnected(false);
+      setPersistentWritesEnabled(false);
+    }
+  }, []);
+
+  const reconnectGoogleSheets = useCallback(async (): Promise<{ success: boolean; message: string }> => {
+    try {
+      const res = await apiRequest<{
+        success: boolean;
+        google_sheets_connected: boolean;
+        persistent_writes_enabled: boolean;
+        message: string;
+        error?: string;
+      }>('/api/health/reconnect', { method: 'POST' });
+      setIsGoogleSheetsConnected(res.google_sheets_connected ?? false);
+      setPersistentWritesEnabled(res.persistent_writes_enabled ?? false);
+      setConnectionError(res.error || null);
+      if (res.success) {
+        setSyncError(null);
+      }
+      return { success: res.success, message: res.message };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Reconnection failed to reach backend.';
+      return { success: false, message: msg };
+    }
+  }, []);
 
   const updateBackendUrl = (url: string) => {
     setApiBaseUrl(url);
@@ -505,12 +554,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     checkSession();
-  }, [loadInitialData]);
+    checkHealth();
+  }, [loadInitialData, checkHealth]);
 
   const refreshData = async () => {
     setIsRefreshing(true);
     try {
-      await loadInitialData();
+      await Promise.allSettled([loadInitialData(), checkHealth()]);
     } finally {
       setIsRefreshing(false);
     }
@@ -1084,6 +1134,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         clearSyncError,
         refreshData,
         isRefreshing,
+        isGoogleSheetsConnected,
+        persistentWritesEnabled,
+        connectionError,
+        checkHealth,
+        reconnectGoogleSheets,
       }}
     >
       {children}

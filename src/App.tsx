@@ -18,7 +18,18 @@ import { UsersView } from './views/UsersView';
 import { ProductionView } from './views/ProductionView';
 
 const MainAppContent: React.FC = () => {
-  const { currentUser, syncError, clearSyncError, refreshData, isLoading, isRefreshing } = useStore();
+  const {
+    currentUser,
+    syncError,
+    clearSyncError,
+    refreshData,
+    isLoading,
+    isRefreshing,
+    isGoogleSheetsConnected,
+    persistentWritesEnabled,
+    connectionError,
+    reconnectGoogleSheets,
+  } = useStore();
   const [currentView, setCurrentView] = useState<ViewType>(() => {
     if (typeof window !== 'undefined') {
       const saved = sessionStorage.getItem('ks_current_view');

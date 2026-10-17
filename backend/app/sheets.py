@@ -4,7 +4,7 @@ import logging
 import re
 import threading
 import uuid
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from app.config import (
     SALES_GOOGLE_SPREADSHEET_ID,
@@ -103,12 +103,14 @@ REQUIRED_TABS = {
 
 
 class SheetsDatabase:
-    """Google Sheets adapter with an in-memory fallback for tests."""
+    """Google Sheets adapter with persistent write enforcement and isolated testing support."""
 
     def __init__(self):
         self.client = None
         self.spreadsheet = None
         self.is_connected = False
+        self.last_connection_error: Optional[str] = None
+        self.allow_in_memory_fallback = os.getenv("SALES_TESTING", "").strip() == "1"
         self._records_cache: Dict[str, tuple] = {}
         self._records_cache_ttl_seconds = 30.0
         self._worksheets: Dict[str, Any] = {}
@@ -118,31 +120,103 @@ class SheetsDatabase:
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self.init_connection()
 
-    def init_connection(self):
+    def init_connection(self) -> bool:
+        """Attempt to connect to Google Sheets using configured service account credentials."""
+        self.is_connected = False
+        self.last_connection_error = None
+
         if not SALES_GOOGLE_SPREADSHEET_ID:
-            logger.warning("SALES_GOOGLE_SPREADSHEET_ID not provided. Using in-memory fallback.")
-            return
+            self.last_connection_error = (
+                "SALES_GOOGLE_SPREADSHEET_ID is not configured in environment. "
+                "Persistent storage cannot initialize."
+            )
+            if self.allow_in_memory_fallback:
+                logger.warning("%s Operating in-memory for testing.", self.last_connection_error)
+            else:
+                logger.error("%s Business writes are disabled to prevent data loss.", self.last_connection_error)
+            return False
+
         try:
             import gspread
             from google.oauth2.service_account import Credentials
 
-            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive.file",
+            ]
             creds = None
             if SALES_GOOGLE_SERVICE_ACCOUNT_JSON:
-                info = json.loads(SALES_GOOGLE_SERVICE_ACCOUNT_JSON)
-                creds = Credentials.from_service_account_info(info, scopes=scopes)
+                try:
+                    info = json.loads(SALES_GOOGLE_SERVICE_ACCOUNT_JSON)
+                    creds = Credentials.from_service_account_info(info, scopes=scopes)
+                except Exception as exc:
+                    self.last_connection_error = f"Invalid SALES_GOOGLE_SERVICE_ACCOUNT_JSON format: {exc}"
+                    logger.error(self.last_connection_error)
+                    return False
+
             if not creds and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE):
-                creds = Credentials.from_service_account_file(SALES_GOOGLE_SERVICE_ACCOUNT_FILE, scopes=scopes)
+                try:
+                    creds = Credentials.from_service_account_file(SALES_GOOGLE_SERVICE_ACCOUNT_FILE, scopes=scopes)
+                except Exception as exc:
+                    self.last_connection_error = f"Failed to load service account file {SALES_GOOGLE_SERVICE_ACCOUNT_FILE}: {exc}"
+                    logger.error(self.last_connection_error)
+                    return False
+
             if not creds:
-                logger.warning("No Google service account credentials found. Operating in-memory.")
-                return
+                self.last_connection_error = (
+                    "No Google service account credentials found. "
+                    "Configure SALES_GOOGLE_SERVICE_ACCOUNT_JSON or SALES_GOOGLE_SERVICE_ACCOUNT_FILE."
+                )
+                if self.allow_in_memory_fallback:
+                    logger.warning("%s Operating in-memory for testing.", self.last_connection_error)
+                else:
+                    logger.error("%s Business writes are disabled to prevent data loss.", self.last_connection_error)
+                return False
+
             self.client = gspread.authorize(creds)
             self.spreadsheet = self.client.open_by_key(SALES_GOOGLE_SPREADSHEET_ID)
             self.is_connected = True
-            logger.info("Connected to the configured Google Sheet.")
+            self.last_connection_error = None
+            logger.info("Connected to configured Google Spreadsheet.")
             self.ensure_required_tabs()
+            return True
         except Exception as exc:
-            logger.error("Failed to connect to Google Sheets: %s. Falling back to in-memory.", exc)
+            self.is_connected = False
+            self.spreadsheet = None
+            self.last_connection_error = f"Failed to connect to Google Sheets: {exc}"
+            logger.error("%s. Persistent writes disabled.", self.last_connection_error)
+            return False
+
+    def reconnect(self) -> bool:
+        """Trigger re-initialization of Google Sheets connection and clear caches."""
+        with self._lock:
+            self._worksheets.clear()
+            self._records_cache.clear()
+        return self.init_connection()
+
+    def verify_tabs_accessibility(self) -> Dict[str, Any]:
+        """Verify that every required sheet can be read and written successfully."""
+        if not (self.is_connected and self.spreadsheet):
+            return {
+                "connected": False,
+                "all_tabs_accessible": False,
+                "error": self.last_connection_error or "Google Sheets not connected",
+                "tabs": {},
+            }
+        results = {}
+        for tab in REQUIRED_TABS:
+            try:
+                ws = self._get_worksheet(tab)
+                row1 = ws.row_values(1)
+                results[tab] = {"status": "ok", "columns": len(row1)}
+            except Exception as exc:
+                results[tab] = {"status": "error", "error": str(exc)}
+        all_ok = all(r.get("status") == "ok" for r in results.values())
+        return {
+            "connected": True,
+            "all_tabs_accessible": all_ok,
+            "tabs": results,
+        }
 
     def ensure_required_tabs(self):
         """Create missing bookkeeping tabs and append missing headers. Never clears rows."""
@@ -188,14 +262,32 @@ class SheetsDatabase:
             ws = self._worksheets.get(tab_name)
         if ws is not None:
             return ws
-        ws = self.spreadsheet.worksheet(tab_name)
+        try:
+            ws = self.spreadsheet.worksheet(tab_name)
+        except Exception as exc:
+            # If worksheet is not found, automatically create it with required headers if it's in REQUIRED_TABS
+            if tab_name in REQUIRED_TABS:
+                headers = REQUIRED_TABS[tab_name]
+                logger.info("Worksheet '%s' not found. Creating worksheet with default headers.", tab_name)
+                ws = self.spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=max(26, len(headers) + 2))
+                self._ensure_headers(ws, headers)
+            else:
+                raise exc
         with self._lock:
             self._worksheets[tab_name] = ws
         return ws
 
     def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
         if not (self.is_connected and self.spreadsheet):
-            return [dict(row) for row in self.memory_store.get(tab_name, [])]
+            if self.allow_in_memory_fallback:
+                return [dict(row) for row in self.memory_store.get(tab_name, [])]
+            err_msg = (
+                f"Persistent storage is unavailable: Google Sheets is disconnected ({self.last_connection_error or 'not connected'}). "
+                f"Cannot retrieve records for '{tab_name}'."
+            )
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
+
         import time
         now = time.monotonic()
         with self._lock:
@@ -238,8 +330,8 @@ class SheetsDatabase:
                         "Google Sheets rate limit/429 for %s (attempt %d/%d): %s",
                         tab_name, attempt + 1, max_retries + 1, exc
                     )
-                    # If we have any cached data (even older than TTL), return it to preserve availability
-                    if cached and cached[1]:
+                    # ONLY serve cached data when fresh=False was requested!
+                    if not fresh and cached and cached[1]:
                         logger.info("Serving stale cached records for %s due to Google Sheets rate limit", tab_name)
                         return [dict(row) for row in cached[1]]
                     if attempt < max_retries:
@@ -259,7 +351,7 @@ class SheetsDatabase:
 
         err_str = str(last_exc).lower() if last_exc else ""
         if "429" in err_str or "quota" in err_str:
-            if cached and cached[1]:
+            if not fresh and cached and cached[1]:
                 return [dict(row) for row in cached[1]]
             logger.error("Exhausted retries on 429 quota error for %s: %s", tab_name, last_exc)
             raise RuntimeError(f"Google Sheets API quota temporarily exceeded for {tab_name}. Please retry in a few seconds.") from last_exc
@@ -296,21 +388,43 @@ class SheetsDatabase:
             except Exception as exc:
                 logger.error("Error appending to %s in Google Sheet: %s", tab_name, exc)
                 if raise_on_error:
-                    raise
+                    raise RuntimeError(f"Persistent write failed for {tab_name}: {exc}") from exc
                 return False
-        self.memory_store.setdefault(tab_name, []).append(dict(record))
-        return True
 
-    def update_record(self, tab_name: str, id_field: str, id_value: str, updates: Dict[str, Any]) -> bool:
+        # Disconnected state:
+        if self.allow_in_memory_fallback:
+            self.memory_store.setdefault(tab_name, []).append(dict(record))
+            return True
+
+        err_msg = (
+            f"Persistent storage is unavailable: Google Sheets is disconnected ({self.last_connection_error or 'not connected'}). "
+            f"Business write for '{tab_name}' was blocked to prevent data loss."
+        )
+        logger.error(err_msg)
+        if raise_on_error:
+            raise RuntimeError(err_msg)
+        return False
+
+    def update_record(self, tab_name: str, id_field: str, id_value: str, updates: Dict[str, Any], raise_on_error: bool = False) -> bool:
         self._invalidate_records_cache(tab_name)
-        found = False
-        for item in self.memory_store.get(tab_name, []):
-            if str(item.get(id_field)) == str(id_value):
-                item.update(updates)
-                found = True
-                break
         if not (self.is_connected and self.spreadsheet):
-            return found
+            if self.allow_in_memory_fallback:
+                found = False
+                for item in self.memory_store.get(tab_name, []):
+                    if str(item.get(id_field)) == str(id_value):
+                        item.update(updates)
+                        found = True
+                        break
+                return found
+            err_msg = (
+                f"Persistent storage is unavailable: Google Sheets is disconnected ({self.last_connection_error or 'not connected'}). "
+                f"Business update for '{tab_name}' record {id_value} was blocked to prevent data loss."
+            )
+            logger.error(err_msg)
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return False
+
         try:
             worksheet = self._get_worksheet(tab_name)
             records = worksheet.get_all_records()
@@ -331,10 +445,17 @@ class SheetsDatabase:
                         cells.append({"range": self._a1(col, idx, col), "values": [[value]]})
                 if cells:
                     worksheet.batch_update([{"range": c["range"], "values": c["values"]} for c in cells])
+                for item in self.memory_store.get(tab_name, []):
+                    if str(item.get(id_field)) == str(id_value):
+                        item.update(updates)
+                        break
                 return True
+            return False
         except Exception as exc:
             logger.error("Error updating record in %s: %s", tab_name, exc)
-        return False
+            if raise_on_error:
+                raise RuntimeError(f"Persistent update failed for {tab_name}: {exc}") from exc
+            return False
 
     def _max_sequence(self, tab_name: str, prefix: str) -> int:
         pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$")
