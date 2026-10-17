@@ -8,6 +8,3 @@
 6. Keep the Google Sheets `DailyClosing` and `AuditLog` headers exactly as documented.
 
 This package adds daily cash closing history and Owner/PA review. It is not a claim that physical stock reconciliation or duplicate-closing prevention is complete.
-
-## Performance update
-See `PERFORMANCE_FIX_NOTES.md` for the login, session restoration, and Google Sheets read-cache changes and their verification status. Frontend build and live Render behavior still need to be checked after upload/deployment.
