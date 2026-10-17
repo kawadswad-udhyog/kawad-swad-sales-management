@@ -109,7 +109,11 @@ async def update_customer(customer_id: str, req: CustomerCreate, current_user: d
         "map_location": (req.map_location or "").strip(),
         "notes": (req.notes or "").strip(),
     }
-    db.update_record("Customers", "customer_id", customer_id, updates)
+    existing = next((r for r in db.get_records("Customers") if str(r.get("customer_id", "")) == customer_id), None)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+    if not db.update_record("Customers", "customer_id", customer_id, updates):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Customer could not be saved. Check the Google Sheets connection and retry.")
 
     db.log_audit(
         actor=current_user.get("user_id"),
@@ -122,5 +126,6 @@ async def update_customer(customer_id: str, req: CustomerCreate, current_user: d
     return Customer(
         customer_id=customer_id,
         **updates,
-        active=True,
+        active=str(existing.get("active", "true")).lower() == "true",
+        created_at=str(existing.get("created_at", "")),
     )

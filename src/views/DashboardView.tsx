@@ -30,19 +30,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     (s) => s.sale_datetime.slice(0, 7) === currentMonthStr && s.bill_status === 'ISSUED'
   );
 
-  const todayBills = dashboardMetrics?.daily?.bills ?? todaySales.length;
-  const todayRevenue =
-    dashboardMetrics?.daily?.revenue ?? todaySales.reduce((sum, s) => sum + s.bill_total, 0);
-  const monthBills = dashboardMetrics?.monthly?.bills ?? monthSales.length;
-  const monthRevenue =
-    dashboardMetrics?.monthly?.revenue ?? monthSales.reduce((sum, s) => sum + s.bill_total, 0);
+  const todayBills = dashboardMetrics?.total_bills_today ?? todaySales.length;
+  const todayRevenue = dashboardMetrics?.today_sales ?? todaySales.reduce((sum, s) => sum + s.bill_total, 0);
+  const monthBills = monthSales.length;
+  const monthRevenue = monthSales.reduce((sum, s) => sum + s.bill_total, 0);
 
   const pendingExpensesCount =
     dashboardMetrics?.pending_expenses ??
     expenses.filter((e) => e.approval_status === 'PENDING').length;
-  const pendingClosingsCount =
-    dashboardMetrics?.pending_closings ??
-    dailyClosings.filter((c) => c.closing_status === 'SUBMITTED').length;
+  const pendingClosingsCount = dailyClosings.filter((c) => c.closing_status === 'SUBMITTED').length;
 
   if (isSalesman) {
     // Stage 7: Mobile-first field salesman workspace

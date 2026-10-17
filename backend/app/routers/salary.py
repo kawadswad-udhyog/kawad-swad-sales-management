@@ -3,7 +3,7 @@ from typing import List, Union
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import SalaryRecord, SalaryCreateRequest, SalaryApproveRequest, SalaryPayRequest
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 
 router = APIRouter(prefix="/api/salary", tags=["Salary & Incentives"])
 
@@ -38,7 +38,7 @@ async def list_salary_records(current_user: dict = Depends(get_current_user)):
     salaries.reverse()
     return salaries
 
-@router.post("", response_model=List[SalaryRecord])
+@router.post("", response_model=List[SalaryRecord], dependencies=[Depends(require_sheets_connection)])
 async def propose_salary_records(
     req: Union[SalaryCreateRequest, List[SalaryCreateRequest]],
     current_user: dict = Depends(get_current_user)
@@ -93,7 +93,7 @@ async def propose_salary_records(
 
     return created_records
 
-@router.post("/{record_id}/approve", response_model=SalaryRecord)
+@router.post("/{record_id}/approve", response_model=SalaryRecord, dependencies=[Depends(require_sheets_connection)])
 async def approve_salary_record(
     record_id: str,
     req: SalaryApproveRequest,
@@ -147,7 +147,7 @@ async def approve_salary_record(
         notes=str(matched.get("notes", "")),
     )
 
-@router.post("/{record_id}/pay", response_model=SalaryRecord)
+@router.post("/{record_id}/pay", response_model=SalaryRecord, dependencies=[Depends(require_sheets_connection)])
 async def mark_salary_paid(
     record_id: str,
     req: SalaryPayRequest,

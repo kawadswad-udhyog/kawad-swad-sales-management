@@ -5,7 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import Sale, SaleCreate, SaleItem
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
 _sales_lock = asyncio.Lock()
@@ -90,7 +90,7 @@ async def list_sales(current_user: dict = Depends(get_current_user)):
         ))
     return sales
 
-@router.post("", response_model=Sale)
+@router.post("", response_model=Sale, dependencies=[Depends(require_sheets_connection)])
 async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
     salesman_id = (req.salesman_user_id or user_id).strip()

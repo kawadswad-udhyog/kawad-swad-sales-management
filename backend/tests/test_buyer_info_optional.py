@@ -23,6 +23,8 @@ if "fastapi" not in sys.modules:
                 return lambda f: f
             def put(self, path="", **kwargs):
                 return lambda f: f
+            def patch(self, path="", **kwargs):
+                return lambda f: f
         class HTTPException(Exception):
             def __init__(self, status_code, detail=None, headers=None):
                 super().__init__(detail)

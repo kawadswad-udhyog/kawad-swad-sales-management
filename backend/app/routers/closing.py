@@ -3,7 +3,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import DailyClosing, DailyClosingCreate, ClosingReviewRequest
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 
 router = APIRouter(prefix="/api/closing", tags=["Daily Closing"])
 
@@ -39,7 +39,7 @@ async def list_daily_closings(current_user: dict = Depends(get_current_user)):
     closings.reverse()
     return closings
 
-@router.post("", response_model=DailyClosing)
+@router.post("", response_model=DailyClosing, dependencies=[Depends(require_sheets_connection)])
 async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
     today_str = date.today().isoformat()
@@ -95,7 +95,7 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
 
     return DailyClosing(**record, stock_discrepancy_flag=False)
 
-@router.post("/{closing_id}/review", response_model=DailyClosing)
+@router.post("/{closing_id}/review", response_model=DailyClosing, dependencies=[Depends(require_sheets_connection)])
 async def review_daily_closing(closing_id: str, req: ClosingReviewRequest, current_user: dict = Depends(get_current_user)):
     caller_role = current_user.get("role", "").upper()
     if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"]:

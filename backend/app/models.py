@@ -227,7 +227,7 @@ class StockIssueCreate(BaseModel):
     product_id: str
     salesman_user_id: str
     txn_type: str = "ISSUE_TO_SALESMAN"
-    quantity: int
+    quantity: int = Field(..., gt=0)
     notes: Optional[str] = ""
     reference_id: Optional[str] = ""
 

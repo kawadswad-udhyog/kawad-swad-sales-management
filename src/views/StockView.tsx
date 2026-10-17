@@ -26,7 +26,7 @@ export const StockView: React.FC = () => {
 
   const needsSalesman = ['ISSUED', 'RETURNED', 'SOLD', 'SALESMAN_ADJUSTMENT'].includes(txnType);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
@@ -36,7 +36,7 @@ export const StockView: React.FC = () => {
     }
 
     try {
-      recordStockMovement({
+      await recordStockMovement({
         txn_type: txnType,
         product_id: productId,
         salesman_user_id: needsSalesman ? salesmanId : '',

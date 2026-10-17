@@ -60,11 +60,12 @@ export interface CreateSaleInput {
 }
 
 export interface DashboardMetrics {
-  date: string;
-  daily: { bills: number; revenue: number };
-  monthly: { bills: number; revenue: number };
+  today_sales: number;
+  today_cash: number;
+  total_bills_today: number;
   pending_expenses: number;
-  pending_closings: number;
+  low_stock_items: number;
+  active_salesmen: number;
 }
 
 export interface StoreContextType {
@@ -307,6 +308,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }>('/api/auth/login', {
           method: 'POST',
           body: JSON.stringify({ username: username.trim(), password }),
+          timeoutMs: 70000,
         });
       } catch (err: unknown) {
         if (err instanceof Error && err.message.includes('404')) {
@@ -320,6 +322,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }>('/auth/login', {
             method: 'POST',
             body: JSON.stringify({ username: username.trim(), password }),
+            timeoutMs: 70000,
           });
         } else {
           throw err;
@@ -350,7 +353,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         localStorage.setItem('ks_user', JSON.stringify(newUser));
       }
       setIsBackendConnected(true);
-      await loadInitialData(userPayload.role);
+      // Do not keep the user on the login screen while every Google Sheets
+      // table is fetched. Authenticate first, then hydrate the workspace in
+      // the background so the first successful login is not mistaken for a
+      // failed login when Sheets or a sleeping Render instance is slow.
+      setSyncError('Signed in. Loading your latest workspace data…');
+      setIsRefreshing(true);
+      void loadInitialData(userPayload.role).finally(() => setIsRefreshing(false));
     } finally {
       setIsLoading(false);
     }
@@ -375,6 +384,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         salariesData,
         auditData,
         closingsData,
+        expensesData,
+        visitsData,
+        ownerData,
       ] = await Promise.all([
         apiRequest<Product[]>('/api/products').catch((err) => {
           console.error('Failed to load products:', err);
@@ -391,14 +403,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           hadSyncError = true;
           return [] as Sale[];
         }),
-        apiRequest<{ company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] }>('/api/stock/summary').catch(() => ({
-          company_stock: [],
-          salesman_stock: [],
-        })),
+        apiRequest<{ company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] }>('/api/stock/summary').catch(() => ({ company_stock: [], salesman_stock: [] })),
         apiRequest<StockTransaction[]>('/api/stock/transactions?limit=250').catch(() => []),
         apiRequest<SalaryIncentive[]>('/api/salary').catch(() => []),
         apiRequest<AuditLog[]>('/api/audit-logs').catch(() => []),
         apiRequest<DailyClosing[]>('/api/closing').catch(() => []),
+        apiRequest<Expense[]>('/api/expenses').catch(() => []),
+        apiRequest<ShopVisit[]>('/api/visits').catch(() => []),
+        (activeRole === 'OWNER' || activeRole === 'PA')
+          ? Promise.all([
+              apiRequest<DashboardMetrics>('/api/dashboard').catch(() => null),
+              apiRequest<User[]>('/api/users').catch(() => [] as User[]),
+            ]).then(([dashboard, userList]) => ({ dashboard, userList }))
+          : Promise.resolve({ dashboard: null, userList: [] as User[] }),
       ]);
 
       if (hadSyncError) {
@@ -422,23 +439,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (auditData.length > 0) setAuditLogs(auditData);
       if (closingsData.length > 0) setDailyClosings(closingsData);
 
-      // Fetch expenses (using correct endpoint /api/expenses)
-      const expensesData = await apiRequest<Expense[]>('/api/expenses').catch(() => []);
       setExpenses(expensesData);
-
-      // Fetch visits
-      const visitsData = await apiRequest<ShopVisit[]>('/api/visits').catch(() => []);
       setShopVisits(visitsData);
-
-      // If Owner/PA, load dashboard metrics and user list
-      if (activeRole === 'OWNER' || activeRole === 'PA') {
-        const [dashData, usersData] = await Promise.all([
-          apiRequest<DashboardMetrics>('/api/dashboard').catch(() => null),
-          apiRequest<User[]>('/api/users').catch(() => []),
-        ]);
-        if (dashData) setDashboardMetrics(dashData);
-        if (usersData) setUsers(usersData);
-      }
+      if (ownerData.dashboard) setDashboardMetrics(ownerData.dashboard);
+      if (ownerData.userList) setUsers(ownerData.userList);
 
       setIsBackendConnected(true);
     } catch (err) {
@@ -485,7 +489,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           localStorage.setItem('ks_user', JSON.stringify(verifiedUser));
         }
         setIsBackendConnected(true);
-        await loadInitialData(me.role);
+        // Restore the cached session immediately. Fetch live records after
+        // rendering so browser refresh does not wait on all Sheets requests.
+        setSyncError('Session restored. Loading your latest workspace data…');
+        setIsRefreshing(true);
+        void loadInitialData(me.role).finally(() => setIsRefreshing(false));
       } catch (e: unknown) {
         console.warn('Session verification warning:', e);
         const msg = e instanceof Error ? e.message.toLowerCase() : '';
@@ -589,7 +597,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const updateCustomer = async (customer_id: string, updates: Partial<Customer>) => {
-    setCustomers((prev) => prev.map((c) => (c.customer_id === customer_id ? { ...c, ...updates } : c)));
+    const existing = customers.find((c) => c.customer_id === customer_id);
+    if (!existing) throw new Error('Customer not found. Refresh the customer list and try again.');
+    const payload = { ...existing, ...updates };
+    const saved = await apiRequest<Customer>(`/api/customers/${encodeURIComponent(customer_id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    setCustomers((prev) => prev.map((c) => (c.customer_id === customer_id ? saved : c)));
     addAuditLog('UPDATE', 'Customer', customer_id, 'Updated customer details');
   };
 
@@ -705,18 +720,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const approveExpense = async (expense_id: string, reason: string = 'Approved by manager') => {
-    const updated = await apiRequest<Expense>(`/api/expenses/${encodeURIComponent(expense_id)}/approval`, {
+    const updated = await apiRequest<Expense>(`/api/expenses/${encodeURIComponent(expense_id)}/approve`, {
       method: 'POST',
-      body: JSON.stringify({ decision: 'APPROVED', reason }),
+      body: JSON.stringify({ approved: true, notes: reason }),
     });
     setExpenses((prev) => prev.map((e) => (e.expense_id === expense_id ? { ...e, ...updated } : e)));
     addAuditLog('APPROVE', 'Expense', expense_id, reason);
   };
 
   const rejectExpense = async (expense_id: string, reason: string) => {
-    const updated = await apiRequest<Expense>(`/api/expenses/${encodeURIComponent(expense_id)}/approval`, {
+    const updated = await apiRequest<Expense>(`/api/expenses/${encodeURIComponent(expense_id)}/approve`, {
       method: 'POST',
-      body: JSON.stringify({ decision: 'REJECTED', reason }),
+      body: JSON.stringify({ approved: false, notes: reason }),
     });
     setExpenses((prev) => prev.map((e) => (e.expense_id === expense_id ? { ...e, ...updated } : e)));
     addAuditLog('REJECT', 'Expense', expense_id, reason);

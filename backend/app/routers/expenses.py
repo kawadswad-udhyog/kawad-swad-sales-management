@@ -3,7 +3,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import Expense, ExpenseCreate, ExpenseApproveRequest
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
 
@@ -38,7 +38,7 @@ async def list_expenses(current_user: dict = Depends(get_current_user)):
     expenses.reverse()
     return expenses
 
-@router.post("", response_model=Expense)
+@router.post("", response_model=Expense, dependencies=[Depends(require_sheets_connection)])
 async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
     salesman_id = req.salesman_user_id or user_id
@@ -73,7 +73,7 @@ async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_cu
 
     return Expense(**record, cash_reducing_expense=False)
 
-@router.post("/{expense_id}/approve", response_model=Expense)
+@router.post("/{expense_id}/approve", response_model=Expense, dependencies=[Depends(require_sheets_connection)])
 async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_user: dict = Depends(get_current_user)):
     caller_role = current_user.get("role", "").upper()
     if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"]:

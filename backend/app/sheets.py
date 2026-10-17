@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
@@ -35,6 +36,11 @@ class SheetsDatabase:
         self.client = None
         self.spreadsheet = None
         self.is_connected = False
+        # Short-lived per-tab cache prevents dashboard and list endpoints from
+        # repeatedly reading the same Google worksheet during one refresh.
+        # All backend writes invalidate the affected tab immediately.
+        self._records_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
+        self._records_cache_ttl_seconds = 10.0
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {
             "AuthUsers": [],
             "Users": [],
@@ -91,19 +97,32 @@ class SheetsDatabase:
         except Exception as e:
             logger.error(f"Failed to connect to Google Sheets: {e}. Falling back to in-memory.")
 
+    def _invalidate_records_cache(self, tab_name: str) -> None:
+        self._records_cache.pop(tab_name, None)
+
     def get_records(self, tab_name: str) -> List[Dict[str, Any]]:
-        """Fetch all rows from a worksheet as dictionaries."""
+        """Fetch worksheet rows with a short cache for repeated dashboard reads."""
+        now = time.monotonic()
+        # Cache only live Google Sheets reads. Test and in-memory mode must
+        # always reflect direct fixture updates immediately.
         if self.is_connected and self.spreadsheet:
+            cached = self._records_cache.get(tab_name)
+            if cached and now - cached[0] < self._records_cache_ttl_seconds:
+                return [dict(row) for row in cached[1]]
             try:
                 worksheet = self.spreadsheet.worksheet(tab_name)
-                return worksheet.get_all_records()
+                records = worksheet.get_all_records()
+                safe_records = [dict(row) for row in records]
+                self._records_cache[tab_name] = (now, safe_records)
+                return [dict(row) for row in safe_records]
             except Exception as e:
                 logger.warning(f"Error reading {tab_name} from sheet: {e}")
-                return self.memory_store.get(tab_name, [])
-        return self.memory_store.get(tab_name, [])
+                return [dict(row) for row in self.memory_store.get(tab_name, [])]
+        return [dict(row) for row in self.memory_store.get(tab_name, [])]
 
     def append_record(self, tab_name: str, record: Dict[str, Any], raise_on_error: bool = False) -> bool:
         """Append a record to a worksheet. Returns True on success, False or raises on failure."""
+        self._invalidate_records_cache(tab_name)
         self.memory_store.setdefault(tab_name, []).append(record)
 
         if self.is_connected and self.spreadsheet:
@@ -125,6 +144,7 @@ class SheetsDatabase:
 
     def delete_record(self, tab_name: str, id_field: str, id_value: str) -> bool:
         """Delete a record from memory store and Google Sheets (used for rollback/recovery)."""
+        self._invalidate_records_cache(tab_name)
         found = False
         items = self.memory_store.get(tab_name, [])
         initial_len = len(items)
@@ -149,6 +169,7 @@ class SheetsDatabase:
 
     def update_record(self, tab_name: str, id_field: str, id_value: str, updates: Dict[str, Any]) -> bool:
         """Update a record in the memory store and in Google Sheets if connected."""
+        self._invalidate_records_cache(tab_name)
         found = False
         items = self.memory_store.get(tab_name, [])
         for item in items:

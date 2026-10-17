@@ -78,3 +78,13 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             headers={"WWW-Authenticate": "Bearer"},
         )
     return payload
+
+async def require_sheets_connection() -> bool:
+    """Fail closed for writes when Google Sheets is unavailable; memory-only writes are not durable."""
+    from app.sheets import db
+    if not getattr(db, "is_connected", False) or getattr(db, "spreadsheet", None) is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google Sheets is disconnected. No transaction was saved. Reconnect Sheets before retrying.",
+        )
+    return True
