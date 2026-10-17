@@ -71,6 +71,17 @@ class ProductCreate(BaseModel):
     active: bool = True
     notes: Optional[str] = ""
 
+class ProductUpdate(BaseModel):
+    sku: Optional[str] = None
+    product_name: Optional[str] = None
+    category: Optional[str] = None
+    variant: Optional[str] = None
+    pack_weight_g: Optional[int] = None
+    selling_unit: Optional[str] = None
+    retail_pack_only: Optional[bool] = None
+    active: Optional[bool] = None
+    notes: Optional[str] = None
+
 # Customer Models
 class Customer(BaseModel):
     customer_id: str

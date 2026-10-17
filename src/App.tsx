@@ -17,8 +17,36 @@ import { AuditView } from './views/AuditView';
 import { UsersView } from './views/UsersView';
 
 const MainAppContent: React.FC = () => {
-  const { currentUser, syncError, clearSyncError, refreshData } = useStore();
-  const [currentView, setCurrentView] = useState<ViewType>('dashboard');
+  const { currentUser, syncError, clearSyncError, refreshData, isLoading, isRefreshing } = useStore();
+  const [currentView, setCurrentView] = useState<ViewType>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = sessionStorage.getItem('ks_current_view');
+      if (saved) return saved as ViewType;
+    }
+    return 'dashboard';
+  });
+
+  const handleSelectView = (v: ViewType) => {
+    setCurrentView(v);
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('ks_current_view', v);
+    }
+  };
+
+  if (isLoading && !currentUser) {
+    return (
+      <div>
+        <Header />
+        <main style={{ padding: '80px 20px', textAlign: 'center', color: '#475569' }}>
+          <div style={{ fontSize: '2.5rem', marginBottom: '16px' }}>⏳</div>
+          <h2 style={{ margin: '0 0 8px', color: '#14532d' }}>Kawad Swad Udhyog</h2>
+          <p style={{ margin: 0, fontSize: '0.95rem', color: '#64748b' }}>
+            Restoring session and syncing catalogue data…
+          </p>
+        </main>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return (
@@ -34,11 +62,11 @@ const MainAppContent: React.FC = () => {
   const renderView = () => {
     switch (currentView) {
       case 'dashboard':
-        return <DashboardView onNavigate={(v) => setCurrentView(v)} />;
+        return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
       case 'products':
         return <ProductsView />;
       case 'customers':
-        return <CustomersView onNavigate={(v) => setCurrentView(v)} />;
+        return <CustomersView onNavigate={(v) => handleSelectView(v)} />;
       case 'sales':
         return <SalesView />;
       case 'stock':
@@ -58,7 +86,7 @@ const MainAppContent: React.FC = () => {
       case 'users':
         return <UsersView />;
       default:
-        return <DashboardView onNavigate={(v) => setCurrentView(v)} />;
+        return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
     }
   };
 
@@ -111,7 +139,7 @@ const MainAppContent: React.FC = () => {
         </div>
       )}
       <main>
-        <Navigation currentView={currentView} onSelectView={setCurrentView} />
+        <Navigation currentView={currentView} onSelectView={handleSelectView} />
         {renderView()}
       </main>
       <footer style={{ textAlign: 'center', padding: '30px 16px', color: '#718078', fontSize: '0.85rem' }}>

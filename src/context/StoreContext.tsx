@@ -171,13 +171,30 @@ export interface StoreContextType {
   syncError: string | null;
   clearSyncError: () => void;
   refreshData: () => Promise<void>;
+  isRefreshing: boolean;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
 
 export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('ks_user');
+        if (saved) return JSON.parse(saved);
+      } catch {
+        // ignore
+      }
+    }
+    return null;
+  });
+  const [isLoading, setIsLoading] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return !localStorage.getItem('ks_user') && !!localStorage.getItem('ks_token');
+    }
+    return false;
+  });
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [isBackendConnected, setIsBackendConnected] = useState<boolean>(false);
   const [backendUrl, setBackendUrlState] = useState<string>(getApiBaseUrl());
 
@@ -209,6 +226,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const logout = useCallback(() => {
     setAuthToken('');
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('ks_user');
+    }
     setCurrentUser(null);
   }, []);
 
@@ -313,7 +333,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         role: res.role || 'SALESMAN',
       };
 
-      setCurrentUser({
+      const newUser: User = {
         user_id: userPayload.user_id,
         full_name: userPayload.full_name || username.trim(),
         username: username.trim(),
@@ -323,7 +343,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         active: true,
         created_at: new Date().toISOString(),
         notes: '',
-      });
+      };
+
+      setCurrentUser(newUser);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('ks_user', JSON.stringify(newUser));
+      }
       setIsBackendConnected(true);
       await loadInitialData(userPayload.role);
     } finally {
@@ -382,7 +407,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setSyncError(null);
       }
 
-      setProducts(prodsData);
+      const cleanProds = (prodsData || []).map((p) => ({
+        ...p,
+        active: typeof p.active === 'string' ? (p.active as string).toLowerCase() === 'true' : Boolean(p.active),
+        retail_pack_only: typeof p.retail_pack_only === 'string' ? (p.retail_pack_only as string).toLowerCase() === 'true' : Boolean(p.retail_pack_only),
+      }));
+      setProducts(cleanProds);
       setCustomers(custsData);
       setSales(salesData);
       setCompanyStockSummary(stockSummaryData.company_stock || []);
@@ -439,7 +469,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
         }
 
-        setCurrentUser({
+        const verifiedUser: User = {
           user_id: me.user_id,
           full_name: me.full_name || me.user_id,
           username: me.user_id,
@@ -449,13 +479,28 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           active: true,
           created_at: new Date().toISOString(),
           notes: '',
-        });
+        };
+        setCurrentUser(verifiedUser);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('ks_user', JSON.stringify(verifiedUser));
+        }
         setIsBackendConnected(true);
         await loadInitialData(me.role);
-      } catch (e) {
-        console.warn('Session verification failed, user must sign in:', e);
-        setAuthToken('');
-        setCurrentUser(null);
+      } catch (e: unknown) {
+        console.warn('Session verification warning:', e);
+        const msg = e instanceof Error ? e.message.toLowerCase() : '';
+        if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('session expired')) {
+          setAuthToken('');
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('ks_user');
+          }
+          setCurrentUser(null);
+        } else {
+          // If network / Render waking up, preserve user session so page refresh doesn't log them out!
+          setIsBackendConnected(false);
+          setSyncError('Connecting to backend API... (Backend may be spinning up).');
+          loadInitialData().catch(() => {});
+        }
       } finally {
         setIsLoading(false);
       }
@@ -465,28 +510,51 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [loadInitialData]);
 
   const refreshData = async () => {
-    setIsLoading(true);
-    await loadInitialData();
-    setIsLoading(false);
+    setIsRefreshing(true);
+    try {
+      await loadInitialData();
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   // Products CRUD with backend
   const addProduct = async (prodData: Omit<Product, 'product_id'>): Promise<Product> => {
+    const payload = {
+      ...prodData,
+      active: Boolean(prodData.active),
+      retail_pack_only: Boolean(prodData.retail_pack_only),
+    };
     const saved = await apiRequest<Product>('/api/products', {
       method: 'POST',
-      body: JSON.stringify(prodData),
+      body: JSON.stringify(payload),
     });
-    setProducts((prev) => [saved, ...prev]);
-    addAuditLog('CREATE', 'Product', saved.product_id, `Created product ${saved.sku}`);
-    return saved;
+    const cleanSaved: Product = {
+      ...saved,
+      active: typeof saved.active === 'string' ? (saved.active as string).toLowerCase() === 'true' : Boolean(saved.active),
+      retail_pack_only: typeof saved.retail_pack_only === 'string' ? (saved.retail_pack_only as string).toLowerCase() === 'true' : Boolean(saved.retail_pack_only),
+    };
+    setProducts((prev) => [cleanSaved, ...prev]);
+    addAuditLog('CREATE', 'Product', cleanSaved.product_id, `Created product ${cleanSaved.sku}`);
+    return cleanSaved;
   };
 
   const updateProduct = async (product_id: string, updates: Partial<Product>) => {
+    const payload = {
+      ...updates,
+      active: updates.active !== undefined ? Boolean(updates.active) : undefined,
+      retail_pack_only: updates.retail_pack_only !== undefined ? Boolean(updates.retail_pack_only) : undefined,
+    };
     const updated = await apiRequest<Product>(`/api/products/${encodeURIComponent(product_id)}`, {
       method: 'PATCH',
-      body: JSON.stringify(updates),
+      body: JSON.stringify(payload),
     });
-    setProducts((prev) => prev.map((p) => (p.product_id === product_id ? { ...p, ...updated } : p)));
+    const cleanUpdated: Product = {
+      ...updated,
+      active: typeof updated.active === 'string' ? (updated.active as string).toLowerCase() === 'true' : Boolean(updated.active),
+      retail_pack_only: typeof updated.retail_pack_only === 'string' ? (updated.retail_pack_only as string).toLowerCase() === 'true' : Boolean(updated.retail_pack_only),
+    };
+    setProducts((prev) => prev.map((p) => (p.product_id === product_id ? { ...p, ...cleanUpdated } : p)));
     addAuditLog('UPDATE', 'Product', product_id, 'Updated product details');
   };
 
@@ -494,7 +562,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const p = products.find((x) => x.product_id === product_id);
     if (!p) return;
     const nextState = !p.active;
-    await updateProduct(product_id, { active: nextState });
+    // Optimistic toggle in local state for instant UI response
+    setProducts((prev) =>
+      prev.map((item) => (item.product_id === product_id ? { ...item, active: nextState } : item))
+    );
+    try {
+      await updateProduct(product_id, { active: nextState });
+    } catch (err) {
+      // Revert if API fails
+      setProducts((prev) =>
+        prev.map((item) => (item.product_id === product_id ? { ...item, active: p.active } : item))
+      );
+      throw err;
+    }
   };
 
   // Customers CRUD with backend
@@ -1011,6 +1091,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         syncError,
         clearSyncError,
         refreshData,
+        isRefreshing,
       }}
     >
       {children}

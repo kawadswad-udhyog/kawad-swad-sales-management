@@ -13,6 +13,8 @@ export const ProductsView: React.FC = () => {
     currentUser,
     companyStockSummary,
     salesmanStockSummary,
+    refreshData,
+    isRefreshing,
   } = useStore();
 
   const isManager = currentUser?.role === 'OWNER' || currentUser?.role === 'PA';
@@ -20,6 +22,7 @@ export const ProductsView: React.FC = () => {
   const [filter, setFilter] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
 
@@ -67,33 +70,14 @@ export const ProductsView: React.FC = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
     try {
       if (editingId) {
         // Update product (SKU is immutable)
-        updateProduct(editingId, {
-          product_name: productName.trim(),
-          category,
-          variant: variant.trim(),
-          pack_weight_g: Number(packWeightG),
-          selling_unit: sellingUnit,
-          retail_pack_only: retailPackOnly,
-          active,
-          notes: notes.trim(),
-        });
-        setNotice({ msg: 'Product updated successfully.' });
-        resetForm();
-      } else {
-        // Check SKU uniqueness
-        if (products.some((p) => p.sku.toLowerCase() === sku.trim().toLowerCase())) {
-          setNotice({ msg: 'A product with this SKU already exists.', error: true });
-          return;
-        }
-
-        addProduct({
+        await updateProduct(editingId, {
           sku: sku.trim().toUpperCase(),
           product_name: productName.trim(),
           category,
@@ -104,7 +88,27 @@ export const ProductsView: React.FC = () => {
           active,
           notes: notes.trim(),
         });
-        setNotice({ msg: 'Product added to catalogue successfully.' });
+        setNotice({ msg: `✅ Product "${productName.trim()}" updated successfully.` });
+        resetForm();
+      } else {
+        // Check SKU uniqueness
+        if (products.some((p) => p.sku.toLowerCase() === sku.trim().toLowerCase())) {
+          setNotice({ msg: 'A product with this SKU already exists.', error: true });
+          return;
+        }
+
+        await addProduct({
+          sku: sku.trim().toUpperCase(),
+          product_name: productName.trim(),
+          category,
+          variant: variant.trim(),
+          pack_weight_g: Number(packWeightG),
+          selling_unit: sellingUnit,
+          retail_pack_only: retailPackOnly,
+          active,
+          notes: notes.trim(),
+        });
+        setNotice({ msg: `✅ Product "${productName.trim()}" added to catalogue successfully.` });
         resetForm();
       }
     } catch (err: unknown) {
@@ -113,11 +117,21 @@ export const ProductsView: React.FC = () => {
     }
   };
 
-  const handleToggleActive = (p: Product) => {
-    const action = p.active ? 'Deactivate' : 'Activate';
-    if (window.confirm(`${action} ${p.product_name}?`)) {
-      toggleProductActive(p.product_id);
-      setNotice({ msg: `Product status updated.` });
+  const handleToggleActive = async (p: Product) => {
+    setUpdatingId(p.product_id);
+    setNotice(null);
+    try {
+      const nextState = !p.active;
+      await toggleProductActive(p.product_id);
+      setNotice({
+        msg: `✅ "${p.product_name}" is now ${nextState ? 'ACTIVE (visible in Sales & Billing)' : 'INACTIVE (hidden from Sales)'}.`,
+        error: false,
+      });
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to toggle product status';
+      setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setUpdatingId(null);
     }
   };
 
@@ -166,31 +180,44 @@ export const ProductsView: React.FC = () => {
             Fast SKU and pack search · Inventory visibility · Clean pagination
           </p>
         </div>
-        {isManager && (
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button
             type="button"
-            onClick={() => {
-              if (isFormOpen && !editingId) {
-                setIsFormOpen(false);
-              } else {
-                resetForm();
-                setIsFormOpen(true);
-              }
-            }}
-            style={{
-              background: isFormOpen ? '#475569' : '#047857',
-              color: '#fff',
-              padding: '8px 16px',
-              borderRadius: '6px',
-              fontSize: '0.88rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-            }}
+            className="secondary"
+            onClick={refreshData}
+            disabled={isRefreshing}
+            style={{ padding: '8px 14px', fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+            title="Reload products from backend database"
           >
-            <span>{isFormOpen ? '✕ Close Form' : '➕ Add New Product'}</span>
+            <span>{isRefreshing ? '⏳' : '↻'}</span>
+            <span>{isRefreshing ? 'Refreshing…' : 'Refresh'}</span>
           </button>
-        )}
+          {isManager && (
+            <button
+              type="button"
+              onClick={() => {
+                if (isFormOpen && !editingId) {
+                  setIsFormOpen(false);
+                } else {
+                  resetForm();
+                  setIsFormOpen(true);
+                }
+              }}
+              style={{
+                background: isFormOpen ? '#475569' : '#047857',
+                color: '#fff',
+                padding: '8px 16px',
+                borderRadius: '6px',
+                fontSize: '0.88rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+            >
+              <span>{isFormOpen ? '✕ Close Form' : '➕ Add New Product'}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {notice && (
@@ -467,11 +494,21 @@ export const ProductsView: React.FC = () => {
                                 Edit
                               </button>
                               <button
-                                className="secondary"
+                                type="button"
                                 onClick={() => handleToggleActive(p)}
-                                style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                                disabled={updatingId === p.product_id}
+                                style={{
+                                  padding: '4px 10px',
+                                  fontSize: '0.8rem',
+                                  borderRadius: '4px',
+                                  fontWeight: 600,
+                                  cursor: updatingId === p.product_id ? 'not-allowed' : 'pointer',
+                                  background: p.active ? '#fef2f2' : '#ecfdf5',
+                                  color: p.active ? '#991b1b' : '#065f46',
+                                  border: p.active ? '1px solid #fecaca' : '1px solid #a7f3d0',
+                                }}
                               >
-                                {p.active ? 'Deactivate' : 'Activate'}
+                                {updatingId === p.product_id ? 'Saving…' : p.active ? '✕ Deactivate' : '✓ Activate'}
                               </button>
                             </div>
                           </td>

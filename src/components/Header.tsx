@@ -3,7 +3,7 @@ import { useStore } from '../context/StoreContext';
 import { UserRole } from '../types';
 
 export const Header: React.FC = () => {
-  const { currentUser, logout, backendUrl, updateBackendUrl, isBackendConnected, refreshData } = useStore();
+  const { currentUser, logout, backendUrl, updateBackendUrl, isBackendConnected, refreshData, isRefreshing } = useStore();
   const [showConfig, setShowConfig] = useState(false);
   const [tempUrl, setTempUrl] = useState(backendUrl);
 
@@ -87,11 +87,18 @@ export const Header: React.FC = () => {
 
               <button
                 onClick={refreshData}
+                disabled={isRefreshing}
                 className="secondary"
                 title="Sync records from Google Sheets / FastAPI backend"
-                style={{ fontSize: '0.8rem', padding: '6px 10px', background: 'rgba(255,255,255,0.15)', color: '#fff' }}
+                style={{
+                  fontSize: '0.8rem',
+                  padding: '6px 12px',
+                  background: isRefreshing ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.15)',
+                  color: '#fff',
+                  cursor: isRefreshing ? 'not-allowed' : 'pointer',
+                }}
               >
-                ↻ Refresh
+                {isRefreshing ? '⏳ Syncing…' : '↻ Refresh'}
               </button>
 
               <button onClick={logout} className="secondary" style={{ padding: '6px 14px' }}>

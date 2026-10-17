@@ -152,7 +152,13 @@ class SheetsDatabase:
         found = False
         items = self.memory_store.get(tab_name, [])
         for item in items:
-            if str(item.get(id_field)) == str(id_value):
+            val = item.get(id_field)
+            if val is None:
+                for ik, iv in item.items():
+                    if str(ik).strip().lower() == str(id_field).strip().lower():
+                        val = iv
+                        break
+            if str(val) == str(id_value):
                 item.update(updates)
                 found = True
                 break
@@ -161,12 +167,20 @@ class SheetsDatabase:
             try:
                 worksheet = self.spreadsheet.worksheet(tab_name)
                 records = worksheet.get_all_records()
+                headers = worksheet.row_values(1)
+                header_map = {str(h).strip().lower(): i + 1 for i, h in enumerate(headers)}
                 for idx, r in enumerate(records, start=2):
-                    if str(r.get(id_field)) == str(id_value):
-                        headers = worksheet.row_values(1)
+                    val = r.get(id_field)
+                    if val is None:
+                        for ik, iv in r.items():
+                            if str(ik).strip().lower() == str(id_field).strip().lower():
+                                val = iv
+                                break
+                    if str(val) == str(id_value):
                         for k, v in updates.items():
-                            if k in headers:
-                                col_idx = headers.index(k) + 1
+                            k_lower = str(k).strip().lower()
+                            if k_lower in header_map:
+                                col_idx = header_map[k_lower]
                                 worksheet.update_cell(idx, col_idx, v)
                         return True
             except Exception as e:
