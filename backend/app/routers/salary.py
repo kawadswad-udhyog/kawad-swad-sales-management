@@ -119,7 +119,7 @@ async def approve_salary_record(
     if req.notes:
         updates["notes"] = req.notes
 
-    if not db.update_record("SalaryIncentives", "record_id", record_id, updates):
+    if not db.update_record("SalaryIncentives", "record_id", record_id, updates, raise_on_error=True):
         raise HTTPException(status_code=503, detail="Salary approval was not saved.")
     matched.update(updates)
 
@@ -173,7 +173,7 @@ async def mark_salary_paid(
     if req.notes:
         updates["notes"] = req.notes
 
-    if not db.update_record("SalaryIncentives", "record_id", record_id, updates):
+    if not db.update_record("SalaryIncentives", "record_id", record_id, updates, raise_on_error=True):
         raise HTTPException(status_code=503, detail="Salary payment was not saved.")
     matched.update(updates)
 

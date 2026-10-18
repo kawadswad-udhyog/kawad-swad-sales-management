@@ -114,7 +114,7 @@ async def change_password(req: ChangePasswordRequest, current_user: dict = Depen
     updated = db.update_record("AuthUsers", "user_id", user_id, {
         "password_hash": hash_password(req.new_password),
         "must_change_password": "false",
-    })
+    }, raise_on_error=True)
     if not updated:
         raise HTTPException(status_code=503, detail="Password was not saved. Try again.")
     db.log_audit(user_id, "CHANGE_PASSWORD", "AuthUsers", user_id, reason="User changed password")

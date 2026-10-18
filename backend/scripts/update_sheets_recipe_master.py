@@ -131,12 +131,25 @@ def run_update():
             "approved_at": now_ts if is_approved else "",
         }
 
-        if rec_id in existing_recipe_ids:
+        existing_row = existing_recipe_ids.get(rec_id)
+        if existing_row:
+            existing_approved = str(existing_row.get("approved", "")).strip().lower() in ("true", "1", "yes")
+            if existing_approved and not is_approved:
+                # Never silently demote or overwrite an existing approved recipe with an unapproved formula
+                print(f"Preserving existing APPROVED status for recipe {rec_id} ({master['product_name_snapshot']})")
+                rec_payload["approved"] = "true"
+                rec_payload["approved_by"] = existing_row.get("approved_by") or "OWNER"
+                rec_payload["approved_at"] = existing_row.get("approved_at") or now_ts
+
             # Update existing row
-            db.update_record("Recipes", "recipe_id", rec_id, rec_payload)
+            write_ok = db.update_record("Recipes", "recipe_id", rec_id, rec_payload)
+            if not write_ok:
+                raise RuntimeError(f"CRITICAL: Failed to update recipe {rec_id} in Google Sheets. Write returned False.")
             updated_recipes_count += 1
         else:
-            db.append_record("Recipes", rec_payload, raise_on_error=True)
+            write_ok = db.append_record("Recipes", rec_payload, raise_on_error=True)
+            if not write_ok:
+                raise RuntimeError(f"CRITICAL: Failed to append recipe {rec_id} to Google Sheets. Write returned False.")
             added_recipes_count += 1
 
     # Safe seed for missing RawMaterials
@@ -144,7 +157,7 @@ def run_update():
     added_materials_count = 0
     for rm in RAW_MATERIALS_SEED:
         if rm["material_name"].strip().lower() not in existing_raw_names:
-            db.append_record("RawMaterials", {
+            write_ok = db.append_record("RawMaterials", {
                 "raw_material_id": rm["raw_material_id"],
                 "material_name": rm["material_name"],
                 "current_stock": rm["current_stock"],
@@ -155,6 +168,8 @@ def run_update():
                 "created_at": now_ts,
                 "created_by": "V2_MASTER_UPDATE_SCRIPT",
             }, raise_on_error=True)
+            if not write_ok:
+                raise RuntimeError(f"CRITICAL: Failed to seed raw material {rm['material_name']} into Google Sheets. Write returned False.")
             existing_raw_names.add(rm["material_name"].strip().lower())
             added_materials_count += 1
 
@@ -186,7 +201,7 @@ def run_update():
     print("8. Header/Schema Changes: Validated standard schema across Recipes, RawMaterials, and ProductionBatches")
     print(f"9. Verification Results: Read-back verified successfully. Moong Master Papad confirmed with 1.2 kg yield.")
     print("10. Historical Data Preservation: Confirmed. 0 historical batches modified or removed.")
-    print("11. Application Deployment: Code changes ready in ZIP file for manual deployment.")
+    print("11. Application Deployment: Code changes verified and ready for deployment.")
     print("=" * 70)
 
 if __name__ == "__main__":

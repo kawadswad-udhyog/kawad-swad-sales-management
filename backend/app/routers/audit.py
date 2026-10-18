@@ -62,5 +62,6 @@ async def create_audit_log(
         "approved_by_user_id": actor,
         "related_record_id": req.related_record_id or req.entity_id,
     }
-    db.append_record("AuditLog", record)
+    if not db.append_record("AuditLog", record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="Audit log entry could not be saved to persistent storage.")
     return AuditLogItem(**record)

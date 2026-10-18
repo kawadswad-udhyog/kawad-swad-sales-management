@@ -60,7 +60,8 @@ async def create_customer(req: CustomerCreate, current_user: dict = Depends(get_
         "created_at": now_iso,
         "notes": (req.notes or "").strip(),
     }
-    db.append_record("Customers", record)
+    if not db.append_record("Customers", record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="Could not save customer to persistent storage.")
 
     db.log_audit(
         actor=current_user.get("user_id"),
@@ -112,7 +113,7 @@ async def update_customer(customer_id: str, req: CustomerCreate, current_user: d
     existing = next((r for r in db.get_records("Customers") if str(r.get("customer_id", "")) == customer_id), None)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
-    if not db.update_record("Customers", "customer_id", customer_id, updates):
+    if not db.update_record("Customers", "customer_id", customer_id, updates, raise_on_error=True):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Customer could not be saved. Check the Google Sheets connection and retry.")
 
     db.log_audit(

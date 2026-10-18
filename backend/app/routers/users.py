@@ -101,7 +101,7 @@ async def reset_password(user_id: str, req: PasswordResetRequest, current_user: 
         "password_hash": hash_password(req.new_password),
         "must_change_password": "true",
         "active": "true",
-    }):
+    }, raise_on_error=True):
         raise HTTPException(status_code=404, detail="Login account was not found or the sheet update failed.")
     db.log_audit(current_user.get("user_id"), "RESET_PASSWORD", "AuthUsers", user_id, reason="Owner reset a password")
     return {"ok": True, "must_change_password": True}

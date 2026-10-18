@@ -66,7 +66,8 @@ async def create_product(req: ProductCreate, current_user: dict = Depends(get_cu
         "active": "true" if req.active else "false",
         "notes": req.notes or "",
     }
-    db.append_record("Products", record)
+    if not db.append_record("Products", record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="Could not save product to persistent storage.")
 
     db.log_audit(
         actor=current_user.get("user_id"),
@@ -122,7 +123,8 @@ async def update_product(product_id: str, req: ProductUpdate, current_user: dict
         updates["notes"] = req.notes.strip()
 
     if updates:
-        db.update_record("Products", "product_id", product_id, updates)
+        if not db.update_record("Products", "product_id", product_id, updates, raise_on_error=True):
+            raise HTTPException(status_code=503, detail="Could not update product in persistent storage.")
 
     merged = {**existing, **updates}
     p_name = merged.get("product_name") or product_id

@@ -117,26 +117,6 @@ export const Header: React.FC = () => {
                 {isRefreshing ? '⏳ Syncing…' : '↻ Refresh'}
               </button>
 
-              <a
-                href="/kawad-swad-sales-management-updated.zip"
-                download="kawad-swad-sales-management-updated.zip"
-                className="secondary"
-                title="Download complete updated project ZIP"
-                style={{
-                  fontSize: '0.8rem',
-                  padding: '6px 12px',
-                  background: 'rgba(255,255,255,0.2)',
-                  color: '#fff',
-                  textDecoration: 'none',
-                  borderRadius: '6px',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                }}
-              >
-                📥 Download ZIP
-              </a>
-
               <button onClick={logout} className="secondary" style={{ padding: '6px 14px' }}>
                 Sign out
               </button>

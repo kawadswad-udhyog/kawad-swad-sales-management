@@ -53,7 +53,8 @@ async def log_shop_visit(req: ShopVisitCreate, current_user: dict = Depends(get_
         "created_at": now_iso,
         "notes": req.notes or "",
     }
-    db.append_record("ShopVisits", record)
+    if not db.append_record("ShopVisits", record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="The shop visit was not saved.")
 
     db.log_audit(
         actor=user_id,
