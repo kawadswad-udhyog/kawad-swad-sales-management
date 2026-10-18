@@ -104,8 +104,11 @@ const MainAppContent: React.FC = () => {
     }
   };
 
+  const [isReconnecting, setIsReconnecting] = useState(false);
+
   return (
     <div>
+      <Header />
       {(!isGoogleSheetsConnected || !persistentWritesEnabled) && (
         <div style={{
           background: '#450a0a',
@@ -127,24 +130,30 @@ const MainAppContent: React.FC = () => {
             </div>
           </div>
           <button
+            disabled={isReconnecting}
             onClick={async () => {
-              const res = await reconnectGoogleSheets();
-              if (res.success) {
-                await refreshData();
+              setIsReconnecting(true);
+              try {
+                const res = await reconnectGoogleSheets();
+                if (res.success) {
+                  await refreshData();
+                }
+              } finally {
+                setIsReconnecting(false);
               }
             }}
             style={{
               padding: '6px 14px',
               fontSize: '0.80rem',
               fontWeight: 700,
-              background: '#ef4444',
+              background: isReconnecting ? '#991b1b' : '#ef4444',
               color: '#fff',
               border: 'none',
               borderRadius: '6px',
-              cursor: 'pointer'
+              cursor: isReconnecting ? 'not-allowed' : 'pointer'
             }}
           >
-            🔄 Reconnect Google Sheets
+            {isReconnecting ? '⏳ Reconnecting…' : '🔄 Reconnect Google Sheets'}
           </button>
         </div>
       )}

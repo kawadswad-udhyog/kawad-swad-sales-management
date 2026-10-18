@@ -69,11 +69,13 @@ export const UsersView: React.FC = () => {
 
       <div className="card">
         <h2>Register new team member</h2>
-        <form className="inline" onSubmit={handleSubmit}>
+        <form className="inline" onSubmit={handleSubmit} autoComplete="off">
           <label>
             Full name
             <input
               required
+              name="new_user_fullname"
+              autoComplete="off"
               placeholder="e.g. Anand Sharma"
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
@@ -84,6 +86,8 @@ export const UsersView: React.FC = () => {
             Username
             <input
               required
+              name="new_member_username_val"
+              autoComplete="off"
               placeholder="e.g. anand"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
@@ -103,6 +107,8 @@ export const UsersView: React.FC = () => {
             Mobile
             <input
               type="tel"
+              name="new_member_mobile_val"
+              autoComplete="off"
               placeholder="10-digit mobile"
               value={mobile}
               onChange={(e) => setMobile(e.target.value)}
@@ -113,6 +119,8 @@ export const UsersView: React.FC = () => {
             Email
             <input
               type="email"
+              name="new_member_email_val"
+              autoComplete="off"
               placeholder="name@kawadswad.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -123,7 +131,10 @@ export const UsersView: React.FC = () => {
             Temporary password
             <input
               type="password"
+              name="new_member_password_val"
+              autoComplete="new-password"
               required
+              placeholder="••••••••••••"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />

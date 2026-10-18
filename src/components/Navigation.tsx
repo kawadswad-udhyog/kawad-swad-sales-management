@@ -22,7 +22,7 @@ interface NavigationProps {
 }
 
 export const Navigation: React.FC<NavigationProps> = ({ currentView, onSelectView }) => {
-  const { currentUser } = useStore();
+  const { currentUser, logout } = useStore();
   const role = currentUser?.role;
 
   const navItems: { view: ViewType; label: string; roles: string[] }[] = [
@@ -44,7 +44,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentView, onSelectVie
   const visibleItems = navItems.filter((item) => role && item.roles.includes(role));
 
   return (
-    <nav className="nav-bar">
+    <nav className="nav-bar" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
       {visibleItems.map((item) => (
         <button
           key={item.view}
@@ -54,6 +54,28 @@ export const Navigation: React.FC<NavigationProps> = ({ currentView, onSelectVie
           {item.label}
         </button>
       ))}
+
+      {currentUser && (
+        <button
+          type="button"
+          onClick={logout}
+          style={{
+            marginLeft: 'auto',
+            background: '#fee2e2',
+            border: '1px solid #fca5a5',
+            color: '#b91c1c',
+            fontWeight: 700,
+            cursor: 'pointer',
+            padding: '6px 14px',
+            borderRadius: '6px',
+            fontSize: '0.80rem',
+            whiteSpace: 'nowrap'
+          }}
+          title="Sign out of current account"
+        >
+          Sign Out ({currentUser.username || currentUser.user_id})
+        </button>
+      )}
     </nav>
   );
 };

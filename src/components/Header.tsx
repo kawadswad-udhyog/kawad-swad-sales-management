@@ -117,7 +117,19 @@ export const Header: React.FC = () => {
                 {isRefreshing ? '⏳ Syncing…' : '↻ Refresh'}
               </button>
 
-              <button onClick={logout} className="secondary" style={{ padding: '6px 14px' }}>
+              <button
+                onClick={logout}
+                className="secondary"
+                style={{
+                  padding: '6px 14px',
+                  background: 'rgba(239, 68, 68, 0.25)',
+                  border: '1px solid rgba(239, 68, 68, 0.5)',
+                  color: '#fff',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+                title="Sign out of current account"
+              >
                 Sign out
               </button>
             </>

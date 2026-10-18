@@ -170,10 +170,13 @@ class SheetsDatabase:
         self._inflight: Dict[str, threading.Event] = {}
         self._fail_once: Dict[str, int] = {}
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        self._last_conn_attempt_time: float = 0.0
         self.init_connection()
 
     def init_connection(self) -> bool:
         """Attempt to connect to Google Sheets using configured service account credentials."""
+        import time
+        self._last_conn_attempt_time = time.monotonic()
         self.is_connected = False
         self.last_connection_error = None
 
@@ -274,13 +277,24 @@ class SheetsDatabase:
         """Create missing bookkeeping tabs and append missing headers. Never clears rows."""
         if not (self.is_connected and self.spreadsheet):
             return
+        try:
+            # Single API call to retrieve all existing worksheets at once
+            existing_ws = {ws.title: ws for ws in self.spreadsheet.worksheets()}
+            with self._lock:
+                for title, ws in existing_ws.items():
+                    self._worksheets[title] = ws
+        except Exception as exc:
+            logger.warning("Could not list worksheets in bulk: %s", exc)
+            existing_ws = {}
+
         for tab, headers in REQUIRED_TABS.items():
             try:
-                try:
-                    worksheet = self.spreadsheet.worksheet(tab)
-                except Exception:
+                worksheet = existing_ws.get(tab)
+                if worksheet is None:
                     worksheet = self.spreadsheet.add_worksheet(title=tab, rows=1000, cols=max(26, len(headers) + 2))
-                self._ensure_headers(worksheet, headers)
+                    worksheet.update("A1", [headers])
+                    with self._lock:
+                        self._worksheets[tab] = worksheet
             except Exception as exc:
                 logger.error("Could not ensure tab %s: %s", tab, exc)
 
@@ -330,6 +344,15 @@ class SheetsDatabase:
         return ws
 
     def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
+        import time
+        now = time.monotonic()
+
+        # If disconnected but configured, attempt lazy self-healing reconnect after a cooldown
+        if not (self.is_connected and self.spreadsheet) and SALES_GOOGLE_SPREADSHEET_ID:
+            if not self.allow_in_memory_fallback and (now - self._last_conn_attempt_time > 15.0):
+                logger.info("Attempting automatic reconnection to Google Sheets for '%s'...", tab_name)
+                self.init_connection()
+
         if not (self.is_connected and self.spreadsheet):
             if self.allow_in_memory_fallback:
                 return [dict(row) for row in self.memory_store.get(tab_name, [])]
