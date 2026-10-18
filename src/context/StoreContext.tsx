@@ -66,6 +66,15 @@ export interface DashboardMetrics {
   pending_expenses: number;
   low_stock_items: number;
   active_salesmen: number;
+  monthly_sales?: number;
+  today_kg_sold?: number;
+  monthly_kg_sold?: number;
+  digital_collections_today?: number;
+  incomplete_transactions_count?: number;
+  pending_discrepancies?: number;
+  pending_production_approvals?: number;
+  role?: string;
+  salesman_user_id?: string | null;
 }
 
 export interface StoreContextType {
@@ -104,6 +113,7 @@ export interface StoreContextType {
   payments: Payment[];
   createSale: (input: CreateSaleInput) => Promise<{ sale: Sale; paymentId?: string }>;
   getSaleWithItems: (sale_id: string) => { sale: Sale; items: SaleItem[] } | null;
+  cancelSale: (sale_id: string, reason: string) => Promise<void>;
 
   stockTransactions: StockTransaction[];
   recordStockMovement: (input: {
@@ -115,6 +125,15 @@ export interface StoreContextType {
   }) => Promise<void>;
   companyStockSummary: CompanyStockItem[];
   salesmanStockSummary: SalesmanStockItem[];
+  stockDiscrepancies: any[];
+  submitStockDiscrepancy: (input: {
+    location: string;
+    product_id: string;
+    expected_stock: number;
+    physical_count: number;
+    reason: string;
+  }) => Promise<void>;
+  reviewStockDiscrepancy: (discrepancy_id: string, action: 'APPROVE' | 'REJECT', notes?: string) => Promise<void>;
 
   expenses: Expense[];
   submitExpense: (input: {
@@ -220,6 +239,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
+  const [stockDiscrepancies, setStockDiscrepancies] = useState<any[]>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [isGoogleSheetsConnected, setIsGoogleSheetsConnected] = useState<boolean>(true);
   const [persistentWritesEnabled, setPersistentWritesEnabled] = useState<boolean>(true);
@@ -275,12 +295,25 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const logout = useCallback(() => {
+    apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
     setAuthToken('');
     if (typeof window !== 'undefined') {
       localStorage.removeItem('ks_user');
+      localStorage.removeItem('ks_token');
     }
     setCurrentUser(null);
   }, []);
+
+  // Multi-tab logout synchronization
+  useEffect(() => {
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'ks_token' && !e.newValue) {
+        logout();
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, [logout]);
 
   useEffect(() => {
     const handleAuthExpired = () => {
@@ -477,6 +510,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setSalaryIncentives(salariesData);
       setAuditLogs(auditData);
       setDailyClosings(closingsData);
+      const discData = await apiRequest<any[]>('/api/stock/discrepancies').catch(() => []);
+      setStockDiscrepancies(discData || []);
 
       setExpenses(expensesData);
       setShopVisits(visitsData);
@@ -740,6 +775,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return { sale, items: items.length > 0 ? items : (sale.lines || sale.items || []) };
   };
 
+  const cancelSale = async (sale_id: string, reason: string): Promise<void> => {
+    setIsLoading(true);
+    try {
+      await apiRequest(`/api/sales/${encodeURIComponent(sale_id)}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      });
+      await refreshData();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Stock movement connected to FastAPI backend
   const recordStockMovement = async (input: {
     txn_type: StockTxnType;
@@ -777,6 +825,42 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     addAuditLog('CREATE', 'StockTransaction', saved.stock_txn_id, `Movement: ${input.txn_type}`);
+  };
+
+  const submitStockDiscrepancy = async (input: {
+    location: string;
+    product_id: string;
+    expected_stock: number;
+    physical_count: number;
+    reason: string;
+  }): Promise<void> => {
+    setIsLoading(true);
+    try {
+      await apiRequest('/api/stock/discrepancies', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      await refreshData();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const reviewStockDiscrepancy = async (
+    discrepancy_id: string,
+    action: 'APPROVE' | 'REJECT',
+    notes?: string
+  ): Promise<void> => {
+    setIsLoading(true);
+    try {
+      await apiRequest(`/api/stock/discrepancies/${encodeURIComponent(discrepancy_id)}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ action, notes: notes || '' }),
+      });
+      await refreshData();
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Expenses connected to FastAPI backend
@@ -1110,10 +1194,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         payments,
         createSale,
         getSaleWithItems,
+        cancelSale,
         stockTransactions,
         recordStockMovement,
         companyStockSummary,
         salesmanStockSummary,
+        stockDiscrepancies,
+        submitStockDiscrepancy,
+        reviewStockDiscrepancy,
         expenses,
         submitExpense,
         approveExpense,

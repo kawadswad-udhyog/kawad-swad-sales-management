@@ -11,6 +11,9 @@ export const StockView: React.FC = () => {
     salesmanStockSummary,
     stockTransactions,
     recordStockMovement,
+    stockDiscrepancies,
+    submitStockDiscrepancy,
+    reviewStockDiscrepancy,
   } = useStore();
 
   const isManager = currentUser?.role === 'OWNER' || currentUser?.role === 'PA';
@@ -23,6 +26,13 @@ export const StockView: React.FC = () => {
   const [quantity, setQuantity] = useState<number>(10);
   const [notes, setNotes] = useState('');
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+
+  // Stock Discrepancy Form State
+  const [discLocation, setDiscLocation] = useState('COMPANY_WAREHOUSE');
+  const [discProductId, setDiscProductId] = useState(activeProducts[0]?.product_id || '');
+  const [discExpected, setDiscExpected] = useState<number>(0);
+  const [discPhysical, setDiscPhysical] = useState<number>(0);
+  const [discReason, setDiscReason] = useState('');
 
   const needsSalesman = ['ISSUED', 'RETURNED', 'SOLD', 'SALESMAN_ADJUSTMENT'].includes(txnType);
 
@@ -49,6 +59,39 @@ export const StockView: React.FC = () => {
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to record stock movement';
       setNotice({ msg: errorMsg, error: true });
+    }
+  };
+
+  const handleDiscrepancySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNotice(null);
+    if (!discProductId) {
+      setNotice({ msg: 'Select a product for audit discrepancy check.', error: true });
+      return;
+    }
+    try {
+      await submitStockDiscrepancy({
+        location: discLocation,
+        product_id: discProductId,
+        expected_stock: Number(discExpected),
+        physical_count: Number(discPhysical),
+        reason: discReason.trim() || 'Physical stock audit reconciliation',
+      });
+      setNotice({ msg: 'Stock physical count submitted for review. Unexplained differences are preserved for verification and not treated as automatic losses.' });
+      setDiscReason('');
+    } catch (err: unknown) {
+      const errStr = err instanceof Error ? err.message : String(err);
+      setNotice({ msg: `Failed to submit discrepancy: ${errStr}`, error: true });
+    }
+  };
+
+  const handleReview = async (discrepancyId: string, action: 'APPROVE' | 'REJECT') => {
+    try {
+      await reviewStockDiscrepancy(discrepancyId, action, action === 'APPROVE' ? 'Approved in physical audit' : 'Rejected');
+      setNotice({ msg: `Discrepancy ${action === 'APPROVE' ? 'approved and stock adjusted' : 'rejected'}.` });
+    } catch (err: unknown) {
+      const errStr = err instanceof Error ? err.message : String(err);
+      setNotice({ msg: `Review failed: ${errStr}`, error: true });
     }
   };
 
@@ -230,6 +273,154 @@ export const StockView: React.FC = () => {
           </div>
         ) : (
           <p className="muted">No current salesman stock balances assigned.</p>
+        )}
+      </div>
+
+      {/* Physical Stock Audit & Discrepancies Section */}
+      <div className="card">
+        <h2>Physical Stock Audit &amp; Discrepancy Workflow</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Reconcile physical inventory counts against expected ledger balances. Differences remain pending review and are never automatically marked as losses without Owner/PA approval.
+        </p>
+
+        <form className="inline" onSubmit={handleDiscrepancySubmit} style={{ marginBottom: '16px' }}>
+          <label>
+            Location
+            <select value={discLocation} onChange={(e) => setDiscLocation(e.target.value)}>
+              <option value="COMPANY_WAREHOUSE">Company Central Warehouse</option>
+              {activeSalesmen.map((u) => (
+                <option key={u.user_id} value={u.user_id}>
+                  Salesman: {u.full_name} ({u.user_id})
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Product
+            <select value={discProductId} onChange={(e) => setDiscProductId(e.target.value)}>
+              {activeProducts.map((p) => (
+                <option key={p.product_id} value={p.product_id}>
+                  {p.sku} - {p.product_name} ({p.pack_weight_g}g)
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Expected Count
+            <input
+              type="number"
+              value={discExpected}
+              onChange={(e) => setDiscExpected(Number(e.target.value))}
+              placeholder="System expected"
+            />
+          </label>
+
+          <label>
+            Physical Count
+            <input
+              type="number"
+              value={discPhysical}
+              onChange={(e) => setDiscPhysical(Number(e.target.value))}
+              placeholder="Actual counted"
+            />
+          </label>
+
+          <label style={{ flex: '1 1 200px' }}>
+            Explanation / Reason
+            <input
+              type="text"
+              value={discReason}
+              onChange={(e) => setDiscReason(e.target.value)}
+              placeholder="e.g. Physical count post-market, batch recount"
+            />
+          </label>
+
+          <button type="submit" style={{ alignSelf: 'flex-end', padding: '9px 18px' }}>
+            📝 Record Physical Count
+          </button>
+        </form>
+
+        {stockDiscrepancies && stockDiscrepancies.length > 0 ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Location</th>
+                  <th>Product</th>
+                  <th>Expected</th>
+                  <th>Physical</th>
+                  <th>Difference</th>
+                  <th>Reason</th>
+                  <th>Counted By</th>
+                  <th>Status</th>
+                  {isManager && <th>Action</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {stockDiscrepancies.map((d: any) => {
+                  const diff = Number(d.difference || 0);
+                  const isPending = d.status === 'PENDING_APPROVAL';
+                  return (
+                    <tr key={d.discrepancy_id}>
+                      <td>{d.discrepancy_date}</td>
+                      <td>{d.location}</td>
+                      <td>{d.product_name_snapshot}</td>
+                      <td>{d.expected_stock}</td>
+                      <td>{d.physical_count}</td>
+                      <td>
+                        <strong style={{ color: diff < 0 ? '#dc2626' : diff > 0 ? '#16a34a' : '#475569' }}>
+                          {diff > 0 ? `+${diff}` : diff}
+                        </strong>
+                      </td>
+                      <td className="muted">{d.reason || '—'}</td>
+                      <td>{d.counted_by_user_id}</td>
+                      <td>
+                        <span
+                          className={`badge ${d.status === 'APPROVED' ? 'on' : d.status === 'REJECTED' ? 'off' : ''}`}
+                          style={{
+                            background: isPending ? '#fef3c7' : undefined,
+                            color: isPending ? '#b45309' : undefined,
+                          }}
+                        >
+                          {d.status}
+                        </span>
+                      </td>
+                      {isManager && (
+                        <td>
+                          {isPending ? (
+                            <div className="actions" style={{ gap: '4px' }}>
+                              <button
+                                type="button"
+                                style={{ padding: '3px 8px', fontSize: '0.75rem', background: '#16a34a', color: '#fff' }}
+                                onClick={() => handleReview(d.discrepancy_id, 'APPROVE')}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                style={{ padding: '3px 8px', fontSize: '0.75rem', color: '#dc2626' }}
+                                onClick={() => handleReview(d.discrepancy_id, 'REJECT')}
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="muted" style={{ fontSize: '0.75rem' }}>Reviewed</span>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="muted" style={{ padding: '8px 0' }}>No stock discrepancies reported yet. Expected counts match physical audit.</p>
         )}
       </div>
 

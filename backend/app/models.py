@@ -400,4 +400,14 @@ class DashboardMetrics(BaseModel):
     low_stock_items: int = 0
     active_salesmen: int = 0
     total_bills_today: int = 0
+    monthly_sales: float = 0.0
+    today_kg_sold: float = 0.0
+    monthly_kg_sold: float = 0.0
+    digital_collections_today: float = 0.0
+    incomplete_transactions_count: int = 0
+    pending_discrepancies: int = 0
+    pending_production_approvals: int = 0
+    role: str = "OWNER"
+    salesman_user_id: Optional[str] = None
+
 

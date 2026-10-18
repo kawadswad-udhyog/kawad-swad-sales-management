@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List, Dict
 from fastapi import APIRouter, HTTPException, status, Depends
+from pydantic import BaseModel
 from app.models import StockSummaryResponse, StockTransaction, StockIssueCreate, CompanyStockItem, SalesmanStockItem
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
@@ -174,3 +175,138 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     )
 
     return StockTransaction(**record)
+
+
+class StockDiscrepancyCreate(BaseModel):
+    location: str
+    product_id: str
+    expected_stock: int
+    physical_count: int
+    reason: str = ""
+
+
+class StockDiscrepancyReview(BaseModel):
+    action: str  # "APPROVE" or "REJECT"
+    notes: str = ""
+
+
+@router.get("/discrepancies")
+async def list_stock_discrepancies(current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id", ""))
+    records = db.get_records("StockDiscrepancies", fresh=True)
+    if not is_manager(current_user):
+        records = [r for r in records if str(r.get("counted_by_user_id")) == user_id or str(r.get("location")) == user_id]
+    return list(reversed(records))
+
+
+@router.post("/discrepancies", dependencies=[Depends(require_sheets_connection)])
+async def submit_stock_discrepancy(req: StockDiscrepancyCreate, current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id", ""))
+    products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
+    product = products.get(req.product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail=f"Product {req.product_id} not found.")
+
+    diff = req.physical_count - req.expected_stock
+    now_iso = datetime.utcnow().isoformat()
+    disc_id = db.generate_id("StockDiscrepancies")
+
+    record = {
+        "discrepancy_id": disc_id,
+        "discrepancy_date": now_iso[:10],
+        "location": req.location,
+        "product_id": req.product_id,
+        "product_name_snapshot": str(product.get("product_name", req.product_id)),
+        "expected_stock": req.expected_stock,
+        "physical_count": req.physical_count,
+        "difference": diff,
+        "reason": req.reason.strip(),
+        "counted_by_user_id": user_id,
+        "reviewed_by_user_id": "",
+        "status": "PENDING_APPROVAL",
+        "approved_adjustment": 0,
+        "created_at": now_iso,
+    }
+    if not db.append_record("StockDiscrepancies", record, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="Could not save stock discrepancy record.")
+
+    db.log_audit(
+        user_id,
+        "SUBMIT_STOCK_DISCREPANCY",
+        "StockDiscrepancies",
+        disc_id,
+        reason=f"Reported discrepancy of {diff} for {product.get('product_name')} at {req.location}. Reason: {req.reason}",
+    )
+    return record
+
+
+@router.post("/discrepancies/{discrepancy_id}/review", dependencies=[Depends(require_sheets_connection)])
+async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyReview, current_user: dict = Depends(get_current_user)):
+    if not is_manager(current_user):
+        raise HTTPException(status_code=403, detail="Only Owner or PA can approve stock discrepancy adjustments.")
+
+    user_id = str(current_user.get("user_id", ""))
+    records = db.get_records("StockDiscrepancies", fresh=True)
+    match = next((r for r in records if str(r.get("discrepancy_id")) == discrepancy_id), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Discrepancy record not found.")
+
+    action = req.action.strip().upper()
+    if action not in {"APPROVE", "REJECT"}:
+        raise HTTPException(status_code=422, detail="Action must be APPROVE or REJECT.")
+
+    now_iso = datetime.utcnow().isoformat()
+    diff = int(match.get("difference", 0) or 0)
+    loc = str(match.get("location", ""))
+    p_id = str(match.get("product_id", ""))
+
+    if action == "APPROVE" and diff != 0:
+        # Create corresponding ledger adjustment so the physical count becomes authoritative
+        products = {str(p.get("product_id")): p for p in db.get_records("Products")}
+        p_info = products.get(p_id, {})
+        sku = str(p_info.get("sku", p_id))
+        pack = int(p_info.get("pack_weight_g", 500) or 500)
+        unit = str(p_info.get("selling_unit", "PACKET"))
+
+        is_company = loc in {"COMPANY_WAREHOUSE", "FACTORY", "WAREHOUSE", ""}
+        txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "ISSUE_TO_SALESMAN"
+        salesman_target = "" if is_company else loc
+
+        adj_record = {
+            "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+            "txn_datetime": now_iso,
+            "salesman_user_id": salesman_target,
+            "product_id": p_id,
+            "sku_snapshot": sku,
+            "txn_type": "POSITIVE_ADJUSTMENT" if diff > 0 else "RETURN_FROM_SALESMAN",
+            "quantity": abs(diff) if diff > 0 else -abs(diff),
+            "unit": unit,
+            "pack_weight_g": pack,
+            "related_sale_id": "",
+            "issued_by_user_id": user_id,
+            "received_by_user_id": salesman_target,
+            "confirmed_by_user_id": user_id,
+            "reference_id": f"DISC-{discrepancy_id}",
+            "notes": f"Approved physical count adjustment for {discrepancy_id}: {req.notes}".strip(),
+        }
+        db.append_record("SalesmanStockLedger", adj_record, raise_on_error=True)
+
+    status_str = "APPROVED" if action == "APPROVE" else "REJECTED"
+    updated = db.update_record("StockDiscrepancies", "discrepancy_id", discrepancy_id, {
+        "status": status_str,
+        "reviewed_by_user_id": user_id,
+        "approved_adjustment": diff if action == "APPROVE" else 0,
+        "reason": f"{match.get('reason', '')} [REVIEW:{status_str}:{user_id}:{req.notes}]".strip(),
+    }, raise_on_error=True)
+    if not updated:
+        raise HTTPException(status_code=503, detail="Could not update discrepancy status.")
+
+    db.log_audit(
+        user_id,
+        f"{status_str}_STOCK_DISCREPANCY",
+        "StockDiscrepancies",
+        discrepancy_id,
+        reason=f"{status_str} stock discrepancy {discrepancy_id}. Adjustment: {diff if action == 'APPROVE' else 0}. Notes: {req.notes}",
+    )
+    return {"ok": True, "status": status_str, "discrepancy_id": discrepancy_id}
+

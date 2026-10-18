@@ -3,6 +3,7 @@ from fastapi import HTTPException
 OWNERS = {"OWNER", "OWNER_ADMIN", "ADMIN"}
 MANAGERS = OWNERS | {"PA"}
 SALESMEN = {"SALESMAN", "FIELD_SALESMAN"}
+FACTORY_WORKERS = {"FACTORY_WORKER", "PRODUCTION_WORKER", "WORKER"}
 
 
 def role_of(user: dict) -> str:
@@ -21,6 +22,14 @@ def is_salesman(user: dict) -> bool:
     return role_of(user) in SALESMEN
 
 
+def is_factory_worker(user: dict) -> bool:
+    return role_of(user) in FACTORY_WORKERS
+
+
+def can_manage_production(user: dict) -> bool:
+    return is_manager(user) or is_factory_worker(user)
+
+
 def require_manager(user: dict) -> None:
     if not is_manager(user):
         raise HTTPException(status_code=403, detail="Owner or PA permission is required.")
@@ -31,6 +40,11 @@ def require_owner(user: dict) -> None:
         raise HTTPException(status_code=403, detail="Only the owner can do this.")
 
 
+def require_production_access(user: dict) -> None:
+    if not can_manage_production(user):
+        raise HTTPException(status_code=403, detail="Production or Owner/PA permission is required.")
+
+
 def ui_role(role: str) -> str:
     value = str(role or "").upper()
     if value in OWNERS:
@@ -39,4 +53,7 @@ def ui_role(role: str) -> str:
         return "PA"
     if value in SALESMEN:
         return "SALESMAN"
+    if value in FACTORY_WORKERS:
+        return "FACTORY_WORKER"
     return value or "SALESMAN"
+

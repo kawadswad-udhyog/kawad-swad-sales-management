@@ -1,3 +1,5 @@
+import time
+from typing import Dict, List
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
 
@@ -7,6 +9,11 @@ from app.auth import verify_password, create_access_token, get_current_user, has
 from app.permissions import ui_role
 
 router = APIRouter(tags=["Authentication"])
+
+# In-memory brute force protection tracking failed logins per username
+_LOGIN_ATTEMPTS: Dict[str, List[float]] = {}
+_MAX_FAILED_ATTEMPTS = 5
+_LOCKOUT_WINDOW_SECONDS = 300.0  # 5 minutes
 
 
 class ChangePasswordRequest(BaseModel):
@@ -42,13 +49,24 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
     username = req.username.strip().lower()
     if not username or not req.password:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Brute-force rate limiting check
+    now_ts = time.time()
+    past_attempts = [t for t in _LOGIN_ATTEMPTS.get(username, []) if now_ts - t < _LOCKOUT_WINDOW_SECONDS]
+    _LOGIN_ATTEMPTS[username] = past_attempts
+    if len(past_attempts) >= _MAX_FAILED_ATTEMPTS:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_429_TOO_MANY_REQUESTS", 429),
+            detail="Account temporarily locked due to repeated failed login attempts. Please wait 5 minutes before trying again.",
+        )
+
     try:
         auth_records = db.get_records("AuthUsers", fresh=False)
     except Exception as exc:
         err_str = str(exc).lower()
         if "429" in err_str or "quota" in err_str:
             raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                status_code=getattr(status, "HTTP_429_TOO_MANY_REQUESTS", 429),
                 detail="Google Sheets API quota temporarily exceeded. Please wait 10-15 seconds and try signing in again.",
             )
         raise HTTPException(
@@ -75,9 +93,18 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
         if verify_password(req.password, stored):
             match = auth
             break
+        # Record failed attempt
+        past_attempts.append(now_ts)
+        _LOGIN_ATTEMPTS[username] = past_attempts
         raise HTTPException(status_code=401, detail="Invalid username or password")
     if not match:
+        past_attempts.append(now_ts)
+        _LOGIN_ATTEMPTS[username] = past_attempts
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Clear failed attempts on successful login
+    _LOGIN_ATTEMPTS.pop(username, None)
+
     background_tasks.add_task(
         db.log_audit,
         actor=match.get("user_id"),
@@ -87,6 +114,14 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
         reason="User successfully authenticated",
     )
     return _token_for(match)
+
+
+@router.post("/api/auth/logout")
+@router.post("/auth/logout")
+async def logout(current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id") or "")
+    db.log_audit(user_id, "LOGOUT", "AuthUsers", user_id, reason="User logged out")
+    return {"ok": True, "message": "Signed out successfully"}
 
 
 @router.get("/api/auth/me")

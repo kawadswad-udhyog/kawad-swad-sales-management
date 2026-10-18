@@ -200,19 +200,35 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
       <div className="grid">
         <div className="metric">
           <span>Today’s bills</span>
-          <strong>{todaySales.length}</strong>
+          <strong>{todayBills}</strong>
         </div>
         <div className="metric">
           <span>Today’s revenue</span>
           <strong>₹{todayRevenue.toFixed(2)}</strong>
         </div>
         <div className="metric">
+          <span>Today’s Papad (kg)</span>
+          <strong>{dashboardMetrics?.today_kg_sold ? `${dashboardMetrics.today_kg_sold.toFixed(1)} kg` : '—'}</strong>
+        </div>
+        <div className="metric">
           <span>Month bills</span>
-          <strong>{monthSales.length}</strong>
+          <strong>{monthBills}</strong>
         </div>
         <div className="metric">
           <span>Month revenue</span>
           <strong>₹{monthRevenue.toFixed(2)}</strong>
+        </div>
+        <div className="metric">
+          <span>Month Papad (kg)</span>
+          <strong>{dashboardMetrics?.monthly_kg_sold ? `${dashboardMetrics.monthly_kg_sold.toFixed(1)} kg` : '—'}</strong>
+        </div>
+        <div className="metric">
+          <span>Today's Cash Collected</span>
+          <strong>₹{(dashboardMetrics?.today_cash || 0).toFixed(2)}</strong>
+        </div>
+        <div className="metric">
+          <span>Today's Digital (UPI/Bank)</span>
+          <strong>₹{(dashboardMetrics?.digital_collections_today || 0).toFixed(2)}</strong>
         </div>
         <div className="metric">
           <span>Pending expenses</span>
@@ -226,6 +242,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             {pendingClosingsCount}
           </strong>
         </div>
+        {(dashboardMetrics?.pending_discrepancies || 0) > 0 && (
+          <div className="metric" style={{ background: '#fef2f2', borderColor: '#fca5a5' }}>
+            <span style={{ color: '#b91c1c' }}>Stock Discrepancies</span>
+            <strong style={{ color: '#b91c1c' }}>{dashboardMetrics?.pending_discrepancies}</strong>
+          </div>
+        )}
+        {(dashboardMetrics?.incomplete_transactions_count || 0) > 0 && (
+          <div className="metric" style={{ background: '#fffbeb', borderColor: '#fcd34d' }}>
+            <span style={{ color: '#b45309' }}>Incomplete Bills</span>
+            <strong style={{ color: '#b45309' }}>{dashboardMetrics?.incomplete_transactions_count}</strong>
+          </div>
+        )}
       </div>
 
       {/* Summary cards for quick actions */}

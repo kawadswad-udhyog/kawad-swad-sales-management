@@ -3,6 +3,7 @@ import re
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, status, Depends
+from pydantic import BaseModel
 
 from app.models import Sale, SaleCreate, SaleItem
 from app.sheets import db
@@ -457,3 +458,112 @@ def _write_children(sale: dict, validated: list, method: str, reference: str, us
             "reference_id": bill_number,
             "notes": f"Cash collection for bill {bill_number}",
         })
+
+
+class SaleCancelRequest(BaseModel):
+    reason: str = "Customer cancellation / authorized reversal"
+
+
+@router.get("/incomplete", response_model=List[Sale])
+async def list_incomplete_sales(current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id", ""))
+    sales_records = db.get_records("Sales", fresh=True)
+    items_records = db.get_records("SaleItems", fresh=True)
+    items_by_sale = {}
+    for row in items_records:
+        items_by_sale.setdefault(str(row.get("sale_id", "")), []).append(_to_item(row))
+    incomplete = []
+    for row in sales_records:
+        if str(row.get("txn_status", "")).upper() != "INCOMPLETE":
+            continue
+        salesman_id = str(row.get("salesman_user_id", ""))
+        if not is_manager(current_user) and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
+            continue
+        incomplete.append(_to_sale(row, items_by_sale.get(str(row.get("sale_id")), [])))
+    return incomplete
+
+
+@router.post("/{sale_id}/cancel", dependencies=[Depends(require_sheets_connection)])
+async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id", ""))
+    sales = db.get_records("Sales", fresh=True)
+    match = next((s for s in sales if str(s.get("sale_id")) == sale_id), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Sale record not found.")
+    if str(match.get("bill_status", "")).upper() == "CANCELLED":
+        raise HTTPException(status_code=409, detail="This bill has already been cancelled.")
+
+    salesman_id = str(match.get("salesman_user_id", ""))
+    if not is_manager(current_user) and salesman_id != user_id:
+        raise HTTPException(status_code=403, detail="Only an Owner/PA or the issuing salesman can cancel a bill.")
+
+    now = now_iso()
+    bill_number = str(match.get("bill_number", ""))
+    reason_text = req.reason.strip() or "Customer cancellation / authorized reversal"
+
+    # 1. Reverse stock in SalesmanStockLedger
+    items = _items_for(sale_id)
+    for itm in items:
+        qty = int(float(itm.get("quantity", 0) or 0))
+        if qty > 0:
+            db.append_record("SalesmanStockLedger", {
+                "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+                "txn_datetime": now,
+                "salesman_user_id": salesman_id,
+                "product_id": str(itm.get("product_id")),
+                "sku_snapshot": str(itm.get("sku_snapshot", "")),
+                "txn_type": "RETURN_FROM_SALESMAN",
+                "quantity": qty,
+                "unit": str(itm.get("unit", "PACKET")),
+                "pack_weight_g": int(float(itm.get("pack_weight_g", 500) or 500)),
+                "related_sale_id": sale_id,
+                "issued_by_user_id": user_id,
+                "received_by_user_id": salesman_id,
+                "confirmed_by_user_id": user_id,
+                "reference_id": f"CANCEL-{bill_number}",
+                "notes": f"Stock reversal for cancelled bill {bill_number}: {reason_text}",
+            }, raise_on_error=True)
+
+    # 2. Reverse payments in Payments / CashLedger
+    bill_total = float(match.get("bill_total", 0) or 0)
+    method = str(match.get("payment_method", "CASH")).upper()
+    db.append_record("Payments", {
+        "payment_id": db.generate_id("Payments"),
+        "sale_id": sale_id,
+        "payment_datetime": now,
+        "payment_method": method,
+        "amount": -bill_total,
+        "reference_number": f"REFUND-{bill_number}",
+        "received_by_user_id": salesman_id,
+        "payment_status": "REFUNDED",
+        "notes": f"Payment reversal for cancelled bill {bill_number}: {reason_text}",
+    }, raise_on_error=True)
+
+    if method == "CASH":
+        db.append_record("CashLedger", {
+            "cash_txn_id": db.generate_id("CashLedger"),
+            "txn_datetime": now,
+            "salesman_user_id": salesman_id,
+            "txn_type": "SALE_REFUND",
+            "amount": -bill_total,
+            "payment_method": "CASH",
+            "related_sale_id": sale_id,
+            "related_expense_id": "",
+            "issued_by_user_id": salesman_id,
+            "received_by_user_id": str(match.get("customer_id", "")),
+            "confirmed_by_user_id": user_id,
+            "reference_id": f"CANCEL-{bill_number}",
+            "notes": f"Cash refund reversal for cancelled bill {bill_number}",
+        }, raise_on_error=True)
+
+    # 3. Update Sales record status
+    updated = db.update_record("Sales", "sale_id", sale_id, {
+        "bill_status": "CANCELLED",
+        "notes": f"{match.get('notes', '')} [CANCELLED:{now}:{user_id}:{reason_text}]".strip(),
+    }, raise_on_error=True)
+    if not updated:
+        raise HTTPException(status_code=503, detail="Could not update bill status to CANCELLED.")
+
+    db.log_audit(user_id, "CANCEL_BILL", "Sales", sale_id, reason=f"Cancelled bill {bill_number} for ₹{bill_total:.2f}. Reason: {reason_text}")
+    return {"ok": True, "message": f"Bill {bill_number} cancelled and stock/payment reversed successfully."}
+

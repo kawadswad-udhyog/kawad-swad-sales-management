@@ -16,6 +16,7 @@ from app.recipes_master import (
 
 router = APIRouter(prefix="/api/production", tags=["Production"])
 ADMIN_ROLES = {"OWNER", "OWNER_ADMIN", "PA"}
+PRODUCTION_ROLES = ADMIN_ROLES | {"FACTORY_WORKER", "PRODUCTION_WORKER", "WORKER"}
 
 def actor_info(user: dict):
     return str(user.get("user_id", "")), str(user.get("role", "")).upper()
@@ -24,6 +25,12 @@ def require_admin(user: dict):
     actor, role = actor_info(user)
     if role not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Owner or authorised PA permission required")
+    return actor, role
+
+def require_production_worker(user: dict):
+    actor, role = actor_info(user)
+    if role not in PRODUCTION_ROLES:
+        raise HTTPException(status_code=403, detail="Production worker or Owner/PA permission required")
     return actor, role
 
 def require_persistent_store():
@@ -368,12 +375,12 @@ async def calculate_custom_recipe_cost(req: RecipeCalculateRequest, user: dict =
 
 @router.get("/batches")
 async def batches(user: dict = Depends(get_current_user)):
-    require_admin(user)
+    require_production_worker(user)
     return db.get_records("ProductionBatches")
 
 @router.post("/batches")
 async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_admin(user)
+    actor, _ = require_production_worker(user)
     require_persistent_store()
     product = next((p for p in db.get_records("Products") if str(field(p,"product_id")) == req.product_id), None)
     if not product: raise HTTPException(404,"Product not found")
@@ -469,12 +476,12 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
 
 @router.get("/packaging")
 async def packaging(user: dict = Depends(get_current_user)):
-    require_admin(user)
+    require_production_worker(user)
     return db.get_records("PackagingBatches")
 
 @router.post("/packaging")
 async def create_packaging(req: PackagingCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_admin(user)
+    actor, _ = require_production_worker(user)
     require_persistent_store()
     product = next((p for p in db.get_records("Products") if str(field(p,"product_id")) == req.product_id), None)
     if not product: raise HTTPException(404,"Product not found")

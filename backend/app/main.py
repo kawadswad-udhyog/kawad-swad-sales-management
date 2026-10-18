@@ -1,5 +1,5 @@
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import SALES_CORS_ORIGINS, assert_runtime_config
 from app.sheets import db
@@ -110,6 +110,26 @@ def health_reconnect():
 @app.get("/api/health/verify-tabs", tags=["System"])
 def health_verify_tabs():
     return db.verify_tabs_accessibility()
+
+@app.get("/health/backup", tags=["System"])
+@app.get("/api/health/backup", tags=["System"])
+def health_backup(current_user: dict = Depends(auth.get_current_user)):
+    from app.permissions import require_owner
+    from app.timeutil import now_iso
+    from app.sheets import REQUIRED_TABS
+    require_owner(current_user)
+    snapshot = {}
+    for tab in REQUIRED_TABS:
+        try:
+            snapshot[tab] = db.get_records(tab, fresh=False)
+        except Exception as e:
+            snapshot[tab] = {"error": str(e)}
+    return {
+        "timestamp": now_iso(),
+        "exported_by": current_user.get("user_id"),
+        "total_tabs": len(snapshot),
+        "data": snapshot,
+    }
 
 @app.get("/", tags=["System"])
 def root():

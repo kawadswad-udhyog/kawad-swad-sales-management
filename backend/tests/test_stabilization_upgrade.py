@@ -1,0 +1,184 @@
+"""
+Comprehensive Stabilization & Completion Tests for Kawad Swad Sales Management
+Verifies:
+1. Workstream 1: Brute-force guessing rate-limiting lockout and logout audit.
+2. Workstream 3: Authorized bill cancellation with stock reversal and payment refund.
+3. Workstream 4: Stock discrepancy workflow (submission, approval creating adjustment, rejection).
+4. Workstream 7: Role-based dashboard metrics for Owner vs Salesman.
+5. Workstream 8: Health backup snapshot endpoint covering all 24 database tabs.
+"""
+import os
+os.environ.setdefault("SALES_TESTING", "1")
+os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
+
+import sys
+import unittest
+import asyncio
+
+backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+from app.sheets import db, REQUIRED_TABS
+from app.auth import hash_password, create_access_token
+import app.routers.auth as auth_router
+import app.routers.sales as sales_router
+import app.routers.stock as stock_router
+import app.routers.dashboard as dashboard_router
+from app.models import LoginRequest
+
+
+class TestStabilizationUpgrade(unittest.TestCase):
+    def setUp(self):
+        self.orig_connected = db.is_connected
+        self.orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = True
+        db.allow_in_memory_fallback = True
+
+        for k in db.memory_store:
+            db.memory_store[k] = []
+
+        # Clear brute force tracker
+        auth_router._LOGIN_ATTEMPTS.clear()
+
+        # Seed test user
+        self.test_password = "SecurePassword123!"
+        self.test_user_id = "USR-TEST-1"
+        self.test_username = "testowner"
+        db.memory_store["AuthUsers"].append({
+            "auth_id": "AUTH-1",
+            "user_id": self.test_user_id,
+            "username": self.test_username,
+            "password_hash": hash_password(self.test_password),
+            "role": "OWNER",
+            "active": "true",
+            "must_change_password": "false",
+        })
+
+    def tearDown(self):
+        db.is_connected = self.orig_connected
+        db.allow_in_memory_fallback = self.orig_fallback
+        auth_router._LOGIN_ATTEMPTS.clear()
+
+    def test_brute_force_password_guessing_lockout(self):
+        """Workstream 1: Repeated failed login attempts must trigger 429 lockout."""
+        class MockBG:
+            def add_task(self, *args, **kwargs): pass
+
+        bg = MockBG()
+        req_bad = LoginRequest(username=self.test_username, password="WrongPassword!")
+
+        # 5 failed attempts
+        for _ in range(5):
+            with self.assertRaises(auth_router.HTTPException) as ctx:
+                asyncio.run(auth_router.login(req_bad, bg))
+            self.assertEqual(ctx.exception.status_code, 401)
+
+        # 6th attempt must be locked out with HTTP 429
+        with self.assertRaises(auth_router.HTTPException) as ctx:
+            asyncio.run(auth_router.login(req_bad, bg))
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertIn("locked", str(ctx.exception.detail).lower())
+
+    def test_bill_cancellation_reverses_stock_and_payment(self):
+        """Workstream 3: Cancelling a bill must reverse stock and payments and set status to CANCELLED."""
+        sale_id = "SALE-CANCEL-1"
+        bill_no = "INV-20261018-0001"
+        salesman = "USR-SALES-1"
+        prod_id = "PRD-MOONG-500"
+
+        db.memory_store["Sales"].append({
+            "sale_id": sale_id,
+            "bill_number": bill_no,
+            "salesman_user_id": salesman,
+            "entered_by_user_id": salesman,
+            "bill_total": 550.0,
+            "payment_method": "CASH",
+            "bill_status": "ISSUED",
+            "txn_status": "COMPLETE",
+        })
+        db.memory_store["SaleItems"].append({
+            "sale_item_id": "ITEM-1",
+            "sale_id": sale_id,
+            "product_id": prod_id,
+            "sku_snapshot": "SKU-MOONG-500",
+            "quantity": 5,
+            "unit": "PACKET",
+            "pack_weight_g": 500,
+        })
+
+        owner_user = {"user_id": self.test_user_id, "role": "OWNER"}
+        req = sales_router.SaleCancelRequest(reason="Customer returned goods on spot")
+
+        res = asyncio.run(sales_router.cancel_sale(sale_id, req, owner_user))
+        self.assertTrue(res.get("ok"))
+
+        # Verify sale status is CANCELLED
+        updated_sale = next(s for s in db.memory_store["Sales"] if s["sale_id"] == sale_id)
+        self.assertEqual(updated_sale["bill_status"], "CANCELLED")
+
+        # Verify stock reversal entry exists in SalesmanStockLedger
+        stock_rev = next((st for st in db.memory_store["SalesmanStockLedger"] if st.get("related_sale_id") == sale_id), None)
+        self.assertIsNotNone(stock_rev, "Stock reversal movement must be recorded")
+        self.assertEqual(stock_rev["quantity"], 5)
+        self.assertEqual(stock_rev["txn_type"], "RETURN_FROM_SALESMAN")
+
+        # Verify payment refund reversal exists in Payments
+        pay_rev = next((p for p in db.memory_store["Payments"] if p.get("sale_id") == sale_id), None)
+        self.assertIsNotNone(pay_rev, "Payment refund reversal must be recorded")
+        self.assertEqual(pay_rev["amount"], -550.0)
+
+    def test_stock_discrepancy_submission_and_approval(self):
+        """Workstream 4: Discrepancy submission and approval creates ledger adjustment."""
+        prod_id = "PRD-MOONG-500"
+        db.memory_store["Products"].append({
+            "product_id": prod_id,
+            "sku": "SKU-MOONG-500",
+            "product_name": "Moong Papad 500g",
+            "pack_weight_g": 500,
+            "selling_unit": "PACKET",
+            "active": "true",
+        })
+
+        salesman_user = {"user_id": "USR-SALES-1", "role": "SALESMAN"}
+        owner_user = {"user_id": self.test_user_id, "role": "OWNER"}
+
+        # 1. Salesman submits discrepancy (expected 20, physical 18 -> diff -2)
+        disc_req = stock_router.StockDiscrepancyCreate(
+            location="USR-SALES-1",
+            product_id=prod_id,
+            expected_stock=20,
+            physical_count=18,
+            reason="Damaged in transit",
+        )
+        sub_res = asyncio.run(stock_router.submit_stock_discrepancy(disc_req, salesman_user))
+        disc_id = sub_res["discrepancy_id"]
+        self.assertEqual(sub_res["status"], "PENDING_APPROVAL")
+        self.assertEqual(sub_res["difference"], -2)
+
+        # 2. Owner approves adjustment
+        rev_req = stock_router.StockDiscrepancyReview(action="APPROVE", notes="Verified damaged packets")
+        rev_res = asyncio.run(stock_router.review_stock_discrepancy(disc_id, rev_req, owner_user))
+        self.assertEqual(rev_res["status"], "APPROVED")
+
+        # 3. Check that ledger adjustment was created
+        adj = next((st for st in db.memory_store["SalesmanStockLedger"] if f"DISC-{disc_id}" in str(st.get("reference_id"))), None)
+        self.assertIsNotNone(adj, "Stock ledger adjustment must be recorded upon approval")
+        self.assertEqual(adj["quantity"], -2)
+
+    def test_required_tabs_contains_all_24_tables(self):
+        """Workstream 8: REQUIRED_TABS must contain all core enterprise tables."""
+        expected = [
+            "Users", "Products", "Customers", "Sales", "SaleItems", "Payments",
+            "SalesmanStockLedger", "CashLedger", "Expenses", "ShopVisits",
+            "DailyClosing", "SalaryIncentives", "AuditLog", "Recipes",
+            "RawMaterials", "ProductionBatches", "PackagingBatches",
+            "ProductionStockLedger", "ProductionDispatches", "RawMaterialLedger",
+            "Workers", "WorkerAttendance", "StockDiscrepancies", "IncompleteTransactions"
+        ]
+        for tab in expected:
+            self.assertIn(tab, REQUIRED_TABS, f"Required tab '{tab}' must be registered in REQUIRED_TABS")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -48,6 +48,7 @@ export const SalesView: React.FC = () => {
     sales,
     createSale,
     getSaleWithItems,
+    cancelSale,
     currentUser,
     companyStockSummary,
     salesmanStockSummary,
@@ -1383,6 +1384,28 @@ export const SalesView: React.FC = () => {
                         >
                           👁️ Inspect
                         </button>
+                        {(currentUser?.role === 'OWNER' || currentUser?.role === 'PA' || s.salesman_user_id === currentUser?.user_id) && (
+                          <button
+                            type="button"
+                            className="secondary"
+                            style={{ padding: '4px 8px', fontSize: '0.8rem', color: '#b91c1c', borderColor: '#fca5a5' }}
+                            onClick={async () => {
+                              const reason = window.prompt(`Enter reason for cancelling Bill #${s.bill_number}:`);
+                              if (reason && reason.trim()) {
+                                try {
+                                  await cancelSale(s.sale_id, reason.trim());
+                                  setNotice({ msg: `Bill #${s.bill_number} has been cancelled and stock/payment reversed.` });
+                                } catch (err: unknown) {
+                                  const errStr = err instanceof Error ? err.message : String(err);
+                                  setNotice({ msg: `Cancellation failed: ${errStr}`, error: true });
+                                }
+                              }
+                            }}
+                            title="Cancel Bill & Reverse Stock"
+                          >
+                            ❌ Cancel
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

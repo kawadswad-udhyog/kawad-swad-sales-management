@@ -40,11 +40,16 @@ ID_PREFIXES = {
     "RawMaterialLedger": "RML",
     "RawMaterials": "RWM",
     "IdAllocations": "ALC",
+    "StockDiscrepancies": "DSC",
+    "IncompleteTransactions": "TXN",
 }
 
 REQUIRED_TABS = {
     "IdAllocations": ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
     "AuthUsers": ["auth_id", "user_id", "username", "password_hash", "role", "active", "created_at", "must_change_password"],
+    "Users": ["user_id", "full_name", "username", "role", "mobile", "email", "active", "created_at", "notes"],
+    "Products": ["product_id", "sku", "product_name", "category", "variant", "pack_weight_g", "selling_unit", "retail_pack_only", "active", "notes"],
+    "Customers": ["customer_id", "customer_type", "shop_name", "shopkeeper_name", "mobile", "alternate_mobile", "address", "locality_area", "city", "gstin", "map_location", "active", "created_at"],
     "Sales": [
         "sale_id", "bill_number", "idempotency_key", "txn_status", "sale_datetime", "sales_type",
         "customer_id", "customer_name_snapshot", "customer_mobile", "customer_gstin",
@@ -52,9 +57,47 @@ REQUIRED_TABS = {
         "payment_method", "payment_reference", "subtotal", "discount_amount", "tax_amount",
         "bill_total", "bill_status", "created_at", "notes",
     ],
+    "SaleItems": [
+        "sale_item_id", "sale_id", "product_id", "product_name_snapshot", "sku_snapshot",
+        "pack_weight_g", "unit", "quantity", "actual_unit_price", "discount_amount",
+        "line_total", "qualifying_kg", "created_at", "notes",
+    ],
     "Payments": [
         "payment_id", "sale_id", "payment_datetime", "payment_method", "amount",
         "reference_number", "received_by_user_id", "payment_status", "notes",
+    ],
+    "SalesmanStockLedger": [
+        "stock_txn_id", "txn_datetime", "salesman_user_id", "product_id", "sku_snapshot",
+        "txn_type", "quantity", "unit", "pack_weight_g", "related_sale_id",
+        "issued_by_user_id", "received_by_user_id", "confirmed_by_user_id", "reference_id", "notes",
+    ],
+    "CashLedger": [
+        "cash_txn_id", "txn_datetime", "salesman_user_id", "txn_type", "amount",
+        "payment_method", "related_sale_id", "related_expense_id", "issued_by_user_id",
+        "received_by_user_id", "confirmed_by_user_id", "reference_id", "notes",
+    ],
+    "Expenses": [
+        "expense_id", "expense_datetime", "salesman_user_id", "category", "amount",
+        "payment_mode", "description", "receipt_image_url", "approval_status",
+        "approved_by_user_id", "approved_datetime", "rejection_reason", "created_at", "notes",
+    ],
+    "ShopVisits": [
+        "visit_id", "visit_datetime", "salesman_user_id", "customer_id", "customer_name_snapshot",
+        "purpose", "outcome", "notes", "created_at",
+    ],
+    "DailyClosing": [
+        "closing_id", "closing_date", "salesman_user_id", "opening_cash", "cash_collected",
+        "approved_cash_expenses", "expected_cash_return", "physical_cash_returned", "cash_difference",
+        "opening_stock_reference", "stock_discrepancy_flag", "closing_status", "submitted_at",
+        "reviewed_by_user_id", "reviewed_at", "notes", "upi_collected", "bank_collected", "other_collected",
+    ],
+    "SalaryIncentives": [
+        "incentive_id", "period_month", "salesman_user_id", "salesman_name", "qualifying_kg_sold",
+        "base_rate_per_kg", "incentive_amount", "approved_by_user_id", "status", "paid_at", "notes", "created_at",
+    ],
+    "AuditLog": [
+        "audit_id", "event_datetime", "actor_user_id", "action", "entity_type", "entity_id",
+        "field_changed", "old_value", "new_value", "reason", "approved_by_user_id", "related_record_id",
     ],
     "Recipes": [
         "recipe_id", "product_id", "product_name_snapshot", "product_family", "version",
@@ -98,6 +141,15 @@ REQUIRED_TABS = {
     "WorkerAttendance": [
         "attendance_id", "worker_id", "worker_name_snapshot", "attendance_date",
         "status", "daily_wage_snapshot", "wage_accrued", "notes", "created_at", "created_by",
+    ],
+    "StockDiscrepancies": [
+        "discrepancy_id", "discrepancy_date", "location", "product_id", "product_name_snapshot",
+        "expected_stock", "physical_count", "difference", "reason", "counted_by_user_id",
+        "reviewed_by_user_id", "status", "approved_adjustment", "created_at",
+    ],
+    "IncompleteTransactions": [
+        "transaction_id", "transaction_type", "idempotency_key", "status", "payload_json",
+        "error_details", "created_at", "updated_at", "resolved_by", "resolved_at",
     ],
 }
 

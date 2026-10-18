@@ -39,6 +39,7 @@ if "fastapi" not in sys.modules:
             HTTP_404_NOT_FOUND = 404
             HTTP_409_CONFLICT = 409
             HTTP_422_UNPROCESSABLE_ENTITY = 422
+            HTTP_429_TOO_MANY_REQUESTS = 429
             HTTP_500_INTERNAL_SERVER_ERROR = 500
             HTTP_503_SERVICE_UNAVAILABLE = 503
         class FastAPI:
