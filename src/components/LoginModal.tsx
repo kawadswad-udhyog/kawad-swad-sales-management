@@ -46,53 +46,9 @@ export const LoginModal: React.FC = () => {
       </div>
 
       <h1>Sign In</h1>
-      <p className="muted">Enter your authenticated sales credentials to access the workspace.</p>
+      <p className="muted">Enter your username and password to access the workspace.</p>
 
-      <div style={{ margin: '14px 0', padding: '10px 12px', background: '#edf4f1', borderRadius: '8px', fontSize: '0.82rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <span style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
-            {backendUrl || 'https://kawad-swad-sales-dev.onrender.com (Proxied)'}
-          </span>
-        </div>
-        <button
-          type="button"
-          className="secondary"
-          style={{ padding: '3px 8px', fontSize: '0.75rem', minHeight: 'auto' }}
-          onClick={() => setShowServerConfig(!showServerConfig)}
-        >
-          {showServerConfig ? 'Close' : 'Change'}
-        </button>
-      </div>
-
-      {showServerConfig && (
-        <form onSubmit={handleSaveBackendUrl} style={{ background: '#f8faf9', padding: '12px', borderRadius: '8px', marginBottom: '14px' }}>
-          <label style={{ margin: '0 0 6px', fontSize: '0.8rem' }}>FastAPI Backend Endpoint URL:</label>
-          <input
-            type="url"
-            value={customUrl}
-            onChange={(e) => setCustomUrl(e.target.value)}
-            placeholder="https://kawad-swad-sales-dev.onrender.com"
-            required
-            style={{ marginBottom: '8px' }}
-          />
-          <div className="actions">
-            <button type="submit" style={{ padding: '6px 12px', fontSize: '0.82rem' }}>Update API URL</button>
-            <button
-              type="button"
-              className="secondary"
-              style={{ padding: '6px 12px', fontSize: '0.82rem' }}
-              onClick={() => {
-                setCustomUrl('https://kawad-swad-sales-dev.onrender.com');
-                updateBackendUrl('https://kawad-swad-sales-dev.onrender.com');
-              }}
-            >
-              Reset to Default Render
-            </button>
-          </div>
-        </form>
-      )}
-
-      <form onSubmit={handleSubmit}>
+      <form onSubmit={handleSubmit} style={{ marginTop: '16px' }}>
         <label>
           Username
           <input
@@ -134,12 +90,58 @@ export const LoginModal: React.FC = () => {
 
         <button
           type="submit"
-          style={{ width: '100%', marginTop: '18px', padding: '12px' }}
+          style={{ width: '100%', marginTop: '20px', padding: '12px', fontWeight: 700 }}
           disabled={isLoading}
         >
-          {isLoading ? 'Verifying with server…' : 'Sign in'}
+          {isLoading ? '⏳ Verifying credentials…' : 'Sign In'}
         </button>
       </form>
+
+      <div style={{ textAlign: 'center', marginTop: '20px' }}>
+        <button
+          type="button"
+          onClick={() => setShowServerConfig(!showServerConfig)}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: '#64748b',
+            fontSize: '0.75rem',
+            cursor: 'pointer',
+            textDecoration: 'underline'
+          }}
+        >
+          {showServerConfig ? 'Hide connection settings' : '⚙ Connection settings'}
+        </button>
+      </div>
+
+      {showServerConfig && (
+        <form onSubmit={handleSaveBackendUrl} style={{ background: '#f8faf9', padding: '12px', borderRadius: '8px', marginTop: '10px' }}>
+          <label style={{ margin: '0 0 6px', fontSize: '0.78rem' }}>FastAPI Backend Endpoint URL:</label>
+          <input
+            type="url"
+            value={customUrl}
+            onChange={(e) => setCustomUrl(e.target.value)}
+            placeholder="https://kawad-swad-sales-dev.onrender.com"
+            required
+            style={{ marginBottom: '8px', fontSize: '0.80rem' }}
+          />
+          <div className="actions" style={{ gap: '8px' }}>
+            <button type="submit" style={{ padding: '5px 10px', fontSize: '0.78rem' }}>Save URL</button>
+            <button
+              type="button"
+              className="secondary"
+              style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+              onClick={() => {
+                setCustomUrl('https://kawad-swad-sales-dev.onrender.com');
+                updateBackendUrl('https://kawad-swad-sales-dev.onrender.com');
+                setShowServerConfig(false);
+              }}
+            >
+              Reset Default
+            </button>
+          </div>
+        </form>
+      )}
     </section>
   );
 };

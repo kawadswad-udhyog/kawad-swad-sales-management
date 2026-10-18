@@ -208,7 +208,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
         </div>
         <div className="metric">
           <span>Today’s Papad (kg)</span>
-          <strong>{dashboardMetrics?.today_kg_sold ? `${dashboardMetrics.today_kg_sold.toFixed(1)} kg` : '—'}</strong>
+          <strong>{typeof dashboardMetrics?.today_kg_sold === 'number' ? `${dashboardMetrics.today_kg_sold.toFixed(1)} kg` : '0.0 kg'}</strong>
         </div>
         <div className="metric">
           <span>Month bills</span>
@@ -220,7 +220,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
         </div>
         <div className="metric">
           <span>Month Papad (kg)</span>
-          <strong>{dashboardMetrics?.monthly_kg_sold ? `${dashboardMetrics.monthly_kg_sold.toFixed(1)} kg` : '—'}</strong>
+          <strong>{typeof dashboardMetrics?.monthly_kg_sold === 'number' ? `${dashboardMetrics.monthly_kg_sold.toFixed(1)} kg` : '0.0 kg'}</strong>
         </div>
         <div className="metric">
           <span>Today's Cash Collected</span>

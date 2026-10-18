@@ -470,7 +470,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         salary: SalaryIncentive[];
         dashboard: DashboardMetrics | null;
         users: User[];
+        stock_discrepancies?: any[];
+        audit_logs?: AuditLog[];
       }>('/api/workspace');
+
       const prodsData = workspace.products || [];
       const custsData = workspace.customers || [];
       const salesData = (workspace.sales || []).map((sale) => ({
@@ -480,15 +483,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const stockSummaryData = workspace.stock || { company_stock: [], salesman_stock: [] };
       const stockTxnsData = workspace.stock_transactions || [];
       const salariesData = workspace.salary || [];
-      const auditData: AuditLog[] = activeRole === 'OWNER' || activeRole === 'PA'
-        ? await apiRequest<AuditLog[]>('/api/audit-logs').catch(() => [])
-        : [];
+      const auditData: AuditLog[] = workspace.audit_logs || [];
       const closingsData = workspace.closings || [];
       const expensesData = workspace.expenses || [];
       const visitsData = workspace.visits || [];
       const ownerData = { dashboard: workspace.dashboard, userList: workspace.users || [] };
+      const discData = workspace.stock_discrepancies || [];
+
       setPayments(workspace.payments || []);
       setSaleItems(salesData.flatMap((sale) => sale.lines || []));
+      setStockDiscrepancies(discData);
 
       if (hadSyncError) {
         setSyncError('Could not sync some records with the backend API. Please verify backend service and Google Sheets connection.');
@@ -510,8 +514,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setSalaryIncentives(salariesData);
       setAuditLogs(auditData);
       setDailyClosings(closingsData);
-      const discData = await apiRequest<any[]>('/api/stock/discrepancies').catch(() => []);
-      setStockDiscrepancies(discData || []);
 
       setExpenses(expensesData);
       setShopVisits(visitsData);
