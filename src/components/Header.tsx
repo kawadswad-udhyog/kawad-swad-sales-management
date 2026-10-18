@@ -3,7 +3,16 @@ import { useStore } from '../context/StoreContext';
 import { UserRole } from '../types';
 
 export const Header: React.FC = () => {
-  const { currentUser, logout, backendUrl, updateBackendUrl, isBackendConnected, refreshData, isRefreshing } = useStore();
+  const {
+    currentUser,
+    logout,
+    backendUrl,
+    updateBackendUrl,
+    isBackendConnected,
+    isGoogleSheetsConnected,
+    refreshData,
+    isRefreshing,
+  } = useStore();
   const [showConfig, setShowConfig] = useState(false);
   const [tempUrl, setTempUrl] = useState(backendUrl);
 
@@ -27,6 +36,13 @@ export const Header: React.FC = () => {
       setShowConfig(false);
     }
   };
+
+  const statusColor = !isBackendConnected ? '#fbbf24' : isGoogleSheetsConnected ? '#4ade80' : '#ef4444';
+  const statusText = !isBackendConnected
+    ? 'Connecting…'
+    : isGoogleSheetsConnected
+    ? 'Sheets Connected'
+    : 'Sheets Disconnected';
 
   return (
     <>
@@ -58,12 +74,12 @@ export const Header: React.FC = () => {
                 width: '8px',
                 height: '8px',
                 borderRadius: '50%',
-                background: isBackendConnected ? '#4ade80' : '#fbbf24',
+                background: statusColor,
                 display: 'inline-block',
               }}
             />
             <span style={{ color: '#fff', opacity: 0.9 }}>
-              {isBackendConnected ? 'Backend Live' : 'Connecting…'}
+              {statusText}
             </span>
           </div>
 

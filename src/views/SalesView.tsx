@@ -53,6 +53,8 @@ export const SalesView: React.FC = () => {
     salesmanStockSummary,
     activeCustomerIdForBilling,
     setActiveCustomerIdForBilling,
+    isGoogleSheetsConnected,
+    persistentWritesEnabled,
   } = useStore();
 
   const activeCustomers = useMemo(() => customers.filter((c) => c.active), [customers]);
@@ -1223,17 +1225,21 @@ export const SalesView: React.FC = () => {
           <div style={{ display: 'flex', gap: '8px', flexDirection: 'column' }}>
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled}
               style={{
                 width: '100%',
                 padding: '16px 24px',
                 fontSize: '1.15rem',
                 fontWeight: 700,
-                background: submissionIdempotencyKey ? '#b45309' : '#047857',
+                background: (!isGoogleSheetsConnected || !persistentWritesEnabled)
+                  ? '#64748b'
+                  : submissionIdempotencyKey
+                  ? '#b45309'
+                  : '#047857',
                 color: '#fff',
                 borderRadius: '8px',
-                cursor: isSubmitting ? 'not-allowed' : 'pointer',
-                opacity: isSubmitting ? 0.7 : 1,
+                cursor: (isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                opacity: (isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 0.75 : 1,
                 boxShadow: submissionIdempotencyKey
                   ? '0 4px 12px rgba(180, 83, 9, 0.25)'
                   : '0 4px 12px rgba(4, 120, 87, 0.25)',
@@ -1243,7 +1249,9 @@ export const SalesView: React.FC = () => {
                 gap: '10px',
               }}
             >
-              {isSubmitting ? (
+              {(!isGoogleSheetsConnected || !persistentWritesEnabled) ? (
+                <span>🔒 Google Sheets Disconnected — Bill Creation Locked</span>
+              ) : isSubmitting ? (
                 <span>⏳ Processing &amp; Saving Bill...</span>
               ) : submissionIdempotencyKey ? (
                 <span>🔄 Retry Bill Submission Safely (₹{billTotal.toFixed(2)})</span>
@@ -1251,6 +1259,11 @@ export const SalesView: React.FC = () => {
                 <span>✅ Save Bill &amp; Record Full Payment (₹{billTotal.toFixed(2)})</span>
               )}
             </button>
+            {(!isGoogleSheetsConnected || !persistentWritesEnabled) && (
+              <p style={{ margin: '4px 0 0', fontSize: '0.82rem', color: '#b91c1c', textAlign: 'center' }}>
+                ⚠️ Google Sheets persistent storage is disconnected. New bills are locked to prevent loss of sales records.
+              </p>
+            )}
             {submissionIdempotencyKey && !isSubmitting && (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 2px' }}>
                 <span style={{ fontSize: '0.8rem', color: '#b45309', fontWeight: 600 }}>

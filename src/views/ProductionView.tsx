@@ -10,7 +10,7 @@ const btn: React.CSSProperties = { padding: '9px 13px', border: 0, borderRadius:
 const today = new Date().toISOString().slice(0, 10);
 
 export const ProductionView: React.FC = () => {
-  const { currentUser } = useStore();
+  const { currentUser, isGoogleSheetsConnected, persistentWritesEnabled } = useStore();
   const [products, setProducts] = useState<Product[]>([]);
   const [workers, setWorkers] = useState<Row[]>([]);
   const [attendance, setAttendance] = useState<Row[]>([]);
@@ -828,8 +828,17 @@ export const ProductionView: React.FC = () => {
                     )}
                   </div>
                 )}
-                <button style={{ ...btn, marginLeft: 'auto' }} disabled={busy}>
-                  Save pending production
+                <button
+                  style={{
+                    ...btn,
+                    marginLeft: 'auto',
+                    background: (!isGoogleSheetsConnected || !persistentWritesEnabled) ? '#64748b' : '#166534',
+                    cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                  }}
+                  disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled}
+                  title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch creation locked to prevent data loss.' : ''}
+                >
+                  {(!isGoogleSheetsConnected || !persistentWritesEnabled) ? '🔒 Locked (Sheets Disconnected)' : 'Save pending production'}
                 </button>
               </div>
             </form>

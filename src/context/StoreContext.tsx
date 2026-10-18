@@ -182,42 +182,6 @@ export interface StoreContextType {
 
 const StoreContext = createContext<StoreContextType | null>(null);
 
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  return 'Unknown error';
-}
-
-function isStorageFailure(error: unknown): boolean {
-  const message = getErrorMessage(error).toLowerCase();
-  return (
-    message.includes('429') ||
-    message.includes('quota') ||
-    message.includes('rate limit') ||
-    message.includes('temporarily rate-limiting') ||
-    message.includes('temporarily unavailable') ||
-    message.includes('service unavailable') ||
-    message.includes('failed to fetch') ||
-    message.includes('networkerror') ||
-    message.includes('timed out after') ||
-    message.includes('google sheets') ||
-    message.includes('backend may be spinning up')
-  );
-}
-
-function isUnauthorizedError(error: unknown): boolean {
-  const message = getErrorMessage(error).toLowerCase();
-  return (
-    message.includes('401') ||
-    message.includes('unauthorized') ||
-    message.includes('invalid token') ||
-    message.includes('session expired') ||
-    message.includes('missing authorization header') ||
-    message.includes('deactivated') ||
-    message.includes('user no longer exists')
-  );
-}
-
 export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     if (typeof window !== 'undefined') {
@@ -314,10 +278,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setAuthToken('');
     if (typeof window !== 'undefined') {
       localStorage.removeItem('ks_user');
-      localStorage.removeItem('ks_auth_error');
     }
     setCurrentUser(null);
-    setSyncError(null);
   }, []);
 
   useEffect(() => {
@@ -378,7 +340,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       let res: {
         access_token: string;
         token_type?: string;
-        user?: { user_id: string; username?: string; full_name?: string; role?: string };
+        user?: { user_id: string; full_name?: string; role?: string };
         user_id?: string;
         full_name?: string;
         role?: string;
@@ -388,7 +350,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         res = await apiRequest<{
           access_token: string;
           token_type?: string;
-          user?: { user_id: string; username?: string; full_name?: string; role?: string };
+          user?: { user_id: string; full_name?: string; role?: string };
           user_id?: string;
           full_name?: string;
           role?: string;
@@ -402,7 +364,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           res = await apiRequest<{
             access_token: string;
             token_type?: string;
-            user?: { user_id: string; username?: string; full_name?: string; role?: string };
+            user?: { user_id: string; full_name?: string; role?: string };
             user_id?: string;
             full_name?: string;
             role?: string;
@@ -426,7 +388,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const newUser: User = {
         user_id: userPayload.user_id,
         full_name: userPayload.full_name || username.trim(),
-        username: ('username' in userPayload && userPayload.username) ? userPayload.username : username.trim(),
+        username: username.trim(),
         role: (userPayload.role || 'SALESMAN') as User['role'],
         mobile: '',
         email: '',
@@ -447,56 +409,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setSyncError('Signed in. Loading your latest workspace data…');
       setIsRefreshing(true);
       void loadInitialData(userPayload.role).finally(() => setIsRefreshing(false));
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      const lower = message.toLowerCase();
-
-      if (isStorageFailure(err)) {
-        setIsBackendConnected(false);
-        setIsGoogleSheetsConnected(false);
-        setPersistentWritesEnabled(false);
-        setConnectionError(message);
-        setSyncError('Google Sheets is temporarily rate-limiting or unavailable. Please wait a few seconds and try again.');
-        return;
-      }
-
-      if (lower.includes('duplicate login username') || lower.includes('duplicate username')) {
-        setSyncError('Duplicate username. Please contact the owner to fix the login record.');
-        return;
-      }
-
-      if (lower.includes('account is deactivated') || lower.includes('staff profile is deactivated')) {
-        setSyncError('This account is inactive. Please contact the owner.');
-        return;
-      }
-
-      if (lower.includes('legacy password') || lower.includes('must change password')) {
-        setSyncError('Password reset is required for this account. Please contact the owner.');
-        return;
-      }
-
-      if (lower.includes('account mismatch') || lower.includes('role and staff') || lower.includes('login role')) {
-        setSyncError('Account mismatch detected between the login record and staff profile. Please contact the owner.');
-        return;
-      }
-
-      if (lower.includes('invalid username or password')) {
-        setSyncError('Invalid username or password.');
-        return;
-      }
-
-      if (lower.includes('no login accounts exist') || lower.includes('passwordless login')) {
-        setSyncError('No valid login account is available yet. Please contact the owner.');
-        return;
-      }
-
-      if (lower.includes('failed to fetch') || lower.includes('unable to reach backend') || lower.includes('network')) {
-        setSyncError('Backend is temporarily unavailable. Please retry in a moment.');
-        return;
-      }
-
-      setSyncError('Unable to sign in. Please check your credentials and try again.');
-      throw err;
     } finally {
       setIsLoading(false);
     }
@@ -574,19 +486,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setIsBackendConnected(true);
     } catch (err) {
       console.warn('Backend live sync warning:', err);
-      const errorMessage = getErrorMessage(err);
-      const lower = errorMessage.toLowerCase();
-
-      if (isStorageFailure(err)) {
-        setIsBackendConnected(false);
-        setIsGoogleSheetsConnected(false);
-        setPersistentWritesEnabled(false);
-        setConnectionError(errorMessage);
-        setSyncError('Google Sheets is temporarily unavailable. Your session remains active locally, but live business data may be stale.');
-        return;
-      }
-
-      setSyncError('Could not load your workspace. Please try again.');
+      setSyncError('Network error connecting to backend API.');
     }
   }, [currentUser?.role]);
 
@@ -601,12 +501,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       try {
-        let me: { user_id: string; username?: string; full_name?: string; role?: string };
+        let me: { user_id: string; full_name?: string; role?: string };
         try {
-          me = await apiRequest<{ user_id: string; username?: string; full_name?: string; role?: string }>('/api/auth/me');
+          me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/api/auth/me');
         } catch (err: unknown) {
           if (err instanceof Error && err.message.includes('404')) {
-            me = await apiRequest<{ user_id: string; username?: string; full_name?: string; role?: string }>('/auth/me');
+            me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/auth/me');
           } else {
             throw err;
           }
@@ -615,7 +515,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const verifiedUser: User = {
           user_id: me.user_id,
           full_name: me.full_name || me.user_id,
-          username: me.username || me.user_id,
+          username: me.user_id,
           role: (me.role || 'SALESMAN') as User['role'],
           mobile: '',
           email: '',
@@ -628,31 +528,25 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           localStorage.setItem('ks_user', JSON.stringify(verifiedUser));
         }
         setIsBackendConnected(true);
+        // Restore the cached session immediately. Fetch live records after
+        // rendering so browser refresh does not wait on all Sheets requests.
         setSyncError('Session restored. Loading your latest workspace data…');
         setIsRefreshing(true);
         void loadInitialData(me.role).finally(() => setIsRefreshing(false));
       } catch (e: unknown) {
         console.warn('Session verification warning:', e);
-        const message = getErrorMessage(e);
-        const lower = message.toLowerCase();
-
-        if (isUnauthorizedError(e)) {
+        const msg = e instanceof Error ? e.message.toLowerCase() : '';
+        if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('session expired')) {
           setAuthToken('');
           if (typeof window !== 'undefined') {
             localStorage.removeItem('ks_user');
           }
           setCurrentUser(null);
-          setSyncError('Your session was rejected. Please sign in again.');
-        } else if (isStorageFailure(e)) {
-          // Preserve the local session during storage outage rather than logging the user out.
-          setIsBackendConnected(false);
-          setIsGoogleSheetsConnected(false);
-          setPersistentWritesEnabled(false);
-          setConnectionError(message);
-          setSyncError('Google Sheets is temporarily unavailable. Your current session remains active locally.');
         } else {
+          // If network / Render waking up, preserve user session so page refresh doesn't log them out!
           setIsBackendConnected(false);
           setSyncError('Connecting to backend API... (Backend may be spinning up).');
+          loadInitialData().catch(() => {});
         }
       } finally {
         setIsLoading(false);

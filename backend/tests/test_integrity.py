@@ -105,25 +105,6 @@ class IntegrityTests(unittest.IsolatedAsyncioTestCase):
             await auth_router.login(type("R", (), {"username": "ramesh", "password": "x"})(), background_tasks=type("B", (), {"add_task": lambda *a, **k: None})())
         self.assertEqual(ctx.exception.status_code, 401)
 
-    async def test_login_rejects_duplicate_usernames_explicitly(self):
-        db.memory_store["AuthUsers"] = [
-            {
-                "auth_id": "AUTH-1", "user_id": "USR-000001", "username": "ramesh",
-                "password_hash": hash_password("correct-horse"), "role": "SALESMAN", "active": "true",
-            },
-            {
-                "auth_id": "AUTH-2", "user_id": "USR-000002", "username": "RAMESH",
-                "password_hash": hash_password("another-password"), "role": "SALESMAN", "active": "true",
-            },
-        ]
-        with self.assertRaises(HTTPException) as ctx:
-            await auth_router.login(
-                type("R", (), {"username": "ramesh", "password": "correct-horse"})(),
-                background_tasks=type("B", (), {"add_task": lambda *a, **k: None})(),
-            )
-        self.assertEqual(ctx.exception.status_code, 409)
-        self.assertIn("Duplicate login username", ctx.exception.detail)
-
     async def test_pa_cannot_create_owner(self):
         with self.assertRaises(HTTPException) as ctx:
             await users_router.create_user(

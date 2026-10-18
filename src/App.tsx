@@ -106,7 +106,48 @@ const MainAppContent: React.FC = () => {
 
   return (
     <div>
-      <Header />
+      {(!isGoogleSheetsConnected || !persistentWritesEnabled) && (
+        <div style={{
+          background: '#450a0a',
+          borderBottom: '2px solid #ef4444',
+          padding: '12px 20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          color: '#fee2e2',
+          fontSize: '0.88rem',
+          flexWrap: 'wrap',
+          gap: '12px'
+        }}>
+          <div>
+            <strong>🔴 Persistent Storage Disconnected:</strong> Google Sheets is currently unreachable.
+            <div style={{ fontSize: '0.80rem', marginTop: '2px', color: '#fca5a5' }}>
+              Business writes (new sales bills, batch production, payments) are temporarily locked to prevent data loss.
+              {connectionError ? ` Reason: ${connectionError}` : ''}
+            </div>
+          </div>
+          <button
+            onClick={async () => {
+              const res = await reconnectGoogleSheets();
+              if (res.success) {
+                await refreshData();
+              }
+            }}
+            style={{
+              padding: '6px 14px',
+              fontSize: '0.80rem',
+              fontWeight: 700,
+              background: '#ef4444',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer'
+            }}
+          >
+            🔄 Reconnect Google Sheets
+          </button>
+        </div>
+      )}
       {syncError && (
         <div style={{
           background: '#fef2f2',

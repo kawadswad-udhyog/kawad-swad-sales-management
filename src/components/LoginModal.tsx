@@ -6,15 +6,7 @@ export const LoginModal: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(() => {
-    try {
-      const saved = sessionStorage.getItem('ks_auth_error') || '';
-      sessionStorage.removeItem('ks_auth_error');
-      return saved;
-    } catch {
-      return '';
-    }
-  });
+  const [error, setError] = useState('');
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [customUrl, setCustomUrl] = useState(backendUrl);
 
