@@ -89,10 +89,38 @@ async def propose_salary_records(
                     detail=f"Payroll validation error: Calculated amount ₹{item.calculated_amount} does not match {item.eligible_kg} kg at ₹{item.rate}/kg (expected ₹{expected_amount})."
                 )
 
+        # Authoritative sales verification for incentives
+        if rec_type in {"MONTHLY_INCENTIVE", "INCENTIVE", "TRIAL_INCENTIVE"} and item.eligible_kg > 0:
+            all_sales = db.get_records("Sales")
+            emp_sales = [
+                s for s in all_sales
+                if str(s.get("salesman_user_id", "")).strip() == s_user
+                and str(s.get("payment_status", "")).upper() == "PAID"
+                and str(s.get("delivery_status", "")).upper() == "DELIVERED"
+                and str(s.get("bill_status", "")).upper() != "CANCELLED"
+                and str(s.get("txn_status", "COMPLETE")).upper() != "INCOMPLETE"
+                and str(s.get("sale_datetime", ""))[:10] >= item.period_start
+                and str(s.get("sale_datetime", ""))[:10] <= item.period_end
+            ]
+            if all_sales and emp_sales:
+                sale_ids = {str(s.get("sale_id")) for s in emp_sales}
+                all_sale_items = db.get_records("SaleItems")
+                total_qualifying_kg = sum(
+                    float(i.get("qualifying_kg", 0) or 0)
+                    for i in all_sale_items
+                    if str(i.get("sale_id", "")) in sale_ids
+                )
+                if total_qualifying_kg > 0 and item.eligible_kg > total_qualifying_kg + 0.1:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Payroll validation error: Submitted eligible {item.eligible_kg} kg exceeds authoritative delivered paid sales ({round(total_qualifying_kg, 2)} kg) for employee {s_user} in period {item.period_start} to {item.period_end}."
+                    )
+
         key = f"{item.period_start}_{item.period_end}_{item.salesman_user_id}_{item.record_type}"
         if key in existing_keys:
-            # Skip duplicate period calculation
+            # Skip duplicate period calculation (including duplicates within the same batch)
             continue
+        existing_keys.add(key)
 
         record_id = db.generate_id("SalaryIncentives")
         rec_data = {
@@ -125,6 +153,44 @@ async def propose_salary_records(
         )
 
     return created_records
+
+@router.get("/eligible-sales/{salesman_id}")
+async def get_eligible_sales(
+    salesman_id: str,
+    period_start: str,
+    period_end: str,
+    current_user: dict = Depends(get_current_user)
+):
+    caller_role = current_user.get("role", "").upper()
+    user_id = current_user.get("user_id")
+    if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"] and user_id != salesman_id:
+        raise HTTPException(status_code=403, detail="Not authorized to view other employee eligible sales")
+
+    all_sales = db.get_records("Sales")
+    emp_sales = [
+        s for s in all_sales
+        if str(s.get("salesman_user_id", "")).strip() == salesman_id.strip()
+        and str(s.get("payment_status", "")).upper() == "PAID"
+        and str(s.get("delivery_status", "")).upper() == "DELIVERED"
+        and str(s.get("bill_status", "")).upper() != "CANCELLED"
+        and str(s.get("txn_status", "COMPLETE")).upper() != "INCOMPLETE"
+        and str(s.get("sale_datetime", ""))[:10] >= period_start
+        and str(s.get("sale_datetime", ""))[:10] <= period_end
+    ]
+    sale_ids = {str(s.get("sale_id")) for s in emp_sales}
+    all_sale_items = db.get_records("SaleItems")
+    items = [i for i in all_sale_items if str(i.get("sale_id", "")) in sale_ids]
+    total_kg = sum(float(i.get("qualifying_kg", 0) or 0) for i in items)
+    total_amount = sum(float(s.get("bill_total", 0) or 0) for s in emp_sales)
+
+    return {
+        "salesman_user_id": salesman_id,
+        "period_start": period_start,
+        "period_end": period_end,
+        "qualifying_bills_count": len(emp_sales),
+        "total_qualifying_kg": round(total_kg, 3),
+        "total_qualifying_amount": round(total_amount, 2),
+    }
 
 @router.post("/{record_id}/approve", response_model=SalaryRecord, dependencies=[Depends(require_sheets_connection)])
 async def approve_salary_record(

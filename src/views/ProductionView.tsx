@@ -37,7 +37,7 @@ export const ProductionView: React.FC = () => {
   const activeProducts = useMemo(() => products.filter(p => p.active !== false && String(p.active).toLowerCase() !== 'false'), [products]);
 
   const load = async () => {
-    const [p, w, r, mr, b, pk, d, s, a] = await Promise.all([
+    const results = await Promise.allSettled([
       apiRequest<Product[]>('/api/products'),
       apiRequest<Row[]>('/api/production/workers'),
       apiRequest<Row[]>('/api/production/recipes'),
@@ -48,15 +48,23 @@ export const ProductionView: React.FC = () => {
       apiRequest<Row>('/api/production/summary'),
       apiRequest<Row[]>('/api/production/attendance'),
     ]);
-    setProducts(p);
-    setWorkers(w);
-    setRecipes(r);
-    setMasterRecipes(mr);
-    setBatches([...b].reverse());
-    setPackaging([...pk].reverse());
-    setDispatches([...d].reverse());
-    setSummary(s);
-    setAttendance([...a].reverse());
+
+    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes] = results;
+
+    if (pRes.status === 'fulfilled' && Array.isArray(pRes.value)) setProducts(pRes.value);
+    if (wRes.status === 'fulfilled' && Array.isArray(wRes.value)) setWorkers(wRes.value);
+    if (rRes.status === 'fulfilled' && Array.isArray(rRes.value)) setRecipes(rRes.value);
+    if (mrRes.status === 'fulfilled' && Array.isArray(mrRes.value)) setMasterRecipes(mrRes.value);
+    if (bRes.status === 'fulfilled' && Array.isArray(bRes.value)) setBatches([...bRes.value].reverse());
+    if (pkRes.status === 'fulfilled' && Array.isArray(pkRes.value)) setPackaging([...pkRes.value].reverse());
+    if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) setDispatches([...dRes.value].reverse());
+    if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+    if (aRes.status === 'fulfilled' && Array.isArray(aRes.value)) setAttendance([...aRes.value].reverse());
+
+    const anyFailed = results.some(r => r.status === 'rejected');
+    if (anyFailed) {
+      console.warn('Some production sub-resources could not be refreshed in background.');
+    }
   };
 
   useEffect(() => {
@@ -70,8 +78,13 @@ export const ProductionView: React.FC = () => {
     setMessage('');
     try {
       await fn();
-      await load();
       setMessage(success);
+      try {
+        await load();
+      } catch (refreshErr: any) {
+        console.warn('Post-action screen refresh warning:', refreshErr);
+        setMessage(`${success} (Data saved, refreshing screen...)`);
+      }
     } catch (e: any) {
       setMessage(e?.message || 'Action failed.');
     } finally {

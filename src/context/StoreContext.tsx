@@ -156,12 +156,13 @@ export interface StoreContextType {
   }) => Promise<void>;
 
   dailyClosings: DailyClosing[];
-  getTodayClosingMetrics: (salesmanId: string) => {
+  getTodayClosingMetrics: (salesmanId: string, customOpeningCash?: number) => {
     opening_cash: number;
     cash_collected: number;
     approved_cash_expenses: number;
     expected_cash_return: number;
   };
+  refreshDashboardMetrics: () => Promise<void>;
   submitDailyClosing: (input: {
     opening_cash: number;
     physical_cash_returned: number;
@@ -527,6 +528,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, [currentUser?.role]);
 
+  const refreshDashboardMetrics = useCallback(async () => {
+    try {
+      const freshMetrics = await apiRequest<DashboardMetrics>('/api/dashboard');
+      if (freshMetrics) {
+        setDashboardMetrics(freshMetrics);
+      }
+    } catch (err) {
+      console.warn('Dashboard metrics refresh non-fatal warning:', err);
+    }
+  }, []);
+
   // Check existing session token on mount
   useEffect(() => {
     async function checkSession() {
@@ -760,6 +772,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })
       .catch(() => undefined);
 
+    refreshDashboardMetrics().catch(() => undefined);
+
     addAuditLog(
       'CREATE',
       'Sale',
@@ -916,8 +930,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   // Daily Closing metrics calculation
-  const getTodayClosingMetrics = (salesmanId: string) => {
-    const today = new Date().toISOString().slice(0, 10);
+  const getTodayClosingMetrics = (salesmanId: string, customOpeningCash?: number) => {
+    // Authoritative Indian Standard Time (Asia/Kolkata) business date
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 
     const todaySales = sales.filter(
       (s) =>
@@ -941,7 +956,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       )
       .reduce((sum, e) => sum + e.amount, 0);
 
-    const openingCash = 500;
+    const openingCash = typeof customOpeningCash === 'number' ? customOpeningCash : 500;
     const expected = Math.max(0, openingCash + cashCollected - approvedExpenses);
 
     return {
@@ -962,6 +977,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       body: JSON.stringify(input),
     });
     setDailyClosings((prev) => [saved, ...prev]);
+    refreshDashboardMetrics().catch(() => undefined);
     addAuditLog('CREATE', 'DailyClosing', saved.closing_id, `Submitted daily closing`);
     return saved;
   };
@@ -978,6 +994,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setDailyClosings((prev) =>
       prev.map((c) => (c.closing_id === closing_id ? { ...c, ...updated } : c))
     );
+    refreshDashboardMetrics().catch(() => undefined);
     addAuditLog('REVIEW', 'DailyClosing', closing_id, `Review decision: ${decision} - ${notes}`);
   };
 
@@ -1085,49 +1102,42 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
     }
 
-    setSalaryIncentives((prev) => {
-      const existingKeys = new Set(
-        prev.map((r) => `${r.period_start}_${r.period_end}_${r.salesman_user_id}_${r.record_type}`)
-      );
-      const newItems = results.filter(
-        (r) => !existingKeys.has(`${r.period_start}_${r.period_end}_${r.salesman_user_id}_${r.record_type}`)
-      );
-      return [...newItems, ...prev];
-    });
-
-    // Asynchronously persist new proposed calculations to backend
-    if (results.length > 0) {
-      try {
-        const payload = results.map((r) => ({
-          period_start: r.period_start,
-          period_end: r.period_end,
-          salesman_user_id: r.salesman_user_id,
-          record_type: r.record_type,
-          eligible_kg: r.eligible_kg,
-          completed_100kg_blocks: r.completed_100kg_blocks,
-          rate: r.rate,
-          calculated_amount: r.calculated_amount,
-          approved_amount: r.approved_amount,
-          notes: r.notes,
-        }));
-        const persisted = await apiRequest<SalaryIncentive[]>('/api/salary', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
-        if (persisted && persisted.length > 0) {
-          setSalaryIncentives((prev) => {
-            const existingIds = new Set(prev.map((p) => p.record_id));
-            const fresh = persisted.filter((p) => !existingIds.has(p.record_id));
-            return [...fresh, ...prev];
-          });
-          return persisted;
-        }
-      } catch (err) {
-        console.warn('Backend salary calculation sync warning:', err);
-      }
+    if (results.length === 0) {
+      return [];
     }
 
-    return results;
+    // Server-confirmed persistence (Finding A):
+    // Submit proposed calculations to backend FIRST and only update state with server-confirmed persisted records
+    const payload = results.map((r) => ({
+      period_start: r.period_start,
+      period_end: r.period_end,
+      salesman_user_id: r.salesman_user_id,
+      record_type: r.record_type,
+      eligible_kg: r.eligible_kg,
+      completed_100kg_blocks: r.completed_100kg_blocks,
+      rate: r.rate,
+      calculated_amount: r.calculated_amount,
+      approved_amount: r.approved_amount,
+      notes: r.notes,
+    }));
+
+    const persisted = await apiRequest<SalaryIncentive[]>('/api/salary', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    if (!persisted || persisted.length === 0) {
+      throw new Error('Salary records were not saved by the server.');
+    }
+
+    setSalaryIncentives((prev) => {
+      const existingIds = new Set(prev.map((p) => p.record_id));
+      const fresh = persisted.filter((p) => !existingIds.has(p.record_id));
+      return [...fresh, ...prev];
+    });
+
+    refreshDashboardMetrics().catch(() => undefined);
+    return persisted;
   };
 
   const approveSalaryIncentive = async (record_id: string, approved_amount?: number) => {
@@ -1138,6 +1148,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setSalaryIncentives((prev) =>
       prev.map((r) => (r.record_id === record_id ? { ...r, ...updated, approval_status: 'APPROVED' } : r))
     );
+    refreshDashboardMetrics().catch(() => undefined);
     addAuditLog('APPROVE', 'SalaryIncentive', record_id, 'Approved salary/incentive payment');
   };
 
@@ -1149,6 +1160,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setSalaryIncentives((prev) =>
       prev.map((r) => (r.record_id === record_id ? { ...r, ...updated } : r))
     );
+    refreshDashboardMetrics().catch(() => undefined);
     addAuditLog('PAY', 'SalaryIncentive', record_id, `Marked paid with ref: ${reference}`);
   };
 
@@ -1168,6 +1180,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       body: JSON.stringify(userData),
     });
     setUsers((prev) => [...prev, saved]);
+    refreshDashboardMetrics().catch(() => undefined);
     addAuditLog('CREATE', 'User', saved.user_id, `Created team user ${saved.username}`);
   };
 
@@ -1219,6 +1232,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         approveSalaryIncentive,
         markSalaryIncentivePaid,
         dashboardMetrics,
+        refreshDashboardMetrics,
         auditLogs,
         syncError,
         clearSyncError,

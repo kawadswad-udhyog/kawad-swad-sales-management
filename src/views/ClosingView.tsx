@@ -20,7 +20,7 @@ export const ClosingView: React.FC = () => {
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
 
   // Live metrics for today
-  const metrics = getTodayClosingMetrics(currentSalesmanId);
+  const metrics = getTodayClosingMetrics(currentSalesmanId, Number(openingCash));
   const liveExpectedReturn = Math.max(
     0,
     openingCash + metrics.cash_collected - metrics.approved_cash_expenses

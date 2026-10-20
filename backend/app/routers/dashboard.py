@@ -8,6 +8,7 @@ from app.timeutil import business_today, business_date_of
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
 @router.get("", response_model=DashboardMetrics)
+@router.get("/metrics", response_model=DashboardMetrics)
 async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id", ""))
     role_name = ui_role(str(current_user.get("role", "")))

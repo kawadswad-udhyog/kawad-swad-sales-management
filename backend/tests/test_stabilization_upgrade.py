@@ -366,6 +366,92 @@ class TestStabilizationUpgrade(unittest.TestCase):
             asyncio.run(salary_router.approve_salary_record(rec_id, app_req, owner_user))
         self.assertEqual(ctx.exception.status_code, 409)
 
+    def test_incomplete_dispatch_reconciliation_recovery(self):
+        """Audit Finding 4: Reconcile incomplete dispatch without creating duplicate dispatch or ledger rows."""
+        owner_user = {"user_id": self.test_user_id, "role": "OWNER"}
+
+        # Seed product & available finished stock
+        db.memory_store["Products"].append({
+            "product_id": "PRD-REC-DISP",
+            "product_name": "Chana Papad 500g",
+            "pack_weight_g": 500,
+            "sku": "SKU-CP-500",
+            "active": "true"
+        })
+        db.memory_store["ProductionStockLedger"].append({
+            "movement_id": "MOV-REC-INIT",
+            "movement_type": "PACKETS_PACKAGED",
+            "product_id": "PRD-REC-DISP",
+            "quantity_packets": 100,
+            "quantity_kg": 0
+        })
+
+        # Simulate an incomplete dispatch (e.g. initial stock write crashed halfway)
+        incomplete_disp_id = "DISP-INCOMPLETE-001"
+        db.memory_store["ProductionDispatches"].append({
+            "dispatch_id": incomplete_disp_id,
+            "dispatch_datetime": "2026-10-20T10:00:00Z",
+            "product_id": "PRD-REC-DISP",
+            "product_name_snapshot": "Chana Papad 500g",
+            "channel": "RETAIL",
+            "destination": "Main Outlet",
+            "quantity_packets": 20,
+            "reference": "REF-PARTIAL-FAIL-1",
+            "status": "INCOMPLETE_STOCK_WRITE",
+            "created_by": self.test_user_id,
+            "notes": "INCOMPLETE_STOCK_WRITE: Simulated network failure"
+        })
+
+        # Retry with the same reference
+        retry_req = production_router.DispatchCreate(
+            product_id="PRD-REC-DISP",
+            channel="RETAIL",
+            destination="Main Outlet",
+            quantity_packets=20,
+            reference="REF-PARTIAL-FAIL-1",
+            notes="Retrying dispatch after recovery"
+        )
+        recovered = asyncio.run(production_router.dispatch(retry_req, owner_user))
+        self.assertEqual(recovered["dispatch_id"], incomplete_disp_id)
+        self.assertEqual(recovered["status"], "DISPATCHED_NOT_SALE")
+
+        # Confirm exactly one dispatch record exists
+        dispatches = [d for d in db.memory_store["ProductionDispatches"] if d.get("reference") == "REF-PARTIAL-FAIL-1"]
+        self.assertEqual(len(dispatches), 1, "Must not create a second dispatch on recovery")
+
+        # Confirm exactly one stock deduction exists for this dispatch
+        stock_deductions = [m for m in db.memory_store["ProductionStockLedger"] if m.get("reference_id") == incomplete_disp_id]
+        self.assertEqual(len(stock_deductions), 1, "Must append the missing ledger entry exactly once")
+
+    def test_salary_batch_duplicate_prevention(self):
+        """Audit Finding 6: Batch submission with duplicate keys in same request must not create duplicates."""
+        owner_user = {"user_id": self.test_user_id, "role": "OWNER"}
+
+        dup_batch = [
+            SalaryCreateRequest(
+                period_start="2026-11-01",
+                period_end="2026-11-30",
+                salesman_user_id=self.test_user_id,
+                record_type="MONTHLY_INCENTIVE",
+                eligible_kg=300.0,
+                completed_100kg_blocks=3,
+                rate=500.0,
+                calculated_amount=1500.0
+            ),
+            SalaryCreateRequest(
+                period_start="2026-11-01",
+                period_end="2026-11-30",
+                salesman_user_id=self.test_user_id,
+                record_type="MONTHLY_INCENTIVE",
+                eligible_kg=300.0,
+                completed_100kg_blocks=3,
+                rate=500.0,
+                calculated_amount=1500.0
+            )
+        ]
+        created = asyncio.run(salary_router.propose_salary_records(dup_batch, owner_user))
+        self.assertEqual(len(created), 1, "Batch duplicates must be deduplicated")
+
 
 if __name__ == "__main__":
     unittest.main()

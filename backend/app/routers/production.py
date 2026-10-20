@@ -103,6 +103,7 @@ class PackagingCreate(BaseModel):
     packets_200g: int = Field(ge=0, default=0)
     packets_500g: int = Field(ge=0, default=0)
     packets_1000g: int = Field(ge=0, default=0)
+    reference: str = ""
     notes: str = ""
 
 class DispatchCreate(BaseModel):
@@ -490,11 +491,74 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
     if total_packets <= 0: raise HTTPException(400,"Enter at least one packet quantity")
     expected_kg=(req.packets_200g*.2)+(req.packets_500g*.5)+(req.packets_1000g*1.0)
     difference=round(req.bulk_kg_used-expected_kg,3)
-    ledger=db.get_records("ProductionStockLedger")
     bulk_key=str(field(product,"product_name")).strip().lower()
+
+    # Finding 5: Transaction ID / Reference Idempotency & Reconciliation
+    if req.reference and req.reference.strip():
+        ref_clean = req.reference.strip()
+        existing_pack = next((p for p in db.get_records("PackagingBatches") if str(field(p, "reference", default="")).strip() == ref_clean), None)
+        if existing_pack:
+            pack_id = str(field(existing_pack, "packaging_id"))
+            pack_status = str(field(existing_pack, "status")).upper()
+            if pack_status in {"RECORDED", "COMPLETE"}:
+                return existing_pack
+
+            # Reconcile incomplete packaging batch without double-writing
+            ledger = db.get_records("ProductionStockLedger")
+            existing_bulk = next((m for m in ledger if str(field(m, "reference_id")) == pack_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
+            if not existing_bulk:
+                row = {
+                    "movement_id": make_id("ProductionStockLedger"),
+                    "txn_datetime": now(),
+                    "movement_type": "BULK_PACKAGED",
+                    "quantity_kg": req.bulk_kg_used,
+                    "quantity_packets": 0,
+                    "channel": "FACTORY_BULK",
+                    "product_id": req.product_id,
+                    "bulk_product_key": bulk_key,
+                    "product_name_snapshot": field(product, "product_name"),
+                    "reference_id": pack_id,
+                    "created_by": actor,
+                    "notes": f"Reconciled retry: {req.notes}",
+                }
+                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                    raise HTTPException(503, "Could not record bulk stock deduction during recovery.")
+
+            for weight_g, packet_count in [(200, req.packets_200g), (500, req.packets_500g), (1000, req.packets_1000g)]:
+                if packet_count <= 0: continue
+                sku_product = next((p for p in db.get_records("Products") if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
+                if sku_product:
+                    target_sku_id = str(field(sku_product, "product_id"))
+                    existing_sku = next((m for m in ledger if str(field(m, "reference_id")) == pack_id and str(field(m, "product_id")) == target_sku_id and str(field(m, "movement_type")).upper() == "PACKETS_PACKAGED"), None)
+                    if not existing_sku:
+                        row = {
+                            "movement_id": make_id("ProductionStockLedger"),
+                            "txn_datetime": now(),
+                            "movement_type": "PACKETS_PACKAGED",
+                            "quantity_kg": 0,
+                            "quantity_packets": packet_count,
+                            "channel": "FACTORY_FINISHED",
+                            "product_id": target_sku_id,
+                            "bulk_product_key": bulk_key,
+                            "product_name_snapshot": field(sku_product, "product_name"),
+                            "sku_snapshot": field(sku_product, "sku"),
+                            "pack_weight_g": weight_g,
+                            "reference_id": pack_id,
+                            "created_by": actor,
+                            "notes": f"Reconciled retry: {req.notes}",
+                        }
+                        if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                            raise HTTPException(503, f"Could not record {weight_g}g packet stock during recovery.")
+
+            db.update_record("PackagingBatches", "packaging_id", pack_id, {"status": "RECORDED", "notes": f"{req.notes} [RECONCILED]"})
+            existing_pack["status"] = "RECORDED"
+            db.log_audit(actor, "RECONCILE_PACKAGING", "PackagingBatches", pack_id, reason=f"Reconciled packaging batch {pack_id}")
+            return existing_pack
+
+    ledger=db.get_records("ProductionStockLedger")
     balance=sum(float(field(r,"quantity_kg",default=0) or 0) if str(field(r,"movement_type")).upper()=="BULK_PRODUCED" and str(field(r,"bulk_product_key",default=field(r,"product_name_snapshot"))).strip().lower()==bulk_key else -float(field(r,"quantity_kg",default=0) or 0) if str(field(r,"movement_type")).upper()=="BULK_PACKAGED" and str(field(r,"bulk_product_key",default=field(r,"product_name_snapshot"))).strip().lower()==bulk_key else 0 for r in ledger)
     if req.bulk_kg_used > balance + 0.0001: raise HTTPException(400,f"Insufficient unpackaged stock. Available {balance:.3f} kg; requested {req.bulk_kg_used:.3f} kg.")
-    rec={"packaging_id":make_id("PackagingBatches"),"packaging_date":req.packaging_date,"product_id":req.product_id,"product_name_snapshot":field(product,"product_name"),"bulk_kg_used":req.bulk_kg_used,"packets_200g":req.packets_200g,"packets_500g":req.packets_500g,"packets_1000g":req.packets_1000g,"total_packets":total_packets,"expected_kg":round(expected_kg,3),"difference_kg":difference,"difference_status":"MATCH" if abs(difference)<0.001 else "REVIEW_REQUIRED","status":"RECORDED","notes":req.notes,"created_at":now(),"created_by":actor}
+    rec={"packaging_id":make_id("PackagingBatches"),"packaging_date":req.packaging_date,"product_id":req.product_id,"product_name_snapshot":field(product,"product_name"),"bulk_kg_used":req.bulk_kg_used,"packets_200g":req.packets_200g,"packets_500g":req.packets_500g,"packets_1000g":req.packets_1000g,"total_packets":total_packets,"expected_kg":round(expected_kg,3),"difference_kg":difference,"difference_status":"MATCH" if abs(difference)<0.001 else "REVIEW_REQUIRED","status":"RECORDED","reference":req.reference,"notes":req.notes,"created_at":now(),"created_by":actor}
     if not db.append_record("PackagingBatches",rec,raise_on_error=True): raise HTTPException(503,"Could not save packaging record")
     movements=[{"movement_type":"BULK_PACKAGED","quantity_kg":req.bulk_kg_used,"quantity_packets":0,"channel":"FACTORY_BULK","product_id":req.product_id,"bulk_product_key":bulk_key,"product_name_snapshot":field(product,"product_name")}]
     # Each packet size must map to its own product/SKU row. Never combine different pack sizes under one SKU.
@@ -509,7 +573,7 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             if not db.append_record("ProductionStockLedger",row,raise_on_error=True):
                 raise RuntimeError("Failed to append stock ledger movement")
     except Exception as exc:
-        # Finding 5: If any stock movement fails, mark packaging batch status as INCOMPLETE so it is identifiable and recoverable
+        # If any stock movement fails, mark packaging batch status as INCOMPLETE so it is identifiable and recoverable
         try:
             db.update_record("PackagingBatches", "packaging_id", rec["packaging_id"], {"status": "INCOMPLETE", "notes": f"INCOMPLETE_STOCK_WRITE: {exc}"})
         except Exception:
@@ -532,16 +596,68 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
     available=sum(int(float(field(r,"quantity_packets",default=0) or 0)) if str(field(r,"movement_type")).upper() in {"PACKETS_PACKAGED","PACKET_RETURN"} and str(field(r,"product_id"))==req.product_id else -int(float(field(r,"quantity_packets",default=0) or 0)) if str(field(r,"movement_type")).upper()=="CHANNEL_DISPATCH" and str(field(r,"product_id"))==req.product_id else 0 for r in ledger)
     if req.quantity_packets>available: raise HTTPException(400,f"Insufficient factory finished stock. Available {available} packets.")
 
-    # Idempotency check: if a dispatch with this reference was already recorded, return existing record
+    # Finding 4: Idempotency & Incomplete Dispatch Recovery
+    # If a dispatch with this reference already exists (either complete or incomplete), reconcile it rather than double-writing!
     if req.reference and req.reference.strip():
-        existing_disp = next((d for d in db.get_records("ProductionDispatches") if str(field(d, "reference")).strip() == req.reference.strip() and str(field(d, "status")).upper() == "DISPATCHED_NOT_SALE"), None)
+        ref_clean = req.reference.strip()
+        existing_disp = next((d for d in db.get_records("ProductionDispatches") if str(field(d, "reference")).strip() == ref_clean), None)
         if existing_disp:
+            disp_id = str(field(existing_disp, "dispatch_id"))
+            disp_status = str(field(existing_disp, "status")).upper()
+            if disp_status == "DISPATCHED_NOT_SALE":
+                return existing_disp
+
+            # Reconcile incomplete dispatch: check missing movements
+            existing_prod_mvt = next((m for m in ledger if str(field(m, "reference_id")) == disp_id and str(field(m, "movement_type")).upper() == "CHANNEL_DISPATCH"), None)
+            if not existing_prod_mvt:
+                movement = {
+                    "movement_id": make_id("ProductionStockLedger"),
+                    "txn_datetime": now(),
+                    "movement_type": "CHANNEL_DISPATCH",
+                    "product_id": req.product_id,
+                    "product_name_snapshot": field(product, "product_name"),
+                    "quantity_kg": 0,
+                    "quantity_packets": req.quantity_packets,
+                    "channel": req.channel.upper(),
+                    "reference_id": disp_id,
+                    "destination": req.destination,
+                    "created_by": actor,
+                    "notes": f"Reconciled retry: {req.notes}",
+                }
+                if not db.append_record("ProductionStockLedger", movement, raise_on_error=True):
+                    raise HTTPException(503, "Production stock deduction failed during dispatch recovery.")
+
+            if req.channel.upper() == "SALESMAN" and req.destination:
+                salesman_ledger = db.get_records("SalesmanStockLedger")
+                existing_salesman_mvt = next((m for m in salesman_ledger if str(field(m, "reference_id")) == disp_id), None)
+                if not existing_salesman_mvt:
+                    if not db.append_record("SalesmanStockLedger", {
+                        "stock_txn_id": make_id("SalesmanStockLedger"),
+                        "txn_datetime": now(),
+                        "salesman_user_id": req.destination,
+                        "product_id": req.product_id,
+                        "sku_snapshot": field(product, "sku"),
+                        "txn_type": "SALESMAN_POSITIVE_ADJUSTMENT",
+                        "quantity": req.quantity_packets,
+                        "unit": "PACKET",
+                        "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+                        "related_sale_id": "",
+                        "issued_by_user_id": actor,
+                        "received_by_user_id": req.destination,
+                        "confirmed_by_user_id": actor,
+                        "reference_id": disp_id,
+                        "notes": "Factory dispatch to salesman (Reconciled retry).",
+                    }, raise_on_error=True):
+                        raise HTTPException(503, "Salesman stock movement failed during dispatch recovery.")
+
+            db.update_record("ProductionDispatches", "dispatch_id", disp_id, {"status": "DISPATCHED_NOT_SALE", "notes": f"{req.notes} [RECONCILED]"})
+            existing_disp["status"] = "DISPATCHED_NOT_SALE"
+            db.log_audit(actor, "RECONCILE_DISPATCH", "ProductionDispatches", disp_id, reason=f"Recovered dispatch {disp_id} with reference {ref_clean}")
             return existing_disp
 
     rec={"dispatch_id":make_id("ProductionDispatches"),"dispatch_datetime":now(),"product_id":req.product_id,"product_name_snapshot":field(product,"product_name"),"channel":req.channel.upper(),"destination":req.destination,"quantity_packets":req.quantity_packets,"reference":req.reference,"status":"DISPATCHED_NOT_SALE","created_by":actor,"notes":req.notes}
     if not db.append_record("ProductionDispatches",rec,raise_on_error=True): raise HTTPException(503,"Could not save dispatch")
 
-    # Finding 4: Handle partial write failures cleanly
     try:
         movement={"movement_id":make_id("ProductionStockLedger"),"txn_datetime":now(),"movement_type":"CHANNEL_DISPATCH","product_id":req.product_id,"product_name_snapshot":field(product,"product_name"),"quantity_kg":0,"quantity_packets":req.quantity_packets,"channel":req.channel.upper(),"reference_id":rec["dispatch_id"],"destination":req.destination,"created_by":actor,"notes":req.notes}
         if not db.append_record("ProductionStockLedger",movement,raise_on_error=True):
@@ -567,7 +683,6 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
             }, raise_on_error=True):
                 raise RuntimeError("SalesmanStockLedger append returned False")
     except Exception as exc:
-        # Mark dispatch as INCOMPLETE so it is identifiable and never creates an unbacked ledger discrepancy
         try:
             db.update_record("ProductionDispatches", "dispatch_id", rec["dispatch_id"], {"status": "INCOMPLETE_STOCK_WRITE", "notes": f"INCOMPLETE_STOCK_WRITE: {exc}"})
         except Exception:
