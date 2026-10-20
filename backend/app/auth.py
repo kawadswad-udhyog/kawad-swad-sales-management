@@ -63,8 +63,17 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
 
 def _auth_row_for(user_id: str) -> Optional[dict]:
     from app.sheets import db
-    for row in db.get_records("AuthUsers"):
-        if str(row.get("user_id", "")).strip() == str(user_id).strip():
+    clean_id = str(user_id or "").strip().lower()
+    if not clean_id:
+        return None
+    try:
+        records = db.get_records("AuthUsers", fresh=False)
+    except Exception:
+        return None
+    for row in records:
+        r_uid = str(row.get("user_id", "")).strip().lower()
+        r_uname = str(row.get("username", "")).strip().lower()
+        if (r_uid and r_uid == clean_id) or (r_uname and r_uname == clean_id):
             return row
     return None
 
@@ -77,7 +86,7 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             headers={"WWW-Authenticate": "Bearer"},
         )
     payload = decode_access_token(credentials.credentials)
-    uid = payload.get("user_id") or payload.get("sub") if payload else None
+    uid = payload.get("user_id") or payload.get("sub") or payload.get("username") if payload else None
     if not payload or not uid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -85,6 +94,7 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             headers={"WWW-Authenticate": "Bearer"},
         )
     user_id = str(uid).strip()
+    payload = dict(payload)
     payload["user_id"] = user_id
     row = _auth_row_for(user_id)
     if row is None:

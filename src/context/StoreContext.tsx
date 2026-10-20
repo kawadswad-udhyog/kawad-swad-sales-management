@@ -369,18 +369,30 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // Real Login via POST /api/auth/login with fallback to /auth/login
   const login = async (username: string, password: string): Promise<void> => {
-    setIsLoading(true);
+    let res: {
+      access_token: string;
+      token_type?: string;
+      user?: { user_id: string; full_name?: string; role?: string };
+      user_id?: string;
+      full_name?: string;
+      role?: string;
+    };
+
     try {
-      let res: {
+      res = await apiRequest<{
         access_token: string;
         token_type?: string;
         user?: { user_id: string; full_name?: string; role?: string };
         user_id?: string;
         full_name?: string;
         role?: string;
-      };
-
-      try {
+      }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ username: username.trim(), password }),
+        timeoutMs: 40000,
+      });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.includes('404')) {
         res = await apiRequest<{
           access_token: string;
           token_type?: string;
@@ -388,64 +400,47 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           user_id?: string;
           full_name?: string;
           role?: string;
-        }>('/api/auth/login', {
+        }>('/auth/login', {
           method: 'POST',
           body: JSON.stringify({ username: username.trim(), password }),
           timeoutMs: 40000,
         });
-      } catch (err: unknown) {
-        if (err instanceof Error && err.message.includes('404')) {
-          res = await apiRequest<{
-            access_token: string;
-            token_type?: string;
-            user?: { user_id: string; full_name?: string; role?: string };
-            user_id?: string;
-            full_name?: string;
-            role?: string;
-          }>('/auth/login', {
-            method: 'POST',
-            body: JSON.stringify({ username: username.trim(), password }),
-            timeoutMs: 40000,
-          });
-        } else {
-          throw err;
-        }
+      } else {
+        throw err;
       }
-
-      setAuthToken(res.access_token);
-      const userPayload = res.user || {
-        user_id: res.user_id || username.trim(),
-        full_name: res.full_name || username.trim(),
-        role: res.role || 'SALESMAN',
-      };
-
-      const newUser: User = {
-        user_id: userPayload.user_id,
-        full_name: userPayload.full_name || username.trim(),
-        username: username.trim(),
-        role: (userPayload.role || 'SALESMAN') as User['role'],
-        mobile: '',
-        email: '',
-        active: true,
-        created_at: new Date().toISOString(),
-        notes: '',
-      };
-
-      setCurrentUser(newUser);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('ks_user', JSON.stringify(newUser));
-      }
-      setIsBackendConnected(true);
-      // Do not keep the user on the login screen while every Google Sheets
-      // table is fetched. Authenticate first, then hydrate the workspace in
-      // the background so the first successful login is not mistaken for a
-      // failed login when Sheets or a sleeping Render instance is slow.
-      setSyncError('Signed in. Loading your latest workspace data…');
-      setIsRefreshing(true);
-      void loadInitialData(userPayload.role).finally(() => setIsRefreshing(false));
-    } finally {
-      setIsLoading(false);
     }
+
+    setAuthToken(res.access_token);
+    const userPayload = res.user || {
+      user_id: res.user_id || username.trim(),
+      full_name: res.full_name || username.trim(),
+      role: res.role || 'SALESMAN',
+    };
+
+    const newUser: User = {
+      user_id: userPayload.user_id || username.trim(),
+      full_name: userPayload.full_name || username.trim(),
+      username: username.trim(),
+      role: (userPayload.role || 'SALESMAN') as User['role'],
+      mobile: '',
+      email: '',
+      active: true,
+      created_at: new Date().toISOString(),
+      notes: '',
+    };
+
+    setCurrentUser(newUser);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('ks_user', JSON.stringify(newUser));
+    }
+    setIsBackendConnected(true);
+    // Do not keep the user on the login screen while every Google Sheets
+    // table is fetched. Authenticate first, then hydrate the workspace in
+    // the background so the first successful login is not mistaken for a
+    // failed login when Sheets or a sleeping Render instance is slow.
+    setSyncError('Signed in. Loading your latest workspace data…');
+    setIsRefreshing(true);
+    void loadInitialData(userPayload.role).finally(() => setIsRefreshing(false));
   };
 
   // Load all live records from FastAPI backend

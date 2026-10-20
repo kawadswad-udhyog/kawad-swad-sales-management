@@ -82,7 +82,17 @@ export const LoginModal: React.FC = () => {
             <strong>Authentication Error:</strong> {error}
             {error.includes('timed out') && (
               <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
-                Tip: Render free services sleep after inactivity and can take ~40 seconds to spin up on first request.
+                Tip: Render free services sleep after inactivity and can take ~40 seconds to spin up on the first request.
+              </p>
+            )}
+            {error.toLowerCase().includes('invalid username or password') && (
+              <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
+                Please check username and password casing. Ensure this account exists in the active <code>AuthUsers</code> sheet.
+              </p>
+            )}
+            {error.toLowerCase().includes('legacy password') && (
+              <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
+                This account has a legacy password. Run <code>python backend/scripts/reset_password.py</code> to set an upgraded PBKDF2 password.
               </p>
             )}
           </div>

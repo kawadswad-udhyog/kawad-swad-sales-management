@@ -15,7 +15,7 @@ const STORAGE_TOKEN_KEY = 'ks_token';
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
     const isProduction = window.location.hostname.includes('kawad-swad-sales-frontend.onrender.com');
-    const saved = localStorage.getItem(STORAGE_API_KEY);
+    const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/$/, '');
     if (saved) {
       if (
         saved === 'https://kawad-swad-sales-dev.onrender.com' &&
@@ -23,7 +23,7 @@ export function getApiBaseUrl(): string {
       ) {
         return '';
       }
-      return saved.replace(/\/$/, '');
+      return saved;
     }
     if (!isProduction && !DEFAULT_API_BASE_URL) {
       return '';
@@ -106,7 +106,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
 
     clearTimeout(timeoutId);
 
-    if (res.status === 401) {
+    const isLoginEndpoint = path.includes('/login');
+    if (res.status === 401 && !isLoginEndpoint) {
       setAuthToken('');
       window.dispatchEvent(new CustomEvent('ks_auth_expired'));
       throw new Error('Session expired or unauthorized. Please sign in again.');

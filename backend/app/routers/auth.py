@@ -22,13 +22,17 @@ class ChangePasswordRequest(BaseModel):
 
 
 def _token_for(row: dict) -> TokenResponse:
-    user_id = str(row.get("user_id") or "")
+    raw_user_id = str(row.get("user_id") or "").strip()
+    raw_username = str(row.get("username") or "").strip()
+    user_id = raw_user_id or raw_username or "user"
+    username = raw_username or raw_user_id or user_id
     role = ui_role(str(row.get("role") or "SALESMAN"))
-    full_name = str(row.get("full_name") or user_id)
+    full_name = str(row.get("full_name") or raw_username or user_id)
     must_change = str(row.get("must_change_password", "false")).lower() == "true"
     token = create_access_token({
         "sub": user_id,
         "user_id": user_id,
+        "username": username,
         "full_name": full_name,
         "role": str(row.get("role") or role),
         "must_change_password": must_change,
