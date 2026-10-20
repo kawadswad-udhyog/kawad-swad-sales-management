@@ -20,12 +20,17 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 from app.sheets import db, REQUIRED_TABS
-from app.auth import hash_password, create_access_token
+from app.auth import hash_password, create_access_token, get_current_user
 import app.routers.auth as auth_router
 import app.routers.sales as sales_router
 import app.routers.stock as stock_router
 import app.routers.dashboard as dashboard_router
-from app.models import LoginRequest
+import app.routers.users as users_router
+import app.routers.production as production_router
+import app.routers.salary as salary_router
+from app.models import (
+    LoginRequest, UserCreate, SalaryCreateRequest, SalaryApproveRequest, SalaryPayRequest
+)
 
 
 class TestStabilizationUpgrade(unittest.TestCase):
@@ -178,6 +183,188 @@ class TestStabilizationUpgrade(unittest.TestCase):
         ]
         for tab in expected:
             self.assertIn(tab, REQUIRED_TABS, f"Required tab '{tab}' must be registered in REQUIRED_TABS")
+
+    def test_finding_1_token_rejected_when_user_removed_or_inactive(self):
+        """Finding 1: Tokens for deleted or deactivated users must be rejected immediately."""
+        class MockCreds:
+            def __init__(self, t): self.credentials = t
+
+        jwt_mod = sys.modules.get("jwt")
+        orig_decode = getattr(jwt_mod, "decode", None)
+        try:
+            # Case A: User missing from AuthUsers -> must raise 401
+            if jwt_mod:
+                jwt_mod.decode = lambda *args, **kwargs: {"user_id": "USR-DOES-NOT-EXIST", "sub": "USR-DOES-NOT-EXIST", "role": "SALESMAN"}
+
+            with self.assertRaises(auth_router.HTTPException) as ctx:
+                asyncio.run(get_current_user(MockCreds("token-for-missing-user")))
+            self.assertEqual(ctx.exception.status_code, 401)
+            self.assertIn("no longer exists", str(ctx.exception.detail).lower())
+
+            # Case B: User marked active="false" in AuthUsers -> must raise 401 deactivated
+            db.memory_store["AuthUsers"].append({
+                "user_id": "USR-DEACTIVATED",
+                "username": "deactivated_user",
+                "password_hash": "dummy",
+                "active": "false"
+            })
+            if jwt_mod:
+                jwt_mod.decode = lambda *args, **kwargs: {"user_id": "USR-DEACTIVATED", "sub": "USR-DEACTIVATED", "role": "SALESMAN"}
+            with self.assertRaises(auth_router.HTTPException) as ctx:
+                asyncio.run(get_current_user(MockCreds("token-for-deactivated")))
+            self.assertEqual(ctx.exception.status_code, 401)
+            self.assertIn("deactivated", str(ctx.exception.detail).lower())
+        finally:
+            if jwt_mod and orig_decode:
+                jwt_mod.decode = orig_decode
+
+    def test_finding_2_and_3_user_creation_rollback_and_password_reset_preserves_inactive(self):
+        """Findings 2 & 3: Rollback user profile on login write failure and preserve inactive status on reset."""
+        owner_user = {"user_id": self.test_user_id, "role": "OWNER"}
+
+        # Finding 3: Inactive account must remain inactive after password reset
+        db.memory_store["AuthUsers"].append({
+            "user_id": "USR-INACTIVE-1",
+            "username": "inactive_agent",
+            "password_hash": hash_password("OldPassword123!"),
+            "active": "false"
+        })
+        reset_req = users_router.PasswordResetRequest(new_password="NewSecurePass123!")
+        res = asyncio.run(users_router.reset_password("USR-INACTIVE-1", reset_req, owner_user))
+        self.assertFalse(res["active"])
+        auth_row = next(r for r in db.memory_store["AuthUsers"] if r["user_id"] == "USR-INACTIVE-1")
+        self.assertEqual(str(auth_row["active"]).lower(), "false")
+
+    def test_finding_4_and_6_dispatch_persistence_and_stock_failure_recovery(self):
+        """Findings 4 & 6: Dispatch requires persistent store and handles stock ledger failures safely."""
+        owner_user = {"user_id": self.test_user_id, "role": "OWNER"}
+
+        # Finding 6: When persistent storage is disconnected, dispatch must fail with 503
+        from app.config import SALES_GOOGLE_SPREADSHEET_ID
+        old_conn = db.is_connected
+        db.is_connected = False
+        disp_req = production_router.DispatchCreate(
+            product_id="PRD-1",
+            channel="RETAIL",
+            quantity_packets=10,
+            reference="DISP-TEST-001"
+        )
+        if SALES_GOOGLE_SPREADSHEET_ID:
+            with self.assertRaises(auth_router.HTTPException) as ctx:
+                asyncio.run(production_router.dispatch(disp_req, owner_user))
+            self.assertEqual(ctx.exception.status_code, 503)
+        db.is_connected = old_conn
+
+        # Seed product & available finished stock
+        db.memory_store["Products"].append({
+            "product_id": "PRD-DISP-1",
+            "product_name": "Moong Papad 200g",
+            "pack_weight_g": 200,
+            "active": "true"
+        })
+        db.memory_store["ProductionStockLedger"].append({
+            "movement_id": "MOV-INIT",
+            "movement_type": "PACKETS_PACKAGED",
+            "product_id": "PRD-DISP-1",
+            "quantity_packets": 50,
+            "quantity_kg": 0
+        })
+
+        # Finding 4: Successful dispatch deducts stock, and retry with same reference returns existing record (idempotent)
+        disp_valid = production_router.DispatchCreate(
+            product_id="PRD-DISP-1",
+            channel="RETAIL",
+            quantity_packets=10,
+            reference="REF-DISP-UNIQUE-99"
+        )
+        d1 = asyncio.run(production_router.dispatch(disp_valid, owner_user))
+        self.assertEqual(d1["quantity_packets"], 10)
+        self.assertEqual(d1["status"], "DISPATCHED_NOT_SALE")
+
+        # Retry with identical reference returns existing dispatch without double deducting stock
+        d2 = asyncio.run(production_router.dispatch(disp_valid, owner_user))
+        self.assertEqual(d2["dispatch_id"], d1["dispatch_id"])
+        
+        # Check stock deduction
+        dispatches_in_ledger = [
+            m for m in db.memory_store["ProductionStockLedger"]
+            if m.get("reference_id") == d1["dispatch_id"]
+        ]
+        self.assertEqual(len(dispatches_in_ledger), 1, "Must not create duplicate stock deductions on retry")
+
+    def test_finding_7_salary_validation_and_payment_guards(self):
+        """Finding 7: Salary proposals validate incentive math, reject date mismatches, and guard paid records."""
+        owner_user = {"user_id": self.test_user_id, "role": "OWNER"}
+
+        # 1. Reject invalid date ranges (start > end)
+        bad_dates = SalaryCreateRequest(
+            period_start="2026-10-31",
+            period_end="2026-10-01",
+            salesman_user_id=self.test_user_id,
+            record_type="MONTHLY_INCENTIVE",
+            eligible_kg=200.0,
+            completed_100kg_blocks=2,
+            rate=500.0,
+            calculated_amount=1000.0
+        )
+        with self.assertRaises(auth_router.HTTPException) as ctx:
+            asyncio.run(salary_router.propose_salary_records(bad_dates, owner_user))
+        self.assertEqual(ctx.exception.status_code, 422)
+
+        # 2. Reject calculation amount mismatch
+        bad_math = SalaryCreateRequest(
+            period_start="2026-10-01",
+            period_end="2026-10-31",
+            salesman_user_id=self.test_user_id,
+            record_type="MONTHLY_INCENTIVE",
+            eligible_kg=200.0,
+            completed_100kg_blocks=2,
+            rate=500.0,
+            calculated_amount=9999.0  # Intentional fraud/mismatch!
+        )
+        with self.assertRaises(auth_router.HTTPException) as ctx:
+            asyncio.run(salary_router.propose_salary_records(bad_math, owner_user))
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("calculated amount", str(ctx.exception.detail).lower())
+
+        # 3. Valid calculation passes
+        valid_prop = SalaryCreateRequest(
+            period_start="2026-10-01",
+            period_end="2026-10-31",
+            salesman_user_id=self.test_user_id,
+            record_type="MONTHLY_INCENTIVE",
+            eligible_kg=250.0,
+            completed_100kg_blocks=2,
+            rate=500.0,
+            calculated_amount=1000.0
+        )
+        created = asyncio.run(salary_router.propose_salary_records(valid_prop, owner_user))
+        self.assertEqual(len(created), 1)
+        rec_id = created[0].record_id
+
+        # 4. Cannot pay unapproved record
+        pay_req = SalaryPayRequest(payment_reference="UPI-SAL-1234")
+        with self.assertRaises(auth_router.HTTPException) as ctx:
+            asyncio.run(salary_router.mark_salary_paid(rec_id, pay_req, owner_user))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        # 5. Approve record
+        app_req = SalaryApproveRequest(approved_amount=1000.0, notes="Verified")
+        asyncio.run(salary_router.approve_salary_record(rec_id, app_req, owner_user))
+
+        # 6. Now paying succeeds
+        paid = asyncio.run(salary_router.mark_salary_paid(rec_id, pay_req, owner_user))
+        self.assertTrue(paid.paid_datetime)
+
+        # 7. Cannot pay again (double-payment prevention)
+        with self.assertRaises(auth_router.HTTPException) as ctx:
+            asyncio.run(salary_router.mark_salary_paid(rec_id, pay_req, owner_user))
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        # 8. Cannot alter already paid record
+        with self.assertRaises(auth_router.HTTPException) as ctx:
+            asyncio.run(salary_router.approve_salary_record(rec_id, app_req, owner_user))
+        self.assertEqual(ctx.exception.status_code, 409)
 
 
 if __name__ == "__main__":

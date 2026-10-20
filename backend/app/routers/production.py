@@ -503,43 +503,77 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         sku_product=next((p for p in db.get_records("Products") if str(field(p,"product_name")).strip().lower()==bulk_key and int(float(field(p,"pack_weight_g",default=0) or 0))==weight_g and truthy(field(p,"active",default="true"))),None)
         if not sku_product: raise HTTPException(400,f"No active {weight_g} g SKU found for {field(product,'product_name')}. Create/activate that pack-size product first.")
         movements.append({"movement_type":"PACKETS_PACKAGED","quantity_kg":0,"quantity_packets":packet_count,"channel":"FACTORY_FINISHED","product_id":str(field(sku_product,"product_id")),"bulk_product_key":bulk_key,"product_name_snapshot":field(sku_product,"product_name"),"sku_snapshot":field(sku_product,"sku"),"pack_weight_g":weight_g})
-    for m in movements:
-        row={"movement_id":make_id("ProductionStockLedger"),"txn_datetime":now(),**m,"reference_id":rec["packaging_id"],"created_by":actor,"notes":req.notes}
-        if not db.append_record("ProductionStockLedger",row,raise_on_error=True): raise HTTPException(503,"Packaging record saved but stock ledger is incomplete. Reconcile before retrying.")
+    try:
+        for m in movements:
+            row={"movement_id":make_id("ProductionStockLedger"),"txn_datetime":now(),**m,"reference_id":rec["packaging_id"],"created_by":actor,"notes":req.notes}
+            if not db.append_record("ProductionStockLedger",row,raise_on_error=True):
+                raise RuntimeError("Failed to append stock ledger movement")
+    except Exception as exc:
+        # Finding 5: If any stock movement fails, mark packaging batch status as INCOMPLETE so it is identifiable and recoverable
+        try:
+            db.update_record("PackagingBatches", "packaging_id", rec["packaging_id"], {"status": "INCOMPLETE", "notes": f"INCOMPLETE_STOCK_WRITE: {exc}"})
+        except Exception:
+            pass
+        raise HTTPException(503, f"Packaging record saved but stock ledger writes failed ({exc}). Marked as INCOMPLETE. Reconcile before retrying.")
+
     db.log_audit(actor,"RECORD_PACKAGING","PackagingBatches",rec["packaging_id"],reason=f"Used {req.bulk_kg_used} kg, produced {total_packets} packets, difference {difference} kg")
     return rec
 
 @router.post("/dispatch")
 async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
     actor, _ = require_admin(user)
+    # Finding 6: Consistent persistence check for dispatch writes
+    require_persistent_store()
+
     product=next((p for p in db.get_records("Products") if str(field(p,"product_id"))==req.product_id),None)
     if not product: raise HTTPException(404,"Product not found")
     if req.channel.upper() not in {"ECOMMERCE","RETAIL","SALESMAN","WHOLESALE","DISTRIBUTOR"}: raise HTTPException(400,"Unsupported distribution channel")
     ledger=db.get_records("ProductionStockLedger")
     available=sum(int(float(field(r,"quantity_packets",default=0) or 0)) if str(field(r,"movement_type")).upper() in {"PACKETS_PACKAGED","PACKET_RETURN"} and str(field(r,"product_id"))==req.product_id else -int(float(field(r,"quantity_packets",default=0) or 0)) if str(field(r,"movement_type")).upper()=="CHANNEL_DISPATCH" and str(field(r,"product_id"))==req.product_id else 0 for r in ledger)
     if req.quantity_packets>available: raise HTTPException(400,f"Insufficient factory finished stock. Available {available} packets.")
+
+    # Idempotency check: if a dispatch with this reference was already recorded, return existing record
+    if req.reference and req.reference.strip():
+        existing_disp = next((d for d in db.get_records("ProductionDispatches") if str(field(d, "reference")).strip() == req.reference.strip() and str(field(d, "status")).upper() == "DISPATCHED_NOT_SALE"), None)
+        if existing_disp:
+            return existing_disp
+
     rec={"dispatch_id":make_id("ProductionDispatches"),"dispatch_datetime":now(),"product_id":req.product_id,"product_name_snapshot":field(product,"product_name"),"channel":req.channel.upper(),"destination":req.destination,"quantity_packets":req.quantity_packets,"reference":req.reference,"status":"DISPATCHED_NOT_SALE","created_by":actor,"notes":req.notes}
     if not db.append_record("ProductionDispatches",rec,raise_on_error=True): raise HTTPException(503,"Could not save dispatch")
-    movement={"movement_id":make_id("ProductionStockLedger"),"txn_datetime":now(),"movement_type":"CHANNEL_DISPATCH","product_id":req.product_id,"product_name_snapshot":field(product,"product_name"),"quantity_kg":0,"quantity_packets":req.quantity_packets,"channel":req.channel.upper(),"reference_id":rec["dispatch_id"],"destination":req.destination,"created_by":actor,"notes":req.notes}
-    if not db.append_record("ProductionStockLedger",movement,raise_on_error=True): raise HTTPException(503,"Dispatch saved but stock ledger write failed. Reconcile before retrying.")
-    if req.channel.upper() == "SALESMAN" and req.destination:
-        db.append_record("SalesmanStockLedger", {
-            "stock_txn_id": make_id("SalesmanStockLedger"),
-            "txn_datetime": now(),
-            "salesman_user_id": req.destination,
-            "product_id": req.product_id,
-            "sku_snapshot": field(product, "sku"),
-            "txn_type": "SALESMAN_POSITIVE_ADJUSTMENT",
-            "quantity": req.quantity_packets,
-            "unit": "PACKET",
-            "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
-            "related_sale_id": "",
-            "issued_by_user_id": actor,
-            "received_by_user_id": req.destination,
-            "confirmed_by_user_id": actor,
-            "reference_id": rec["dispatch_id"],
-            "notes": "Factory dispatch to salesman. This is not a sale.",
-        }, raise_on_error=True)
+
+    # Finding 4: Handle partial write failures cleanly
+    try:
+        movement={"movement_id":make_id("ProductionStockLedger"),"txn_datetime":now(),"movement_type":"CHANNEL_DISPATCH","product_id":req.product_id,"product_name_snapshot":field(product,"product_name"),"quantity_kg":0,"quantity_packets":req.quantity_packets,"channel":req.channel.upper(),"reference_id":rec["dispatch_id"],"destination":req.destination,"created_by":actor,"notes":req.notes}
+        if not db.append_record("ProductionStockLedger",movement,raise_on_error=True):
+            raise RuntimeError("ProductionStockLedger append returned False")
+
+        if req.channel.upper() == "SALESMAN" and req.destination:
+            if not db.append_record("SalesmanStockLedger", {
+                "stock_txn_id": make_id("SalesmanStockLedger"),
+                "txn_datetime": now(),
+                "salesman_user_id": req.destination,
+                "product_id": req.product_id,
+                "sku_snapshot": field(product, "sku"),
+                "txn_type": "SALESMAN_POSITIVE_ADJUSTMENT",
+                "quantity": req.quantity_packets,
+                "unit": "PACKET",
+                "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+                "related_sale_id": "",
+                "issued_by_user_id": actor,
+                "received_by_user_id": req.destination,
+                "confirmed_by_user_id": actor,
+                "reference_id": rec["dispatch_id"],
+                "notes": "Factory dispatch to salesman. This is not a sale.",
+            }, raise_on_error=True):
+                raise RuntimeError("SalesmanStockLedger append returned False")
+    except Exception as exc:
+        # Mark dispatch as INCOMPLETE so it is identifiable and never creates an unbacked ledger discrepancy
+        try:
+            db.update_record("ProductionDispatches", "dispatch_id", rec["dispatch_id"], {"status": "INCOMPLETE_STOCK_WRITE", "notes": f"INCOMPLETE_STOCK_WRITE: {exc}"})
+        except Exception:
+            pass
+        raise HTTPException(503, f"Dispatch was saved but stock deduction failed ({exc}). Marked as INCOMPLETE. Reconcile before retrying.")
+
     db.log_audit(actor,"PRODUCTION_STOCK_DISPATCH","ProductionDispatches",rec["dispatch_id"],reason=f"{req.quantity_packets} packets to {req.channel}: {req.destination}")
     return rec
 

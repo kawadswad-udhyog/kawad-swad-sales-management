@@ -65,8 +65,19 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
         "created_at": now_iso,
         "must_change_password": "false",
     }
-    if not db.append_record("AuthUsers", auth_record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="The login record was not saved. Retry before using this username.")
+    try:
+        if not db.append_record("AuthUsers", auth_record, raise_on_error=True):
+            raise RuntimeError("AuthUsers write returned False")
+    except Exception as exc:
+        # Finding 2: Roll back the created Users record so it is not left orphaned without a login
+        try:
+            db.update_record("Users", "user_id", user_id, {"active": "false", "notes": f"INCOMPLETE_LOGIN_CREATION: {exc}"})
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=503,
+            detail=f"The login record could not be saved ({exc}). The employee profile creation was rolled back.",
+        )
 
     db.log_audit(
         actor=current_user.get("user_id"),
@@ -97,11 +108,20 @@ class PasswordResetRequest(BaseModel):
 async def reset_password(user_id: str, req: PasswordResetRequest, current_user: dict = Depends(get_current_user)):
     """Owner recovery path for a legacy or forgotten password. Does not reveal the old hash."""
     require_owner(current_user)
-    if not db.update_record("AuthUsers", "user_id", user_id, {
+    # Finding 3: Do NOT automatically reactivate an account if it was deactivated!
+    auth_records = db.get_records("AuthUsers")
+    target_auth = next((r for r in auth_records if str(r.get("user_id", "")).strip() == user_id.strip()), None)
+    if not target_auth:
+        raise HTTPException(status_code=404, detail="Login account was not found.")
+
+    current_active_status = str(target_auth.get("active", "true")).lower()
+
+    update_payload = {
         "password_hash": hash_password(req.new_password),
         "must_change_password": "true",
-        "active": "true",
-    }, raise_on_error=True):
-        raise HTTPException(status_code=404, detail="Login account was not found or the sheet update failed.")
+        "active": current_active_status,  # Preserve existing active status!
+    }
+    if not db.update_record("AuthUsers", "user_id", user_id, update_payload, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="The password update failed to save to Google Sheets.")
     db.log_audit(current_user.get("user_id"), "RESET_PASSWORD", "AuthUsers", user_id, reason="Owner reset a password")
-    return {"ok": True, "must_change_password": True}
+    return {"ok": True, "must_change_password": True, "active": current_active_status in ("true", "1", "yes")}

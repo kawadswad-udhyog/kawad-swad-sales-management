@@ -1,0 +1,650 @@
+# Kawad Swad Sales Management App: Complete Code Audit 🔍
+
+I inspected the uploaded ZIP containing your sales management application, reviewed its backend architecture, authentication, employee permissions, sales and billing, production, salary management, stock handling, daily closing, and frontend structure. I also ran the automated backend tests.
+
+**My conclusion: The application has a substantial foundation, and its automated backend tests pass. However, I would not yet trust it with unsupervised, day-to-day business operations without fixing several risks and testing it against a development Google Sheet.**
+
+Your application is not just a sales app. It connects several business processes, so a mistake in one module can affect other modules.
+
+For example:
+
+**Production → Finished Stock → Salesman Stock → Sales → Payments → Daily Closing → Salary & Incentives**
+
+If any connection in this chain fails, your dashboard might show incorrect stock, cash, or employee earnings.
+
+Let's examine the system properly.
+
+---
+
+# 1. Initial Audit Results
+
+## Automated checks
+
+| Check                                    | Result                        | What it means                                                                               |
+| ---------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------- |
+| Python backend compilation               | ✅ Passed                      | Python source files compile successfully.                                                   |
+| Backend automated tests                  | ✅ Passed                      | All 61 tests passed in this environment.                                                    |
+| Authentication tests                     | ✅ Covered                     | Password validation and several access-control scenarios are tested.                        |
+| Sales and billing tests                  | ✅ Covered                     | Includes total validation, overselling prevention, and retry handling.                      |
+| Production tests                         | ✅ Covered                     | Includes recipe approval, raw-material consumption, packaging, and dispatch scenarios.      |
+| Salary and incentives                    | ⚠️ Partial assurance          | Passing tests do not establish that all payroll calculations are correct for your business. |
+| Frontend TypeScript and production build | ⚠️ Not verified in this audit | The ZIP does not include installed frontend dependencies or a package lockfile.             |
+| Live Google Sheets integration           | ❌ Not verified                | The audit did not connect to your actual spreadsheet.                                       |
+| Complete browser workflow                | ❌ Not verified                | The application was not tested by clicking through every screen in a browser.               |
+| Concurrent production use                | ⚠️ Not verified               | Multiple deployed servers and simultaneous business transactions need additional testing.   |
+
+**Important distinction:** Passing 61 tests means the existing test cases passed. It does not mean every possible business workflow is correct.
+
+I have not changed your production data, deployed the application, or connected to your live spreadsheet.
+
+---
+
+# 2. How Your Application Works
+
+The project uses a frontend, a Python API, and Google Sheets as its storage layer.
+
+| Component                   | Responsibility                                                      |
+| --------------------------- | ------------------------------------------------------------------- |
+| React + TypeScript frontend | Screens, forms, dashboards, and employee interactions               |
+| FastAPI backend             | Business rules, validation, authentication, and API endpoints       |
+| Google Sheets               | Persistent business records                                         |
+| JWT authentication          | Employee login sessions                                             |
+| Password hashing            | Protecting stored employee passwords                                |
+| Backend routers             | Sales, stock, production, salary, users, closing, and other modules |
+
+The backend contains separate routers for the major business functions.
+
+These are the principal areas I reviewed:
+
+* `backend/app/routers/auth.py`
+* `backend/app/routers/users.py`
+* `backend/app/routers/sales.py`
+* `backend/app/routers/stock.py`
+* `backend/app/routers/production.py`
+* `backend/app/routers/salary.py`
+* `backend/app/routers/closing.py`
+* `backend/app/routers/expenses.py`
+* `backend/app/routers/dashboard.py`
+* `backend/app/routers/workspace.py`
+
+The main frontend includes sales, stock, employees, production, expenses, closing, salary, and reporting screens.
+
+This separation is useful, but it creates an important requirement: **the backend must enforce the same business rules that the frontend displays.** Hiding a button from an employee is not sufficient security.
+
+---
+
+# 3. Critical Area: Employee Login and Permissions 🔐
+
+Employee authentication deserves special attention because it protects salary records, business information, and stock operations.
+
+### What is already implemented well?
+
+The reviewed code includes several useful security controls:
+
+* Passwords are stored using PBKDF2-SHA256 hashing.
+* Plaintext passwords and raw SHA-256 password values are rejected.
+* JWT sessions have an expiration period.
+* The application rejects missing or known insecure JWT secrets.
+* Production configuration rejects wildcard CORS.
+* Owner and manager permissions are enforced on several sensitive backend endpoints.
+* A PA cannot create an Owner account through the user-creation endpoint.
+* User lists and audit logs have restricted access.
+
+These are meaningful safeguards.
+
+### Finding 1: Removed login accounts may retain access until their token expires
+
+**Priority: High**
+
+In `backend/app/auth.py`, the `get_current_user()` function checks whether the authenticated user's record exists in `AuthUsers`.
+
+However, if the record is missing, the function does not explicitly reject the token. It continues using the role and identity information contained in the token.
+
+This means that a previously issued token may remain usable after its associated login record has been removed, until the token expires.
+
+The token lifetime is configurable and defaults to eight hours.
+
+**Recommended correction:**
+
+1. Require the corresponding `AuthUsers` record to exist.
+2. Reject the session if that record is missing or inactive.
+3. Use the current role from the authoritative account record rather than trusting an old token role.
+4. Consider a session-version or revocation mechanism for immediately invalidating existing sessions.
+
+This should be addressed before relying on employee access controls for sensitive operations.
+
+### Finding 2: Employee profile and login records are separate
+
+**Priority: High**
+
+The user-creation endpoint writes to two separate spreadsheet tabs:
+
+1. `Users`
+2. `AuthUsers`
+
+If the first write succeeds but the second fails, the employee profile can exist without a working login.
+
+The backend returns an error, but the first write is not automatically rolled back.
+
+This can leave an incomplete employee record.
+
+**Recommended correction:**
+
+Introduce a recoverable employee-creation workflow:
+
+* Create a record with a pending status.
+* Create the corresponding authentication record.
+* Mark the employee active only after both writes succeed.
+* Provide a reconciliation process for incomplete employee creations.
+
+Google Sheets does not provide a transaction spanning both tabs, so this needs explicit recovery logic.
+
+### Finding 3: Password reset reactivates an account
+
+**Priority: Medium**
+
+In `backend/app/routers/users.py`, the password-reset endpoint sets the account's `active` field to `true`.
+
+This is convenient when recovering a legitimate account, but it also means a password reset can reactivate an account that was deliberately disabled.
+
+**Recommended correction:**
+
+Password reset should not automatically reactivate an inactive employee.
+
+Reactivation should require a separate, authorized action.
+
+### Employee permissions that should be tested
+
+| Action                                | Expected restriction     |
+| ------------------------------------- | ------------------------ |
+| View another employee's salary        | Denied unless authorized |
+| View all employee records             | Owner/PA only            |
+| Create an Owner account               | Owner only               |
+| Approve production                    | Authorized manager       |
+| Access production management          | Authorized role          |
+| Submit a sale as another salesman     | Denied                   |
+| Reset another employee's password     | Owner only               |
+| Access company-wide audit information | Owner/PA only            |
+
+The code already enforces several of these restrictions. The remaining task is to verify the complete permission matrix across every endpoint, including endpoints that are not directly accessible through the interface.
+
+---
+
+# 4. Sales and Billing Flow 🧾
+
+The sales module is one of the more developed parts of the application.
+
+The reviewed code contains protections against several common billing problems.
+
+### Existing safeguards
+
+* The server recalculates sale totals.
+* Incorrect client-supplied totals are rejected.
+* Inactive products cannot be sold.
+* Insufficient salesman stock is rejected.
+* A salesman cannot create a sale under another salesman's identity.
+* Payment references are supported.
+* Idempotency keys help prevent duplicate bills when requests are retried.
+* Incomplete transactions can be identified.
+* Invoice generation is separated from sale creation.
+
+These are good design decisions.
+
+## The complete sales flow that needs verification
+
+The intended sequence is:
+
+1. Employee logs in.
+2. The application loads the employee's workspace.
+3. The employee checks available stock.
+4. The employee selects products and quantities.
+5. The server validates product status, prices, and stock.
+6. The server creates the sale.
+7. Sale items are recorded.
+8. Payment information is recorded.
+9. The relevant cash or payment records are updated.
+10. The salesman stock ledger is updated.
+11. The sale is marked complete only when required records exist.
+12. The invoice and reports display the saved transaction.
+
+The application already contains logic intended to protect this sequence.
+
+However, a multi-step sale is not a single atomic transaction in Google Sheets.
+
+For example, a network failure might occur after the sale header is saved but before all stock and payment records are written.
+
+The application has retry and incomplete-transaction handling, but this must be tested against actual spreadsheet behavior.
+
+### Required test
+
+Create a test sale, then simulate a failure at each stage:
+
+| Failure point        | Expected behavior                       |
+| -------------------- | --------------------------------------- |
+| Sale header write    | No completed bill                       |
+| Sale items write     | Transaction remains incomplete          |
+| Payment write        | Transaction remains incomplete          |
+| Stock movement write | Transaction remains incomplete          |
+| Network reconnect    | Retry recovers the existing transaction |
+| Invoice reprint      | No new sale or stock movement           |
+
+**Important:** Never repair an incomplete sale by simply creating a new bill. First inspect the existing transaction and its associated ledger entries.
+
+The code is designed to support recovery, but its behavior against your real Google Sheet remains unverified.
+
+---
+
+# 5. Production and Stock Management 🏭
+
+The production module is particularly important because it connects raw materials, finished papad, packaging, and distribution.
+
+The intended workflow is:
+
+![Image](https://images.openai.com/static-rsc-4/9_oZ8Myze9c907d8KjTf1Z0pBHAIoKsKgZWEZ3jnlp0dg6VNO5d_nZL39e6BJebtX30fufojuXAGTIoouCZeJDSseNLsyjez0ZOyOfcYEVkJvLWNjXJRdBPeJQN1Bl2cfo9Whu_NOkaRvSgr2wE9KFaaGzoOZbOMI9UvGPfN6kF6XxJEysD2DywHmr0kTjAS?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/d08pkYMoxC_GbID-rAt1VyKn0vOxTTfslCIV3H9BP_PwQCwvtDxe6FhCdSuQcunkmURw0X_Jh-duroaoarvAhnf-Z8bg5fX9PWSARBk5hcZTwK5wv0MCGewNJq-wkjHNyiq7ZJb8yY5qK7ycvwM4SBx5Q5AF3bZfQCbgujZ43hWvp8oGqU-9TmejVfnnGqS9?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/EwnZ6giJcDgLwk5H3ahnxZFY0F4al_XhvRsBMPzpXFSjKgJwBiWLD7yGLsJbOFZEAcAEB3ZHt_Pynm0hrn7o4df0cgvwJVMr7FarTqgyVEm5WxjnXU2OBVlK_v94FifpO4bs9j5W0fOTOXIwyi_Al26NvtScVaByHib2N9RyIAAAw3JIX_fhT7ypwwQaq1iD?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/4Z7_F0XLCpHEZNf2a02c8NB6ijDsgFT3V1jD3R5X-vIJw94EvgBZ3ePR_tYsUrCdikPebjqP9Z74T0QqBuy-2NWZQ7OSBLYGJ9AlWBZOfPZVdARMNR8PIy_9GZ4In9cQ-KtJA-B4AG7Hbp9TBW289GoJeHUlhjPwPTn7SSIGpH-FdTmkHFKExjlm96IQI4Ko?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/xbnjTNjXVToMciKvDh-Fletjp3kkKzuyhMd_1yXa_QtDqTkW6nInJ3wPMs5UbL1RpuRvUDpskTwZEooi4FvmcNroR50Es-jcRRdQbmnzuo4tRUG-aFRKCGmMel2R_k6lD5oLYKRGkWYIiDKLuOJIzcVTEV3fTKC2bchRho1-H9ZWDZijtr2F4qU1ULE3T98s?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/I72QyqWRK5gPpqpyvFBi8QJjywAkNze5HtpEz76X8bjGwObx-rjnIaoaW7fogfBE_kowI9FByywj73ERN9CNqVJNueIUXVJvwyiTVccb3Efkmtp6A9csrsUK1wFLVX1-xhrGbjt-ibpUiG3umEfam8fHVRrhOl3q5OccNtTqjceiIaZuEW_Y1_paEu8Ip_fF?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/FWiPW9I2aoHTjZ2l1Iln7o5Gk8QRv2E8HDZelj-AUIY3krvy_X6dp8hw3ahK56Z7aB8Zyg2Siczr_3JL3ev0Q_QsTUbyCtJrNIvnntRxqNSdyeIOvOpP_CbFj0X0-QszgNqUiOSbQrNCBvE8hPHHexNl-hatlXupcos9b4nNRBIQlxaA6jNjDRriIw4ddLj8?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/TpRBfCH5aKzju0pd3auWGtH0RYVoc6FG19PIyxh4TMGDC5tijOxxU9V-dbFDHx5Iem7P5Ya_vQHQJ0z_18A-4sywdCbqxsI-U9sq6OJw9ahHf2oXl93xzu7mg9bT8EhgvQzDGsJIiBG9iIxzyM-6W746_Mm37cMb0hFOuFDCjLxzWq8hMYXqF-gT-T1-8hOW?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/_TWNwxyZtiPWQVqguFfcFiha1Z6U21QosFHTpE7pRd4uxuDAwQhR2PEdvhEJeoNOAY2UfBkxCQiKVgcLASrylMRC_8eBuxxndBmBjFIM_HHgawV2ZC54K0XWmDZSxMGNqc2g_NHfp6yOB-g_-lBNXKLgc1DO_ezlEvFrAygv454qCsYpr2jHLuyjmojhfYkz?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/om1RpcCgakV_O4OPFPhl_RGbKOAhjfPv-XIDrYXhhgA8MHXANp4D2-AppUX7KgziCw9yZIJ10vrwZrskDmwPTsY8fkhQ_qzvSypgyjDRlrBClLpEUQHO5rbvt-j16jYk_nbSl56UE0HNTXCUvjWnD6JeBbZXlq0173MFwTDoUK-16CyBWrupV03VpLQHv9dK?purpose=fullsize)
+
+![Image](https://images.openai.com/static-rsc-4/da6IjVUFaikmUZAmrJQ8Yw7fujSrnDZuKOQETUz3vtmCZ4gTTwC8OnKF2v2V5uFat29Hhrdf8NI67KQkWNTm0CXhr8GBcjfZWfHxIdyZDyNsIUbZ-fvr1a3VMq-jqf6iT9IGAksH7vnwLHhOu4SRd5yajLyUp0cEdwv3AW1k9W6Y2UcsPQRwvgtNYfj2sjnL?purpose=fullsize)
+
+**Raw materials → Production batch → Approval → Bulk stock → Packaging → Finished packets → Dispatch**
+
+### Existing functionality
+
+The code supports:
+
+* Factory worker profiles.
+* Daily attendance.
+* Daily wage records.
+* Recipe creation and approval.
+* Raw-material consumption.
+* Production batches.
+* Wastage recording.
+* Packaging into 200 g, 500 g, and 1 kg packets.
+* Finished-stock ledgers.
+* Dispatch to e-commerce, retail, salesmen, wholesale, and distributors.
+
+Production dispatch is designed to be a stock movement rather than a sale. That distinction is correct: sending stock to a salesman does not automatically mean the customer has purchased it.
+
+## Finding 4: Dispatch can partially save without its stock movement
+
+**Priority: High**
+
+In `backend/app/routers/production.py`, the dispatch endpoint performs two separate writes:
+
+1. It saves the dispatch record.
+2. It saves the corresponding finished-stock ledger movement.
+
+If the first succeeds and the second fails, the application can retain a dispatch record without the corresponding stock deduction.
+
+The code reports the failure, but the first write is not automatically rolled back.
+
+This is especially important because dispatch retries can have financial and inventory consequences.
+
+**Recommended correction:**
+
+Give every dispatch a unique transaction identifier and implement reconciliation that can detect:
+
+* Dispatch record exists, stock movement missing.
+* Stock movement exists, dispatch record missing.
+* Duplicate stock movements.
+* Duplicate dispatch submissions.
+
+A retry should complete the existing transaction rather than create a second dispatch.
+
+## Finding 5: Packaging needs the same failure-recovery protection
+
+**Priority: High**
+
+Packaging consumes bulk kilograms and creates finished packets.
+
+The code checks whether sufficient bulk stock exists and calculates the difference between kilograms used and packet weight.
+
+However, packaging involves multiple ledger writes. If some writes succeed and a later write fails, the application can end up with inconsistent bulk and finished stock.
+
+The same problem can arise when a user retries a failed request.
+
+**Recommended correction:**
+
+Use a packaging transaction ID and ensure all movements associated with that packaging batch can be reconciled.
+
+Do not silently compensate for a discrepancy by changing quantities. Record the discrepancy and require an authorized correction.
+
+## Finding 6: Production writes need a consistent persistence guard
+
+**Priority: High**
+
+The production module contains a `require_persistent_store()` guard to block writes when Google Sheets is configured but disconnected.
+
+However, the reviewed `/api/production/dispatch` endpoint does not invoke this guard before performing its writes.
+
+That is inconsistent with other production write endpoints.
+
+**Recommended correction:**
+
+Apply the persistence check consistently to every production mutation endpoint, including dispatch.
+
+Then test what happens when Google Sheets disconnects during a transaction.
+
+The desired result is that the application never reports an unpersisted operation as a successful, durable business transaction.
+
+---
+
+# 6. Salary, Incentives, and Employee Wages 💰
+
+This module needs a distinction between **calculation correctness** and **payment correctness**.
+
+The code supports salary and incentive records, approvals, and payment marking.
+
+It also has logic intended to calculate incentives from eligible sales rather than simply counting every bill.
+
+The documented rules include:
+
+* Trial incentives based on eligible kilograms.
+* Monthly incentives based on completed 100 kg blocks.
+* Base salary after the configured trial period.
+* Separate approval and payment statuses.
+
+These rules are configurable and must be confirmed against your actual employment policy before being relied upon.
+
+## Finding 7: Salary proposal amounts need server-side business validation
+
+**Priority: High**
+
+In `backend/app/routers/salary.py`, the salary proposal endpoint accepts values such as:
+
+* Eligible kilograms.
+* Incentive rate.
+* Calculated amount.
+* Approved amount.
+* Employee identity.
+
+The endpoint restricts access to Owner and PA roles, which is appropriate.
+
+However, authorization alone does not establish that the submitted figures are correct.
+
+For example, an authorized user could submit a salary proposal whose calculated amount does not match the eligible kilograms and applicable incentive rate.
+
+**Recommended correction:**
+
+The server should calculate or independently validate payroll amounts from authoritative records and configured rules.
+
+At minimum, validate:
+
+1. Employee exists and is eligible for the period.
+2. The period is valid.
+3. Eligible kilograms correspond to qualifying sales.
+4. Incentive calculations match the configured policy.
+5. Base salary is applied only when the eligibility conditions are satisfied.
+6. An already-paid record cannot be recalculated or altered without a controlled adjustment.
+7. Duplicate salary records cannot be created for the same employee, period, and record type.
+
+The existing code checks for duplicate period records, but this is not equivalent to a complete payroll validation system.
+
+### Another important limitation
+
+The production module's attendance system records worker wage accruals. The documented implementation does not establish a complete payroll system for factory workers.
+
+It does not automatically handle statutory deductions, overtime, advances, or attendance-prorated monthly salaries.
+
+Those should not be assumed to exist.
+
+**My recommendation:** Do not use the app's salary figures as the final payment authority until the calculation rules have been tested with known examples and the actual spreadsheet data.
+
+---
+
+# 7. Daily Closing and Cash Reconciliation
+
+Daily closing is where several business processes meet.
+
+The backend calculates expected cash using:
+
+**Expected cash = Opening cash + Cash collections − Approved cash-reducing expenses**
+
+UPI, bank transfers, and other payment methods are tracked separately.
+
+The code also includes checks for duplicate daily closings and stock discrepancies.
+
+These are useful controls.
+
+### What must be tested?
+
+Suppose a salesman starts with ₹500, collects ₹2,000 in cash, and has ₹200 in approved cash expenses.
+
+Expected cash returned:
+
+₹500 + ₹2,000 − ₹200 = **₹2,300**
+
+If the salesman returns ₹2,250, the discrepancy should be ₹50.
+
+The system must also correctly distinguish cash collections from UPI payments.
+
+### Required scenarios
+
+* Cash sale.
+* UPI sale.
+* Bank-transfer sale.
+* Mixed payment methods, if supported by your workflow.
+* Approved cash expense.
+* Rejected expense.
+* Incomplete sale.
+* Duplicate closing submission.
+* Physical cash mismatch.
+* Physical stock mismatch.
+* A sale recorded close to midnight.
+* A failed closing submission followed by a retry.
+
+The code uses the Asia/Kolkata business date for closing, which is appropriate for your Indian operations.
+
+However, the calculations still need to be validated against real examples.
+
+---
+
+# 8. Google Sheets: The Biggest Architectural Risk
+
+Your application uses Google Sheets for persistent business data.
+
+This can be practical for an early-stage business, but it has limitations when several employees are working simultaneously.
+
+Google Sheets does not provide a transaction spanning your sales, payment, stock, and closing tabs.
+
+Consider this situation:
+
+1. Two employees submit transactions at nearly the same time.
+2. Both read the same stock quantity.
+3. Both attempt to sell or dispatch stock.
+4. Both perform their writes.
+
+Even if each request validates stock correctly in isolation, concurrent operations can create inconsistencies unless the read-check-write sequence is protected.
+
+The code includes ID allocation logic and an in-process lock in parts of the application, but an in-process lock does not coordinate multiple deployed backend servers.
+
+### Finding 8: Concurrent operations require stronger consistency controls
+
+**Priority: High**
+
+The application needs explicit testing for concurrent:
+
+* Sales.
+* Stock movements.
+* Production approvals.
+* Packaging batches.
+* Dispatches.
+* Salary proposals.
+* Daily closing submissions.
+
+The existing ID-allocation mechanism is an improvement over simply counting spreadsheet rows, but it is not a complete concurrency-control mechanism for all business transactions.
+
+### Recommended solution
+
+For the immediate version:
+
+* Add idempotency keys to all high-risk operations.
+* Reconcile incomplete transactions.
+* Protect stock checks against concurrent writes.
+* Prevent duplicate approvals and dispatches.
+* Add a recovery report for inconsistent ledger entries.
+
+For a future version, consider moving transactional business data to a database such as PostgreSQL while retaining Google Sheets for exports and reporting.
+
+You do not need to migrate immediately to continue testing the application. However, the limitations should be understood before the business grows.
+
+---
+
+# 9. Employee App: The Complete End-to-End Flow
+
+Your employee application should be tested by role, not simply by screen.
+
+The following is the recommended workflow matrix.
+
+| Workflow               | Owner                | PA                                | Salesman               | Factory worker                                |
+| ---------------------- | -------------------- | --------------------------------- | ---------------------- | --------------------------------------------- |
+| Login                  | Required             | Required                          | Required               | Required if account enabled                   |
+| View company dashboard | Yes                  | Yes, as authorized                | No company-wide access | No company-wide access                        |
+| Manage employees       | Yes                  | Restricted by policy              | No                     | No                                            |
+| Create sales bill      | If permitted         | If permitted                      | Own sales only         | No                                            |
+| View salesman stock    | All authorized stock | All authorized stock              | Own stock              | No                                            |
+| Record production      | Yes                  | Yes                               | No                     | Intended for authorized production operations |
+| Approve production     | Yes                  | Yes, under current implementation | No                     | No                                            |
+| View salary records    | Authorized           | Authorized                        | Own records            | No access to others' salary                   |
+| Approve salary         | Yes                  | Yes, under current implementation | No                     | No                                            |
+| Submit daily closing   | If applicable        | If applicable                     | Own closing            | No                                            |
+| Review daily closing   | Yes                  | Yes                               | No                     | No                                            |
+| View audit logs        | Yes                  | Restricted by policy              | No                     | No                                            |
+
+**Important:** This is the intended access policy for testing, not a claim that every row has already been verified.
+
+The actual access controls must be checked against the backend endpoints, not only the navigation menu.
+
+---
+
+# 10. What I Would Fix First
+
+I would prioritize the work in this order.
+
+| Priority | Issue                                       | Required action                                                                             |
+| -------- | ------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| P0       | Session validity after account removal      | Reject tokens whose authoritative login account no longer exists or is inactive.            |
+| P0       | Incomplete production dispatch transactions | Add recovery and reconciliation for dispatch records and stock movements.                   |
+| P0       | Incomplete packaging transactions           | Protect bulk and finished-stock movements against partial writes and duplicate retries.     |
+| P0       | Production persistence guard                | Ensure dispatch and all other writes fail safely when persistent storage is unavailable.    |
+| P1       | Payroll calculation validation              | Recalculate or validate salary and incentive amounts on the server.                         |
+| P1       | Employee creation across two tabs           | Add a recoverable workflow for incomplete user creation.                                    |
+| P1       | Concurrent stock operations                 | Test simultaneous sales and stock movements, then strengthen transaction controls.          |
+| P1       | Password-reset account status               | Prevent password reset from automatically reactivating disabled accounts.                   |
+| P1       | Daily closing verification                  | Test cash, UPI, expenses, physical stock, and duplicate submissions.                        |
+| P2       | Frontend build verification                 | Install dependencies and run the complete production build.                                 |
+| P2       | Browser workflow verification               | Test every screen and role against a development spreadsheet.                               |
+| P2       | Reporting reconciliation                    | Compare dashboard, sales, stock, closing, and salary totals against the underlying ledgers. |
+
+P0 means the issue should be resolved before trusting the affected workflow for routine business use.
+
+---
+
+# 11. How We Should Test the Entire App
+
+I recommend a dedicated test environment rather than experimenting with live business data.
+
+## Phase 1: Login and employee management
+
+Create test accounts for Owner, PA, Salesman A, Salesman B, and a factory worker.
+
+Verify login, logout, password reset, account deactivation, and role restrictions.
+
+Try to access another employee's records and confirm the backend denies unauthorized requests.
+
+## Phase 2: Production
+
+Create a test raw-material inventory and an approved recipe.
+
+Record a production batch, approve it, and verify that raw-material stock decreases exactly once.
+
+Package the output into the appropriate SKUs.
+
+Confirm that bulk stock decreases and packet stock increases correctly.
+
+Attempt to package more kilograms than the available bulk stock and confirm that the operation is rejected.
+
+## Phase 3: Sales
+
+Issue packets to Salesman A.
+
+Create a small cash bill and verify that the sale, sale items, payment, and stock movement all appear correctly.
+
+Repeat with UPI and a payment reference.
+
+Attempt an oversized sale and confirm that insufficient stock prevents it.
+
+Retry an existing transaction and verify that no duplicate bill or stock movement is created.
+
+## Phase 4: Expenses and daily closing
+
+Submit an expense, approve it, and check whether the cash calculation includes it correctly.
+
+Complete the day's sales and submit closing.
+
+Compare expected cash against physical cash and verify that any difference is reported accurately.
+
+## Phase 5: Salary and incentives
+
+Use a known set of qualifying sales to calculate an employee's eligible kilograms.
+
+Compare the application result with a manually calculated result.
+
+Approve the salary, record a test payment, and verify that the record cannot be paid twice accidentally.
+
+## Phase 6: Reports and reconciliation
+
+Compare the following across the app and Google Sheets:
+
+* Total sales.
+* Cash collections.
+* UPI collections.
+* Outstanding or incomplete transactions.
+* Company stock.
+* Salesman stock.
+* Production kilograms.
+* Packaged quantities.
+* Dispatch quantities.
+* Salary and incentives.
+* Daily closing differences.
+
+The figures should reconcile before the application is used for live operations.
+
+---
+
+# 12. Final Verdict
+
+Your application already contains many of the foundations needed for a useful internal business management system.
+
+The sales module has meaningful validation and recovery logic. The production module covers a substantial portion of the manufacturing workflow. Authentication and role-based access controls are present, and the automated backend tests are passing.
+
+However, **the remaining risks are concentrated in the areas where business records span multiple operations or spreadsheet tabs.** These are precisely the places where a small technical failure can become a real stock or money discrepancy.
+
+My recommendation is:
+
+1. Fix the session-validation and production transaction issues.
+2. Strengthen salary calculation validation.
+3. Test the complete employee permission matrix.
+4. Run the frontend build.
+5. Test all business workflows against a separate development spreadsheet.
+6. Reconcile the results manually before using the updated version for live sales, production, or salary processing.
+
+I have completed an initial static review and automated backend test run. This is not yet a line-by-line certification of every frontend interaction or a verification of your live business data.
+
+**The next step should be a deeper code-fix pass, beginning with authentication, production ledger integrity, and payroll validation, followed by complete end-to-end testing.**

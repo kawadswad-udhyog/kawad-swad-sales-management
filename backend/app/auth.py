@@ -77,20 +77,32 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             headers={"WWW-Authenticate": "Bearer"},
         )
     payload = decode_access_token(credentials.credentials)
-    if not payload or not payload.get("user_id"):
+    uid = payload.get("user_id") or payload.get("sub") if payload else None
+    if not payload or not uid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired or invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    row = _auth_row_for(str(payload.get("user_id")))
-    if row is not None:
-        if str(row.get("active", "true")).lower() == "false":
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is deactivated")
-        payload = dict(payload)
-        payload["role"] = row.get("role") or payload.get("role")
-        payload["full_name"] = row.get("full_name") or payload.get("full_name")
-        payload["must_change_password"] = str(row.get("must_change_password", "false")).lower() == "true"
+    user_id = str(uid).strip()
+    payload["user_id"] = user_id
+    row = _auth_row_for(user_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account no longer exists. Session revoked.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if str(row.get("active", "true")).lower() == "false":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is deactivated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    payload = dict(payload)
+    payload["role"] = row.get("role") or payload.get("role")
+    payload["full_name"] = row.get("full_name") or payload.get("full_name")
+    payload["must_change_password"] = str(row.get("must_change_password", "false")).lower() == "true"
     return payload
 
 
