@@ -1,9 +1,10 @@
 import time
 import secrets
+import base64
 from datetime import datetime, timezone
 import json
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from fastapi import HTTPException, status
 
 from app.sheets import db
@@ -123,11 +124,52 @@ VALID_BOOLEANS = {"true", "false", "1", "0", "yes", "no"}
 PLACEHOLDER_NAMES = {"your full name", "test user", "placeholder", "dummy", "admin", "owner", ""}
 
 
+def validate_pbkdf2_hash(pw_hash: str) -> Tuple[bool, str]:
+    """
+    Validate that a password hash strictly conforms to the expected PBKDF2 format:
+    pbkdf2:sha256:<iterations>$<salt_b64>$<dk_b64>
+    Checks iteration bounds, base64 salt decode, and base64 dk decode.
+    """
+    if not pw_hash:
+        return False, "Password hash is empty"
+    if not pw_hash.startswith("pbkdf2:sha256:"):
+        return False, "Does not start with 'pbkdf2:sha256:' prefix"
+    parts = pw_hash.split("$")
+    if len(parts) != 3:
+        return False, f"Expected 3 components separated by '$', got {len(parts)}"
+
+    prefix_parts = parts[0].split(":")
+    if len(prefix_parts) != 3:
+        return False, f"Invalid algorithm prefix '{parts[0]}'"
+    try:
+        iterations = int(prefix_parts[2])
+        if iterations < 10000 or iterations > 2000000:
+            return False, f"Iterations count ({iterations}) is out of safe range [10000, 2000000]"
+    except ValueError:
+        return False, f"Non-numeric iteration count '{prefix_parts[2]}'"
+
+    try:
+        salt = base64.b64decode(parts[1], validate=True)
+        if len(salt) < 8:
+            return False, f"Salt length ({len(salt)} bytes) is below minimum (8 bytes)"
+    except Exception:
+        return False, "Salt is not valid base64"
+
+    try:
+        dk = base64.b64decode(parts[2], validate=True)
+        if len(dk) < 16:
+            return False, f"Derived key length ({len(dk)} bytes) is below minimum (16 bytes)"
+    except Exception:
+        return False, "Derived key is not valid base64"
+
+    return True, ""
+
+
 def audit_user_reconciliation() -> Dict[str, Any]:
     """
     Read-only independent audit of Users and AuthUsers sheets.
     Detects:
-    - Sheet connectivity errors (returns status="INCOMPLETE")
+    - Sheet connectivity errors (returns execution_status='INCOMPLETE')
     - Orphaned profiles and orphaned auth credentials
     - Duplicate employee IDs in Users and AuthUsers
     - Duplicate auth_ids in AuthUsers
@@ -135,9 +177,10 @@ def audit_user_reconciliation() -> Dict[str, Any]:
     - Username mismatches between Users and AuthUsers (Finding 1)
     - Ambiguous duplicate identities with full details without arbitrary cross-row matching (Finding 2)
     - Role and status mismatches on unambiguous records
-    - Missing or malformed records: blank IDs, missing usernames, invalid roles, invalid booleans, malformed password hashes (Finding 3)
+    - Missing or malformed records: blank IDs, missing usernames, invalid roles, invalid booleans, malformed password hashes (Finding 3 & D)
     - Insecure / missing credentials
     - Incomplete or placeholder Owner profiles (Finding C4)
+    - Distinguishes execution status, data health, and modification safety (Finding E)
     """
     try:
         users = db.get_records("Users", fresh=True) or []
@@ -146,8 +189,12 @@ def audit_user_reconciliation() -> Dict[str, Any]:
         logger.error(f"Failed to read sheets for reconciliation audit: {exc}")
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution_status": "INCOMPLETE",
             "status": "INCOMPLETE",
             "healthy": False,
+            "safe_to_modify": False,
+            "modification_freeze_active": True,
+            "freeze_reasons": ["Reconciliation scan could not complete due to Google Sheets read failure."],
             "error_detail": f"Could not complete reconciliation audit: Google Sheets read failed ({exc}).",
             "total_issues_count": 1,
             "system_errors": [str(exc)],
@@ -199,13 +246,15 @@ def audit_user_reconciliation() -> Dict[str, Any]:
     insecure_credentials = []
     incomplete_owner_profiles = []
 
-    # 1. Missing or malformed records validation (Finding 3)
+    # 1. Missing or malformed records validation (Finding 3 & Finding D)
     for idx, u in enumerate(users):
         row_num = idx + 2
         uid = str(u.get("user_id") or "").strip()
         fname = str(u.get("full_name") or "").strip()
+        uname = str(u.get("username") or "").strip()
         role = str(u.get("role") or "").strip().upper()
-        active = str(u.get("active") or "").strip().lower()
+        raw_act_u = u.get("active")
+        act_str_u = str(raw_act_u if raw_act_u is not None else "").strip().lower()
 
         if not uid:
             malformed_or_invalid_records.append({
@@ -214,6 +263,15 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "field": "user_id",
                 "value": "",
                 "issue": "Blank or missing user_id in Users sheet.",
+            })
+        if not uname:
+            malformed_or_invalid_records.append({
+                "sheet": "Users",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "username",
+                "value": "",
+                "issue": "Blank or missing username in Users sheet.",
             })
         if not fname or fname.lower() in PLACEHOLDER_NAMES:
             malformed_or_invalid_records.append({
@@ -224,7 +282,16 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "value": fname,
                 "issue": f"Placeholder or missing employee full_name: '{fname or '<blank>'}'.",
             })
-        if role and role not in VALID_ROLES:
+        if not role:
+            malformed_or_invalid_records.append({
+                "sheet": "Users",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "role",
+                "value": "",
+                "issue": "Blank or missing role in Users sheet.",
+            })
+        elif role not in VALID_ROLES:
             malformed_or_invalid_records.append({
                 "sheet": "Users",
                 "row_index": row_num,
@@ -233,14 +300,23 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "value": role,
                 "issue": f"Unrecognized role '{role}' in Users sheet (allowed: {', '.join(sorted(VALID_ROLES))}).",
             })
-        if active and active not in VALID_BOOLEANS:
+        if not act_str_u:
             malformed_or_invalid_records.append({
                 "sheet": "Users",
                 "row_index": row_num,
                 "user_id": uid,
                 "field": "active",
-                "value": active,
-                "issue": f"Invalid active-status format '{active}' in Users sheet.",
+                "value": "",
+                "issue": "Blank or missing active-status in Users sheet.",
+            })
+        elif act_str_u not in VALID_BOOLEANS:
+            malformed_or_invalid_records.append({
+                "sheet": "Users",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "active",
+                "value": act_str_u,
+                "issue": f"Invalid active-status format '{act_str_u}' in Users sheet.",
             })
 
     for idx, a in enumerate(auth_users):
@@ -249,7 +325,8 @@ def audit_user_reconciliation() -> Dict[str, Any]:
         aid = str(a.get("auth_id") or "").strip()
         uname = str(a.get("username") or "").strip()
         role = str(a.get("role") or "").strip().upper()
-        active = str(a.get("active") or "").strip().lower()
+        raw_act_a = a.get("active")
+        act_str_a = str(raw_act_a if raw_act_a is not None else "").strip().lower()
         pw_hash = str(a.get("password_hash") or "").strip()
 
         if not uid:
@@ -278,7 +355,16 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "value": "",
                 "issue": "Blank or missing username in AuthUsers sheet.",
             })
-        if role and role not in VALID_ROLES:
+        if not role:
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "role",
+                "value": "",
+                "issue": "Blank or missing role in AuthUsers sheet.",
+            })
+        elif role not in VALID_ROLES:
             malformed_or_invalid_records.append({
                 "sheet": "AuthUsers",
                 "row_index": row_num,
@@ -287,14 +373,23 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "value": role,
                 "issue": f"Unrecognized role '{role}' in AuthUsers sheet.",
             })
-        if active and active not in VALID_BOOLEANS:
+        if not act_str_a:
             malformed_or_invalid_records.append({
                 "sheet": "AuthUsers",
                 "row_index": row_num,
                 "user_id": uid,
                 "field": "active",
-                "value": active,
-                "issue": f"Invalid active-status format '{active}' in AuthUsers sheet.",
+                "value": "",
+                "issue": "Blank or missing active-status in AuthUsers sheet.",
+            })
+        elif act_str_a not in VALID_BOOLEANS:
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "active",
+                "value": act_str_a,
+                "issue": f"Invalid active-status format '{act_str_a}' in AuthUsers sheet.",
             })
         if not pw_hash:
             insecure_credentials.append({
@@ -302,15 +397,17 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "username": uname,
                 "issue": "Empty or missing password hash in AuthUsers.",
             })
-        elif not (pw_hash.startswith("pbkdf2:sha256:") and len(pw_hash.split("$")) == 3):
-            malformed_or_invalid_records.append({
-                "sheet": "AuthUsers",
-                "row_index": row_num,
-                "user_id": uid,
-                "username": uname,
-                "field": "password_hash",
-                "issue": "Malformed or insecure password hash (not in standard PBKDF2-SHA256 format).",
-            })
+        else:
+            is_valid_hash, hash_err = validate_pbkdf2_hash(pw_hash)
+            if not is_valid_hash:
+                malformed_or_invalid_records.append({
+                    "sheet": "AuthUsers",
+                    "row_index": row_num,
+                    "user_id": uid,
+                    "username": uname,
+                    "field": "password_hash",
+                    "issue": f"Malformed password hash ({hash_err}).",
+                })
 
     # 2. Check duplicates in Users and AuthUsers
     for uid, rows in users_by_id.items():
@@ -466,10 +563,30 @@ def audit_user_reconciliation() -> Dict[str, Any]:
         len(incomplete_owner_profiles)
     )
 
+    safe_to_modify = (
+        len(ambiguous_identity_records) == 0
+        and len(duplicate_users) == 0
+        and len(duplicate_auth_users) == 0
+        and len(duplicate_auth_ids) == 0
+    )
+    freeze_reasons = []
+    if len(ambiguous_identity_records) > 0:
+        freeze_reasons.append(f"Ambiguous identities: {len(ambiguous_identity_records)} employee IDs shared across conflicting records.")
+    if len(duplicate_users) > 0:
+        freeze_reasons.append(f"Duplicate rows in Users sheet for {len(duplicate_users)} IDs.")
+    if len(duplicate_auth_users) > 0:
+        freeze_reasons.append(f"Duplicate rows in AuthUsers sheet for {len(duplicate_auth_users)} IDs.")
+    if len(duplicate_auth_ids) > 0:
+        freeze_reasons.append(f"Duplicate auth_id keys in AuthUsers sheet ({len(duplicate_auth_ids)} keys).")
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "execution_status": "COMPLETED",
         "status": "COMPLETED",
         "healthy": total_issues == 0,
+        "safe_to_modify": safe_to_modify,
+        "modification_freeze_active": not safe_to_modify,
+        "freeze_reasons": freeze_reasons,
         "total_issues_count": total_issues,
         "total_users_count": len(users),
         "total_auth_users_count": len(auth_users),
@@ -493,59 +610,183 @@ def inspect_user_references(user_id: str) -> Dict[str, Any]:
     """
     Search across all ledger, sales, production, and audit tabs to identify
     every historical transaction referencing user_id before renumbering or repairing.
+    Covers all 8 sources including ProductionStockLedger and RawMaterialLedger.
+    Fails visibly (status='INCOMPLETE') if ANY required sheet cannot be read.
     """
     clean_id = str(user_id or "").strip()
-    references: Dict[str, List[Dict[str, Any]]] = {
-        "Sales": [],
-        "Payments": [],
-        "ProductionBatches": [],
-        "PackagingBatches": [],
-        "ProductionStockLedger": [],
-        "RawMaterialLedger": [],
-        "ApprovalRequests": [],
-        "AuditTrail": [],
-    }
+    sources_to_scan = [
+        "Sales",
+        "Payments",
+        "ProductionBatches",
+        "PackagingBatches",
+        "ProductionStockLedger",
+        "RawMaterialLedger",
+        "ApprovalRequests",
+        "AuditTrail",
+    ]
+
+    references: Dict[str, List[Dict[str, Any]]] = {s: [] for s in sources_to_scan}
+    scanned_sources = []
+    failed_sources = []
+    errors = []
 
     if not clean_id:
-        return {"user_id": clean_id, "total_references": 0, "references": references}
+        return {
+            "status": "COMPLETED",
+            "user_id": clean_id,
+            "total_references": 0,
+            "is_safe_to_evaluate": True,
+            "scanned_sources": sources_to_scan,
+            "failed_sources": [],
+            "errors": [],
+            "references": references,
+        }
 
+    # 1. Sales
     try:
         sales = db.get_records("Sales", fresh=True) or []
         for s in sales:
             if clean_id in {str(s.get("salesman_id", "")).strip(), str(s.get("created_by", "")).strip()}:
-                references["Sales"].append({"sale_id": s.get("sale_id"), "date": s.get("sale_date"), "amount": s.get("total_amount")})
+                references["Sales"].append({
+                    "sale_id": s.get("sale_id"),
+                    "date": s.get("sale_date"),
+                    "amount": s.get("total_amount"),
+                    "role_field": "salesman_id" if str(s.get("salesman_id", "")).strip() == clean_id else "created_by",
+                })
+        scanned_sources.append("Sales")
+    except Exception as exc:
+        failed_sources.append("Sales")
+        errors.append(f"Failed to scan Sales: {exc}")
 
+    # 2. Payments
+    try:
         payments = db.get_records("Payments", fresh=True) or []
         for p in payments:
             if clean_id in {str(p.get("received_by", "")).strip(), str(p.get("created_by", "")).strip()}:
-                references["Payments"].append({"payment_id": p.get("payment_id"), "date": p.get("payment_date"), "amount": p.get("amount")})
+                references["Payments"].append({
+                    "payment_id": p.get("payment_id"),
+                    "date": p.get("payment_date"),
+                    "amount": p.get("amount"),
+                    "role_field": "received_by" if str(p.get("received_by", "")).strip() == clean_id else "created_by",
+                })
+        scanned_sources.append("Payments")
+    except Exception as exc:
+        failed_sources.append("Payments")
+        errors.append(f"Failed to scan Payments: {exc}")
 
+    # 3. ProductionBatches
+    try:
         prod_batches = db.get_records("ProductionBatches", fresh=True) or []
         for b in prod_batches:
             if clean_id in {str(b.get("created_by", "")).strip(), str(b.get("approved_by", "")).strip()}:
-                references["ProductionBatches"].append({"production_id": b.get("production_id"), "product": b.get("product_name_snapshot"), "status": b.get("status")})
+                references["ProductionBatches"].append({
+                    "production_id": b.get("production_id"),
+                    "product": b.get("product_name_snapshot"),
+                    "status": b.get("status"),
+                    "role_field": "created_by" if str(b.get("created_by", "")).strip() == clean_id else "approved_by",
+                })
+        scanned_sources.append("ProductionBatches")
+    except Exception as exc:
+        failed_sources.append("ProductionBatches")
+        errors.append(f"Failed to scan ProductionBatches: {exc}")
 
+    # 4. PackagingBatches
+    try:
         pack_batches = db.get_records("PackagingBatches", fresh=True) or []
         for pb in pack_batches:
             if clean_id in {str(pb.get("created_by", "")).strip(), str(pb.get("approved_by", "")).strip()}:
-                references["PackagingBatches"].append({"packaging_id": pb.get("packaging_id"), "product": pb.get("product_name_snapshot"), "status": pb.get("status")})
+                references["PackagingBatches"].append({
+                    "packaging_id": pb.get("packaging_id"),
+                    "product": pb.get("product_name_snapshot"),
+                    "status": pb.get("status"),
+                    "role_field": "created_by" if str(pb.get("created_by", "")).strip() == clean_id else "approved_by",
+                })
+        scanned_sources.append("PackagingBatches")
+    except Exception as exc:
+        failed_sources.append("PackagingBatches")
+        errors.append(f"Failed to scan PackagingBatches: {exc}")
 
+    # 5. ProductionStockLedger (Finding A)
+    try:
+        stock_ledger = db.get_records("ProductionStockLedger", fresh=True) or []
+        for m in stock_ledger:
+            if clean_id == str(m.get("created_by", "")).strip():
+                references["ProductionStockLedger"].append({
+                    "movement_id": m.get("movement_id"),
+                    "movement_type": m.get("movement_type"),
+                    "product": m.get("product_name_snapshot") or m.get("bulk_product_key"),
+                    "quantity_kg": m.get("quantity_kg"),
+                    "reference_id": m.get("reference_id"),
+                })
+        scanned_sources.append("ProductionStockLedger")
+    except Exception as exc:
+        failed_sources.append("ProductionStockLedger")
+        errors.append(f"Failed to scan ProductionStockLedger: {exc}")
+
+    # 6. RawMaterialLedger (Finding A)
+    try:
+        raw_ledger = db.get_records("RawMaterialLedger", fresh=True) or []
+        for r in raw_ledger:
+            if clean_id == str(r.get("created_by", "")).strip():
+                references["RawMaterialLedger"].append({
+                    "raw_material_txn_id": r.get("raw_material_txn_id"),
+                    "material_name": r.get("material_name"),
+                    "movement_type": r.get("movement_type"),
+                    "quantity": r.get("quantity"),
+                    "production_id": r.get("production_id"),
+                })
+        scanned_sources.append("RawMaterialLedger")
+    except Exception as exc:
+        failed_sources.append("RawMaterialLedger")
+        errors.append(f"Failed to scan RawMaterialLedger: {exc}")
+
+    # 7. ApprovalRequests
+    try:
         approvals = db.get_records("ApprovalRequests", fresh=True) or []
         for ar in approvals:
             if clean_id in {str(ar.get("requested_by", "")).strip(), str(ar.get("approved_by", "")).strip(), str(ar.get("target_user_id", "")).strip()}:
-                references["ApprovalRequests"].append({"request_id": ar.get("request_id"), "type": ar.get("request_type"), "status": ar.get("status")})
+                references["ApprovalRequests"].append({
+                    "request_id": ar.get("request_id"),
+                    "type": ar.get("request_type"),
+                    "status": ar.get("status"),
+                    "role_field": (
+                        "requested_by" if str(ar.get("requested_by", "")).strip() == clean_id
+                        else "approved_by" if str(ar.get("approved_by", "")).strip() == clean_id
+                        else "target_user_id"
+                    ),
+                })
+        scanned_sources.append("ApprovalRequests")
+    except Exception as exc:
+        failed_sources.append("ApprovalRequests")
+        errors.append(f"Failed to scan ApprovalRequests: {exc}")
 
+    # 8. AuditTrail
+    try:
         audit_rows = db.get_records("AuditTrail", fresh=True) or []
         for a in audit_rows:
             if clean_id in {str(a.get("actor", "")).strip(), str(a.get("entity_id", "")).strip()}:
-                references["AuditTrail"].append({"audit_id": a.get("audit_id"), "action": a.get("action"), "entity_type": a.get("entity_type")})
+                references["AuditTrail"].append({
+                    "audit_id": a.get("audit_id"),
+                    "action": a.get("action"),
+                    "entity_type": a.get("entity_type"),
+                    "role_field": "actor" if str(a.get("actor", "")).strip() == clean_id else "entity_id",
+                })
+        scanned_sources.append("AuditTrail")
     except Exception as exc:
-        logger.warning(f"Error inspecting user references for {clean_id}: {exc}")
+        failed_sources.append("AuditTrail")
+        errors.append(f"Failed to scan AuditTrail: {exc}")
 
-    total_refs = sum(len(v) for v in references.values())
+    is_complete = len(failed_sources) == 0
+    total_refs = sum(len(v) for v in references.values()) if is_complete else None
+
     return {
+        "status": "COMPLETED" if is_complete else "INCOMPLETE",
         "user_id": clean_id,
+        "is_safe_to_evaluate": is_complete,
         "total_references": total_refs,
+        "scanned_sources": scanned_sources,
+        "failed_sources": failed_sources,
+        "errors": errors,
         "references": references,
     }
 

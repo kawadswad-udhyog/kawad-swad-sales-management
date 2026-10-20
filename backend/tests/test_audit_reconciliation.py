@@ -601,7 +601,7 @@ class TestAuditReconciliation(unittest.TestCase):
         self.assertFalse(any(s["user_id"] == dup_uid for s in rep["status_mismatches"]))
 
     def test_finding3_malformed_records_validation(self):
-        """Finding 3: Detect blank IDs, missing usernames, invalid roles, invalid active booleans, malformed password hashes."""
+        """Finding 3 & D: Detect blank IDs, missing usernames, invalid roles, invalid/blank active booleans, malformed password hashes."""
         # 1. Blank employee ID in Users
         db.memory_store["Users"].append({
             "user_id": "",
@@ -610,7 +610,23 @@ class TestAuditReconciliation(unittest.TestCase):
             "role": "SALESMAN",
             "active": "true",
         })
-        # 2. Blank auth_id in AuthUsers
+        # 2. Blank username in Users (Finding D)
+        db.memory_store["Users"].append({
+            "user_id": "USR-BLANKUNAME",
+            "full_name": "Blank Username User",
+            "username": "",
+            "role": "SALESMAN",
+            "active": "true",
+        })
+        # 3. Blank active in Users (Finding D)
+        db.memory_store["Users"].append({
+            "user_id": "USR-BLANKACTIVE",
+            "full_name": "Blank Active User",
+            "username": "blank_act",
+            "role": "SALESMAN",
+            "active": "",
+        })
+        # 4. Blank auth_id in AuthUsers
         db.memory_store["AuthUsers"].append({
             "auth_id": "",
             "user_id": "USR-NOAUTHID",
@@ -619,7 +635,16 @@ class TestAuditReconciliation(unittest.TestCase):
             "active": "true",
             "password_hash": hash_password("ValidPass123"),
         })
-        # 3. Invalid role
+        # 5. Blank active in AuthUsers (Finding D)
+        db.memory_store["AuthUsers"].append({
+            "auth_id": "AUT-BLANKACT-A",
+            "user_id": "USR-BLANKACT-A",
+            "username": "blank_act_a",
+            "role": "SALESMAN",
+            "active": "",
+            "password_hash": hash_password("ValidPass123"),
+        })
+        # 6. Invalid role
         db.memory_store["Users"].append({
             "user_id": "USR-BADROLE",
             "full_name": "Bad Role User",
@@ -627,7 +652,7 @@ class TestAuditReconciliation(unittest.TestCase):
             "role": "SUPERADMIN_INVALID",
             "active": "true",
         })
-        # 4. Invalid active format
+        # 7. Invalid active format
         db.memory_store["Users"].append({
             "user_id": "USR-BADACTIVE",
             "full_name": "Bad Active User",
@@ -635,7 +660,7 @@ class TestAuditReconciliation(unittest.TestCase):
             "role": "SALESMAN",
             "active": "maybe_active",
         })
-        # 5. Malformed password hash
+        # 8. Malformed password hash (invalid structure and iteration check - Finding C)
         db.memory_store["AuthUsers"].append({
             "auth_id": "AUT-MALFORMED",
             "user_id": "USR-MALFORMED",
@@ -644,22 +669,30 @@ class TestAuditReconciliation(unittest.TestCase):
             "active": "true",
             "password_hash": "plain_password_not_hashed",
         })
+        db.memory_store["AuthUsers"].append({
+            "auth_id": "AUT-BADITERS",
+            "user_id": "USR-BADITERS",
+            "username": "bad_iters",
+            "role": "SALESMAN",
+            "active": "true",
+            "password_hash": "pbkdf2:sha256:5$c2FsdHNhbHQ=$ZGVyaXZlZGtleWRlcml2ZWQ=",
+        })
 
         rep = audit_user_reconciliation()
         self.assertFalse(rep["healthy"])
         issues = rep["malformed_or_invalid_records"]
         self.assertTrue(any(i["field"] == "user_id" and i["sheet"] == "Users" for i in issues))
+        self.assertTrue(any(i["field"] == "username" and i["sheet"] == "Users" for i in issues))
+        self.assertTrue(any(i["field"] == "active" and i["sheet"] == "Users" and "blank" in i["issue"].lower() for i in issues))
+        self.assertTrue(any(i["field"] == "active" and i["sheet"] == "AuthUsers" and "blank" in i["issue"].lower() for i in issues))
         self.assertTrue(any(i["field"] == "auth_id" and i["sheet"] == "AuthUsers" for i in issues))
         self.assertTrue(any(i["field"] == "role" and "SUPERADMIN_INVALID" in i["value"] for i in issues))
         self.assertTrue(any(i["field"] == "active" and "maybe_active" in i["value"] for i in issues))
         self.assertTrue(any(i["field"] == "password_hash" and "malformed_pw" in str(i) for i in issues))
+        self.assertTrue(any(i["field"] == "password_hash" and "bad_iters" in str(i) for i in issues))
 
     def test_finding4_reconciliation_failure_handling(self):
         """Finding 4: When Google Sheets read fails, auditor returns status='INCOMPLETE' and healthy=False rather than crashing."""
-        db._fail_once["Users"] = 1
-        rep = audit_user_reconciliation()
-        # Even with an in-memory test setup, if get_records raises an exception:
-        # Let's test by mocking get_records to simulate failure
         orig_get_records = db.get_records
         try:
             def mock_fail(tab_name, fresh=False):
@@ -667,14 +700,17 @@ class TestAuditReconciliation(unittest.TestCase):
             db.get_records = mock_fail
             rep_err = audit_user_reconciliation()
             self.assertEqual(rep_err["status"], "INCOMPLETE")
+            self.assertEqual(rep_err["execution_status"], "INCOMPLETE")
             self.assertFalse(rep_err["healthy"])
+            self.assertFalse(rep_err["safe_to_modify"])
+            self.assertTrue(rep_err["modification_freeze_active"])
             self.assertIn("Could not complete reconciliation", rep_err["error_detail"])
             self.assertTrue(len(rep_err["system_errors"]) > 0)
         finally:
             db.get_records = orig_get_records
 
-    def test_finding5_inspect_user_references(self):
-        """Finding 5: Inspect all historical transactions referencing user_id across Sales, Batches, and Audits."""
+    def test_finding_a_and_5_inspect_user_references_all_eight_sources(self):
+        """Finding A & 5: Complete coverage across all 8 sources including ProductionStockLedger and RawMaterialLedger."""
         test_uid = "USR-SALES-REFTEST"
         db.memory_store.setdefault("Sales", []).append({
             "sale_id": "SALE-001",
@@ -688,6 +724,20 @@ class TestAuditReconciliation(unittest.TestCase):
             "status": "APPROVED",
             "created_by": test_uid,
         })
+        db.memory_store.setdefault("ProductionStockLedger", []).append({
+            "movement_id": "PST-001",
+            "movement_type": "BULK_PRODUCED",
+            "product_name_snapshot": "Moong Special Papad",
+            "quantity_kg": 50.0,
+            "created_by": test_uid,
+        })
+        db.memory_store.setdefault("RawMaterialLedger", []).append({
+            "raw_material_txn_id": "RML-001",
+            "material_name": "Moong Dal",
+            "movement_type": "PURCHASE_RECEIPT",
+            "quantity": 100.0,
+            "created_by": test_uid,
+        })
         db.memory_store.setdefault("AuditTrail", []).append({
             "audit_id": "AUD-001",
             "actor": test_uid,
@@ -696,11 +746,62 @@ class TestAuditReconciliation(unittest.TestCase):
         })
 
         res = inspect_user_references(test_uid)
+        self.assertEqual(res["status"], "COMPLETED")
+        self.assertTrue(res["is_safe_to_evaluate"])
         self.assertEqual(res["user_id"], test_uid)
-        self.assertEqual(res["total_references"], 3)
+        self.assertEqual(res["total_references"], 5)
         self.assertEqual(len(res["references"]["Sales"]), 1)
         self.assertEqual(len(res["references"]["ProductionBatches"]), 1)
+        self.assertEqual(len(res["references"]["ProductionStockLedger"]), 1)
+        self.assertEqual(len(res["references"]["RawMaterialLedger"]), 1)
         self.assertEqual(len(res["references"]["AuditTrail"]), 1)
+        self.assertEqual(len(res["scanned_sources"]), 8)
+        self.assertEqual(len(res["failed_sources"]), 0)
+
+    def test_finding_b_reference_inspection_failure_returns_incomplete(self):
+        """Finding B: Read failures in inspect_user_references visibly return INCOMPLETE with total_references=None."""
+        orig_get_records = db.get_records
+        try:
+            def mock_partial_fail(tab_name, fresh=False):
+                if tab_name == "Payments":
+                    raise RuntimeError("Injected Google Sheets rate limit on Payments")
+                return orig_get_records(tab_name, fresh=fresh)
+
+            db.get_records = mock_partial_fail
+            res = inspect_user_references(self.salesman_id)
+            self.assertEqual(res["status"], "INCOMPLETE")
+            self.assertFalse(res["is_safe_to_evaluate"])
+            self.assertIsNone(res["total_references"])
+            self.assertIn("Payments", res["failed_sources"])
+            self.assertTrue(len(res["errors"]) > 0)
+        finally:
+            db.get_records = orig_get_records
+
+    def test_finding_e_modification_freeze_flag_and_reasons(self):
+        """Finding E: Ensure safe_to_modify=False and freeze reasons are returned when ambiguous or duplicate IDs exist."""
+        dup_uid = "USR-DUP-FREEZE"
+        db.memory_store["Users"].append({
+            "user_id": dup_uid,
+            "full_name": "First Employee",
+            "username": "emp_one",
+            "role": "PA",
+            "active": "true",
+        })
+        db.memory_store["Users"].append({
+            "user_id": dup_uid,
+            "full_name": "Second Employee",
+            "username": "emp_two",
+            "role": "SALESMAN",
+            "active": "true",
+        })
+
+        rep = audit_user_reconciliation()
+        self.assertEqual(rep["execution_status"], "COMPLETED")
+        self.assertFalse(rep["healthy"])
+        self.assertFalse(rep["safe_to_modify"])
+        self.assertTrue(rep["modification_freeze_active"])
+        self.assertTrue(len(rep["freeze_reasons"]) > 0)
+        self.assertTrue(any("Ambiguous" in r or "Duplicate" in r for r in rep["freeze_reasons"]))
 
 
 if __name__ == "__main__":
