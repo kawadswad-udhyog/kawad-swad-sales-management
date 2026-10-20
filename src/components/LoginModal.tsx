@@ -95,6 +95,21 @@ export const LoginModal: React.FC = () => {
                 This account has a legacy password. Run <code>python backend/scripts/reset_password.py</code> to set an upgraded PBKDF2 password.
               </p>
             )}
+            {(error.toLowerCase().includes('failed to fetch') || error.toLowerCase().includes('network error')) && (
+              <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
+                Cannot connect to backend server. Verify connection settings below and ensure <code>kawad-swad-sales-dev.onrender.com</code> is operational.
+              </p>
+            )}
+            {(error.toLowerCase().includes('quota') || error.includes('429')) && (
+              <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
+                Google Sheets read quota was momentarily reached. Please wait ~15 seconds and try again.
+              </p>
+            )}
+            {error.toLowerCase().includes('locked') && (
+              <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
+                Too many incorrect attempts. Please wait 2 minutes before trying again.
+              </p>
+            )}
           </div>
         )}
 

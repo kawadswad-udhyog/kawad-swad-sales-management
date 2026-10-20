@@ -61,21 +61,23 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _auth_row_for(user_id: str) -> Optional[dict]:
+def _auth_row_for(user_id: str):
+    """Lookup AuthUsers row. Returns (row, error_occurred_flag)."""
     from app.sheets import db
     clean_id = str(user_id or "").strip().lower()
     if not clean_id:
-        return None
+        return None, False
     try:
         records = db.get_records("AuthUsers", fresh=False)
     except Exception:
-        return None
+        # Sheet read failed or quota exceeded
+        return None, True
     for row in records:
         r_uid = str(row.get("user_id", "")).strip().lower()
         r_uname = str(row.get("username", "")).strip().lower()
         if (r_uid and r_uid == clean_id) or (r_uname and r_uname == clean_id):
-            return row
-    return None
+            return row, False
+    return None, False
 
 
 async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
@@ -96,7 +98,12 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     user_id = str(uid).strip()
     payload = dict(payload)
     payload["user_id"] = user_id
-    row = _auth_row_for(user_id)
+    row, sheet_error = _auth_row_for(user_id)
+    if sheet_error:
+        # Transient Google Sheets quota limit or network timeout.
+        # Preserve the cryptographically signed, unexpired session token
+        # instead of revoking valid sessions on rate-limit hiccups.
+        return payload
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -931,7 +931,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const todaySales = sales.filter(
       (s) =>
-        s.sale_datetime.slice(0, 10) === today &&
+        String(s?.sale_datetime || '').slice(0, 10) === today &&
         s.payment_status === 'PAID' &&
         (s.salesman_user_id === salesmanId || s.entered_by_user_id === salesmanId)
     );
@@ -947,7 +947,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           (e.submitted_by_user_id === salesmanId || e.salesman_user_id === salesmanId) &&
           e.approval_status === 'APPROVED' &&
           e.cash_reducing_expense &&
-          e.expense_datetime.slice(0, 10) === today
+          String(e?.expense_datetime || '').slice(0, 10) === today
       )
       .reduce((sum, e) => sum + e.amount, 0);
 
@@ -1012,8 +1012,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         s.salesman_user_id === params.salesman_user_id &&
         s.payment_status === 'PAID' &&
         s.delivery_status === 'DELIVERED' &&
-        s.sale_datetime.slice(0, 10) >= params.period_start &&
-        s.sale_datetime.slice(0, 10) <= params.period_end
+        String(s?.sale_datetime || '').slice(0, 10) >= params.period_start &&
+        String(s?.sale_datetime || '').slice(0, 10) <= params.period_end
     );
 
     const relevantSaleIds = new Set(relevantSales.map((s) => s.sale_id));

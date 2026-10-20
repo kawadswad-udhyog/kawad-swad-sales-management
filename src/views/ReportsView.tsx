@@ -22,7 +22,7 @@ export const ReportsView: React.FC = () => {
 
   // Filter sales for the selected month
   const monthSales = sales.filter(
-    (s) => s.sale_datetime.slice(0, 7) === selectedMonth && s.bill_status === 'ISSUED'
+    (s) => String(s?.sale_datetime || '').slice(0, 7) === selectedMonth && s.bill_status === 'ISSUED'
   );
 
   const totalBills = monthSales.length;
@@ -58,7 +58,7 @@ export const ReportsView: React.FC = () => {
   }
 
   // Expense breakdown for the month
-  const monthExpenses = expenses.filter((e) => e.expense_datetime.slice(0, 7) === selectedMonth);
+  const monthExpenses = expenses.filter((e) => String(e?.expense_datetime || '').slice(0, 7) === selectedMonth);
   const expenseStatusBreakdown: Record<string, { count: number; total: number }> = {
     APPROVED: { count: 0, total: 0 },
     PENDING: { count: 0, total: 0 },

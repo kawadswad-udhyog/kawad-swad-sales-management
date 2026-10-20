@@ -13,7 +13,7 @@ router = APIRouter(tags=["Authentication"])
 # In-memory brute force protection tracking failed logins per username
 _LOGIN_ATTEMPTS: Dict[str, List[float]] = {}
 _MAX_FAILED_ATTEMPTS = 5
-_LOCKOUT_WINDOW_SECONDS = 300.0  # 5 minutes
+_LOCKOUT_WINDOW_SECONDS = 120.0  # 2 minutes
 
 
 class ChangePasswordRequest(BaseModel):

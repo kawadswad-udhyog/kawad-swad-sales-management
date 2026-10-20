@@ -27,7 +27,7 @@ def is_factory_worker(user: dict) -> bool:
 
 
 def can_manage_production(user: dict) -> bool:
-    return is_manager(user) or is_factory_worker(user)
+    return is_owner(user)
 
 
 def require_manager(user: dict) -> None:
@@ -41,8 +41,8 @@ def require_owner(user: dict) -> None:
 
 
 def require_production_access(user: dict) -> None:
-    if not can_manage_production(user):
-        raise HTTPException(status_code=403, detail="Production or Owner/PA permission is required.")
+    if not is_owner(user):
+        raise HTTPException(status_code=403, detail="Only the Owner can access production operations.")
 
 
 def ui_role(role: str) -> str:

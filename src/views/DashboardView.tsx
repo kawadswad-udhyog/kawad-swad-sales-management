@@ -24,10 +24,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
 
   // Metrics for Owner/PA using backend dashboard data or live ledger records
   const todaySales = sales.filter(
-    (s) => s.sale_datetime.slice(0, 10) === todayStr && s.bill_status === 'ISSUED'
+    (s) => String(s?.sale_datetime || '').slice(0, 10) === todayStr && s.bill_status === 'ISSUED'
   );
   const monthSales = sales.filter(
-    (s) => s.sale_datetime.slice(0, 7) === currentMonthStr && s.bill_status === 'ISSUED'
+    (s) => String(s?.sale_datetime || '').slice(0, 7) === currentMonthStr && s.bill_status === 'ISSUED'
   );
 
   const todayBills = dashboardMetrics?.total_bills_today ?? todaySales.length;
@@ -44,12 +44,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     // Stage 7: Mobile-first field salesman workspace
     const todayVisits = shopVisits.filter(
       (v) =>
-        v.visit_datetime.slice(0, 10) === todayStr &&
+        String(v?.visit_datetime || '').slice(0, 10) === todayStr &&
         v.salesman_user_id === currentUser.user_id
     );
     const myTodaySales = sales.filter(
       (s) =>
-        s.sale_datetime.slice(0, 10) === todayStr &&
+        String(s?.sale_datetime || '').slice(0, 10) === todayStr &&
         (s.salesman_user_id === currentUser.user_id || s.entered_by_user_id === currentUser.user_id)
     );
     const myTodaySalesRevenue = myTodaySales.reduce((sum, s) => sum + s.bill_total, 0);

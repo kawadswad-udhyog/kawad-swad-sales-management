@@ -44,26 +44,33 @@ async def load_workspace(current_user: dict = Depends(get_current_user)):
             audit_router.list_audit_logs(250, None, current_user),
         ])
 
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _safe_val(idx: int, default_val):
+        if idx < len(results):
+            val = results[idx]
+            if not isinstance(val, Exception):
+                return val
+        return default_val
 
     payload = {
-        "products": results[0],
-        "customers": results[1],
-        "sales": results[2],
-        "payments": results[3],
-        "stock": results[4],
-        "stock_transactions": results[5],
-        "expenses": results[6],
-        "visits": results[7],
-        "closings": results[8],
-        "salary": results[9],
-        "stock_discrepancies": results[10],
+        "products": _safe_val(0, []),
+        "customers": _safe_val(1, []),
+        "sales": _safe_val(2, []),
+        "payments": _safe_val(3, []),
+        "stock": _safe_val(4, {"company_stock": [], "salesman_stock": []}),
+        "stock_transactions": _safe_val(5, []),
+        "expenses": _safe_val(6, []),
+        "visits": _safe_val(7, []),
+        "closings": _safe_val(8, []),
+        "salary": _safe_val(9, []),
+        "stock_discrepancies": _safe_val(10, []),
     }
 
     if manager:
-        payload["dashboard"] = results[11]
-        payload["users"] = results[12]
-        payload["audit_logs"] = results[13]
+        payload["dashboard"] = _safe_val(11, None)
+        payload["users"] = _safe_val(12, [])
+        payload["audit_logs"] = _safe_val(13, [])
     else:
         payload["dashboard"] = None
         payload["users"] = []
