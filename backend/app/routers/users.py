@@ -15,6 +15,7 @@ from app.user_service import (
     execute_set_user_status,
     execute_reset_password,
     audit_user_reconciliation,
+    inspect_user_references,
 )
 from app.routers.approvals import create_approval_request
 
@@ -215,3 +216,10 @@ async def get_user_reconciliation(current_user: dict = Depends(get_current_user)
     """Owner-only read-only audit comparing Users and AuthUsers sheets."""
     require_owner(current_user)
     return audit_user_reconciliation()
+
+
+@router.get("/references/{user_id}")
+async def get_user_references(user_id: str, current_user: dict = Depends(get_current_user)):
+    """Owner-only audit tool to check all historical transactions referencing user_id before renumbering."""
+    require_owner(current_user)
+    return inspect_user_references(user_id)

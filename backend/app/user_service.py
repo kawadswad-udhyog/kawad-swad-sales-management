@@ -118,17 +118,59 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
     return result
 
 
+VALID_ROLES = {"OWNER", "PA", "SALESMAN", "PRODUCTION", "DISPATCH"}
+VALID_BOOLEANS = {"true", "false", "1", "0", "yes", "no"}
+PLACEHOLDER_NAMES = {"your full name", "test user", "placeholder", "dummy", "admin", "owner", ""}
+
+
 def audit_user_reconciliation() -> Dict[str, Any]:
     """
     Read-only independent audit of Users and AuthUsers sheets.
-    Detects mismatches, orphaned profiles, missing auth credentials,
-    duplicate IDs/usernames, role divergence, and inactive desynchronization.
+    Detects:
+    - Sheet connectivity errors (returns status="INCOMPLETE")
+    - Orphaned profiles and orphaned auth credentials
+    - Duplicate employee IDs in Users and AuthUsers
+    - Duplicate auth_ids in AuthUsers
+    - Duplicate usernames (case-insensitive normalized)
+    - Username mismatches between Users and AuthUsers (Finding 1)
+    - Ambiguous duplicate identities with full details without arbitrary cross-row matching (Finding 2)
+    - Role and status mismatches on unambiguous records
+    - Missing or malformed records: blank IDs, missing usernames, invalid roles, invalid booleans, malformed password hashes (Finding 3)
+    - Insecure / missing credentials
+    - Incomplete or placeholder Owner profiles (Finding C4)
     """
-    users = db.get_records("Users", fresh=True) or []
-    auth_users = db.get_records("AuthUsers", fresh=True) or []
+    try:
+        users = db.get_records("Users", fresh=True) or []
+        auth_users = db.get_records("AuthUsers", fresh=True) or []
+    except Exception as exc:
+        logger.error(f"Failed to read sheets for reconciliation audit: {exc}")
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "INCOMPLETE",
+            "healthy": False,
+            "error_detail": f"Could not complete reconciliation audit: Google Sheets read failed ({exc}).",
+            "total_issues_count": 1,
+            "system_errors": [str(exc)],
+            "total_users_count": 0,
+            "total_auth_users_count": 0,
+            "orphaned_profiles": [],
+            "orphaned_auth_accounts": [],
+            "duplicate_users": [],
+            "duplicate_auth_users": [],
+            "duplicate_auth_ids": [],
+            "duplicate_usernames": [],
+            "username_mismatches": [],
+            "ambiguous_identity_records": [],
+            "role_mismatches": [],
+            "status_mismatches": [],
+            "malformed_or_invalid_records": [],
+            "insecure_credentials": [],
+            "incomplete_owner_profiles": [],
+        }
 
+    # Group by user_id
     users_by_id: Dict[str, List[dict]] = {}
-    for u in users:
+    for idx, u in enumerate(users):
         uid = str(u.get("user_id") or "").strip()
         if uid:
             users_by_id.setdefault(uid, []).append(u)
@@ -147,90 +189,153 @@ def audit_user_reconciliation() -> Dict[str, Any]:
     orphaned_auth_accounts = []
     duplicate_users = []
     duplicate_auth_users = []
+    duplicate_auth_ids = []
     duplicate_usernames = []
+    username_mismatches = []
+    ambiguous_identity_records = []
     role_mismatches = []
     status_mismatches = []
+    malformed_or_invalid_records = []
     insecure_credentials = []
+    incomplete_owner_profiles = []
 
-    # Check duplicate user_ids in Users
-    for uid, rows in users_by_id.items():
-        if len(rows) > 1:
-            duplicate_users.append({"user_id": uid, "count": len(rows)})
+    # 1. Missing or malformed records validation (Finding 3)
+    for idx, u in enumerate(users):
+        row_num = idx + 2
+        uid = str(u.get("user_id") or "").strip()
+        fname = str(u.get("full_name") or "").strip()
+        role = str(u.get("role") or "").strip().upper()
+        active = str(u.get("active") or "").strip().lower()
 
-    # Check duplicate user_ids in AuthUsers
-    for uid, rows in auth_by_id.items():
-        if len(rows) > 1:
-            duplicate_auth_users.append({"user_id": uid, "count": len(rows)})
-
-    # Check duplicate usernames in AuthUsers
-    for uname, rows in auth_by_username.items():
-        if len(rows) > 1:
-            duplicate_usernames.append({"username": uname, "user_ids": [r.get("user_id") for r in rows]})
-
-    # Check orphaned Users and consistency with AuthUsers
-    for uid, rows in users_by_id.items():
-        u = rows[0]
-        if uid not in auth_by_id:
-            orphaned_profiles.append({
-                "user_id": uid,
-                "full_name": u.get("full_name"),
-                "username": u.get("username"),
-                "role": u.get("role"),
-                "active": u.get("active"),
-                "issue": "Profile exists in Users sheet but has NO login credentials in AuthUsers sheet.",
+        if not uid:
+            malformed_or_invalid_records.append({
+                "sheet": "Users",
+                "row_index": row_num,
+                "field": "user_id",
+                "value": "",
+                "issue": "Blank or missing user_id in Users sheet.",
             })
-        else:
-            a = auth_by_id[uid][0]
-            u_role = str(u.get("role") or "").strip().upper()
-            a_role = str(a.get("role") or "").strip().upper()
-            if u_role != a_role:
-                role_mismatches.append({
-                    "user_id": uid,
-                    "username": a.get("username") or u.get("username"),
-                    "users_role": u_role,
-                    "auth_role": a_role,
-                    "issue": f"Role mismatch: Users says '{u_role}' but AuthUsers says '{a_role}'.",
-                })
-
-            u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
-            a_active = str(a.get("active", "true")).lower() in {"true", "1", "yes"}
-            if u_active != a_active:
-                status_mismatches.append({
-                    "user_id": uid,
-                    "username": a.get("username") or u.get("username"),
-                    "users_active": u_active,
-                    "auth_active": a_active,
-                    "issue": f"Status mismatch: Users is {'active' if u_active else 'inactive'} but AuthUsers is {'active' if a_active else 'inactive'}.",
-                })
-
-    # Check orphaned AuthUsers
-    for uid, rows in auth_by_id.items():
-        a = rows[0]
-        if uid not in users_by_id:
-            orphaned_auth_accounts.append({
+        if not fname or fname.lower() in PLACEHOLDER_NAMES:
+            malformed_or_invalid_records.append({
+                "sheet": "Users",
+                "row_index": row_num,
                 "user_id": uid,
-                "username": a.get("username"),
-                "role": a.get("role"),
-                "active": a.get("active"),
-                "issue": "Login credentials exist in AuthUsers sheet but has NO profile in Users sheet.",
+                "field": "full_name",
+                "value": fname,
+                "issue": f"Placeholder or missing employee full_name: '{fname or '<blank>'}'.",
             })
-        # Check empty or blank password hash
+        if role and role not in VALID_ROLES:
+            malformed_or_invalid_records.append({
+                "sheet": "Users",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "role",
+                "value": role,
+                "issue": f"Unrecognized role '{role}' in Users sheet (allowed: {', '.join(sorted(VALID_ROLES))}).",
+            })
+        if active and active not in VALID_BOOLEANS:
+            malformed_or_invalid_records.append({
+                "sheet": "Users",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "active",
+                "value": active,
+                "issue": f"Invalid active-status format '{active}' in Users sheet.",
+            })
+
+    for idx, a in enumerate(auth_users):
+        row_num = idx + 2
+        uid = str(a.get("user_id") or "").strip()
+        aid = str(a.get("auth_id") or "").strip()
+        uname = str(a.get("username") or "").strip()
+        role = str(a.get("role") or "").strip().upper()
+        active = str(a.get("active") or "").strip().lower()
         pw_hash = str(a.get("password_hash") or "").strip()
+
+        if not uid:
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "field": "user_id",
+                "value": "",
+                "issue": "Blank or missing user_id in AuthUsers sheet.",
+            })
+        if not aid:
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "auth_id",
+                "value": "",
+                "issue": "Blank or missing auth_id in AuthUsers sheet.",
+            })
+        if not uname:
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "username",
+                "value": "",
+                "issue": "Blank or missing username in AuthUsers sheet.",
+            })
+        if role and role not in VALID_ROLES:
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "role",
+                "value": role,
+                "issue": f"Unrecognized role '{role}' in AuthUsers sheet.",
+            })
+        if active and active not in VALID_BOOLEANS:
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "user_id": uid,
+                "field": "active",
+                "value": active,
+                "issue": f"Invalid active-status format '{active}' in AuthUsers sheet.",
+            })
         if not pw_hash:
             insecure_credentials.append({
                 "user_id": uid,
-                "username": a.get("username"),
+                "username": uname,
                 "issue": "Empty or missing password hash in AuthUsers.",
             })
+        elif not (pw_hash.startswith("pbkdf2:sha256:") and len(pw_hash.split("$")) == 3):
+            malformed_or_invalid_records.append({
+                "sheet": "AuthUsers",
+                "row_index": row_num,
+                "user_id": uid,
+                "username": uname,
+                "field": "password_hash",
+                "issue": "Malformed or insecure password hash (not in standard PBKDF2-SHA256 format).",
+            })
 
-    # Check duplicate auth_ids in AuthUsers
+    # 2. Check duplicates in Users and AuthUsers
+    for uid, rows in users_by_id.items():
+        if len(rows) > 1:
+            duplicate_users.append({
+                "user_id": uid,
+                "count": len(rows),
+                "profiles": [{"full_name": r.get("full_name"), "username": r.get("username"), "role": r.get("role")} for r in rows],
+            })
+
+    for uid, rows in auth_by_id.items():
+        if len(rows) > 1:
+            duplicate_auth_users.append({
+                "user_id": uid,
+                "count": len(rows),
+                "logins": [{"auth_id": r.get("auth_id"), "username": r.get("username"), "role": r.get("role")} for r in rows],
+            })
+
+    # Check duplicate auth_ids
     auth_by_auth_id: Dict[str, List[dict]] = {}
     for a in auth_users:
         aid = str(a.get("auth_id") or "").strip()
         if aid:
             auth_by_auth_id.setdefault(aid, []).append(a)
 
-    duplicate_auth_ids = []
     for aid, rows in auth_by_auth_id.items():
         if len(rows) > 1:
             duplicate_auth_ids.append({
@@ -241,13 +346,103 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "issue": f"Duplicate auth_id '{aid}' shared across {len(rows)} AuthUsers rows.",
             })
 
-    # Check incomplete Owner profile (C4)
-    incomplete_owner_profiles = []
+    # Check duplicate usernames
+    for uname, rows in auth_by_username.items():
+        if len(rows) > 1:
+            duplicate_usernames.append({
+                "username": uname,
+                "count": len(rows),
+                "user_ids": [r.get("user_id") for r in rows],
+            })
+
+    # 3. Handle Ambiguous Identifiers vs 1-to-1 Field Comparisons (Finding 2)
+    all_uids = set(users_by_id.keys()).union(set(auth_by_id.keys()))
+    for uid in all_uids:
+        u_rows = users_by_id.get(uid, [])
+        a_rows = auth_by_id.get(uid, [])
+
+        if len(u_rows) > 1 or len(a_rows) > 1:
+            # Ambiguous identity! Record under ambiguous_identity_records and avoid arbitrary row-0 assertions
+            ambiguous_identity_records.append({
+                "user_id": uid,
+                "users_rows_count": len(u_rows),
+                "auth_rows_count": len(a_rows),
+                "users_records": [
+                    {"full_name": r.get("full_name"), "username": r.get("username"), "role": r.get("role"), "active": r.get("active")}
+                    for r in u_rows
+                ],
+                "auth_records": [
+                    {"auth_id": r.get("auth_id"), "username": r.get("username"), "role": r.get("role"), "active": r.get("active")}
+                    for r in a_rows
+                ],
+                "issue": f"Ambiguous identity: Multiple records share user_id '{uid}'. Unambiguous field comparison is frozen until separate IDs are assigned.",
+            })
+            continue
+
+        if len(u_rows) == 1 and len(a_rows) == 0:
+            u = u_rows[0]
+            orphaned_profiles.append({
+                "user_id": uid,
+                "full_name": u.get("full_name"),
+                "username": u.get("username"),
+                "role": u.get("role"),
+                "active": u.get("active"),
+                "issue": "Profile exists in Users sheet but has NO login credentials in AuthUsers sheet.",
+            })
+        elif len(u_rows) == 0 and len(a_rows) == 1:
+            a = a_rows[0]
+            orphaned_auth_accounts.append({
+                "user_id": uid,
+                "username": a.get("username"),
+                "role": a.get("role"),
+                "active": a.get("active"),
+                "issue": "Login credentials exist in AuthUsers sheet but has NO profile in Users sheet.",
+            })
+        elif len(u_rows) == 1 and len(a_rows) == 1:
+            u = u_rows[0]
+            a = a_rows[0]
+
+            # Finding 1: Check username mismatches
+            u_uname_raw = str(u.get("username") or "").strip()
+            a_uname_raw = str(a.get("username") or "").strip()
+            if u_uname_raw and a_uname_raw and u_uname_raw.lower() != a_uname_raw.lower():
+                username_mismatches.append({
+                    "user_id": uid,
+                    "users_username": u_uname_raw,
+                    "auth_username": a_uname_raw,
+                    "issue": f"Username mismatch: Users sheet has '{u_uname_raw}' but AuthUsers sheet has '{a_uname_raw}'.",
+                })
+
+            # Check role mismatches
+            u_role = str(u.get("role") or "").strip().upper()
+            a_role = str(a.get("role") or "").strip().upper()
+            if u_role != a_role:
+                role_mismatches.append({
+                    "user_id": uid,
+                    "username": a_uname_raw or u_uname_raw,
+                    "users_role": u_role,
+                    "auth_role": a_role,
+                    "issue": f"Role mismatch: Users says '{u_role}' but AuthUsers says '{a_role}'.",
+                })
+
+            # Check status mismatches
+            u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
+            a_active = str(a.get("active", "true")).lower() in {"true", "1", "yes"}
+            if u_active != a_active:
+                status_mismatches.append({
+                    "user_id": uid,
+                    "username": a_uname_raw or u_uname_raw,
+                    "users_active": u_active,
+                    "auth_active": a_active,
+                    "issue": f"Status mismatch: Users is {'active' if u_active else 'inactive'} but AuthUsers is {'active' if a_active else 'inactive'}.",
+                })
+
+    # Incomplete Owner profile check (C4)
     for u in users:
         if str(u.get("role") or "").strip().upper() == "OWNER":
             fname = str(u.get("full_name") or "").strip()
             uname = str(u.get("username") or "").strip()
-            if fname.lower() in {"your full name", "owner", ""} or not uname:
+            if fname.lower() in PLACEHOLDER_NAMES or not uname:
                 incomplete_owner_profiles.append({
                     "user_id": u.get("user_id"),
                     "full_name": fname,
@@ -262,18 +457,25 @@ def audit_user_reconciliation() -> Dict[str, Any]:
         len(duplicate_auth_users) +
         len(duplicate_auth_ids) +
         len(duplicate_usernames) +
+        len(username_mismatches) +
+        len(ambiguous_identity_records) +
         len(role_mismatches) +
         len(status_mismatches) +
+        len(malformed_or_invalid_records) +
         len(insecure_credentials) +
         len(incomplete_owner_profiles)
     )
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "total_users_count": len(users),
-        "total_auth_users_count": len(auth_users),
+        "status": "COMPLETED",
         "healthy": total_issues == 0,
         "total_issues_count": total_issues,
+        "total_users_count": len(users),
+        "total_auth_users_count": len(auth_users),
+        "username_mismatches": username_mismatches,
+        "ambiguous_identity_records": ambiguous_identity_records,
+        "malformed_or_invalid_records": malformed_or_invalid_records,
         "orphaned_profiles": orphaned_profiles,
         "orphaned_auth_accounts": orphaned_auth_accounts,
         "duplicate_users": duplicate_users,
@@ -284,6 +486,67 @@ def audit_user_reconciliation() -> Dict[str, Any]:
         "status_mismatches": status_mismatches,
         "insecure_credentials": insecure_credentials,
         "incomplete_owner_profiles": incomplete_owner_profiles,
+    }
+
+
+def inspect_user_references(user_id: str) -> Dict[str, Any]:
+    """
+    Search across all ledger, sales, production, and audit tabs to identify
+    every historical transaction referencing user_id before renumbering or repairing.
+    """
+    clean_id = str(user_id or "").strip()
+    references: Dict[str, List[Dict[str, Any]]] = {
+        "Sales": [],
+        "Payments": [],
+        "ProductionBatches": [],
+        "PackagingBatches": [],
+        "ProductionStockLedger": [],
+        "RawMaterialLedger": [],
+        "ApprovalRequests": [],
+        "AuditTrail": [],
+    }
+
+    if not clean_id:
+        return {"user_id": clean_id, "total_references": 0, "references": references}
+
+    try:
+        sales = db.get_records("Sales", fresh=True) or []
+        for s in sales:
+            if clean_id in {str(s.get("salesman_id", "")).strip(), str(s.get("created_by", "")).strip()}:
+                references["Sales"].append({"sale_id": s.get("sale_id"), "date": s.get("sale_date"), "amount": s.get("total_amount")})
+
+        payments = db.get_records("Payments", fresh=True) or []
+        for p in payments:
+            if clean_id in {str(p.get("received_by", "")).strip(), str(p.get("created_by", "")).strip()}:
+                references["Payments"].append({"payment_id": p.get("payment_id"), "date": p.get("payment_date"), "amount": p.get("amount")})
+
+        prod_batches = db.get_records("ProductionBatches", fresh=True) or []
+        for b in prod_batches:
+            if clean_id in {str(b.get("created_by", "")).strip(), str(b.get("approved_by", "")).strip()}:
+                references["ProductionBatches"].append({"production_id": b.get("production_id"), "product": b.get("product_name_snapshot"), "status": b.get("status")})
+
+        pack_batches = db.get_records("PackagingBatches", fresh=True) or []
+        for pb in pack_batches:
+            if clean_id in {str(pb.get("created_by", "")).strip(), str(pb.get("approved_by", "")).strip()}:
+                references["PackagingBatches"].append({"packaging_id": pb.get("packaging_id"), "product": pb.get("product_name_snapshot"), "status": pb.get("status")})
+
+        approvals = db.get_records("ApprovalRequests", fresh=True) or []
+        for ar in approvals:
+            if clean_id in {str(ar.get("requested_by", "")).strip(), str(ar.get("approved_by", "")).strip(), str(ar.get("target_user_id", "")).strip()}:
+                references["ApprovalRequests"].append({"request_id": ar.get("request_id"), "type": ar.get("request_type"), "status": ar.get("status")})
+
+        audit_rows = db.get_records("AuditTrail", fresh=True) or []
+        for a in audit_rows:
+            if clean_id in {str(a.get("actor", "")).strip(), str(a.get("entity_id", "")).strip()}:
+                references["AuditTrail"].append({"audit_id": a.get("audit_id"), "action": a.get("action"), "entity_type": a.get("entity_type")})
+    except Exception as exc:
+        logger.warning(f"Error inspecting user references for {clean_id}: {exc}")
+
+    total_refs = sum(len(v) for v in references.values())
+    return {
+        "user_id": clean_id,
+        "total_references": total_refs,
+        "references": references,
     }
 
 
