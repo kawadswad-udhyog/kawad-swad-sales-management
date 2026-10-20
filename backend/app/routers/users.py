@@ -14,6 +14,7 @@ from app.user_service import (
     execute_update_user,
     execute_set_user_status,
     execute_reset_password,
+    audit_user_reconciliation,
 )
 from app.routers.approvals import create_approval_request
 
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/api/users", tags=["Users"])
 
 
 class PasswordResetRequest(BaseModel):
-    new_password: str = Field(min_length=8, max_length=128)
+    new_password: Optional[str] = ""
 
 
 def _get_target_user_role(user_id: str) -> str:
@@ -65,14 +66,24 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
 
     if is_owner(current_user):
         # Owner executes directly
+        if not req.password or len(req.password) < 8:
+            raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
         created = execute_create_user(req.dict(), actor_id)
         return UserProfile(**created)
     else:
-        # PA submits approval request
+        # PA submits approval request WITHOUT PASSWORD
+        creation_payload = {
+            "username": req.username,
+            "full_name": req.full_name,
+            "role": requested_role,
+            "mobile": req.mobile,
+            "email": req.email,
+            "notes": req.notes,
+        }
         app_req = create_approval_request(
             request_type="CREATE_USER",
             target_user_id=None,
-            payload=req.dict(),
+            payload=creation_payload,
             requested_by=actor_id,
             requested_by_name=actor_name,
         )
@@ -178,14 +189,16 @@ async def reset_password(user_id: str, req: PasswordResetRequest, current_user: 
 
     if is_owner(current_user):
         # Owner executes directly
+        if not req.new_password or len(req.new_password) < 8:
+            raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
         res = execute_reset_password(user_id, req.new_password, actor_id, reason="Owner reset user password")
         return res
     else:
-        # PA submits approval request
+        # PA submits approval request WITHOUT PASSWORD
         app_req = create_approval_request(
             request_type="RESET_PASSWORD",
             target_user_id=user_id,
-            payload={"new_password": req.new_password},
+            payload={"reason": "PA requested password reset for employee"},
             requested_by=actor_id,
             requested_by_name=actor_name,
         )
@@ -195,3 +208,10 @@ async def reset_password(user_id: str, req: PasswordResetRequest, current_user: 
             "message": f"Password reset request for {user_id} submitted for Owner approval.",
             "request_id": app_req.request_id,
         }
+
+
+@router.get("/reconciliation")
+async def get_user_reconciliation(current_user: dict = Depends(get_current_user)):
+    """Owner-only read-only audit comparing Users and AuthUsers sheets."""
+    require_owner(current_user)
+    return audit_user_reconciliation()

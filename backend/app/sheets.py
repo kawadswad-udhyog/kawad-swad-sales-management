@@ -486,6 +486,13 @@ class SheetsDatabase:
 
     def update_record(self, tab_name: str, id_field: str, id_value: str, updates: Dict[str, Any], raise_on_error: bool = False) -> bool:
         self._invalidate_records_cache(tab_name)
+        failures = self._fail_once.get(tab_name, 0)
+        if failures > 0:
+            self._fail_once[tab_name] = failures - 1
+            logger.error("Injected update failure for %s", tab_name)
+            if raise_on_error:
+                raise RuntimeError(f"Injected failure updating {tab_name}")
+            return False
         if not (self.is_connected and self.spreadsheet):
             if self.allow_in_memory_fallback:
                 found = False

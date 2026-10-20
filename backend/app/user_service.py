@@ -1,3 +1,5 @@
+import time
+import secrets
 from datetime import datetime, timezone
 import json
 import logging
@@ -5,15 +7,18 @@ from typing import Optional, Dict, Any, List
 from fastapi import HTTPException, status
 
 from app.sheets import db
-from app.auth import hash_password, revoke_all_user_sessions
+from app.auth import hash_password, revoke_all_user_sessions, _USER_REVOKED_AT
 
 logger = logging.getLogger("kawad_swad.users")
 
 
 def get_all_users_with_auth() -> List[Dict[str, Any]]:
-    """Merge Users and AuthUsers to ensure real username and accurate active status."""
-    user_records = db.get_records("Users", fresh=True)
-    auth_records = db.get_records("AuthUsers", fresh=True)
+    """
+    Merge Users and AuthUsers to ensure real username and accurate active status.
+    Never conceals orphaned auth records or profiles without logins.
+    """
+    user_records = db.get_records("Users", fresh=True) or []
+    auth_records = db.get_records("AuthUsers", fresh=True) or []
 
     auth_by_uid: Dict[str, Dict[str, Any]] = {}
     for a in auth_records:
@@ -21,29 +26,192 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
         if uid:
             auth_by_uid[uid] = a
 
+    users_seen_uids = set()
     result = []
+
+    # Process all profile records in Users sheet
     for u in user_records:
         uid = str(u.get("user_id") or "").strip()
-        auth = auth_by_uid.get(uid, {})
-        real_username = str(auth.get("username") or u.get("username") or uid).strip()
+        users_seen_uids.add(uid)
+        auth = auth_by_uid.get(uid)
 
-        # Both records must be active for the account to be considered fully active
-        u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
-        a_active = str(auth.get("active", "true")).lower() in {"true", "1", "yes"}
-        is_active = u_active and a_active
+        real_username = str((auth.get("username") if auth else None) or u.get("username") or uid).strip()
+
+        # Audit rule: A profile WITHOUT an AuthUsers record cannot authenticate and MUST NOT be shown as active!
+        if not auth:
+            is_active = False
+            sync_warning = "No login account found in AuthUsers sheet"
+        else:
+            u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
+            a_active = str(auth.get("active", "true")).lower() in {"true", "1", "yes"}
+            is_active = u_active and a_active
+            sync_warning = "" if u_active == a_active else "Status mismatch between profile and credentials"
 
         result.append({
             "user_id": uid,
             "full_name": str(u.get("full_name") or ""),
             "username": real_username,
-            "role": str(auth.get("role") or u.get("role") or "SALESMAN"),
+            "role": str((auth.get("role") if auth else None) or u.get("role") or "SALESMAN"),
             "mobile": str(u.get("mobile") or ""),
             "email": str(u.get("email") or ""),
             "active": is_active,
             "created_at": str(u.get("created_at") or ""),
             "notes": str(u.get("notes") or ""),
+            "sync_warning": sync_warning,
         })
+
+    # Also include any orphaned AuthUsers records (credentials exist but profile missing)
+    for a in auth_records:
+        uid = str(a.get("user_id") or "").strip()
+        if uid and uid not in users_seen_uids:
+            uname = str(a.get("username") or uid).strip()
+            result.append({
+                "user_id": uid,
+                "full_name": f"[Auth Only] {uname}",
+                "username": uname,
+                "role": str(a.get("role") or "SALESMAN"),
+                "mobile": "",
+                "email": "",
+                "active": False,
+                "created_at": str(a.get("created_at") or ""),
+                "notes": "Orphaned authentication record without profile",
+                "sync_warning": "Credentials exist in AuthUsers but profile is missing in Users sheet",
+            })
+
     return result
+
+
+def audit_user_reconciliation() -> Dict[str, Any]:
+    """
+    Read-only independent audit of Users and AuthUsers sheets.
+    Detects mismatches, orphaned profiles, missing auth credentials,
+    duplicate IDs/usernames, role divergence, and inactive desynchronization.
+    """
+    users = db.get_records("Users", fresh=True) or []
+    auth_users = db.get_records("AuthUsers", fresh=True) or []
+
+    users_by_id: Dict[str, List[dict]] = {}
+    for u in users:
+        uid = str(u.get("user_id") or "").strip()
+        if uid:
+            users_by_id.setdefault(uid, []).append(u)
+
+    auth_by_id: Dict[str, List[dict]] = {}
+    auth_by_username: Dict[str, List[dict]] = {}
+    for a in auth_users:
+        uid = str(a.get("user_id") or "").strip()
+        uname = str(a.get("username") or "").strip().lower()
+        if uid:
+            auth_by_id.setdefault(uid, []).append(a)
+        if uname:
+            auth_by_username.setdefault(uname, []).append(a)
+
+    orphaned_profiles = []
+    orphaned_auth_accounts = []
+    duplicate_users = []
+    duplicate_auth_users = []
+    duplicate_usernames = []
+    role_mismatches = []
+    status_mismatches = []
+    insecure_credentials = []
+
+    # Check duplicate user_ids in Users
+    for uid, rows in users_by_id.items():
+        if len(rows) > 1:
+            duplicate_users.append({"user_id": uid, "count": len(rows)})
+
+    # Check duplicate user_ids in AuthUsers
+    for uid, rows in auth_by_id.items():
+        if len(rows) > 1:
+            duplicate_auth_users.append({"user_id": uid, "count": len(rows)})
+
+    # Check duplicate usernames in AuthUsers
+    for uname, rows in auth_by_username.items():
+        if len(rows) > 1:
+            duplicate_usernames.append({"username": uname, "user_ids": [r.get("user_id") for r in rows]})
+
+    # Check orphaned Users and consistency with AuthUsers
+    for uid, rows in users_by_id.items():
+        u = rows[0]
+        if uid not in auth_by_id:
+            orphaned_profiles.append({
+                "user_id": uid,
+                "full_name": u.get("full_name"),
+                "username": u.get("username"),
+                "role": u.get("role"),
+                "active": u.get("active"),
+                "issue": "Profile exists in Users sheet but has NO login credentials in AuthUsers sheet.",
+            })
+        else:
+            a = auth_by_id[uid][0]
+            u_role = str(u.get("role") or "").strip().upper()
+            a_role = str(a.get("role") or "").strip().upper()
+            if u_role != a_role:
+                role_mismatches.append({
+                    "user_id": uid,
+                    "username": a.get("username") or u.get("username"),
+                    "users_role": u_role,
+                    "auth_role": a_role,
+                    "issue": f"Role mismatch: Users says '{u_role}' but AuthUsers says '{a_role}'.",
+                })
+
+            u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
+            a_active = str(a.get("active", "true")).lower() in {"true", "1", "yes"}
+            if u_active != a_active:
+                status_mismatches.append({
+                    "user_id": uid,
+                    "username": a.get("username") or u.get("username"),
+                    "users_active": u_active,
+                    "auth_active": a_active,
+                    "issue": f"Status mismatch: Users is {'active' if u_active else 'inactive'} but AuthUsers is {'active' if a_active else 'inactive'}.",
+                })
+
+    # Check orphaned AuthUsers
+    for uid, rows in auth_by_id.items():
+        a = rows[0]
+        if uid not in users_by_id:
+            orphaned_auth_accounts.append({
+                "user_id": uid,
+                "username": a.get("username"),
+                "role": a.get("role"),
+                "active": a.get("active"),
+                "issue": "Login credentials exist in AuthUsers sheet but has NO profile in Users sheet.",
+            })
+        # Check empty or blank password hash
+        pw_hash = str(a.get("password_hash") or "").strip()
+        if not pw_hash:
+            insecure_credentials.append({
+                "user_id": uid,
+                "username": a.get("username"),
+                "issue": "Empty or missing password hash in AuthUsers.",
+            })
+
+    total_issues = (
+        len(orphaned_profiles) +
+        len(orphaned_auth_accounts) +
+        len(duplicate_users) +
+        len(duplicate_auth_users) +
+        len(duplicate_usernames) +
+        len(role_mismatches) +
+        len(status_mismatches) +
+        len(insecure_credentials)
+    )
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "total_users_count": len(users),
+        "total_auth_users_count": len(auth_users),
+        "healthy": total_issues == 0,
+        "total_issues_count": total_issues,
+        "orphaned_profiles": orphaned_profiles,
+        "orphaned_auth_accounts": orphaned_auth_accounts,
+        "duplicate_users": duplicate_users,
+        "duplicate_auth_users": duplicate_auth_users,
+        "duplicate_usernames": duplicate_usernames,
+        "role_mismatches": role_mismatches,
+        "status_mismatches": status_mismatches,
+        "insecure_credentials": insecure_credentials,
+    }
 
 
 def validate_unique_username(username: str, exclude_user_id: Optional[str] = None) -> None:
@@ -52,7 +220,7 @@ def validate_unique_username(username: str, exclude_user_id: Optional[str] = Non
     if not clean_username:
         raise HTTPException(status_code=422, detail="Username cannot be blank.")
     
-    auth_records = db.get_records("AuthUsers", fresh=True)
+    auth_records = db.get_records("AuthUsers", fresh=True) or []
     for a in auth_records:
         uid = str(a.get("user_id") or "").strip()
         if exclude_user_id and uid == exclude_user_id.strip():
@@ -66,7 +234,10 @@ def validate_unique_username(username: str, exclude_user_id: Optional[str] = Non
 
 
 def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str, Any]:
-    """Two-phase creation of profile (Users) and credentials (AuthUsers) with safe failure rollback."""
+    """
+    Two-phase creation of profile (Users) and credentials (AuthUsers) with safe failure rollback
+    and idempotent replay support.
+    """
     username = str(payload.get("username") or "").strip()
     full_name = str(payload.get("full_name") or "").strip()
     role = str(payload.get("role") or "SALESMAN").upper()
@@ -79,10 +250,38 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
         raise HTTPException(status_code=422, detail="Username is required.")
     if not full_name:
         raise HTTPException(status_code=422, detail="Full name is required.")
-    if len(password) < 8:
-        raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
+
+    # Idempotent check: if user already exists with both profile and credentials, return existing
+    auth_records = db.get_records("AuthUsers", fresh=True) or []
+    existing_auth = next((a for a in auth_records if str(a.get("username", "")).strip().lower() == username.lower()), None)
+    if existing_auth:
+        user_records = db.get_records("Users", fresh=True) or []
+        existing_user = next((u for u in user_records if str(u.get("user_id", "")).strip() == str(existing_auth.get("user_id", "")).strip()), None)
+        if existing_user:
+            return {
+                "user_id": existing_user.get("user_id"),
+                "full_name": existing_user.get("full_name"),
+                "username": existing_auth.get("username"),
+                "role": existing_auth.get("role"),
+                "mobile": existing_user.get("mobile", ""),
+                "email": existing_user.get("email", ""),
+                "active": str(existing_auth.get("active", "true")).lower() in {"true", "1", "yes"},
+                "created_at": existing_user.get("created_at", ""),
+                "notes": existing_user.get("notes", ""),
+                "idempotent": True,
+            }
 
     validate_unique_username(username)
+
+    # Secure onboarding rule: If password is not provided (e.g. Approved PA request), generate secure temporary password
+    temporary_password = ""
+    must_change = "false"
+    if not password:
+        temporary_password = f"Kawad@{secrets.token_hex(4)}"
+        password = temporary_password
+        must_change = "true"
+    elif len(password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
 
     user_id = db.generate_id("Users")
     auth_id = db.generate_id("AuthUsers")
@@ -114,7 +313,7 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
         "role": role,
         "active": "true",
         "created_at": now_iso,
-        "must_change_password": "false",
+        "must_change_password": must_change,
         "sessions_revoked_at": "",
     }
 
@@ -144,7 +343,7 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
         reason=f"Created employee account {username} ({role})",
     )
 
-    return {
+    resp = {
         "user_id": user_id,
         "full_name": full_name,
         "username": username,
@@ -155,11 +354,18 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
         "created_at": now_iso,
         "notes": notes,
     }
+    if temporary_password:
+        resp["temporary_password"] = temporary_password
+        resp["must_change_password"] = True
+    return resp
 
 
 def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: str) -> Dict[str, Any]:
-    """Update profile and credentials, revoking existing sessions if role changes."""
-    user_records = db.get_records("Users", fresh=True)
+    """
+    Update profile and credentials, revoking existing sessions if role changes.
+    Guarantees atomic rollback if AuthUsers synchronization fails so records never disagree.
+    """
+    user_records = db.get_records("Users", fresh=True) or []
     target = next((u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()), None)
     if not target:
         raise HTTPException(status_code=404, detail="Employee record not found.")
@@ -179,9 +385,25 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
     if "notes" in payload and payload["notes"] is not None:
         user_updates["notes"] = str(payload["notes"]).strip()
 
-    if user_updates:
-        if not db.update_record("Users", "user_id", user_id, user_updates, raise_on_error=True):
-            raise HTTPException(status_code=503, detail="Failed to update Users record in Google Sheets.")
+    # Idempotent check: if nothing changed, return target state
+    if not user_updates:
+        merged = dict(target)
+        merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
+        return merged
+
+    all_matched = True
+    for k, v in user_updates.items():
+        if str(target.get(k, "")).strip() != str(v).strip():
+            all_matched = False
+            break
+    if all_matched:
+        merged = dict(target)
+        merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
+        merged["idempotent"] = True
+        return merged
+
+    if not db.update_record("Users", "user_id", user_id, user_updates, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="Failed to update Users record in Google Sheets.")
 
     # Synchronize AuthUsers
     auth_updates: Dict[str, Any] = {}
@@ -190,13 +412,33 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
     if "role" in user_updates and user_updates["role"] != old_role:
         auth_updates["role"] = user_updates["role"]
         # Audit requirement: Role change must immediately revoke existing sessions!
-        revoke_all_user_sessions(user_id, f"Role changed from {old_role} to {new_role}")
+        now_epoch = time.time()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _USER_REVOKED_AT[str(user_id or "").strip().lower()] = now_epoch
+        auth_updates["sessions_revoked_at"] = now_iso
 
     if auth_updates:
         try:
-            db.update_record("AuthUsers", "user_id", user_id, auth_updates, raise_on_error=True)
+            if not db.update_record("AuthUsers", "user_id", user_id, auth_updates, raise_on_error=True):
+                raise RuntimeError("AuthUsers update returned False")
         except Exception as exc:
-            logger.warning(f"Failed to synchronize AuthUsers for {user_id}: {exc}")
+            # Audit P0 Rule: Partial write detected! Roll back Users to prevent account divergence.
+            logger.error(f"AuthUsers sync failed for {user_id}. Rolling back Users profile: {exc}")
+            rollback_fields = {
+                "full_name": str(target.get("full_name") or ""),
+                "role": old_role,
+                "mobile": str(target.get("mobile") or ""),
+                "email": str(target.get("email") or ""),
+                "notes": str(target.get("notes") or ""),
+            }
+            try:
+                db.update_record("Users", "user_id", user_id, rollback_fields, raise_on_error=True)
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to synchronize authentication credentials in AuthUsers ({exc}). Profile update was safely rolled back to prevent account mismatch.",
+            )
 
     db.log_audit(
         actor=actor_user_id,
@@ -213,8 +455,25 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
 
 
 def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reason: str = "") -> Dict[str, Any]:
-    """Toggle user active/deactive status in both Users and AuthUsers. Invalidate sessions immediately on deactivation."""
+    """
+    Toggle user active/deactive status in both Users and AuthUsers.
+    Guarantees atomic rollback if AuthUsers update fails so status records never disagree.
+    """
+    user_records = db.get_records("Users", fresh=True) or []
+    target_u = next((u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()), None)
+
+    auth_records = db.get_records("AuthUsers", fresh=True) or []
+    target_a = next((a for a in auth_records if str(a.get("user_id") or "").strip() == user_id.strip()), None)
+
+    # Idempotent check
+    if target_u and target_a:
+        u_act = str(target_u.get("active", "true")).lower() in {"true", "1", "yes"}
+        a_act = str(target_a.get("active", "true")).lower() in {"true", "1", "yes"}
+        if u_act == active and a_act == active:
+            return {"ok": True, "user_id": user_id, "active": active, "idempotent": True}
+
     active_str = "true" if active else "false"
+    old_active_str = "false" if active else "true"
 
     # Step 1: Update Users
     if not db.update_record("Users", "user_id", user_id, {"active": active_str}, raise_on_error=True):
@@ -224,12 +483,25 @@ def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reas
     auth_updates = {"active": active_str}
     if not active:
         # Invalidate all existing sessions immediately across devices
-        revoke_all_user_sessions(user_id, f"Account deactivated by {actor_user_id}: {reason}")
+        now_epoch = time.time()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _USER_REVOKED_AT[str(user_id or "").strip().lower()] = now_epoch
+        auth_updates["sessions_revoked_at"] = now_iso
 
     try:
-        db.update_record("AuthUsers", "user_id", user_id, auth_updates, raise_on_error=True)
+        if not db.update_record("AuthUsers", "user_id", user_id, auth_updates, raise_on_error=True):
+            raise RuntimeError("AuthUsers status update returned False")
     except Exception as exc:
-        logger.warning(f"AuthUsers status update warning for {user_id}: {exc}")
+        # Audit P0 Rule: Partial write detected! Roll back Users status to prevent account divergence.
+        logger.error(f"AuthUsers status update failed for {user_id}. Rolling back Users status: {exc}")
+        try:
+            db.update_record("Users", "user_id", user_id, {"active": old_active_str}, raise_on_error=True)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to synchronize status in AuthUsers ({exc}). Status change was safely rolled back to prevent account mismatch.",
+        )
 
     action_label = "REACTIVATE_USER" if active else "DEACTIVATE_USER"
     db.log_audit(
@@ -248,7 +520,7 @@ def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, 
     if len(new_password) < 8:
         raise HTTPException(status_code=422, detail="New password must be at least 8 characters.")
 
-    auth_records = db.get_records("AuthUsers", fresh=True)
+    auth_records = db.get_records("AuthUsers", fresh=True) or []
     target_auth = next((r for r in auth_records if str(r.get("user_id", "")).strip() == user_id.strip()), None)
     if not target_auth:
         raise HTTPException(status_code=404, detail="Login account was not found in AuthUsers.")
@@ -273,4 +545,9 @@ def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, 
         entity_id=user_id,
         reason=f"{reason}. Revoked all existing sessions.",
     )
-    return {"ok": True, "user_id": user_id, "must_change_password": True, "active": current_active_status == "true"}
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "must_change_password": True,
+        "active": current_active_status == "true",
+    }

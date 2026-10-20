@@ -46,7 +46,7 @@ class UserCreate(BaseModel):
     mobile: Optional[str] = ""
     email: Optional[str] = ""
     notes: Optional[str] = ""
-    password: str
+    password: Optional[str] = ""
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
@@ -73,10 +73,12 @@ class ApprovalRequestModel(BaseModel):
     decision_notes: Optional[str] = ""
     execution_error: Optional[str] = ""
     executed_at: Optional[str] = ""
+    temporary_credentials: Optional[str] = ""
 
 class ApprovalDecisionRequest(BaseModel):
     decision: str  # APPROVED, REJECTED
     notes: Optional[str] = ""
+    initial_password: Optional[str] = None
 
 # Product Models
 class Product(BaseModel):

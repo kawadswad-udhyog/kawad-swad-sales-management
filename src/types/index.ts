@@ -11,6 +11,7 @@ export interface User {
   created_at: string;
   notes: string;
   password?: string;
+  sync_warning?: string;
 }
 
 export interface Product {
@@ -228,5 +229,51 @@ export interface ApprovalRequest {
   decision_notes?: string;
   execution_error?: string;
   executed_at?: string;
+  temporary_credentials?: string;
+}
+
+export interface ReconciliationReport {
+  timestamp: string;
+  total_users_count: number;
+  total_auth_users_count: number;
+  healthy: boolean;
+  total_issues_count: number;
+  orphaned_profiles: Array<{
+    user_id: string;
+    full_name?: string;
+    username?: string;
+    role?: string;
+    active?: string | boolean;
+    issue: string;
+  }>;
+  orphaned_auth_accounts: Array<{
+    user_id: string;
+    username?: string;
+    role?: string;
+    active?: string | boolean;
+    issue: string;
+  }>;
+  duplicate_users: Array<{ user_id: string; count: number }>;
+  duplicate_auth_users: Array<{ user_id: string; count: number }>;
+  duplicate_usernames: Array<{ username: string; user_ids: string[] }>;
+  role_mismatches: Array<{
+    user_id: string;
+    username?: string;
+    users_role: string;
+    auth_role: string;
+    issue: string;
+  }>;
+  status_mismatches: Array<{
+    user_id: string;
+    username?: string;
+    users_active: boolean;
+    auth_active: boolean;
+    issue: string;
+  }>;
+  insecure_credentials: Array<{
+    user_id: string;
+    username?: string;
+    issue: string;
+  }>;
 }
 

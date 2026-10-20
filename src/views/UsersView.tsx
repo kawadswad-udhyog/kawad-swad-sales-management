@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
-import { User, UserRole, ApprovalRequest } from '../types';
+import { User, UserRole, ApprovalRequest, ReconciliationReport } from '../types';
+import { apiRequest } from '../services/api';
 
 export const UsersView: React.FC = () => {
   const {
@@ -19,8 +20,23 @@ export const UsersView: React.FC = () => {
   const isOwner = currentUser?.role === 'OWNER';
   const isPA = currentUser?.role === 'PA';
 
-  const [activeTab, setActiveTab] = useState<'directory' | 'approvals' | 'history'>('directory');
+  const [activeTab, setActiveTab] = useState<'directory' | 'approvals' | 'history' | 'reconciliation'>('directory');
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+  const [reconciliationReport, setReconciliationReport] = useState<ReconciliationReport | null>(null);
+  const [isLoadingReconciliation, setIsLoadingReconciliation] = useState(false);
+
+  const fetchReconciliation = async () => {
+    setIsLoadingReconciliation(true);
+    try {
+      const data = await apiRequest<ReconciliationReport>('/api/users/reconciliation');
+      setReconciliationReport(data);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch reconciliation report.';
+      setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setIsLoadingReconciliation(false);
+    }
+  };
 
   // Form states for Create User / Request Create User
   const [fullName, setFullName] = useState('');
@@ -73,12 +89,17 @@ export const UsersView: React.FC = () => {
       return;
     }
 
+    if (isOwner && (!password || password.length < 8)) {
+      setNotice({ msg: 'Please provide an initial password of at least 8 characters.', error: true });
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       const res = await createUser({
         full_name: fullName.trim(),
         username: cleanUsername,
-        password,
+        password: isOwner ? password : '',
         role,
         mobile: mobile.trim(),
         email: email.trim(),
@@ -171,10 +192,15 @@ export const UsersView: React.FC = () => {
     e.preventDefault();
     if (!pwResetUser) return;
     setNotice(null);
-    setIsSubmitting(true);
 
+    if (isOwner && (!newPassword || newPassword.length < 8)) {
+      setNotice({ msg: 'Please provide a password of at least 8 characters.', error: true });
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
-      const res = await resetUserPassword(pwResetUser.user_id, newPassword);
+      const res = await resetUserPassword(pwResetUser.user_id, isOwner ? newPassword : '');
       if (res.pending_approval) {
         setNotice({ msg: `Password reset request for '${pwResetUser.full_name}' submitted for Owner approval.` });
       } else {
@@ -193,8 +219,11 @@ export const UsersView: React.FC = () => {
   const handleApprove = async (req: ApprovalRequest) => {
     setNotice(null);
     try {
-      await decideApprovalRequest(req.request_id, 'APPROVED');
-      setNotice({ msg: `Request ${req.request_id} (${req.request_type}) approved and executed.` });
+      const res = await decideApprovalRequest(req.request_id, 'APPROVED');
+      const credNotice = (res as { temporary_credentials?: string })?.temporary_credentials;
+      setNotice({
+        msg: `Request ${req.request_id} (${req.request_type}) approved and executed! ${credNotice ? ` [${credNotice}]` : ''}`,
+      });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to approve request.';
       setNotice({ msg: errorMsg, error: true });
@@ -308,6 +337,19 @@ export const UsersView: React.FC = () => {
           >
             📜 Approval History
           </button>
+
+          {isOwner && (
+            <button
+              type="button"
+              className={activeTab === 'reconciliation' ? 'primary' : 'secondary'}
+              onClick={() => {
+                setActiveTab('reconciliation');
+                void fetchReconciliation();
+              }}
+            >
+              🔍 Sheet Audit &amp; Reconciliation
+            </button>
+          )}
         </div>
       </div>
 
@@ -409,17 +451,23 @@ export const UsersView: React.FC = () => {
                 />
               </label>
 
-              <label>
-                Temporary Password (min 8 chars)
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  disabled={isSubmitting}
-                />
-              </label>
+              {isOwner ? (
+                <label>
+                  Initial Password (min 8 chars)
+                  <input
+                    type="password"
+                    required
+                    placeholder="••••••••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    disabled={isSubmitting}
+                  />
+                </label>
+              ) : (
+                <div style={{ padding: '8px 12px', background: '#f8fafc', borderRadius: '6px', fontSize: '0.82rem', color: '#475569', alignSelf: 'center' }}>
+                  🔒 <em>Security Policy: Passwords cannot be set by PA. Credentials will be safely generated upon Owner approval.</em>
+                </div>
+              )}
 
               <label style={{ gridColumn: 'span 2' }}>
                 Notes / Assigned Territory
@@ -509,6 +557,11 @@ export const UsersView: React.FC = () => {
                             <span style={{ background: '#fee2e2', color: '#b91c1c', padding: '2px 8px', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
                               Inactive
                             </span>
+                          )}
+                          {u.sync_warning && (
+                            <div style={{ color: '#dc2626', fontSize: '0.7rem', marginTop: '3px', fontWeight: 600 }}>
+                              ⚠️ {u.sync_warning}
+                            </div>
                           )}
                         </td>
                         <td>{u.created_at ? new Date(u.created_at).toLocaleDateString('en-IN') : '—'}</td>
@@ -733,6 +786,146 @@ export const UsersView: React.FC = () => {
         </div>
       )}
 
+      {/* TAB 4: SHEET RECONCILIATION AUDIT (Owner Only) */}
+      {isOwner && activeTab === 'reconciliation' && (
+        <div>
+          <div className="card" style={{ marginBottom: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Google Sheets User System Reconciliation Audit</h2>
+                <p className="muted" style={{ margin: '4px 0 0', fontSize: '0.85rem' }}>
+                  Independent, read-only analysis comparing live records between <code>Users</code> (profiles) and <code>AuthUsers</code> (login credentials).
+                </p>
+              </div>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void fetchReconciliation()}
+                disabled={isLoadingReconciliation}
+              >
+                {isLoadingReconciliation ? 'Analyzing Sheets…' : '🔄 Refresh Live Audit'}
+              </button>
+            </div>
+
+            {isLoadingReconciliation && (
+              <div style={{ padding: '24px', textAlign: 'center', color: '#64748b' }}>
+                Fetching and auditing live Google Sheets records...
+              </div>
+            )}
+
+            {!isLoadingReconciliation && reconciliationReport && (
+              <div style={{ marginTop: '16px' }}>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                  gap: '12px',
+                  marginBottom: '20px',
+                }}>
+                  <div style={{ padding: '12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div className="muted" style={{ fontSize: '0.75rem', textTransform: 'uppercase' }}>Users Sheet Profiles</div>
+                    <div style={{ fontSize: '1.4rem', fontWeight: 800, marginTop: '4px' }}>{reconciliationReport.total_users_count}</div>
+                  </div>
+                  <div style={{ padding: '12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div className="muted" style={{ fontSize: '0.75rem', textTransform: 'uppercase' }}>AuthUsers Sheet Logins</div>
+                    <div style={{ fontSize: '1.4rem', fontWeight: 800, marginTop: '4px' }}>{reconciliationReport.total_auth_users_count}</div>
+                  </div>
+                  <div style={{
+                    padding: '12px',
+                    background: reconciliationReport.healthy ? '#dcfce7' : '#fee2e2',
+                    borderRadius: '8px',
+                    border: `1px solid ${reconciliationReport.healthy ? '#bbf7d0' : '#fecaca'}`,
+                  }}>
+                    <div className="muted" style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: reconciliationReport.healthy ? '#166534' : '#991b1b' }}>System Health</div>
+                    <div style={{ fontSize: '1.2rem', fontWeight: 800, marginTop: '4px', color: reconciliationReport.healthy ? '#166534' : '#991b1b' }}>
+                      {reconciliationReport.healthy ? '✓ Synchronized' : `⚠️ ${reconciliationReport.total_issues_count} Discrepancies`}
+                    </div>
+                  </div>
+                </div>
+
+                {reconciliationReport.healthy ? (
+                  <div className="notice-success">
+                    <strong>✓ All records are synchronized.</strong> Every profile in <code>Users</code> matches an active login account in <code>AuthUsers</code> with matching roles and statuses.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                    {reconciliationReport.orphaned_profiles.length > 0 && (
+                      <div className="notice-error">
+                        <strong>Orphaned Profiles in Users Sheet ({reconciliationReport.orphaned_profiles.length}):</strong>
+                        <p style={{ margin: '4px 0 8px', fontSize: '0.82rem' }}>
+                          These employees exist in <code>Users</code> but have NO login credentials in <code>AuthUsers</code>. They cannot sign in.
+                        </p>
+                        <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '0.85rem' }}>
+                          {reconciliationReport.orphaned_profiles.map((p, idx) => (
+                            <li key={idx}>
+                              <code>{p.user_id}</code>: <strong>{p.full_name}</strong> (Username: <code>{p.username || '—'}</code>, Role: {p.role})
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {reconciliationReport.orphaned_auth_accounts.length > 0 && (
+                      <div className="notice-error">
+                        <strong>Orphaned Credentials in AuthUsers Sheet ({reconciliationReport.orphaned_auth_accounts.length}):</strong>
+                        <p style={{ margin: '4px 0 8px', fontSize: '0.82rem' }}>
+                          These accounts exist in <code>AuthUsers</code> but have NO profile in <code>Users</code>.
+                        </p>
+                        <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '0.85rem' }}>
+                          {reconciliationReport.orphaned_auth_accounts.map((a, idx) => (
+                            <li key={idx}>
+                              User ID: <code>{a.user_id}</code> | Username: <code>{a.username}</code> (Role: {a.role})
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {reconciliationReport.role_mismatches.length > 0 && (
+                      <div className="notice-error">
+                        <strong>Role Mismatches ({reconciliationReport.role_mismatches.length}):</strong>
+                        <ul style={{ margin: '4px 0 0', paddingLeft: '20px', fontSize: '0.85rem' }}>
+                          {reconciliationReport.role_mismatches.map((m, idx) => (
+                            <li key={idx}>
+                              <code>{m.user_id}</code> ({m.username}): Users role <code>{m.users_role}</code> ≠ AuthUsers role <code>{m.auth_role}</code>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {reconciliationReport.status_mismatches.length > 0 && (
+                      <div className="notice-error">
+                        <strong>Status Divergences ({reconciliationReport.status_mismatches.length}):</strong>
+                        <ul style={{ margin: '4px 0 0', paddingLeft: '20px', fontSize: '0.85rem' }}>
+                          {reconciliationReport.status_mismatches.map((s, idx) => (
+                            <li key={idx}>
+                              <code>{s.user_id}</code> ({s.username}): Users is <strong>{s.users_active ? 'Active' : 'Inactive'}</strong> but AuthUsers is <strong>{s.auth_active ? 'Active' : 'Inactive'}</strong>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {reconciliationReport.duplicate_usernames.length > 0 && (
+                      <div className="notice-error">
+                        <strong>Duplicate Usernames in AuthUsers ({reconciliationReport.duplicate_usernames.length}):</strong>
+                        <ul style={{ margin: '4px 0 0', paddingLeft: '20px', fontSize: '0.85rem' }}>
+                          {reconciliationReport.duplicate_usernames.map((d, idx) => (
+                            <li key={idx}>
+                              Username <code>{d.username}</code> is used by user IDs: {d.user_ids.join(', ')}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* MODAL: EDIT EMPLOYEE */}
       {editingUser && (
         <div className="modal-overlay" onClick={() => setEditingUser(null)}>
@@ -815,28 +1008,44 @@ export const UsersView: React.FC = () => {
                 : 'Submit a password reset request to the Owner.'}
             </p>
 
-            <form onSubmit={handleResetPasswordSubmit}>
-              <label>
-                New Temporary Password (min 8 characters)
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••••••"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  disabled={isSubmitting}
-                />
-              </label>
+            {isOwner ? (
+              <form onSubmit={handleResetPasswordSubmit}>
+                <label>
+                  New Temporary Password (min 8 characters)
+                  <input
+                    type="password"
+                    required
+                    placeholder="••••••••••••"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    disabled={isSubmitting}
+                  />
+                </label>
 
-              <div className="actions" style={{ marginTop: '16px' }}>
-                <button type="submit" disabled={isSubmitting || newPassword.length < 8}>
-                  {isSubmitting ? 'Processing…' : isOwner ? 'Reset Password & Revoke Sessions' : 'Submit Request'}
-                </button>
-                <button type="button" className="secondary" onClick={() => setPwResetUser(null)}>
-                  Cancel
-                </button>
-              </div>
-            </form>
+                <div className="actions" style={{ marginTop: '16px' }}>
+                  <button type="submit" disabled={isSubmitting || newPassword.length < 8}>
+                    {isSubmitting ? 'Processing…' : 'Reset Password & Revoke Sessions'}
+                  </button>
+                  <button type="button" className="secondary" onClick={() => setPwResetUser(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleResetPasswordSubmit}>
+                <div style={{ padding: '12px', background: '#f8fafc', borderRadius: '6px', fontSize: '0.85rem', color: '#334155', marginBottom: '16px' }}>
+                  🔒 <strong>Policy Note:</strong> A request will be routed to the Owner to reset credentials for <strong>{pwResetUser.full_name}</strong>. Personal Assistants do not issue or view employee passwords.
+                </div>
+                <div className="actions">
+                  <button type="submit" disabled={isSubmitting}>
+                    {isSubmitting ? 'Submitting…' : 'Submit Reset Request to Owner'}
+                  </button>
+                  <button type="button" className="secondary" onClick={() => setPwResetUser(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

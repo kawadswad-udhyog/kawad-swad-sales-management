@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 import json
 import logging
-from typing import List, Optional
+import secrets
+from typing import List, Optional, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 
@@ -92,24 +93,33 @@ async def list_approval_requests(current_user: dict = Depends(get_current_user))
     return requests
 
 
-def _run_request_execution(request_record: dict, actor_user_id: str):
-    """Executes the approved action. Raises Exception on failure."""
+def _run_request_execution(request_record: dict, actor_user_id: str, initial_password: Optional[str] = None) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Executes the approved action. Returns (result_dict, temporary_password_if_any). Raises Exception on failure."""
     req_type = str(request_record.get("request_type") or "")
     target_uid = str(request_record.get("target_user_id") or "")
     payload_str = str(request_record.get("payload_json") or "{}")
     payload = json.loads(payload_str)
 
+    temp_pw = None
     if req_type == "CREATE_USER":
-        return execute_create_user(payload, actor_user_id)
+        if initial_password:
+            payload["password"] = initial_password
+        res = execute_create_user(payload, actor_user_id)
+        temp_pw = res.get("temporary_password") or initial_password
+        return res, temp_pw
     elif req_type == "UPDATE_USER":
-        return execute_update_user(target_uid, payload, actor_user_id)
+        res = execute_update_user(target_uid, payload, actor_user_id)
+        return res, None
     elif req_type == "DEACTIVATE_USER":
-        return execute_set_user_status(target_uid, False, actor_user_id, reason=payload.get("reason", "Approved deactivation"))
+        res = execute_set_user_status(target_uid, False, actor_user_id, reason=payload.get("reason", "Approved deactivation"))
+        return res, None
     elif req_type == "REACTIVATE_USER":
-        return execute_set_user_status(target_uid, True, actor_user_id, reason=payload.get("reason", "Approved reactivation"))
+        res = execute_set_user_status(target_uid, True, actor_user_id, reason=payload.get("reason", "Approved reactivation"))
+        return res, None
     elif req_type == "RESET_PASSWORD":
-        new_pw = str(payload.get("new_password") or "")
-        return execute_reset_password(target_uid, new_pw, actor_user_id, reason="Owner approved password reset")
+        new_pw = initial_password or f"Kawad@{secrets.token_hex(4)}"
+        res = execute_reset_password(target_uid, new_pw, actor_user_id, reason="Owner approved password reset")
+        return res, new_pw
     else:
         raise ValueError(f"Unknown request type: {req_type}")
 
@@ -157,11 +167,14 @@ async def decide_approval_request(
         "decision_notes": decision_req.notes or "",
     }
 
+    temp_credentials_to_show = ""
     try:
-        _run_request_execution(target, owner_id)
+        res, temp_pw = _run_request_execution(target, owner_id, decision_req.initial_password)
         updates["status"] = "EXECUTED"
         updates["executed_at"] = datetime.now(timezone.utc).isoformat()
         updates["execution_error"] = ""
+        if temp_pw:
+            temp_credentials_to_show = f"Temporary Password: {temp_pw}"
         db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
         db.log_audit(owner_id, "APPROVE_AND_EXECUTE", "ApprovalRequests", request_id, reason=f"Executed {target.get('request_type')}")
     except Exception as exc:
@@ -173,6 +186,8 @@ async def decide_approval_request(
 
     updated_dict = dict(target)
     updated_dict.update(updates)
+    if temp_credentials_to_show:
+        updated_dict["temporary_credentials"] = temp_credentials_to_show
     return ApprovalRequestModel(**updated_dict)
 
 

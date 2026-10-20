@@ -100,11 +100,11 @@ export interface StoreContextType {
   }) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
   updateUser: (user_id: string, updates: Partial<User>) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string; user?: User }>;
   setUserStatus: (user_id: string, active: boolean, reason?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
-  resetUserPassword: (user_id: string, newPassword: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
+  resetUserPassword: (user_id: string, newPassword?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
 
   approvalRequests: ApprovalRequest[];
   loadApprovalRequests: () => Promise<void>;
-  decideApprovalRequest: (requestId: string, decision: 'APPROVED' | 'REJECTED', notes?: string) => Promise<void>;
+  decideApprovalRequest: (requestId: string, decision: 'APPROVED' | 'REJECTED', notes?: string, initialPassword?: string) => Promise<ApprovalRequest>;
   retryApprovalRequest: (requestId: string) => Promise<void>;
   cancelApprovalRequest: (requestId: string) => Promise<void>;
 
@@ -560,27 +560,38 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       try {
-        let me: { user_id: string; full_name?: string; role?: string };
+        let cachedUser: User | null = null;
+        if (typeof window !== 'undefined') {
+          try {
+            const raw = localStorage.getItem('ks_user');
+            if (raw) cachedUser = JSON.parse(raw);
+          } catch {
+            // ignore
+          }
+        }
+
+        let me: { user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean };
         try {
-          me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/api/auth/me');
+          me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/api/auth/me');
         } catch (err: unknown) {
           if (err instanceof Error && err.message.includes('404')) {
-            me = await apiRequest<{ user_id: string; full_name?: string; role?: string }>('/auth/me');
+            me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/auth/me');
           } else {
             throw err;
           }
         }
 
+        const realUsername = me.username || cachedUser?.username || me.user_id;
         const verifiedUser: User = {
           user_id: me.user_id,
-          full_name: me.full_name || me.user_id,
-          username: me.user_id,
-          role: (me.role || 'SALESMAN') as User['role'],
-          mobile: '',
-          email: '',
+          full_name: me.full_name || cachedUser?.full_name || realUsername,
+          username: realUsername,
+          role: (me.role || cachedUser?.role || 'SALESMAN') as User['role'],
+          mobile: cachedUser?.mobile || '',
+          email: cachedUser?.email || '',
           active: true,
-          created_at: new Date().toISOString(),
-          notes: '',
+          created_at: cachedUser?.created_at || new Date().toISOString(),
+          notes: cachedUser?.notes || '',
         };
         setCurrentUser(verifiedUser);
         if (typeof window !== 'undefined') {
@@ -1242,10 +1253,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return res;
   };
 
-  const resetUserPassword = async (userId: string, newPassword: string) => {
+  const resetUserPassword = async (userId: string, newPassword?: string) => {
     const res = await apiRequest<{ ok?: boolean; pending_approval?: boolean; message?: string }>(`/api/users/${encodeURIComponent(userId)}/reset-password`, {
       method: 'POST',
-      body: JSON.stringify({ new_password: newPassword }),
+      body: JSON.stringify({ new_password: newPassword || '' }),
     });
     if (res.pending_approval) {
       await loadApprovalRequests();
@@ -1255,10 +1266,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return res;
   };
 
-  const decideApprovalRequest = async (requestId: string, decision: 'APPROVED' | 'REJECTED', notes: string = '') => {
+  const decideApprovalRequest = async (requestId: string, decision: 'APPROVED' | 'REJECTED', notes: string = '', initialPassword?: string): Promise<ApprovalRequest> => {
     const updated = await apiRequest<ApprovalRequest>(`/api/approvals/requests/${encodeURIComponent(requestId)}/decision`, {
       method: 'POST',
-      body: JSON.stringify({ decision, notes }),
+      body: JSON.stringify({ decision, notes, initial_password: initialPassword }),
     });
     setApprovalRequests((prev) => prev.map((r) => (r.request_id === requestId ? updated : r)));
     // Synchronize users if approved
@@ -1267,6 +1278,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (Array.isArray(freshUsers)) setUsers(freshUsers);
     } catch {}
     refreshDashboardMetrics().catch(() => undefined);
+    return updated;
   };
 
   const retryApprovalRequest = async (requestId: string) => {
