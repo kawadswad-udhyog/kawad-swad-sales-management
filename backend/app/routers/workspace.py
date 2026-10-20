@@ -14,6 +14,7 @@ from app.routers import salary as salary_router
 from app.routers import dashboard as dashboard_router
 from app.routers import users as users_router
 from app.routers import audit as audit_router
+from app.routers import approvals as approvals_router
 
 router = APIRouter(prefix="/api/workspace", tags=["Workspace"])
 
@@ -42,6 +43,7 @@ async def load_workspace(current_user: dict = Depends(get_current_user)):
             dashboard_router.get_dashboard_metrics(current_user),
             users_router.list_users(current_user),
             audit_router.list_audit_logs(250, None, current_user),
+            approvals_router.list_approval_requests(current_user),
         ])
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -71,9 +73,11 @@ async def load_workspace(current_user: dict = Depends(get_current_user)):
         payload["dashboard"] = _safe_val(11, None)
         payload["users"] = _safe_val(12, [])
         payload["audit_logs"] = _safe_val(13, [])
+        payload["approval_requests"] = _safe_val(14, [])
     else:
         payload["dashboard"] = None
         payload["users"] = []
         payload["audit_logs"] = []
+        payload["approval_requests"] = []
 
     return payload

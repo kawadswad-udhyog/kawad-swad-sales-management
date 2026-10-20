@@ -1,127 +1,197 @@
-from datetime import datetime
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, Field
-from app.models import UserProfile, UserCreate
+
+from app.models import UserProfile, UserCreate, UserUpdate, UserStatusUpdate
 from app.sheets import db
-from app.auth import get_current_user, hash_password
+from app.auth import get_current_user
 from app.permissions import is_manager, is_owner, require_manager, require_owner
+from app.user_service import (
+    get_all_users_with_auth,
+    validate_unique_username,
+    execute_create_user,
+    execute_update_user,
+    execute_set_user_status,
+    execute_reset_password,
+)
+from app.routers.approvals import create_approval_request
 
 router = APIRouter(prefix="/api/users", tags=["Users"])
-
-@router.get("", response_model=List[UserProfile])
-async def list_users(current_user: dict = Depends(get_current_user)):
-    require_manager(current_user)
-    records = db.get_records("Users")
-    users = []
-    for r in records:
-        users.append(UserProfile(
-            user_id=str(r.get("user_id", "")),
-            full_name=str(r.get("full_name", "")),
-            username=str(r.get("user_id", "")),
-            role=str(r.get("role", "SALESMAN")),
-            mobile=str(r.get("mobile", "")),
-            email=str(r.get("email", "")),
-            active=str(r.get("active", "true")).lower() == "true",
-            created_at=str(r.get("created_at", "")),
-            notes=str(r.get("notes", "")),
-        ))
-    return users
-
-@router.post("", response_model=UserProfile)
-async def create_user(req: UserCreate, current_user: dict = Depends(get_current_user)):
-    require_manager(current_user)
-    requested = str(req.role or "SALESMAN").upper()
-    if requested in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
-        raise HTTPException(status_code=403, detail="Only the owner can create another owner account.")
-    if requested not in {"OWNER", "OWNER_ADMIN", "PA", "SALESMAN", "FIELD_SALESMAN"}:
-        raise HTTPException(status_code=422, detail="Role must be OWNER, PA, or SALESMAN.")
-
-    user_id = db.generate_id("Users")
-    auth_id = db.generate_id("AuthUsers")
-    now_iso = datetime.utcnow().isoformat()
-
-    user_record = {
-        "user_id": user_id,
-        "full_name": req.full_name,
-        "role": req.role,
-        "mobile": req.mobile or "",
-        "email": req.email or "",
-        "active": "true",
-        "created_at": now_iso,
-        "notes": req.notes or "",
-    }
-    if not db.append_record("Users", user_record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="The user record was not saved.")
-
-    hashed_pw = hash_password(req.password)
-    auth_record = {
-        "auth_id": auth_id,
-        "user_id": user_id,
-        "username": req.username,
-        "password_hash": hashed_pw,
-        "role": req.role,
-        "active": "true",
-        "created_at": now_iso,
-        "must_change_password": "false",
-    }
-    try:
-        if not db.append_record("AuthUsers", auth_record, raise_on_error=True):
-            raise RuntimeError("AuthUsers write returned False")
-    except Exception as exc:
-        # Finding 2: Roll back the created Users record so it is not left orphaned without a login
-        try:
-            db.update_record("Users", "user_id", user_id, {"active": "false", "notes": f"INCOMPLETE_LOGIN_CREATION: {exc}"})
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=503,
-            detail=f"The login record could not be saved ({exc}). The employee profile creation was rolled back.",
-        )
-
-    db.log_audit(
-        actor=current_user.get("user_id"),
-        action="CREATE_USER",
-        entity_type="Users",
-        entity_id=user_id,
-        reason=f"Created user {req.username} with role {req.role}"
-    )
-
-    return UserProfile(
-        user_id=user_id,
-        full_name=req.full_name,
-        username=req.username,
-        role=req.role,
-        mobile=req.mobile or "",
-        email=req.email or "",
-        active=True,
-        created_at=now_iso,
-        notes=req.notes or "",
-    )
 
 
 class PasswordResetRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+def _get_target_user_role(user_id: str) -> str:
+    """Helper to check target user's current role."""
+    users = db.get_records("Users", fresh=True) or []
+    target = next((u for u in users if str(u.get("user_id") or "").strip() == user_id.strip()), None)
+    if not target:
+        auth_users = db.get_records("AuthUsers", fresh=True) or []
+        target = next((u for u in auth_users if str(u.get("user_id") or "").strip() == user_id.strip()), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Employee record not found.")
+    return str(target.get("role") or "SALESMAN").upper()
+
+
+@router.get("", response_model=List[UserProfile])
+async def list_users(current_user: dict = Depends(get_current_user)):
+    """List all employees with real username from AuthUsers and verified active status."""
+    require_manager(current_user)
+    users = get_all_users_with_auth()
+    return [UserProfile(**u) for u in users]
+
+
+@router.post("")
+async def create_user(req: UserCreate, current_user: dict = Depends(get_current_user)):
+    """Owner creates employee directly. PA creates a PENDING approval request."""
+    require_manager(current_user)
+    requested_role = str(req.role or "SALESMAN").upper()
+
+    # Rule: PA cannot create an Owner account
+    if requested_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="Only the business owner can create another owner account.")
+
+    if requested_role not in {"OWNER", "OWNER_ADMIN", "PA", "SALESMAN", "FIELD_SALESMAN"}:
+        raise HTTPException(status_code=422, detail="Role must be OWNER, PA, or SALESMAN.")
+
+    # Validate username uniqueness upfront before creating request or record
+    validate_unique_username(req.username)
+
+    actor_id = str(current_user.get("user_id") or "")
+    actor_name = str(current_user.get("full_name") or actor_id)
+
+    if is_owner(current_user):
+        # Owner executes directly
+        created = execute_create_user(req.dict(), actor_id)
+        return UserProfile(**created)
+    else:
+        # PA submits approval request
+        app_req = create_approval_request(
+            request_type="CREATE_USER",
+            target_user_id=None,
+            payload=req.dict(),
+            requested_by=actor_id,
+            requested_by_name=actor_name,
+        )
+        return {
+            "ok": True,
+            "pending_approval": True,
+            "message": f"Account creation request for {req.username} submitted for Owner approval.",
+            "request_id": app_req.request_id,
+        }
+
+
+@router.put("/{user_id}")
+async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depends(get_current_user)):
+    """Owner updates employee details directly. PA submits an approval request."""
+    require_manager(current_user)
+    target_role = _get_target_user_role(user_id)
+
+    # Rule: PA cannot edit or change role of an Owner account
+    if target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="PA cannot edit or change the role of an Owner account.")
+
+    # Rule: PA cannot promote any user to Owner
+    if req.role and str(req.role).upper() in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="PA cannot promote an employee to Owner.")
+
+    actor_id = str(current_user.get("user_id") or "")
+    actor_name = str(current_user.get("full_name") or actor_id)
+
+    try:
+        update_data = req.dict(exclude_unset=True)
+    except TypeError:
+        update_data = {k: v for k, v in req.dict().items() if v is not None}
+
+    if is_owner(current_user):
+        # Owner executes directly
+        updated = execute_update_user(user_id, update_data, actor_id)
+        return {"ok": True, "user": updated}
+    else:
+        # PA submits approval request
+        app_req = create_approval_request(
+            request_type="UPDATE_USER",
+            target_user_id=user_id,
+            payload=update_data,
+            requested_by=actor_id,
+            requested_by_name=actor_name,
+        )
+        return {
+            "ok": True,
+            "pending_approval": True,
+            "message": f"Employee update request for {user_id} submitted for Owner approval.",
+            "request_id": app_req.request_id,
+        }
+
+
+@router.post("/{user_id}/status")
+async def set_user_status(user_id: str, req: UserStatusUpdate, current_user: dict = Depends(get_current_user)):
+    """Owner activates/deactivates directly. PA submits an approval request."""
+    require_manager(current_user)
+    target_role = _get_target_user_role(user_id)
+
+    # Rule: PA cannot deactivate or modify status of an Owner account
+    if target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="PA cannot deactivate or modify an Owner account.")
+
+    actor_id = str(current_user.get("user_id") or "")
+    actor_name = str(current_user.get("full_name") or actor_id)
+
+    action_type = "REACTIVATE_USER" if req.active else "DEACTIVATE_USER"
+
+    if is_owner(current_user):
+        # Owner executes directly
+        res = execute_set_user_status(user_id, req.active, actor_id, reason=req.reason or "")
+        return res
+    else:
+        # PA submits approval request
+        app_req = create_approval_request(
+            request_type=action_type,
+            target_user_id=user_id,
+            payload={"active": req.active, "reason": req.reason or ""},
+            requested_by=actor_id,
+            requested_by_name=actor_name,
+        )
+        return {
+            "ok": True,
+            "pending_approval": True,
+            "message": f"Account {action_type.lower()} request for {user_id} submitted for Owner approval.",
+            "request_id": app_req.request_id,
+        }
+
+
 @router.post("/{user_id}/reset-password")
 async def reset_password(user_id: str, req: PasswordResetRequest, current_user: dict = Depends(get_current_user)):
-    """Owner recovery path for a legacy or forgotten password. Does not reveal the old hash."""
-    require_owner(current_user)
-    # Finding 3: Do NOT automatically reactivate an account if it was deactivated!
-    auth_records = db.get_records("AuthUsers")
-    target_auth = next((r for r in auth_records if str(r.get("user_id", "")).strip() == user_id.strip()), None)
-    if not target_auth:
-        raise HTTPException(status_code=404, detail="Login account was not found.")
+    """Owner resets password directly and revokes all active sessions. PA submits an approval request."""
+    require_manager(current_user)
+    target_role = _get_target_user_role(user_id)
 
-    current_active_status = str(target_auth.get("active", "true")).lower()
+    # Rule: PA cannot reset password for an Owner account
+    if target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="PA cannot reset the password of an Owner account.")
 
-    update_payload = {
-        "password_hash": hash_password(req.new_password),
-        "must_change_password": "true",
-        "active": current_active_status,  # Preserve existing active status!
-    }
-    if not db.update_record("AuthUsers", "user_id", user_id, update_payload, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="The password update failed to save to Google Sheets.")
-    db.log_audit(current_user.get("user_id"), "RESET_PASSWORD", "AuthUsers", user_id, reason="Owner reset a password")
-    return {"ok": True, "must_change_password": True, "active": current_active_status in ("true", "1", "yes")}
+    actor_id = str(current_user.get("user_id") or "")
+    actor_name = str(current_user.get("full_name") or actor_id)
+
+    if is_owner(current_user):
+        # Owner executes directly
+        res = execute_reset_password(user_id, req.new_password, actor_id, reason="Owner reset user password")
+        return res
+    else:
+        # PA submits approval request
+        app_req = create_approval_request(
+            request_type="RESET_PASSWORD",
+            target_user_id=user_id,
+            payload={"new_password": req.new_password},
+            requested_by=actor_id,
+            requested_by_name=actor_name,
+        )
+        return {
+            "ok": True,
+            "pending_approval": True,
+            "message": f"Password reset request for {user_id} submitted for Owner approval.",
+            "request_id": app_req.request_id,
+        }

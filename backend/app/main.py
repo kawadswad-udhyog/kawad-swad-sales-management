@@ -18,6 +18,7 @@ from app.routers import (
     audit,
     production,
     workspace,
+    approvals,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +52,7 @@ app.add_middleware(
 # Register Routers
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(approvals.router)
 app.include_router(products.router)
 app.include_router(customers.router)
 app.include_router(sales.router)

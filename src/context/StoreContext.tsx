@@ -14,6 +14,7 @@ import {
   AuditLog,
   StockTxnType,
   CustomerType,
+  ApprovalRequest,
 } from '../types';
 import {
   apiRequest,
@@ -87,7 +88,7 @@ export interface StoreContextType {
   logout: () => void;
   users: User[];
   createUser: (user: {
-    user_id: string;
+    user_id?: string;
     full_name: string;
     username: string;
     password: string;
@@ -96,7 +97,16 @@ export interface StoreContextType {
     email?: string;
     active?: boolean;
     notes?: string;
-  }) => Promise<void>;
+  }) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
+  updateUser: (user_id: string, updates: Partial<User>) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string; user?: User }>;
+  setUserStatus: (user_id: string, active: boolean, reason?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
+  resetUserPassword: (user_id: string, newPassword: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
+
+  approvalRequests: ApprovalRequest[];
+  loadApprovalRequests: () => Promise<void>;
+  decideApprovalRequest: (requestId: string, decision: 'APPROVED' | 'REJECTED', notes?: string) => Promise<void>;
+  retryApprovalRequest: (requestId: string) => Promise<void>;
+  cancelApprovalRequest: (requestId: string) => Promise<void>;
 
   products: Product[];
   addProduct: (product: Omit<Product, 'product_id'>) => Promise<Product>;
@@ -239,6 +249,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [salaryIncentives, setSalaryIncentives] = useState<SalaryIncentive[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [approvalRequests, setApprovalRequests] = useState<ApprovalRequest[]>([]);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
   const [stockDiscrepancies, setStockDiscrepancies] = useState<any[]>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -468,6 +479,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         users: User[];
         stock_discrepancies?: any[];
         audit_logs?: AuditLog[];
+        approval_requests?: ApprovalRequest[];
       }>('/api/workspace');
 
       const prodsData = workspace.products || [];
@@ -489,6 +501,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setPayments(workspace.payments || []);
       setSaleItems(salesData.flatMap((sale) => sale.lines || []));
       setStockDiscrepancies(discData);
+      if (workspace.approval_requests) {
+        setApprovalRequests(workspace.approval_requests);
+      }
 
       if (hadSyncError) {
         setSyncError('Could not sync some records with the backend API. Please verify backend service and Google Sheets connection.');
@@ -1159,8 +1174,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     addAuditLog('PAY', 'SalaryIncentive', record_id, `Marked paid with ref: ${reference}`);
   };
 
+  const loadApprovalRequests = useCallback(async () => {
+    try {
+      const list = await apiRequest<ApprovalRequest[]>('/api/approvals/requests');
+      if (Array.isArray(list)) {
+        setApprovalRequests(list);
+      }
+    } catch (err) {
+      console.warn('Failed to load approval requests:', err);
+    }
+  }, []);
+
   const createUser = async (userData: {
-    user_id: string;
+    user_id?: string;
     full_name: string;
     username: string;
     password: string;
@@ -1170,13 +1196,95 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     active?: boolean;
     notes?: string;
   }) => {
-    const saved = await apiRequest<User>('/api/users', {
+    const res = await apiRequest<any>('/api/users', {
       method: 'POST',
       body: JSON.stringify(userData),
     });
-    setUsers((prev) => [...prev, saved]);
+    if (res.user_id) {
+      // Direct creation (Owner)
+      setUsers((prev) => [...prev, res as User]);
+      refreshDashboardMetrics().catch(() => undefined);
+      addAuditLog('CREATE', 'User', res.user_id, `Created team user ${res.username}`);
+    } else if (res.pending_approval) {
+      // PA request
+      await loadApprovalRequests();
+    }
+    return res;
+  };
+
+  const updateUser = async (userId: string, data: Partial<User>) => {
+    const res = await apiRequest<{ ok?: boolean; pending_approval?: boolean; message?: string; user?: User }>(`/api/users/${encodeURIComponent(userId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+    if (res.user) {
+      setUsers((prev) => prev.map((u) => (u.user_id === userId ? { ...u, ...res.user } : u)));
+      addAuditLog('UPDATE', 'User', userId, `Updated user details for ${userId}`);
+    }
+    if (res.pending_approval) {
+      await loadApprovalRequests();
+    }
+    return res;
+  };
+
+  const setUserStatus = async (userId: string, active: boolean, reason: string = '') => {
+    const res = await apiRequest<{ ok?: boolean; pending_approval?: boolean; message?: string; active?: boolean }>(`/api/users/${encodeURIComponent(userId)}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ active, reason }),
+    });
+    if (typeof res.active === 'boolean') {
+      setUsers((prev) => prev.map((u) => (u.user_id === userId ? { ...u, active: res.active! } : u)));
+      addAuditLog('STATUS_CHANGE', 'User', userId, `Changed status to ${active ? 'Active' : 'Inactive'}`);
+    }
+    if (res.pending_approval) {
+      await loadApprovalRequests();
+    }
+    return res;
+  };
+
+  const resetUserPassword = async (userId: string, newPassword: string) => {
+    const res = await apiRequest<{ ok?: boolean; pending_approval?: boolean; message?: string }>(`/api/users/${encodeURIComponent(userId)}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ new_password: newPassword }),
+    });
+    if (res.pending_approval) {
+      await loadApprovalRequests();
+    } else {
+      addAuditLog('RESET_PASSWORD', 'User', userId, `Owner reset password and revoked sessions`);
+    }
+    return res;
+  };
+
+  const decideApprovalRequest = async (requestId: string, decision: 'APPROVED' | 'REJECTED', notes: string = '') => {
+    const updated = await apiRequest<ApprovalRequest>(`/api/approvals/requests/${encodeURIComponent(requestId)}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, notes }),
+    });
+    setApprovalRequests((prev) => prev.map((r) => (r.request_id === requestId ? updated : r)));
+    // Synchronize users if approved
+    try {
+      const freshUsers = await apiRequest<User[]>('/api/users');
+      if (Array.isArray(freshUsers)) setUsers(freshUsers);
+    } catch {}
     refreshDashboardMetrics().catch(() => undefined);
-    addAuditLog('CREATE', 'User', saved.user_id, `Created team user ${saved.username}`);
+  };
+
+  const retryApprovalRequest = async (requestId: string) => {
+    const updated = await apiRequest<ApprovalRequest>(`/api/approvals/requests/${encodeURIComponent(requestId)}/retry`, {
+      method: 'POST',
+    });
+    setApprovalRequests((prev) => prev.map((r) => (r.request_id === requestId ? updated : r)));
+    try {
+      const freshUsers = await apiRequest<User[]>('/api/users');
+      if (Array.isArray(freshUsers)) setUsers(freshUsers);
+    } catch {}
+  };
+
+  const cancelApprovalRequest = async (requestId: string) => {
+    const updated = await apiRequest<ApprovalRequest>(`/api/approvals/requests/${encodeURIComponent(requestId)}/cancel`, {
+      method: 'POST',
+    });
+    setApprovalRequests((prev) => prev.map((r) => (r.request_id === requestId ? updated : r)));
   };
 
   return (
@@ -1191,6 +1299,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         logout,
         users,
         createUser,
+        updateUser,
+        setUserStatus,
+        resetUserPassword,
+        approvalRequests,
+        loadApprovalRequests,
+        decideApprovalRequest,
+        retryApprovalRequest,
+        cancelApprovalRequest,
         products,
         addProduct,
         updateProduct,

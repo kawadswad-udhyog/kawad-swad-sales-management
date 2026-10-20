@@ -48,6 +48,36 @@ class UserCreate(BaseModel):
     notes: Optional[str] = ""
     password: str
 
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    mobile: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+
+class UserStatusUpdate(BaseModel):
+    active: bool
+    reason: Optional[str] = ""
+
+class ApprovalRequestModel(BaseModel):
+    request_id: str
+    request_type: str  # CREATE_USER, UPDATE_USER, DEACTIVATE_USER, REACTIVATE_USER, RESET_PASSWORD
+    target_user_id: Optional[str] = ""
+    requested_by: str
+    requested_by_name: Optional[str] = ""
+    requested_at: str
+    payload_json: str
+    status: str  # PENDING, APPROVED, REJECTED, CANCELLED, EXECUTED, EXECUTION_FAILED
+    decided_by: Optional[str] = ""
+    decided_at: Optional[str] = ""
+    decision_notes: Optional[str] = ""
+    execution_error: Optional[str] = ""
+    executed_at: Optional[str] = ""
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: str  # APPROVED, REJECTED
+    notes: Optional[str] = ""
+
 # Product Models
 class Product(BaseModel):
     product_id: str

@@ -11,8 +11,16 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.config import jwt_secret, SALES_TOKEN_HOURS
 
+import uuid
+import time
+from typing import Optional, Dict, Any, Set, Tuple
+
 security = HTTPBearer(auto_error=False)
 _PBKDF2_PREFIX = "pbkdf2:sha256:"
+
+# In-memory revocation cache for instant sub-millisecond lookups across requests
+_REVOKED_TOKENS: Set[str] = set()
+_USER_REVOKED_AT: Dict[str, float] = {}
 
 
 def hash_password(password: str) -> str:
@@ -48,9 +56,14 @@ def password_needs_reset(hashed_password: str) -> bool:
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
+    now_utc = datetime.now(timezone.utc)
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(hours=SALES_TOKEN_HOURS))
-    to_encode.update({"exp": expire})
+    expire = now_utc + (expires_delta or timedelta(hours=SALES_TOKEN_HOURS))
+    to_encode.update({
+        "exp": expire,
+        "iat": int(now_utc.timestamp()),
+        "jti": str(uuid.uuid4()),
+    })
     return jwt.encode(to_encode, jwt_secret(), algorithm="HS256")
 
 
@@ -61,7 +74,86 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _auth_row_for(user_id: str):
+def _token_identifier(token: str, payload: Optional[Dict[str, Any]] = None) -> str:
+    """Compute a stable hash or extract jti for token revocation."""
+    if payload and payload.get("jti"):
+        return str(payload["jti"])
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+
+
+def revoke_token(token: str, user_id: str, reason: str = "Logout") -> None:
+    """Revoke a single active JWT token (both in-memory and persisted)."""
+    payload = decode_access_token(token)
+    token_id = _token_identifier(token, payload)
+    _REVOKED_TOKENS.add(token_id)
+    if token:
+        _REVOKED_TOKENS.add(token)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    exp_iso = ""
+    if payload and payload.get("exp"):
+        exp_iso = datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()
+
+    from app.sheets import db
+    try:
+        rev_id = db.generate_id("RevokedTokens")
+        db.append_record("RevokedTokens", {
+            "token_id": rev_id,
+            "jti": token_id,
+            "user_id": user_id,
+            "revoked_at": now_iso,
+            "expires_at": exp_iso,
+            "reason": reason,
+        })
+    except Exception:
+        pass
+
+
+def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation") -> None:
+    """Invalidate all active sessions across all devices for a user immediately."""
+    clean_id = str(user_id or "").strip().lower()
+    now_epoch = time.time()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    _USER_REVOKED_AT[clean_id] = now_epoch
+
+    from app.sheets import db
+    try:
+        db.update_record("AuthUsers", "user_id", user_id, {
+            "sessions_revoked_at": now_iso
+        })
+    except Exception:
+        pass
+
+
+def is_token_revoked(token: str, payload: Dict[str, Any]) -> bool:
+    """Check if token was revoked explicitly or via user-wide revocation."""
+    jti = payload.get("jti")
+    token_id = _token_identifier(token, payload)
+    if token_id in _REVOKED_TOKENS or (jti and jti in _REVOKED_TOKENS) or token in _REVOKED_TOKENS:
+        return True
+
+    # Check user-level revocation in memory
+    user_id = str(payload.get("user_id") or payload.get("sub") or "").strip().lower()
+    iat = float(payload.get("iat") or 0)
+    if user_id in _USER_REVOKED_AT and iat <= _USER_REVOKED_AT[user_id]:
+        return True
+
+    # Check persisted RevokedTokens tab
+    from app.sheets import db
+    try:
+        revoked_rows = db.get_records("RevokedTokens", fresh=False)
+        for r in revoked_rows:
+            r_jti = str(r.get("jti") or "").strip()
+            if r_jti and (r_jti == token_id or (jti and r_jti == jti)):
+                _REVOKED_TOKENS.add(token_id)
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _auth_row_for(user_id: str) -> Tuple[Optional[dict], bool]:
     """Lookup AuthUsers row. Returns (row, error_occurred_flag)."""
     from app.sheets import db
     clean_id = str(user_id or "").strip().lower()
@@ -87,7 +179,8 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             detail="Missing Authorization header",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    payload = decode_access_token(credentials.credentials)
+    raw_token = credentials.credentials
+    payload = decode_access_token(raw_token)
     uid = payload.get("user_id") or payload.get("sub") or payload.get("username") if payload else None
     if not payload or not uid:
         raise HTTPException(
@@ -95,30 +188,59 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             detail="Session expired or invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
     user_id = str(uid).strip()
     payload = dict(payload)
     payload["user_id"] = user_id
+
     row, sheet_error = _auth_row_for(user_id)
     if sheet_error:
-        # Transient Google Sheets quota limit or network timeout.
-        # Preserve the cryptographically signed, unexpired session token
-        # instead of revoking valid sessions on rate-limit hiccups.
-        return payload
+        # User System Audit Rule: Do NOT fall back to stale JWT permissions when Sheets cannot be read!
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google Sheets is currently unreachable. Cannot verify current account permissions. Please retry.",
+        )
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account no longer exists. Session revoked.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if str(row.get("active", "true")).lower() == "false":
+    if str(row.get("active", "true")).lower() in {"false", "0", "no"}:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Account is deactivated",
+            detail="Account is deactivated. Session revoked.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    payload = dict(payload)
+
+    # Check server-side revocation
+    if is_token_revoked(raw_token, payload):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has been logged out and revoked. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Check persistent user-level session revocation timestamp from AuthUsers sheet
+    revoked_at_str = str(row.get("sessions_revoked_at", "")).strip()
+    if revoked_at_str:
+        try:
+            rev_dt = datetime.fromisoformat(revoked_at_str.replace("Z", "+00:00"))
+            rev_epoch = rev_dt.timestamp()
+            token_iat = float(payload.get("iat") or 0)
+            if token_iat <= rev_epoch:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session revoked due to password reset, role change, or security policy. Please sign in again.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        except (ValueError, TypeError):
+            pass
+
+    # Ensure authoritative permissions and details always come from fresh sheet record
     payload["role"] = row.get("role") or payload.get("role")
     payload["full_name"] = row.get("full_name") or payload.get("full_name")
+    payload["username"] = row.get("username") or payload.get("username")
     payload["must_change_password"] = str(row.get("must_change_password", "false")).lower() == "true"
     return payload
 

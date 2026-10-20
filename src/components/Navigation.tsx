@@ -34,11 +34,11 @@ export const Navigation: React.FC<NavigationProps> = ({ currentView, onSelectVie
     { view: 'expenses', label: 'Expenses', roles: ['OWNER', 'PA', 'SALESMAN'] },
     { view: 'visits', label: 'Shop Visits', roles: ['OWNER', 'PA', 'SALESMAN'] },
     { view: 'closing', label: 'Daily Closing', roles: ['OWNER', 'PA', 'SALESMAN'] },
-    { view: 'production', label: 'Production', roles: ['OWNER', 'PA'] },
+    { view: 'production', label: 'Production', roles: ['OWNER'] },
     { view: 'salary', label: 'Salary & Incentives', roles: ['OWNER', 'PA'] },
     { view: 'reports', label: 'Reports & Exports', roles: ['OWNER', 'PA'] },
     { view: 'audit', label: 'Audit Log', roles: ['OWNER', 'PA'] },
-    { view: 'users', label: 'Users', roles: ['OWNER'] },
+    { view: 'users', label: 'Team & Approvals', roles: ['OWNER', 'PA'] },
   ];
 
   const visibleItems = navItems.filter((item) => role && item.roles.includes(role));

@@ -211,3 +211,22 @@ export interface AuditLog {
   approved_by_user_id: string;
   related_record_id: string;
 }
+
+export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXECUTED' | 'EXECUTION_FAILED';
+
+export interface ApprovalRequest {
+  request_id: string;
+  request_type: 'CREATE_USER' | 'UPDATE_USER' | 'DEACTIVATE_USER' | 'REACTIVATE_USER' | 'RESET_PASSWORD';
+  target_user_id: string;
+  requested_by: string;
+  requested_by_name: string;
+  requested_at: string;
+  payload_json: string;
+  status: ApprovalStatus;
+  decided_by?: string;
+  decided_at?: string;
+  decision_notes?: string;
+  execution_error?: string;
+  executed_at?: string;
+}
+

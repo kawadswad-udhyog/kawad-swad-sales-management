@@ -42,11 +42,15 @@ ID_PREFIXES = {
     "IdAllocations": "ALC",
     "StockDiscrepancies": "DSC",
     "IncompleteTransactions": "TXN",
+    "RevokedTokens": "RVK",
+    "ApprovalRequests": "REQ",
 }
 
 REQUIRED_TABS = {
     "IdAllocations": ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
-    "AuthUsers": ["auth_id", "user_id", "username", "password_hash", "role", "active", "created_at", "must_change_password"],
+    "RevokedTokens": ["token_id", "jti", "user_id", "revoked_at", "expires_at", "reason"],
+    "ApprovalRequests": ["request_id", "request_type", "target_user_id", "requested_by", "requested_at", "payload_json", "status", "decided_by", "decided_at", "decision_notes", "execution_error", "executed_at"],
+    "AuthUsers": ["auth_id", "user_id", "username", "password_hash", "role", "active", "created_at", "must_change_password", "sessions_revoked_at"],
     "Users": ["user_id", "full_name", "username", "role", "mobile", "email", "active", "created_at", "notes"],
     "Products": ["product_id", "sku", "product_name", "category", "variant", "pack_weight_g", "selling_unit", "retail_pack_only", "active", "notes"],
     "Customers": ["customer_id", "customer_type", "shop_name", "shopkeeper_name", "mobile", "alternate_mobile", "address", "locality_area", "city", "gstin", "map_location", "active", "created_at"],

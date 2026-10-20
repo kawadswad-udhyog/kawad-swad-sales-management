@@ -1,11 +1,21 @@
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from app.models import LoginRequest, TokenResponse
 from app.sheets import db
-from app.auth import verify_password, create_access_token, get_current_user, hash_password, password_needs_reset
+from app.auth import (
+    verify_password,
+    create_access_token,
+    get_current_user,
+    hash_password,
+    password_needs_reset,
+    revoke_token,
+    revoke_all_user_sessions,
+    security,
+)
 from app.permissions import ui_role
 
 router = APIRouter(tags=["Authentication"])
@@ -122,10 +132,15 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
 
 @router.post("/api/auth/logout")
 @router.post("/auth/logout")
-async def logout(current_user: dict = Depends(get_current_user)):
+async def logout(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    current_user: dict = Depends(get_current_user),
+):
     user_id = str(current_user.get("user_id") or "")
-    db.log_audit(user_id, "LOGOUT", "AuthUsers", user_id, reason="User logged out")
-    return {"ok": True, "message": "Signed out successfully"}
+    if credentials and credentials.credentials:
+        revoke_token(credentials.credentials, user_id, reason="User logged out")
+    db.log_audit(user_id, "LOGOUT", "AuthUsers", user_id, reason="User logged out and session revoked")
+    return {"ok": True, "message": "Signed out and session revoked successfully"}
 
 
 @router.get("/api/auth/me")
@@ -134,6 +149,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     return {
         "user_id": current_user.get("user_id"),
         "full_name": current_user.get("full_name"),
+        "username": current_user.get("username"),
         "role": ui_role(str(current_user.get("role") or "")),
         "must_change_password": bool(current_user.get("must_change_password")),
     }
@@ -150,11 +166,15 @@ async def change_password(req: ChangePasswordRequest, current_user: dict = Depen
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     if req.new_password == req.current_password:
         raise HTTPException(status_code=422, detail="Choose a different password")
+    
+    # Invalidate all existing sessions across devices
+    revoke_all_user_sessions(user_id, reason="User changed password")
+
     updated = db.update_record("AuthUsers", "user_id", user_id, {
         "password_hash": hash_password(req.new_password),
         "must_change_password": "false",
     }, raise_on_error=True)
     if not updated:
         raise HTTPException(status_code=503, detail="Password was not saved. Try again.")
-    db.log_audit(user_id, "CHANGE_PASSWORD", "AuthUsers", user_id, reason="User changed password")
+    db.log_audit(user_id, "CHANGE_PASSWORD", "AuthUsers", user_id, reason="User changed password and invalidated prior sessions")
     return {"ok": True}
