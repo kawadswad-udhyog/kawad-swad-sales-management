@@ -15,35 +15,70 @@ logger = logging.getLogger("kawad_swad.users")
 def get_all_users_with_auth() -> List[Dict[str, Any]]:
     """
     Merge Users and AuthUsers to ensure real username and accurate active status.
-    Never conceals orphaned auth records or profiles without logins.
+    Never silently overwrites duplicate auth rows or conceals orphaned records.
     """
     user_records = db.get_records("Users", fresh=True) or []
     auth_records = db.get_records("AuthUsers", fresh=True) or []
 
-    auth_by_uid: Dict[str, Dict[str, Any]] = {}
+    auth_by_uid: Dict[str, List[Dict[str, Any]]] = {}
     for a in auth_records:
         uid = str(a.get("user_id") or "").strip()
         if uid:
-            auth_by_uid[uid] = a
+            auth_by_uid.setdefault(uid, []).append(a)
 
-    users_seen_uids = set()
+    users_by_uid: Dict[str, List[Dict[str, Any]]] = {}
+    for u in user_records:
+        uid = str(u.get("user_id") or "").strip()
+        if uid:
+            users_by_uid.setdefault(uid, []).append(u)
+
+    used_auth_indices = set()
     result = []
 
     # Process all profile records in Users sheet
     for u in user_records:
         uid = str(u.get("user_id") or "").strip()
-        users_seen_uids.add(uid)
-        auth = auth_by_uid.get(uid)
+        matching_auths = auth_by_uid.get(uid, [])
+        is_dup_id = len(matching_auths) > 1 or len(users_by_uid.get(uid, [])) > 1
 
-        real_username = str((auth.get("username") if auth else None) or u.get("username") or uid).strip()
+        # Match auth record: prefer matching username, else first unused, else first
+        matched_auth = None
+        matched_idx = None
+        u_uname = str(u.get("username") or "").strip().lower()
 
-        # Audit rule: A profile WITHOUT an AuthUsers record cannot authenticate and MUST NOT be shown as active!
-        if not auth:
+        for idx, a in enumerate(matching_auths):
+            a_key = (uid, idx)
+            if a_key not in used_auth_indices:
+                a_uname = str(a.get("username") or "").strip().lower()
+                if u_uname and a_uname == u_uname:
+                    matched_auth = a
+                    matched_idx = a_key
+                    break
+
+        if not matched_auth:
+            for idx, a in enumerate(matching_auths):
+                a_key = (uid, idx)
+                if a_key not in used_auth_indices:
+                    matched_auth = a
+                    matched_idx = a_key
+                    break
+
+        if matched_idx is not None:
+            used_auth_indices.add(matched_idx)
+        elif matching_auths:
+            matched_auth = matching_auths[0]
+
+        real_username = str((matched_auth.get("username") if matched_auth else None) or u.get("username") or uid).strip()
+
+        if is_dup_id:
+            is_active = False
+            sync_warning = "CRITICAL: Duplicate user_id detected across multiple sheet rows. Updates frozen until resolved by Owner."
+        elif not matched_auth:
             is_active = False
             sync_warning = "No login account found in AuthUsers sheet"
         else:
             u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
-            a_active = str(auth.get("active", "true")).lower() in {"true", "1", "yes"}
+            a_active = str(matched_auth.get("active", "true")).lower() in {"true", "1", "yes"}
             is_active = u_active and a_active
             sync_warning = "" if u_active == a_active else "Status mismatch between profile and credentials"
 
@@ -51,32 +86,34 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
             "user_id": uid,
             "full_name": str(u.get("full_name") or ""),
             "username": real_username,
-            "role": str((auth.get("role") if auth else None) or u.get("role") or "SALESMAN"),
+            "role": str((matched_auth.get("role") if matched_auth else None) or u.get("role") or "SALESMAN"),
             "mobile": str(u.get("mobile") or ""),
             "email": str(u.get("email") or ""),
             "active": is_active,
             "created_at": str(u.get("created_at") or ""),
             "notes": str(u.get("notes") or ""),
             "sync_warning": sync_warning,
+            "has_duplicate_id": is_dup_id,
         })
 
-    # Also include any orphaned AuthUsers records (credentials exist but profile missing)
-    for a in auth_records:
-        uid = str(a.get("user_id") or "").strip()
-        if uid and uid not in users_seen_uids:
-            uname = str(a.get("username") or uid).strip()
-            result.append({
-                "user_id": uid,
-                "full_name": f"[Auth Only] {uname}",
-                "username": uname,
-                "role": str(a.get("role") or "SALESMAN"),
-                "mobile": "",
-                "email": "",
-                "active": False,
-                "created_at": str(a.get("created_at") or ""),
-                "notes": "Orphaned authentication record without profile",
-                "sync_warning": "Credentials exist in AuthUsers but profile is missing in Users sheet",
-            })
+    # Also include any unused/orphaned AuthUsers records
+    for uid, auth_list in auth_by_uid.items():
+        for idx, a in enumerate(auth_list):
+            if (uid, idx) not in used_auth_indices:
+                uname = str(a.get("username") or uid).strip()
+                result.append({
+                    "user_id": uid,
+                    "full_name": f"[Auth Only] {uname}",
+                    "username": uname,
+                    "role": str(a.get("role") or "SALESMAN"),
+                    "mobile": "",
+                    "email": "",
+                    "active": False,
+                    "created_at": str(a.get("created_at") or ""),
+                    "notes": "Orphaned authentication record without matching profile",
+                    "sync_warning": "Credentials exist in AuthUsers but profile is missing in Users sheet",
+                    "has_duplicate_id": len(auth_list) > 1,
+                })
 
     return result
 
@@ -186,15 +223,49 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                 "issue": "Empty or missing password hash in AuthUsers.",
             })
 
+    # Check duplicate auth_ids in AuthUsers
+    auth_by_auth_id: Dict[str, List[dict]] = {}
+    for a in auth_users:
+        aid = str(a.get("auth_id") or "").strip()
+        if aid:
+            auth_by_auth_id.setdefault(aid, []).append(a)
+
+    duplicate_auth_ids = []
+    for aid, rows in auth_by_auth_id.items():
+        if len(rows) > 1:
+            duplicate_auth_ids.append({
+                "auth_id": aid,
+                "count": len(rows),
+                "user_ids": [r.get("user_id") for r in rows],
+                "usernames": [r.get("username") for r in rows],
+                "issue": f"Duplicate auth_id '{aid}' shared across {len(rows)} AuthUsers rows.",
+            })
+
+    # Check incomplete Owner profile (C4)
+    incomplete_owner_profiles = []
+    for u in users:
+        if str(u.get("role") or "").strip().upper() == "OWNER":
+            fname = str(u.get("full_name") or "").strip()
+            uname = str(u.get("username") or "").strip()
+            if fname.lower() in {"your full name", "owner", ""} or not uname:
+                incomplete_owner_profiles.append({
+                    "user_id": u.get("user_id"),
+                    "full_name": fname,
+                    "username": uname,
+                    "issue": "Owner profile contains placeholder full_name ('Your Full Name') or blank username in Users sheet.",
+                })
+
     total_issues = (
         len(orphaned_profiles) +
         len(orphaned_auth_accounts) +
         len(duplicate_users) +
         len(duplicate_auth_users) +
+        len(duplicate_auth_ids) +
         len(duplicate_usernames) +
         len(role_mismatches) +
         len(status_mismatches) +
-        len(insecure_credentials)
+        len(insecure_credentials) +
+        len(incomplete_owner_profiles)
     )
 
     return {
@@ -207,10 +278,12 @@ def audit_user_reconciliation() -> Dict[str, Any]:
         "orphaned_auth_accounts": orphaned_auth_accounts,
         "duplicate_users": duplicate_users,
         "duplicate_auth_users": duplicate_auth_users,
+        "duplicate_auth_ids": duplicate_auth_ids,
         "duplicate_usernames": duplicate_usernames,
         "role_mismatches": role_mismatches,
         "status_mismatches": status_mismatches,
         "insecure_credentials": insecure_credentials,
+        "incomplete_owner_profiles": incomplete_owner_profiles,
     }
 
 
@@ -366,9 +439,23 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
     Guarantees atomic rollback if AuthUsers synchronization fails so records never disagree.
     """
     user_records = db.get_records("Users", fresh=True) or []
-    target = next((u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()), None)
+    matching_users = [u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()]
+    if len(matching_users) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ambiguous identity: Multiple employee records ({len(matching_users)}) exist with user_id '{user_id}'. Account changes are frozen until duplicates are resolved by Owner.",
+        )
+    target = matching_users[0] if matching_users else None
     if not target:
         raise HTTPException(status_code=404, detail="Employee record not found.")
+
+    auth_records = db.get_records("AuthUsers", fresh=True) or []
+    matching_auth = [a for a in auth_records if str(a.get("user_id") or "").strip() == user_id.strip()]
+    if len(matching_auth) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ambiguous identity: Multiple authentication records ({len(matching_auth)}) exist with user_id '{user_id}'. Account changes are frozen until duplicates are resolved by Owner.",
+        )
 
     old_role = str(target.get("role") or "").upper()
     new_role = str(payload.get("role") or old_role).upper()
@@ -460,10 +547,22 @@ def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reas
     Guarantees atomic rollback if AuthUsers update fails so status records never disagree.
     """
     user_records = db.get_records("Users", fresh=True) or []
-    target_u = next((u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()), None)
+    matching_u = [u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()]
+    if len(matching_u) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ambiguous identity: Multiple employee records ({len(matching_u)}) exist with user_id '{user_id}'. Account changes are frozen until duplicates are resolved by Owner.",
+        )
+    target_u = matching_u[0] if matching_u else None
 
     auth_records = db.get_records("AuthUsers", fresh=True) or []
-    target_a = next((a for a in auth_records if str(a.get("user_id") or "").strip() == user_id.strip()), None)
+    matching_a = [a for a in auth_records if str(a.get("user_id") or "").strip() == user_id.strip()]
+    if len(matching_a) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ambiguous identity: Multiple authentication records ({len(matching_a)}) exist with user_id '{user_id}'. Account changes are frozen until duplicates are resolved by Owner.",
+        )
+    target_a = matching_a[0] if matching_a else None
 
     # Idempotent check
     if target_u and target_a:

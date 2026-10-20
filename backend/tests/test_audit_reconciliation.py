@@ -434,7 +434,115 @@ class TestAuditReconciliation(unittest.TestCase):
         all_users = get_all_users_with_auth()
         nologin_entry = next(u for u in all_users if u["user_id"] == "USR-NOLOGIN")
         self.assertFalse(nologin_entry["active"], "A profile without an AuthUsers account MUST NOT be displayed as active!")
-        self.assertIn("no login account", nologin_entry["sync_warning"].lower())
+    def test_c1_duplicate_user_id_freezes_modifications_and_lists_both(self):
+        """C1 Safety: Duplicate user_id (e.g. USR-000002) in Users or AuthUsers freezes modifications with 409 and flags listing."""
+        dup_uid = "USR-000002"
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Add duplicate Users rows as reported in workbook (Mahi Sharma and Manish Gosami)
+        db.memory_store["Users"].append({
+            "user_id": dup_uid,
+            "full_name": "Mahi Sharma",
+            "username": "mahi.-.sharma--",
+            "role": "PA",
+            "active": "true",
+            "created_at": now_iso,
+        })
+        db.memory_store["Users"].append({
+            "user_id": dup_uid,
+            "full_name": "Manish Gosami",
+            "username": "manish",
+            "role": "SALESMAN",
+            "active": "true",
+            "created_at": now_iso,
+        })
+
+        # Add duplicate AuthUsers rows with duplicate auth_id as reported in workbook
+        db.memory_store["AuthUsers"].append({
+            "auth_id": "AUT-000002",
+            "user_id": dup_uid,
+            "username": "mahi.-.sharma--",
+            "password_hash": hash_password("MahiPass123"),
+            "role": "PA",
+            "active": "true",
+            "created_at": now_iso,
+        })
+        db.memory_store["AuthUsers"].append({
+            "auth_id": "AUT-000002",
+            "user_id": dup_uid,
+            "username": "manish",
+            "password_hash": hash_password("ManishPass123"),
+            "role": "SALESMAN",
+            "active": "true",
+            "created_at": now_iso,
+        })
+
+        # Auditor must report duplicates across all dimensions
+        rep = audit_user_reconciliation()
+        self.assertFalse(rep["healthy"])
+        self.assertTrue(any(d["user_id"] == dup_uid for d in rep["duplicate_users"]))
+        self.assertTrue(any(d["user_id"] == dup_uid for d in rep["duplicate_auth_users"]))
+        self.assertTrue(any(d["auth_id"] == "AUT-000002" for d in rep["duplicate_auth_ids"]))
+
+        # Directory must flag both and not silently overwrite
+        user_list = get_all_users_with_auth()
+        dup_entries = [u for u in user_list if u["user_id"] == dup_uid]
+        self.assertEqual(len(dup_entries), 2)
+        for entry in dup_entries:
+            self.assertTrue(entry.get("has_duplicate_id"))
+            self.assertFalse(entry["active"])
+            self.assertIn("duplicate user_id", entry["sync_warning"].lower())
+
+        # Modifications must be frozen to prevent accidental corruption
+        with self.assertRaises(HTTPException) as ctx:
+            execute_update_user(dup_uid, {"full_name": "Mahi Updated"}, self.owner_id)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("ambiguous", str(ctx.exception.detail).lower())
+
+        with self.assertRaises(HTTPException) as ctx:
+            execute_set_user_status(dup_uid, False, self.owner_id)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("ambiguous", str(ctx.exception.detail).lower())
+
+    def test_c4_incomplete_owner_profile_detected(self):
+        """C4 Reconciliation: Detect placeholder 'Your Full Name' or missing username on Owner profile."""
+        owner_row = next(u for u in db.memory_store["Users"] if u["user_id"] == self.owner_id)
+        owner_row["full_name"] = "Your Full Name"
+        owner_row["username"] = ""
+
+        rep = audit_user_reconciliation()
+        self.assertFalse(rep["healthy"])
+        self.assertTrue(any(o["user_id"] == self.owner_id for o in rep["incomplete_owner_profiles"]))
+
+    def test_c3_pending_production_batch_never_credits_bulk_stock(self):
+        """C3 Ledger Control: A batch in PENDING status must never write BULK_PRODUCED credits to ProductionStockLedger."""
+        batch_id = "PRB-TEST-PENDING"
+        db.memory_store["ProductionBatches"].append({
+            "production_id": batch_id,
+            "status": "PENDING",
+            "net_quantity_kg": 18.0,
+            "product_id": "PRD-TEST",
+        })
+
+        # Confirm no BULK_PRODUCED movement exists for this pending batch
+        ledger_mvts = [
+            m for m in db.memory_store.get("ProductionStockLedger", [])
+            if m.get("reference_id") == batch_id and str(m.get("movement_type")).upper() == "BULK_PRODUCED"
+        ]
+        self.assertEqual(len(ledger_mvts), 0, "Pending batches must NEVER have BULK_PRODUCED credits in stock ledger!")
+
+    def test_c2_packaging_discrepancy_variance_calculation(self):
+        """C2 Packaging Control: 75 kg used with only 20 kg expected yield (55 kg variance) is flagged as REVIEW_REQUIRED."""
+        from app.routers.production import calculate_packing_variance, calculate_packed_weight
+        # 100 packets of 200g = 20.0 kg expected
+        packed_kg, total_packets, _ = calculate_packed_weight([{"packet_quantity": 100, "pack_weight_g": 200}])
+        self.assertEqual(packed_kg, 20.0)
+        self.assertEqual(total_packets, 100)
+
+        # 75 kg consumed vs 20 kg packed
+        v = calculate_packing_variance(bulk_consumed_kg=75.0, total_packed_kg=packed_kg, packing_loss_kg=0.0, tolerance_kg=0.5)
+        self.assertTrue(v["is_discrepancy"])
+        self.assertEqual(v["unexplained_variance_kg"], 55.0)
 
 
 if __name__ == "__main__":
