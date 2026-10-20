@@ -3,6 +3,7 @@ import { useStore, StoreProvider } from './context/StoreContext';
 import { Header } from './components/Header';
 import { Navigation, ViewType } from './components/Navigation';
 import { LoginModal } from './components/LoginModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { DashboardView } from './views/DashboardView';
 import { ProductsView } from './views/ProductsView';
 import { CustomersView } from './views/CustomersView';
@@ -37,6 +38,7 @@ const MainAppContent: React.FC = () => {
     }
     return 'dashboard';
   });
+  const [isReconnecting, setIsReconnecting] = useState(false);
 
   const handleSelectView = (v: ViewType) => {
     setCurrentView(v);
@@ -103,8 +105,6 @@ const MainAppContent: React.FC = () => {
         return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
     }
   };
-
-  const [isReconnecting, setIsReconnecting] = useState(false);
 
   return (
     <div>
@@ -215,9 +215,11 @@ const MainAppContent: React.FC = () => {
 
 export const App: React.FC = () => {
   return (
-    <StoreProvider>
-      <MainAppContent />
-    </StoreProvider>
+    <ErrorBoundary>
+      <StoreProvider>
+        <MainAppContent />
+      </StoreProvider>
+    </ErrorBoundary>
   );
 };
 
