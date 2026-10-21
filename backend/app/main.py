@@ -88,6 +88,21 @@ def health_check():
     status_str = "ok" if db.is_connected else "storage_disconnected"
     has_sa_file = bool(SALES_GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE))
     has_sa_json = bool(SALES_GOOGLE_SERVICE_ACCOUNT_JSON and len(SALES_GOOGLE_SERVICE_ACCOUNT_JSON.strip()) > 10)
+
+    # Granular status classification conforming to Phase 4 connectivity standards
+    if not SALES_GOOGLE_SPREADSHEET_ID:
+        gs_status = "NOT_CONFIGURED"
+        gs_message = "SALES_GOOGLE_SPREADSHEET_ID is missing from environment"
+    elif not (has_sa_file or has_sa_json):
+        gs_status = "CREDENTIALS_MISSING"
+        gs_message = "Service account credentials file or JSON not found"
+    elif db.is_connected and db.spreadsheet is not None:
+        gs_status = "CONNECTED"
+        gs_message = "Google Sheets connected and accessible"
+    else:
+        gs_status = "ERROR"
+        gs_message = db.last_connection_error or "Google Sheets connection failed"
+
     return {
         "status": status_str,
         "service": "kawad-swad-sales-backend",
@@ -97,6 +112,21 @@ def health_check():
         "service_account_configured": has_sa_file or has_sa_json,
         "last_connection_error": db.last_connection_error,
         "allow_in_memory_fallback": db.allow_in_memory_fallback,
+        "backend": {
+            "status": "CONNECTED",
+            "service": "kawad-swad-sales-backend",
+            "version": "1.0.0",
+        },
+        "google_sheets": {
+            "status": gs_status,
+            "connected": db.is_connected,
+            "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
+            "message": gs_message,
+        },
+        "required_sheets": {
+            "status": "AVAILABLE" if db.is_connected else "NOT_VERIFIED",
+            "total_managed_tabs": 28,
+        },
     }
 
 @app.post("/health/reconnect", tags=["System"])

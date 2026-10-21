@@ -131,7 +131,7 @@ if "fastapi.security" not in sys.modules:
     sys.modules["fastapi.security"] = mock_sec
 
 from app.sheets import db
-from app.routers.production import record_attendance, attendance, update_attendance, AttendanceCreate, AttendanceUpdate
+from app.routers.production import record_attendance, attendance, update_attendance, delete_duplicate_attendance, AttendanceCreate, AttendanceUpdate
 
 class AttendanceAndWorkflowTestCase(unittest.TestCase):
     def setUp(self):
@@ -233,6 +233,60 @@ class AttendanceAndWorkflowTestCase(unittest.TestCase):
         self.assertEqual(len(errors), 4)
         for err in errors:
             self.assertIn("already recorded", str(err))
+
+    def test_delete_duplicate_attendance_success(self):
+        db.memory_store["WorkerAttendance"] = [
+            {
+                "attendance_id": "ATT-000001",
+                "worker_id": "WRK-000001",
+                "worker_name_snapshot": "Ramesh Kumar",
+                "attendance_date": "2026-10-20",
+                "status": "PRESENT",
+                "daily_wage_snapshot": 400.0,
+                "wage_accrued": 400.0,
+            },
+            {
+                "attendance_id": "ATT-000002",
+                "worker_id": "WRK-000001",
+                "worker_name_snapshot": "Ramesh Kumar",
+                "attendance_date": "2026-10-20",
+                "status": "PRESENT",
+                "daily_wage_snapshot": 400.0,
+                "wage_accrued": 400.0,
+            },
+        ]
+        res = asyncio.run(delete_duplicate_attendance("ATT-000002", self.owner_user))
+        self.assertEqual(res["status"], "DELETED")
+        self.assertEqual(res["attendance_id"], "ATT-000002")
+        remaining = db.memory_store["WorkerAttendance"]
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["attendance_id"], "ATT-000001")
+
+    def test_delete_duplicate_attendance_blocks_unique_record(self):
+        db.memory_store["WorkerAttendance"] = [
+            {
+                "attendance_id": "ATT-000001",
+                "worker_id": "WRK-000001",
+                "worker_name_snapshot": "Ramesh Kumar",
+                "attendance_date": "2026-10-20",
+                "status": "PRESENT",
+                "daily_wage_snapshot": 400.0,
+                "wage_accrued": 400.0,
+            }
+        ]
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(delete_duplicate_attendance("ATT-000001", self.owner_user))
+        self.assertIn("Cannot delete unique attendance record", str(ctx.exception))
+        # Ensure record was NOT removed
+        self.assertEqual(len(db.memory_store["WorkerAttendance"]), 1)
+
+    def test_diagnostic_health_endpoint_schema(self):
+        from app.main import health_check
+        health = health_check()
+        self.assertIn("backend", health)
+        self.assertEqual(health["backend"]["status"], "CONNECTED")
+        self.assertIn("google_sheets", health)
+        self.assertIn("required_sheets", health)
 
 if __name__ == "__main__":
     unittest.main()
