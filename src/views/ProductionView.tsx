@@ -15,6 +15,9 @@ export const ProductionView: React.FC = () => {
   const [workers, setWorkers] = useState<Row[]>([]);
   const [attendance, setAttendance] = useState<Row[]>([]);
   const [attendanceForm, setAttendanceForm] = useState({ worker_id: '', attendance_date: today, status: 'PRESENT', notes: '' });
+  const [editingAttendance, setEditingAttendance] = useState<Row | null>(null);
+  const [editAttendanceStatus, setEditAttendanceStatus] = useState<string>('PRESENT');
+  const [editAttendanceNotes, setEditAttendanceNotes] = useState<string>('');
   const [recipes, setRecipes] = useState<Row[]>([]);
   const [masterRecipes, setMasterRecipes] = useState<Row[]>([]);
   const [selectedFamily, setSelectedFamily] = useState<string>('ALL');
@@ -35,6 +38,14 @@ export const ProductionView: React.FC = () => {
   const isOwner = role === 'OWNER';
   const canManage = ['OWNER', 'OWNER_ADMIN', 'PA'].includes(role);
   const activeProducts = useMemo(() => products.filter(p => p.active !== false && String(p.active).toLowerCase() !== 'false'), [products]);
+
+  const isDuplicateAttendance = useMemo(() => {
+    if (!attendanceForm.worker_id || !attendanceForm.attendance_date) return false;
+    return attendance.some(
+      a => String(a.worker_id || '').trim() === attendanceForm.worker_id.trim() &&
+           String(a.attendance_date || '').trim() === attendanceForm.attendance_date.trim()
+    );
+  }, [attendance, attendanceForm.worker_id, attendanceForm.attendance_date]);
 
   const load = async () => {
     const results = await Promise.allSettled([
@@ -67,20 +78,93 @@ export const ProductionView: React.FC = () => {
     }
   };
 
+  const refreshSummary = async () => {
+    try {
+      const s = await apiRequest<Row>('/api/production/summary');
+      if (s) setSummary(s);
+    } catch (e) {
+      console.warn('Could not refresh summary', e);
+    }
+  };
+
+  const refreshAttendance = async () => {
+    const [aRes, sRes] = await Promise.allSettled([
+      apiRequest<Row[]>('/api/production/attendance'),
+      apiRequest<Row>('/api/production/summary'),
+    ]);
+    if (aRes.status === 'fulfilled' && Array.isArray(aRes.value)) setAttendance([...aRes.value].reverse());
+    if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+  };
+
+  const refreshBatches = async () => {
+    const [bRes, sRes] = await Promise.allSettled([
+      apiRequest<Row[]>('/api/production/batches'),
+      apiRequest<Row>('/api/production/summary'),
+    ]);
+    if (bRes.status === 'fulfilled' && Array.isArray(bRes.value)) setBatches([...bRes.value].reverse());
+    if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+  };
+
+  const refreshPackaging = async () => {
+    const [pkRes, sRes] = await Promise.allSettled([
+      apiRequest<Row[]>('/api/production/packaging'),
+      apiRequest<Row>('/api/production/summary'),
+    ]);
+    if (pkRes.status === 'fulfilled' && Array.isArray(pkRes.value)) setPackaging([...pkRes.value].reverse());
+    if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+  };
+
+  const refreshWorkers = async () => {
+    const [wRes, sRes] = await Promise.allSettled([
+      apiRequest<Row[]>('/api/production/workers'),
+      apiRequest<Row>('/api/production/summary'),
+    ]);
+    if (wRes.status === 'fulfilled' && Array.isArray(wRes.value)) setWorkers(wRes.value);
+    if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+  };
+
+  const refreshDispatches = async () => {
+    const [dRes, sRes] = await Promise.allSettled([
+      apiRequest<Row[]>('/api/production/dispatches'),
+      apiRequest<Row>('/api/production/summary'),
+    ]);
+    if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) setDispatches([...dRes.value].reverse());
+    if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+  };
+
+  const refreshRecipes = async () => {
+    const rRes = await apiRequest<Row[]>('/api/production/recipes');
+    if (Array.isArray(rRes)) setRecipes(rRes);
+  };
+
+  const refreshMasterRecipes = async () => {
+    const [mrRes, rRes] = await Promise.allSettled([
+      apiRequest<Row[]>('/api/production/recipes/master'),
+      apiRequest<Row[]>('/api/production/recipes'),
+    ]);
+    if (mrRes.status === 'fulfilled' && Array.isArray(mrRes.value)) setMasterRecipes(mrRes.value);
+    if (rRes.status === 'fulfilled' && Array.isArray(rRes.value)) setRecipes(rRes.value);
+  };
+
   useEffect(() => {
     if (canManage) {
       load().catch(e => setMessage(e.message || 'Could not load production data.'));
     }
   }, [canManage]);
 
-  const run = async (fn: () => Promise<unknown>, success: string) => {
+  const runAction = async (fn: () => Promise<unknown>, success: string, targetedRefresh?: () => Promise<void>) => {
+    if (busy) return;
     setBusy(true);
     setMessage('');
     try {
       await fn();
       setMessage(success);
       try {
-        await load();
+        if (targetedRefresh) {
+          await targetedRefresh();
+        } else {
+          await load();
+        }
       } catch (refreshErr: any) {
         console.warn('Post-action screen refresh warning:', refreshErr);
         setMessage(`${success} (Data saved, refreshing screen...)`);
@@ -91,6 +175,9 @@ export const ProductionView: React.FC = () => {
       setBusy(false);
     }
   };
+
+  // Backward-compatible run wrapper defaulting to full load
+  const run = (fn: () => Promise<unknown>, success: string) => runAction(fn, success);
 
   if (!canManage) {
     return (
@@ -220,9 +307,10 @@ export const ProductionView: React.FC = () => {
                 style={{ ...btn, background: '#0284c7' }}
                 disabled={busy}
                 onClick={() =>
-                  run(
+                  runAction(
                     () => apiRequest('/api/production/recipes/master/bootstrap', { method: 'POST' }),
-                    'Version 2.0 Master Recipes and Raw Materials synchronized to system successfully.'
+                    'Version 2.0 Master Recipes and Raw Materials synchronized to system successfully.',
+                    refreshMasterRecipes
                   )
                 }
               >
@@ -475,7 +563,7 @@ export const ProductionView: React.FC = () => {
                         }}
                         disabled={busy}
                         onClick={() =>
-                          run(
+                          runAction(
                             () =>
                               apiRequest(`/api/production/recipes/master/${encodeURIComponent(r.recipe_id)}/confirm`, {
                                 method: 'POST',
@@ -483,7 +571,8 @@ export const ProductionView: React.FC = () => {
                               }),
                             isApproved
                               ? `Formula ${r.product_name_snapshot} marked as draft.`
-                              : `Formula ${r.product_name_snapshot} confirmed & approved by Owner.`
+                              : `Formula ${r.product_name_snapshot} confirmed & approved by Owner.`,
+                            refreshMasterRecipes
                           )
                         }
                       >
@@ -549,7 +638,7 @@ export const ProductionView: React.FC = () => {
             <form
               onSubmit={e => {
                 e.preventDefault();
-                run(
+                runAction(
                   () =>
                     apiRequest('/api/production/workers', {
                       method: 'POST',
@@ -561,7 +650,8 @@ export const ProductionView: React.FC = () => {
                         active: true,
                       }),
                     }),
-                  'Worker added.'
+                  'Worker added.',
+                  refreshWorkers
                 );
                 setWorker({ worker_name: '', mobile: '', daily_wage: '', notes: '' });
               }}
@@ -616,9 +706,14 @@ export const ProductionView: React.FC = () => {
             <form
               onSubmit={e => {
                 e.preventDefault();
-                run(
+                if (isDuplicateAttendance) {
+                  setMessage('Attendance is already recorded for this worker on this date.');
+                  return;
+                }
+                runAction(
                   () => apiRequest('/api/production/attendance', { method: 'POST', body: JSON.stringify(attendanceForm) }),
-                  'Attendance recorded and wage accrued.'
+                  'Attendance recorded and wage accrued.',
+                  refreshAttendance
                 );
                 setAttendanceForm({ ...attendanceForm, notes: '' });
               }}
@@ -661,25 +756,183 @@ export const ProductionView: React.FC = () => {
                 value={attendanceForm.notes}
                 onChange={e => setAttendanceForm({ ...attendanceForm, notes: e.target.value })}
               />
-              <button style={btn} disabled={busy}>
-                Save attendance
+              <button
+                style={{
+                  ...btn,
+                  background: isDuplicateAttendance ? '#94a3b8' : '#166534',
+                  cursor: isDuplicateAttendance || busy ? 'not-allowed' : 'pointer',
+                }}
+                disabled={busy || isDuplicateAttendance || !attendanceForm.worker_id}
+              >
+                {busy ? 'Saving...' : 'Save attendance'}
               </button>
+
+              {isDuplicateAttendance && (
+                <div
+                  style={{
+                    gridColumn: '1 / -1',
+                    background: '#fef2f2',
+                    border: '1px solid #fecaca',
+                    color: '#991b1b',
+                    padding: '8px 12px',
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontWeight: 500,
+                  }}
+                >
+                  ⚠️ Attendance for this worker on <b>{attendanceForm.attendance_date}</b> is already recorded in the system. Duplicate submission is blocked.
+                </div>
+              )}
             </form>
-            <p style={{ color: '#64748b' }}>
-              Attendance records accrue wages; they do not mark wages as paid. Duplicate attendance for the same worker/date is
-              blocked.
+            <p style={{ color: '#64748b', fontSize: 13, margin: '8px 0 0' }}>
+              Attendance records accrue wages; they do not mark wages as paid. Duplicate attendance for the same worker/date is blocked.
             </p>
           </div>
+
+          {/* Attendance Correction Modal for Owner */}
+          {editingAttendance && (
+            <div style={{ ...card, background: '#fffbeb', borderColor: '#fcd34d' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <h4 style={{ margin: 0, color: '#92400e' }}>
+                  Audited Attendance Correction: {editingAttendance.worker_name_snapshot} ({editingAttendance.attendance_date})
+                </h4>
+                <button
+                  type="button"
+                  style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 16 }}
+                  onClick={() => setEditingAttendance(null)}
+                >
+                  ✕
+                </button>
+              </div>
+              <p style={{ fontSize: 12, color: '#b45309', margin: '0 0 10px' }}>
+                Existing records are never deleted. Status changes update accrued wages and log an audit trail entry.
+              </p>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <select
+                  style={{ ...input, width: 180 }}
+                  value={editAttendanceStatus}
+                  onChange={e => setEditAttendanceStatus(e.target.value)}
+                >
+                  <option value="PRESENT">Present (full wage)</option>
+                  <option value="HALF_DAY">Half day (half wage)</option>
+                  <option value="ABSENT">Absent (no wage)</option>
+                </select>
+                <input
+                  style={{ ...input, flex: 1 }}
+                  placeholder="Reason for correction (required for audit log)"
+                  value={editAttendanceNotes}
+                  onChange={e => setEditAttendanceNotes(e.target.value)}
+                />
+                <button
+                  style={{ ...btn, background: '#b45309' }}
+                  disabled={busy || !editAttendanceNotes.trim()}
+                  onClick={() => {
+                    runAction(
+                      () =>
+                        apiRequest(`/api/production/attendance/${encodeURIComponent(editingAttendance.attendance_id)}`, {
+                          method: 'PUT',
+                          body: JSON.stringify({ status: editAttendanceStatus, notes: editAttendanceNotes }),
+                        }),
+                      'Attendance corrected successfully.',
+                      refreshAttendance
+                    );
+                    setEditingAttendance(null);
+                  }}
+                >
+                  Save correction
+                </button>
+                <button
+                  type="button"
+                  style={{ ...btn, background: '#64748b' }}
+                  onClick={() => setEditingAttendance(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
           <div style={card}>
             <h3>Attendance and accrued wages</h3>
-            {rowsTable(attendance, [
-              ['attendance_date', 'Date'],
-              ['worker_name_snapshot', 'Worker'],
-              ['status', 'Attendance'],
-              ['daily_wage_snapshot', 'Daily wage ₹'],
-              ['wage_accrued', 'Wage accrued ₹'],
-              ['created_by', 'Entered by'],
-            ])}
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: '#f1f5f9' }}>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Date</th>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Worker</th>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Status</th>
+                    <th style={{ textAlign: 'right', padding: 9 }}>Daily Wage ₹</th>
+                    <th style={{ textAlign: 'right', padding: 9 }}>Accrued Wage ₹</th>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Notes</th>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Entered By</th>
+                    {isOwner && <th style={{ textAlign: 'center', padding: 9 }}>Actions</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {attendance.map((a, idx) => {
+                    const statusColor =
+                      a.status === 'PRESENT' ? '#166534' : a.status === 'HALF_DAY' ? '#b45309' : '#64748b';
+                    return (
+                      <tr key={String(a.attendance_id || idx)} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                        <td style={{ padding: 9 }}>{String(a.attendance_date || '-')}</td>
+                        <td style={{ padding: 9, fontWeight: 500 }}>
+                          {String(a.worker_name_snapshot || a.worker_id || '-')}
+                          {a.is_duplicate && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                padding: '2px 6px',
+                                background: '#fee2e2',
+                                color: '#b91c1c',
+                                borderRadius: 4,
+                                fontSize: 11,
+                                fontWeight: 600,
+                              }}
+                            >
+                              Duplicate in Sheet
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ padding: 9 }}>
+                          <span
+                            style={{
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              background: a.status === 'PRESENT' ? '#ecfdf5' : a.status === 'HALF_DAY' ? '#fffbeb' : '#f1f5f9',
+                              color: statusColor,
+                            }}
+                          >
+                            {String(a.status || '-')}
+                          </span>
+                        </td>
+                        <td style={{ padding: 9, textAlign: 'right' }}>₹{String(a.daily_wage_snapshot ?? '-')}</td>
+                        <td style={{ padding: 9, textAlign: 'right', fontWeight: 600 }}>₹{String(a.wage_accrued ?? '-')}</td>
+                        <td style={{ padding: 9, color: '#64748b', fontSize: 12 }}>{String(a.notes || '-')}</td>
+                        <td style={{ padding: 9, color: '#64748b', fontSize: 12 }}>{String(a.created_by || '-')}</td>
+                        {isOwner && (
+                          <td style={{ padding: 9, textAlign: 'center' }}>
+                            <button
+                              type="button"
+                              style={{ ...btn, padding: '4px 8px', fontSize: 11, background: '#0284c7' }}
+                              onClick={() => {
+                                setEditingAttendance(a);
+                                setEditAttendanceStatus(String(a.status || 'PRESENT'));
+                                setEditAttendanceNotes('');
+                              }}
+                            >
+                              ✏️ Correct
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {!attendance.length && <p style={{ color: '#64748b', padding: 12 }}>No attendance records found.</p>}
+            </div>
           </div>
         </>
       )}
@@ -705,13 +958,14 @@ export const ProductionView: React.FC = () => {
                   setMessage('Enter at least one valid ingredient line.');
                   return;
                 }
-                run(
+                runAction(
                   () =>
                     apiRequest('/api/production/recipes', {
                       method: 'POST',
                       body: JSON.stringify({ product_id: recipe.product_id, items, approved: true, notes: recipe.notes }),
                     }),
-                  'Approved recipe saved.'
+                  'Approved recipe saved.',
+                  refreshRecipes
                 );
                 setRecipe({ product_id: '', ingredients: '', notes: '' });
               }}
@@ -763,7 +1017,7 @@ export const ProductionView: React.FC = () => {
             <form
               onSubmit={e => {
                 e.preventDefault();
-                run(
+                runAction(
                   () =>
                     apiRequest('/api/production/batches', {
                       method: 'POST',
@@ -774,7 +1028,8 @@ export const ProductionView: React.FC = () => {
                         flour_base_used_kg: production.flour_base_used_kg ? Number(production.flour_base_used_kg) : undefined,
                       }),
                     }),
-                  'Production batch recorded and sent for approval.'
+                  'Production batch recorded and sent for approval.',
+                  refreshBatches
                 );
                 setProduction({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });
               }}
@@ -895,13 +1150,14 @@ export const ProductionView: React.FC = () => {
                     style={btn}
                     disabled={busy}
                     onClick={() =>
-                      run(
+                      runAction(
                         () =>
                           apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
                             method: 'POST',
                             body: JSON.stringify({ approved: true, notes: 'Approved by authorised user' }),
                           }),
-                        'Production approved; recipe consumption and bulk stock recorded.'
+                        'Production approved; recipe consumption and bulk stock recorded.',
+                        refreshBatches
                       )
                     }
                   >
@@ -911,13 +1167,14 @@ export const ProductionView: React.FC = () => {
                     style={{ ...btn, background: '#b91c1c' }}
                     disabled={busy}
                     onClick={() =>
-                      run(
+                      runAction(
                         () =>
                           apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
                             method: 'POST',
                             body: JSON.stringify({ approved: false, notes: 'Rejected by authorised user' }),
                           }),
-                        'Production rejected.'
+                        'Production rejected.',
+                        refreshBatches
                       )
                     }
                   >
@@ -937,7 +1194,7 @@ export const ProductionView: React.FC = () => {
             <form
               onSubmit={e => {
                 e.preventDefault();
-                run(
+                runAction(
                   () =>
                     apiRequest('/api/production/packaging', {
                       method: 'POST',
@@ -949,7 +1206,8 @@ export const ProductionView: React.FC = () => {
                         packets_1000g: Number(pack.packets_1000g),
                       }),
                     }),
-                  'Packaging recorded. Review any flagged kg difference.'
+                  'Packaging recorded. Review any flagged kg difference.',
+                  refreshPackaging
                 );
                 setPack({
                   product_id: '',
@@ -1045,7 +1303,7 @@ export const ProductionView: React.FC = () => {
             <form
               onSubmit={e => {
                 e.preventDefault();
-                run(
+                runAction(
                   () =>
                     apiRequest('/api/production/dispatch', {
                       method: 'POST',
@@ -1054,7 +1312,8 @@ export const ProductionView: React.FC = () => {
                         quantity_packets: Number(dispatch.quantity_packets),
                       }),
                     }),
-                  'Dispatch recorded. It is a stock transfer, not a sale.'
+                  'Dispatch recorded. It is a stock transfer, not a sale.',
+                  refreshDispatches
                 );
                 setDispatch({ ...dispatch, quantity_packets: '', destination: '', reference: '', notes: '' });
               }}

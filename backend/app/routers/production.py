@@ -1,6 +1,7 @@
 from app.timeutil import business_today, now_iso
 from typing import Any, Dict, List, Optional
 import json
+import threading
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from app.auth import get_current_user
@@ -13,6 +14,8 @@ from app.recipes_master import (
     calculate_recipe_cost,
     normalize_quantity_to_std_unit,
 )
+
+_ATTENDANCE_LOCK = threading.Lock()
 from app.calculations import (
     normalize_to_canonical_unit,
     round_stock,
@@ -108,6 +111,11 @@ class AttendanceCreate(BaseModel):
     attendance_date: str
     status: str = "PRESENT"
     notes: str = ""
+
+
+class AttendanceUpdate(BaseModel):
+    status: str
+    notes: Optional[str] = ""
 
 
 class RecipeItemInput(BaseModel):
@@ -261,7 +269,23 @@ async def add_worker(req: WorkerCreate, user: dict = Depends(get_current_user)):
 @router.get("/attendance")
 async def attendance(user: dict = Depends(get_current_user)):
     require_owner(user)
-    return db.get_records("WorkerAttendance")
+    records = db.get_records("WorkerAttendance") or []
+    # Count occurrences of (worker_id, attendance_date) to detect duplicate rows in sheet
+    counts: Dict[tuple, int] = {}
+    for r in records:
+        w_id = str(field(r, "worker_id")).strip()
+        a_dt = str(field(r, "attendance_date")).strip()
+        if w_id and a_dt:
+            counts[(w_id, a_dt)] = counts.get((w_id, a_dt), 0) + 1
+
+    annotated = []
+    for r in records:
+        w_id = str(field(r, "worker_id")).strip()
+        a_dt = str(field(r, "attendance_date")).strip()
+        rec_copy = dict(r)
+        rec_copy["is_duplicate"] = counts.get((w_id, a_dt), 0) > 1
+        annotated.append(rec_copy)
+    return annotated
 
 
 @router.post("/attendance")
@@ -271,30 +295,67 @@ async def record_attendance(req: AttendanceCreate, user: dict = Depends(get_curr
     status_value = req.status.strip().upper()
     if status_value not in {"PRESENT", "ABSENT", "HALF_DAY"}:
         raise HTTPException(400, "Attendance must be PRESENT, ABSENT, or HALF_DAY")
-    worker = next((w for w in db.get_records("Workers") if str(field(w, "worker_id")) == req.worker_id), None)
+    
+    worker_id_clean = req.worker_id.strip()
+    date_clean = req.attendance_date.strip()
+
+    worker = next((w for w in (db.get_records("Workers", fresh=True) or []) if str(field(w, "worker_id")).strip() == worker_id_clean), None)
     if not worker:
         raise HTTPException(404, "Worker not found")
-    existing = next((a for a in db.get_records("WorkerAttendance") if str(field(a, "worker_id")) == req.worker_id and str(field(a, "attendance_date")) == req.attendance_date), None)
-    if existing:
-        raise HTTPException(409, "Attendance is already recorded for this worker and date. Ask Owner to correct it through an audited correction workflow.")
-    daily_wage = float(field(worker, "daily_wage", default=0) or 0)
-    payable = daily_wage if status_value == "PRESENT" else daily_wage * 0.5 if status_value == "HALF_DAY" else 0
-    rec = {
-        "attendance_id": make_id("WorkerAttendance"),
-        "worker_id": req.worker_id,
-        "worker_name_snapshot": field(worker, "worker_name"),
-        "attendance_date": req.attendance_date,
-        "status": status_value,
-        "daily_wage_snapshot": daily_wage,
+
+    with _ATTENDANCE_LOCK:
+        existing = next((a for a in (db.get_records("WorkerAttendance", fresh=True) or [])
+                         if str(field(a, "worker_id")).strip() == worker_id_clean
+                         and str(field(a, "attendance_date")).strip() == date_clean), None)
+        if existing:
+            raise HTTPException(409, f"Attendance is already recorded for worker '{field(worker, 'worker_name')}' on {date_clean}. Use the correction workflow to adjust.")
+
+        daily_wage = float(field(worker, "daily_wage", default=0) or 0)
+        payable = daily_wage if status_value == "PRESENT" else daily_wage * 0.5 if status_value == "HALF_DAY" else 0
+        rec = {
+            "attendance_id": make_id("WorkerAttendance"),
+            "worker_id": worker_id_clean,
+            "worker_name_snapshot": field(worker, "worker_name"),
+            "attendance_date": date_clean,
+            "status": status_value,
+            "daily_wage_snapshot": daily_wage,
+            "wage_accrued": round(payable, 2),
+            "notes": req.notes.strip(),
+            "created_at": now(),
+            "created_by": actor,
+        }
+        if not db.append_record("WorkerAttendance", rec, raise_on_error=True):
+            raise HTTPException(503, "Could not save attendance")
+        db.log_audit(actor, "RECORD_WORKER_ATTENDANCE", "WorkerAttendance", rec["attendance_id"], reason=f"{rec['worker_name_snapshot']} {status_value} on {date_clean}")
+        return rec
+
+
+@router.put("/attendance/{attendance_id}")
+async def update_attendance(attendance_id: str, req: AttendanceUpdate, user: dict = Depends(get_current_user)):
+    """Owner audited correction workflow for existing attendance records."""
+    actor, _ = require_owner(user)
+    require_persistent_store()
+    records = db.get_records("WorkerAttendance", fresh=True) or []
+    existing = next((r for r in records if str(field(r, "attendance_id")).strip() == attendance_id.strip()), None)
+    if not existing:
+        raise HTTPException(404, "Attendance record not found")
+    new_status = req.status.strip().upper()
+    if new_status not in {"PRESENT", "ABSENT", "HALF_DAY"}:
+        raise HTTPException(400, "Status must be PRESENT, ABSENT, or HALF_DAY")
+
+    daily_wage = float(field(existing, "daily_wage_snapshot", default=0) or 0)
+    payable = daily_wage if new_status == "PRESENT" else daily_wage * 0.5 if new_status == "HALF_DAY" else 0
+    updates = {
+        "status": new_status,
         "wage_accrued": round(payable, 2),
-        "notes": req.notes,
-        "created_at": now(),
-        "created_by": actor,
+        "notes": f"{field(existing, 'notes')} | Corrected by {actor}: {req.notes}".strip(" | "),
+        "updated_at": now(),
+        "updated_by": actor,
     }
-    if not db.append_record("WorkerAttendance", rec, raise_on_error=True):
-        raise HTTPException(503, "Could not save attendance")
-    db.log_audit(actor, "RECORD_WORKER_ATTENDANCE", "WorkerAttendance", rec["attendance_id"], reason=f"{rec['worker_name_snapshot']} {status_value} on {req.attendance_date}")
-    return rec
+    if not db.update_record("WorkerAttendance", "attendance_id", attendance_id, updates, raise_on_error=True):
+        raise HTTPException(503, "Could not update attendance record")
+    db.log_audit(actor, "CORRECT_WORKER_ATTENDANCE", "WorkerAttendance", attendance_id, reason=f"Changed status from {field(existing, 'status')} to {new_status}: {req.notes}")
+    return {**existing, **updates}
 
 
 @router.get("/recipes")
