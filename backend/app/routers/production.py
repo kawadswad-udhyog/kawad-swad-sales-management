@@ -640,6 +640,7 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
     batch_id = make_id("ProductionBatches")
     rec = {
         "production_id": batch_id,
+        "batch_id": batch_id,
         "production_date": req.production_date,
         "product_id": req.product_id,
         "product_name_snapshot": field(product, "product_name"),
@@ -668,6 +669,28 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
     if not db.append_record("ProductionBatches", rec, raise_on_error=True):
         raise HTTPException(503, "Could not save production batch")
     db.log_audit(actor, "CREATE_PRODUCTION_BATCH", "ProductionBatches", batch_id, reason=f"{rec['net_quantity_kg']} kg {rec['product_name_snapshot']}; pending approval")
+    
+    # Also link to ApprovalRequests for Owner dashboard visibility
+    try:
+        from app.routers.approvals import create_approval_request
+        create_approval_request(
+            request_type="PRODUCTION_BATCH",
+            target_user_id=batch_id,
+            payload={
+                "production_id": batch_id,
+                "batch_id": batch_id,
+                "product_id": req.product_id,
+                "product_name": field(product, "product_name"),
+                "net_quantity_kg": reconciliation["saleable_output_kg"],
+                "recipe_id": req.recipe_id or "",
+                "notes": req.notes,
+            },
+            requested_by=actor,
+            requested_by_name=str(user.get("full_name") or actor),
+        )
+    except Exception as exc:
+        logger.warning(f"Could not link ApprovalRequest for batch {batch_id}: {exc}")
+
     return rec
 
 
@@ -783,49 +806,94 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
     require_persistent_store()
 
     batches = db.get_records("ProductionBatches")
-    rec = next((b for b in batches if str(field(b, "production_id")) == production_id), None)
+    prod_id_clean = str(production_id or "").strip()
+    rec = next(
+        (b for b in batches if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
+        None
+    )
     if not rec:
-        raise HTTPException(404, "Production batch not found")
-    if str(field(rec, "status")).upper() != "PENDING":
+        raise HTTPException(404, f"Production batch '{production_id}' not found")
+
+    current_status = str(field(rec, "status", default="PENDING")).upper()
+    if current_status != "PENDING":
         raise HTTPException(409, "This batch has already been reviewed")
 
     if not req.approved:
         updates = {"status": "REJECTED", "approved_by": actor, "approved_at": now(), "approval_notes": req.notes}
-        if not db.update_record("ProductionBatches", "production_id", production_id, updates):
+        saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
+        if not saved:
+            saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
+        if not saved:
             raise HTTPException(503, "Rejection was not saved.")
-        db.log_audit(actor, "REJECT_PRODUCTION", "ProductionBatches", production_id, reason=req.notes)
+        
+        # Also sync corresponding ApprovalRequests
+        try:
+            for app_req in db.get_records("ApprovalRequests"):
+                if str(app_req.get("target_user_id", "")).strip() == prod_id_clean and str(app_req.get("status", "")).upper() == "PENDING":
+                    db.update_record("ApprovalRequests", "request_id", str(app_req.get("request_id")), {
+                        "status": "REJECTED",
+                        "decided_by": actor,
+                        "decided_at": now(),
+                        "decision_notes": req.notes or "Rejected by Owner",
+                    })
+        except Exception as sync_err:
+            logger.warning(f"Could not sync ApprovalRequest rejection for batch {prod_id_clean}: {sync_err}")
+
+        db.log_audit(actor, "REJECT_PRODUCTION", "ProductionBatches", prod_id_clean, reason=req.notes)
         return {**rec, **updates}
 
     # Find approved recipe
+    rec_prod_name = str(field(rec, "product_name_snapshot", default="")).strip().lower()
+    rec_prod_id = str(field(rec, "product_id", default="")).strip()
+    rec_recipe_id = str(field(rec, "recipe_id", default="")).strip()
+
     recipe_rows = [
         r for r in db.get_records("Recipes")
         if (
-            str(field(r, "product_name_snapshot")).strip().lower() == str(field(rec, "product_name_snapshot")).strip().lower()
-            or (field(rec, "product_id") and str(field(r, "product_id")) == str(field(rec, "product_id")))
+            (rec_recipe_id and str(field(r, "recipe_id", default="")).strip() == rec_recipe_id)
+            or (rec_prod_name and str(field(r, "product_name_snapshot", default="")).strip().lower() == rec_prod_name)
+            or (rec_prod_id and str(field(r, "product_id", default="")).strip() == rec_prod_id)
         )
         and truthy(field(r, "approved"))
     ]
-    if not recipe_rows:
-        raise HTTPException(400, "No approved recipe exists for this product. Save and approve its recipe before approving production.")
-    recipe = sorted(recipe_rows, key=lambda r: int(float(field(r, "version", default=0) or 0)))[-1]
-    items = json.loads(str(field(recipe, "items_json", default="[]")))
-    production_kg = float(field(rec, "net_quantity_kg", default=0) or 0)
+
+    recipe = None
+    items = []
+    if recipe_rows:
+        recipe = sorted(recipe_rows, key=lambda r: int(float(field(r, "version", default=0) or 0)))[-1]
+        try:
+            items = json.loads(str(field(recipe, "items_json", default="[]")))
+        except Exception:
+            items = []
+    else:
+        # Fallback to master recipes definition
+        master_match = next(
+            (m for m in MASTER_RECIPES_DEFINITION if (rec_prod_id and m.get("product_id") == rec_prod_id) or m.get("product_name", "").strip().lower() == rec_prod_name),
+            None
+        )
+        if master_match:
+            recipe = master_match
+            items = master_match.get("items", [])
+        else:
+            raise HTTPException(400, "No approved recipe exists for this product. Save and approve its recipe before approving production.")
+
+    production_kg = float(field(rec, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0)
 
     # Check if materials were already issued
     raw_ledger = db.get_records("RawMaterialLedger")
     already_issued = any(
-        str(field(x, "production_id")) == production_id and str(field(x, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"
+        str(field(x, "production_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"
         for x in raw_ledger
     )
 
-    if not already_issued:
+    if not already_issued and items:
         # Issue materials now (only if not previously issued)
         raw_master = db.get_records("RawMaterials")
         deductions = []
         for item in items:
             name = str(item.get("material_name", "")).strip()
             required = round(float(item.get("quantity_per_kg", 0)) * production_kg, 4)
-            stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=production_id)
+            stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=prod_id_clean)
             if not stock_bal["exists"]:
                 raise HTTPException(400, f"Raw material '{name}' is missing from RawMaterials master.")
             if stock_bal["available"] < required:
@@ -852,16 +920,16 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
                 "quantity": d["quantity"],
                 "unit": d["unit"],
                 "rate_per_unit": d["rate_per_unit"],
-                "production_id": production_id,
+                "production_id": prod_id_clean,
                 "issue_txn_id": issue_txn_id,
                 "created_by": actor,
-                "notes": f"Batch {production_id} approval material deduction under Recipe {field(recipe, 'recipe_id')}",
+                "notes": f"Batch {prod_id_clean} approval material deduction under Recipe {field(recipe, 'recipe_id')}",
             }
             if not db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True):
                 raise HTTPException(503, "Could not record raw material consumption.")
 
     # Post bulk output to inventory exactly once
-    existing_bulk = next((x for x in db.get_records("ProductionStockLedger") if str(field(x, "reference_id")) == production_id and str(field(x, "movement_type")).upper() == "BULK_PRODUCED"), None)
+    existing_bulk = next((x for x in db.get_records("ProductionStockLedger") if str(field(x, "reference_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "BULK_PRODUCED"), None)
     if not existing_bulk:
         stock = {
             "movement_id": make_id("ProductionStockLedger"),
@@ -873,7 +941,7 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
             "quantity_kg": production_kg,
             "quantity_packets": 0,
             "channel": "FACTORY_BULK",
-            "reference_id": production_id,
+            "reference_id": prod_id_clean,
             "created_by": actor,
             "notes": req.notes,
         }
@@ -888,10 +956,27 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
         "recipe_id": field(recipe, "recipe_id"),
         "materials_issued": "true",
     }
-    if not db.update_record("ProductionBatches", "production_id", production_id, updates):
+    saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
+    if not saved:
+        saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
+    if not saved:
         raise HTTPException(503, "Batch status could not be saved. Existing ledger entries remain safe.")
 
-    db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", production_id, reason=f"Approved {production_kg} kg and credited bulk inventory.")
+    # Also sync corresponding ApprovalRequests
+    try:
+        for app_req in db.get_records("ApprovalRequests"):
+            if str(app_req.get("target_user_id", "")).strip() == prod_id_clean and str(app_req.get("status", "")).upper() == "PENDING":
+                db.update_record("ApprovalRequests", "request_id", str(app_req.get("request_id")), {
+                    "status": "EXECUTED",
+                    "decided_by": actor,
+                    "decided_at": now(),
+                    "executed_at": now(),
+                    "decision_notes": req.notes or "Approved by Owner",
+                })
+    except Exception as sync_err:
+        logger.warning(f"Could not sync ApprovalRequest for batch {prod_id_clean}: {sync_err}")
+
+    db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
     return {**rec, **updates}
 
 

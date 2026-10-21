@@ -9,7 +9,11 @@ const input: React.CSSProperties = { padding: '9px 10px', border: '1px solid #cb
 const btn: React.CSSProperties = { padding: '9px 13px', border: 0, borderRadius: 7, background: '#166534', color: 'white', fontWeight: 600, cursor: 'pointer' };
 const today = new Date().toISOString().slice(0, 10);
 
-export const ProductionView: React.FC = () => {
+export interface ProductionViewProps {
+  initialTab?: string;
+}
+
+export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'production' }) => {
   const { currentUser, isGoogleSheetsConnected, persistentWritesEnabled } = useStore();
   const [products, setProducts] = useState<Product[]>([]);
   const [workers, setWorkers] = useState<Row[]>([]);
@@ -25,9 +29,18 @@ export const ProductionView: React.FC = () => {
   const [packaging, setPackaging] = useState<Row[]>([]);
   const [dispatches, setDispatches] = useState<Row[]>([]);
   const [summary, setSummary] = useState<Row>({ bulk_stock: [], finished_stock: [], workers_active: 0, pending_production: 0 });
-  const [tab, setTab] = useState('master_recipes');
+  const [tab, setTab] = useState(initialTab);
+  const [batchSearch, setBatchSearch] = useState('');
+  const [batchStatusFilter, setBatchStatusFilter] = useState('ALL');
+  const [batchDateFilter, setBatchDateFilter] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    if (initialTab) {
+      setTab(initialTab);
+    }
+  }, [initialTab]);
   const [worker, setWorker] = useState({ worker_name: '', mobile: '', daily_wage: '', notes: '' });
   const [recipe, setRecipe] = useState({ product_id: '', ingredients: '', notes: '' });
   const [production, setProduction] = useState({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });

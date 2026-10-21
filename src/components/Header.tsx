@@ -1,8 +1,31 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { UserRole } from '../types';
+import { ViewType } from './Navigation';
+import {
+  Menu,
+  RefreshCw,
+  LogOut,
+  Shield,
+  Wifi,
+  WifiOff,
+  Database,
+  CheckCircle2,
+  AlertTriangle,
+  X,
+} from 'lucide-react';
 
-export const Header: React.FC = () => {
+interface HeaderProps {
+  currentView?: ViewType;
+  onToggleMobileNav?: () => void;
+  onNavigate?: (v: ViewType) => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({
+  currentView = 'dashboard',
+  onToggleMobileNav,
+  onNavigate,
+}) => {
   const {
     currentUser,
     logout,
@@ -10,22 +33,107 @@ export const Header: React.FC = () => {
     updateBackendUrl,
     isBackendConnected,
     isGoogleSheetsConnected,
+    persistentWritesEnabled,
+    connectionError,
+    reconnectGoogleSheets,
     refreshData,
     isRefreshing,
   } = useStore();
-  const [showConfig, setShowConfig] = useState(false);
-  const [tempUrl, setTempUrl] = useState(backendUrl);
 
-  const getRoleBadgeStyle = (role?: UserRole) => {
+  const [showStatusModal, setShowStatusModal] = useState(false);
+  const [tempUrl, setTempUrl] = useState(backendUrl);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+
+  const getRoleBadge = (role?: UserRole) => {
     switch (role) {
       case 'OWNER':
-        return { background: '#fef08a', color: '#854d0e' };
+        return { label: 'Owner / Admin', bg: '#fef08a', text: '#854d0e' };
       case 'PA':
-        return { background: '#bfdbfe', color: '#1e40af' };
+        return { label: 'Personal Assistant', bg: '#dbeafe', text: '#1e40af' };
       case 'SALESMAN':
-        return { background: '#bbf7d0', color: '#166534' };
+        return { label: 'Field Sales', bg: '#dcfce7', text: '#15803d' };
       default:
-        return {};
+        return { label: role || 'Staff', bg: '#f1f5f9', text: '#475569' };
+    }
+  };
+
+  const getViewTitle = (v: ViewType) => {
+    switch (v) {
+      case 'dashboard':
+        return currentUser?.role === 'SALESMAN' ? 'Field Workspace' : 'Overview Dashboard';
+      case 'production':
+        return 'Daily Production & Batches';
+      case 'attendance':
+        return 'Worker Attendance & Wages';
+      case 'packaging':
+        return 'Packaging & Packet Reconciliation';
+      case 'stock':
+        return 'Inventory & Stock Ledgers';
+      case 'sales':
+        return 'Sales Billing & Invoicing';
+      case 'approvals':
+        return 'Approvals Management';
+      case 'customers':
+        return 'Customer Directory';
+      case 'products':
+        return 'Product Catalogue';
+      case 'expenses':
+        return 'Expenses & Claims';
+      case 'visits':
+        return 'Shop Visits & Field Activity';
+      case 'closing':
+        return 'Daily Cash Closing';
+      case 'salary':
+        return 'Salary & Incentives';
+      case 'reports':
+        return 'Reports & Data Exports';
+      case 'users':
+        return 'User Management & Security';
+      case 'audit':
+        return 'Audit Logs & Sheet Integrity';
+      default:
+        return 'Management System';
+    }
+  };
+
+  const roleBadge = getRoleBadge(currentUser?.role);
+
+  // Status configuration
+  let statusBadge = {
+    label: 'Connected',
+    color: '#15803d',
+    bg: '#ecfdf5',
+    border: '#bbf7d0',
+    icon: <CheckCircle2 size={13} />,
+  };
+
+  if (!isBackendConnected) {
+    statusBadge = {
+      label: 'Connecting API…',
+      color: '#b45309',
+      bg: '#fffbeb',
+      border: '#fde68a',
+      icon: <AlertTriangle size={13} />,
+    };
+  } else if (!isGoogleSheetsConnected || !persistentWritesEnabled) {
+    statusBadge = {
+      label: 'Sheets Offline',
+      color: '#b91c1c',
+      bg: '#fef2f2',
+      border: '#fecaca',
+      icon: <WifiOff size={13} />,
+    };
+  }
+
+  const handleManualReconnect = async () => {
+    setIsReconnecting(true);
+    try {
+      const res = await reconnectGoogleSheets();
+      if (res.success) {
+        await refreshData();
+      }
+    } finally {
+      setIsReconnecting(false);
     }
   };
 
@@ -33,148 +141,311 @@ export const Header: React.FC = () => {
     e.preventDefault();
     if (tempUrl.trim()) {
       updateBackendUrl(tempUrl.trim());
-      setShowConfig(false);
+      setShowStatusModal(false);
     }
   };
 
-  const statusColor = !isBackendConnected ? '#fbbf24' : isGoogleSheetsConnected ? '#4ade80' : '#ef4444';
-  const statusText = !isBackendConnected
-    ? 'Connecting…'
-    : isGoogleSheetsConnected
-    ? 'Sheets Connected'
-    : 'Sheets Disconnected';
-
   return (
     <>
-      <header>
-        <div className="brand">
-          Kawad Swad
-          <small>Sales Management</small>
+      <header
+        style={{
+          background: '#ffffff',
+          borderBottom: '1px solid #e2e8f0',
+          padding: '10px 20px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '16px',
+          height: '62px',
+          boxSizing: 'border-box',
+          position: 'sticky',
+          top: 0,
+          zIndex: 30,
+        }}
+      >
+        {/* Left Side: Mobile Menu Button & Breadcrumb */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {onToggleMobileNav && (
+            <button
+              onClick={onToggleMobileNav}
+              style={{
+                background: 'transparent',
+                border: '1px solid #e2e8f0',
+                borderRadius: '8px',
+                padding: '7px',
+                color: '#475569',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+              className="mobile-nav-toggle"
+              title="Open Navigation"
+            >
+              <Menu size={18} />
+            </button>
+          )}
+
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', color: '#64748b' }}>
+              <span>Kawad Swad</span>
+              <span>/</span>
+              <span style={{ fontWeight: 600, color: '#0f172a' }}>{getViewTitle(currentView)}</span>
+            </div>
+            <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+              {new Date().toLocaleDateString('en-IN', {
+                weekday: 'short',
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+              })}
+            </div>
+          </div>
         </div>
 
-        <div className="header-right">
-          {/* Connection status indicator */}
+        {/* Right Side: Quick Actions, Connection Pill & User Info */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {/* Refresh Button */}
+          <button
+            onClick={() => refreshData()}
+            disabled={isRefreshing}
+            style={{
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              borderRadius: '8px',
+              padding: '6px 10px',
+              color: '#475569',
+              fontSize: '0.80rem',
+              fontWeight: 500,
+              cursor: isRefreshing ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+            title="Refresh active workspace data"
+          >
+            <RefreshCw size={13} className={isRefreshing ? 'spin-icon' : ''} />
+            <span className="hide-on-mobile">{isRefreshing ? 'Syncing…' : 'Sync'}</span>
+          </button>
+
+          {/* Connection Status Pill */}
           <div
-            onClick={() => setShowConfig(true)}
+            onClick={() => setShowStatusModal(true)}
+            role="button"
+            tabIndex={0}
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
               cursor: 'pointer',
-              fontSize: '0.78rem',
-              background: 'rgba(255, 255, 255, 0.1)',
+              fontSize: '0.76rem',
+              fontWeight: 600,
+              background: statusBadge.bg,
+              color: statusBadge.color,
+              border: `1px solid ${statusBadge.border}`,
               padding: '5px 10px',
               borderRadius: '999px',
-              border: '1px solid rgba(255, 255, 255, 0.2)',
             }}
-            title={`Backend: ${backendUrl} (Click to change)`}
+            title="Click to check connection status"
           >
-            <span
-              style={{
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                background: statusColor,
-                display: 'inline-block',
-              }}
-            />
-            <span style={{ color: '#fff', opacity: 0.9 }}>
-              {statusText}
-            </span>
+            {statusBadge.icon}
+            <span>{statusBadge.label}</span>
           </div>
 
-          {currentUser ? (
-            <>
-              <div className="user-badge" title="Authenticated session">
-                <span>{currentUser.full_name}</span>
-                <span
+          {/* Logged in User Badge */}
+          {currentUser && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '4px 8px',
+                  borderRadius: '8px',
+                  background: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                }}
+              >
+                <div
                   style={{
-                    ...getRoleBadgeStyle(currentUser.role),
-                    fontSize: '0.72rem',
-                    padding: '2px 7px',
-                    borderRadius: '999px',
-                    fontWeight: 800,
-                    textTransform: 'uppercase',
+                    width: '28px',
+                    height: '28px',
+                    borderRadius: '50%',
+                    background: '#166534',
+                    color: '#ffffff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '0.78rem',
+                    fontWeight: 700,
                   }}
                 >
-                  {currentUser.role}
-                </span>
+                  {currentUser.full_name ? currentUser.full_name.slice(0, 1).toUpperCase() : 'U'}
+                </div>
+                <div className="hide-on-mobile" style={{ textAlign: 'left', lineHeight: 1.15 }}>
+                  <div style={{ fontSize: '0.80rem', fontWeight: 600, color: '#0f172a' }}>
+                    {currentUser.full_name}
+                  </div>
+                  <div style={{ fontSize: '0.70rem', color: roleBadge.text, fontWeight: 700 }}>
+                    {roleBadge.label}
+                  </div>
+                </div>
               </div>
 
-              <button
-                onClick={refreshData}
-                disabled={isRefreshing}
-                className="secondary"
-                title="Sync records from Google Sheets / FastAPI backend"
-                style={{
-                  fontSize: '0.8rem',
-                  padding: '6px 12px',
-                  background: isRefreshing ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.15)',
-                  color: '#fff',
-                  cursor: isRefreshing ? 'not-allowed' : 'pointer',
-                }}
-              >
-                {isRefreshing ? '⏳ Syncing…' : '↻ Refresh'}
-              </button>
-
+              {/* Logout Button */}
               <button
                 onClick={logout}
-                className="secondary"
                 style={{
-                  padding: '6px 14px',
-                  background: 'rgba(239, 68, 68, 0.25)',
-                  border: '1px solid rgba(239, 68, 68, 0.5)',
-                  color: '#fff',
-                  fontWeight: 700,
+                  background: 'transparent',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '8px',
+                  padding: '7px 10px',
+                  color: '#64748b',
                   cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '0.78rem',
+                  fontWeight: 600,
                 }}
-                title="Sign out of current account"
+                title="Sign out of ERP"
               >
-                Sign out
+                <LogOut size={14} />
+                <span className="hide-on-mobile">Logout</span>
               </button>
-            </>
-          ) : null}
+            </div>
+          )}
         </div>
       </header>
 
-      {showConfig && (
-        <div className="modal-overlay" onClick={() => setShowConfig(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '480px' }}>
-            <h2 style={{ marginTop: 0 }}>Backend Service Settings</h2>
-            <p className="muted">
-              Configure the remote FastAPI backend URL hosted on Render or local proxy:
-            </p>
-
-            <form onSubmit={handleSaveUrl}>
-              <label>
-                API Base URL
-                <input
-                  type="url"
-                  value={tempUrl}
-                  onChange={(e) => setTempUrl(e.target.value)}
-                  placeholder="https://kawad-swad-sales-dev.onrender.com"
-                  required
-                />
-              </label>
-
-              <div className="actions" style={{ marginTop: '16px' }}>
-                <button type="submit">Save &amp; Reconnect</button>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => {
-                    setTempUrl('https://kawad-swad-sales-dev.onrender.com');
-                    updateBackendUrl('https://kawad-swad-sales-dev.onrender.com');
-                    setShowConfig(false);
-                  }}
-                >
-                  Reset Default
-                </button>
-                <button type="button" className="secondary" onClick={() => setShowConfig(false)}>
-                  Cancel
-                </button>
+      {/* Connection Details Modal */}
+      {showStatusModal && (
+        <div
+          onClick={() => setShowStatusModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.45)',
+            zIndex: 50,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+            backdropFilter: 'blur(2px)',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#ffffff',
+              borderRadius: '14px',
+              maxWidth: '520px',
+              width: '100%',
+              padding: '24px',
+              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
+              border: '1px solid #e2e8f0',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Wifi size={20} color="#166534" />
+                <h3 style={{ margin: 0, fontSize: '1.15rem', color: '#0f172a' }}>System Connection Health</h3>
               </div>
-            </form>
+              <button
+                onClick={() => setShowStatusModal(false)}
+                style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', padding: '4px' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Status Checklist */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  background: isBackendConnected ? '#ecfdf5' : '#fffbeb',
+                  border: isBackendConnected ? '1px solid #bbf7d0' : '1px solid #fde68a',
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: '0.88rem', color: '#0f172a' }}>Backend API Service</div>
+                  <div style={{ fontSize: '0.78rem', color: '#64748b' }}>FastAPI on Render ({backendUrl || 'Proxy / direct'})</div>
+                </div>
+                <span style={{ fontSize: '0.80rem', fontWeight: 700, color: isBackendConnected ? '#15803d' : '#b45309' }}>
+                  {isBackendConnected ? 'Online ✓' : 'Connecting / Waking…'}
+                </span>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  background: isGoogleSheetsConnected ? '#ecfdf5' : '#fef2f2',
+                  border: isGoogleSheetsConnected ? '1px solid #bbf7d0' : '1px solid #fecaca',
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: '0.88rem', color: '#0f172a' }}>Google Sheets Persistent Storage</div>
+                  <div style={{ fontSize: '0.78rem', color: '#64748b' }}>Master 28-tab Google Sheets Database</div>
+                </div>
+                <span style={{ fontSize: '0.80rem', fontWeight: 700, color: isGoogleSheetsConnected ? '#15803d' : '#b91c1c' }}>
+                  {isGoogleSheetsConnected ? 'Connected ✓' : 'Disconnected ✗'}
+                </span>
+              </div>
+
+              {connectionError && (
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px', fontSize: '0.78rem', color: '#64748b' }}>
+                  <strong>Diagnostic note:</strong> {connectionError}
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button
+                disabled={isReconnecting}
+                onClick={handleManualReconnect}
+                style={{
+                  padding: '8px 14px',
+                  fontSize: '0.84rem',
+                  fontWeight: 600,
+                  background: '#166534',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: isReconnecting ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+              >
+                <RefreshCw size={14} className={isReconnecting ? 'spin-icon' : ''} />
+                {isReconnecting ? 'Reconnecting Sheets…' : 'Test & Reconnect Sheets'}
+              </button>
+              <button
+                onClick={() => setShowStatusModal(false)}
+                style={{
+                  padding: '8px 14px',
+                  fontSize: '0.84rem',
+                  fontWeight: 600,
+                  background: '#f1f5f9',
+                  color: '#475569',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                }}
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

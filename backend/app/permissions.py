@@ -30,19 +30,22 @@ def can_manage_production(user: dict) -> bool:
     return is_owner(user)
 
 
-def require_manager(user: dict) -> None:
+def require_manager(user: dict) -> tuple[str, str]:
     if not is_manager(user):
         raise HTTPException(status_code=403, detail="Owner or PA permission is required.")
+    return str((user or {}).get("user_id", "")), role_of(user)
 
 
-def require_owner(user: dict) -> None:
+def require_owner(user: dict) -> tuple[str, str]:
     if not is_owner(user):
         raise HTTPException(status_code=403, detail="Only the owner can do this.")
+    return str((user or {}).get("user_id", "")), role_of(user)
 
 
-def require_production_access(user: dict) -> None:
-    if not is_owner(user):
-        raise HTTPException(status_code=403, detail="Only the Owner can access production operations.")
+def require_production_access(user: dict) -> tuple[str, str]:
+    if not is_manager(user):
+        raise HTTPException(status_code=403, detail="Only the Owner or PA can access production operations.")
+    return str((user or {}).get("user_id", "")), role_of(user)
 
 
 def ui_role(role: str) -> str:

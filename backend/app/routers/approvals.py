@@ -120,6 +120,32 @@ def _run_request_execution(request_record: dict, actor_user_id: str, initial_pas
         new_pw = initial_password or f"Kawad@{secrets.token_hex(4)}"
         res = execute_reset_password(target_uid, new_pw, actor_user_id, reason="Owner approved password reset")
         return res, new_pw
+    elif req_type == "PRODUCTION_BATCH":
+        import asyncio
+        from app.routers.production import approve_batch, ApprovalRequest as ProdApprovalReq
+        prod_id = target_uid or payload.get("production_id") or payload.get("batch_id")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                res = pool.submit(
+                    asyncio.run,
+                    approve_batch(
+                        prod_id,
+                        ProdApprovalReq(approved=True, notes="Approved by Owner via Request"),
+                        {"user_id": actor_user_id, "role": "OWNER"},
+                    )
+                ).result()
+        else:
+            res = asyncio.run(approve_batch(
+                prod_id,
+                ProdApprovalReq(approved=True, notes="Approved by Owner via Request"),
+                {"user_id": actor_user_id, "role": "OWNER"},
+            ))
+        return res, None
     else:
         raise ValueError(f"Unknown request type: {req_type}")
 
@@ -155,6 +181,19 @@ async def decide_approval_request(
             "decision_notes": decision_req.notes or "",
         }
         db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
+        # If it was a PRODUCTION_BATCH, also update ProductionBatches
+        if target.get("request_type") == "PRODUCTION_BATCH":
+            target_batch_id = str(target.get("target_user_id") or "").strip()
+            if target_batch_id:
+                batch_updates = {
+                    "status": "REJECTED",
+                    "approved_by": owner_id,
+                    "approved_at": now_iso,
+                    "approval_notes": decision_req.notes or "Rejected via Approval Request",
+                }
+                db.update_record("ProductionBatches", "production_id", target_batch_id, batch_updates)
+                db.update_record("ProductionBatches", "batch_id", target_batch_id, batch_updates)
+
         db.log_audit(owner_id, "REJECT_APPROVAL", "ApprovalRequests", request_id, reason=decision_req.notes or "Owner rejected request")
         updated_dict = dict(target)
         updated_dict.update(updates)
