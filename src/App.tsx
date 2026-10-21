@@ -17,6 +17,8 @@ import { ReportsView } from './views/ReportsView';
 import { AuditView } from './views/AuditView';
 import { UsersView } from './views/UsersView';
 import { ProductionView } from './views/ProductionView';
+import { AttendanceView } from './views/AttendanceView';
+import { ApprovalsView } from './views/ApprovalsView';
 
 const MainAppContent: React.FC = () => {
   const {
@@ -40,9 +42,11 @@ const MainAppContent: React.FC = () => {
     return 'dashboard';
   });
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
   const handleSelectView = (v: ViewType) => {
     setCurrentView(v);
+    setIsMobileNavOpen(false);
     if (typeof window !== 'undefined') {
       sessionStorage.setItem('ks_current_view', v);
     }
@@ -50,7 +54,7 @@ const MainAppContent: React.FC = () => {
 
   if (isLoading && !currentUser) {
     return (
-      <div>
+      <div className="app-shell">
         <Header />
         <main style={{ padding: '80px 20px', textAlign: 'center', color: '#475569' }}>
           <div style={{ fontSize: '2.5rem', marginBottom: '16px' }}>⏳</div>
@@ -65,7 +69,7 @@ const MainAppContent: React.FC = () => {
 
   if (!currentUser) {
     return (
-      <div>
+      <div className="app-shell">
         <Header />
         <main>
           <LoginModal />
@@ -78,14 +82,22 @@ const MainAppContent: React.FC = () => {
     switch (currentView) {
       case 'dashboard':
         return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
-      case 'products':
-        return <ProductsView />;
-      case 'customers':
-        return <CustomersView onNavigate={(v) => handleSelectView(v)} />;
-      case 'sales':
-        return <SalesView />;
+      case 'production':
+        return <ProductionView initialTab="production" />;
+      case 'attendance':
+        return <AttendanceView />;
+      case 'packaging':
+        return <ProductionView initialTab="packaging" />;
       case 'stock':
         return <StockView />;
+      case 'sales':
+        return <SalesView />;
+      case 'approvals':
+        return <ApprovalsView />;
+      case 'customers':
+        return <CustomersView onNavigate={(v) => handleSelectView(v)} />;
+      case 'products':
+        return <ProductsView />;
       case 'expenses':
         return <ExpensesView />;
       case 'visits':
@@ -100,16 +112,18 @@ const MainAppContent: React.FC = () => {
         return <AuditView />;
       case 'users':
         return <UsersView />;
-      case 'production':
-        return <ProductionView />;
       default:
         return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
     }
   };
 
   return (
-    <div>
-      <Header />
+    <div className="app-shell">
+      <Header
+        currentView={currentView}
+        onToggleMobileNav={() => setIsMobileNavOpen((prev) => !prev)}
+        onNavigate={handleSelectView}
+      />
       {!isBackendConnected && (
         <div style={{
           background: '#451a03',
@@ -196,7 +210,7 @@ const MainAppContent: React.FC = () => {
           </button>
         </div>
       )}
-      {syncError && isBackendConnected && (
+      {syncError && isBackendConnected && isGoogleSheetsConnected && persistentWritesEnabled && (
         <div style={{
           background: '#fef2f2',
           borderBottom: '1px solid #fecaca',
@@ -242,11 +256,23 @@ const MainAppContent: React.FC = () => {
           </div>
         </div>
       )}
-      <main>
-        <Navigation currentView={currentView} onSelectView={handleSelectView} />
-        {renderView()}
-      </main>
-      <footer style={{ textAlign: 'center', padding: '30px 16px', color: '#718078', fontSize: '0.85rem' }}>
+
+      {/* Main ERP Layout: Sidebar on Left, Main Content on Right */}
+      <div className="app-body">
+        <Navigation
+          currentView={currentView}
+          onSelectView={handleSelectView}
+          isOpenMobile={isMobileNavOpen}
+          onCloseMobile={() => setIsMobileNavOpen(false)}
+        />
+        <main className="app-main-content">
+          <ErrorBoundary>
+            {renderView()}
+          </ErrorBoundary>
+        </main>
+      </div>
+
+      <footer style={{ textAlign: 'center', padding: '20px 16px', color: '#94a3b8', fontSize: '0.82rem', background: '#ffffff', borderTop: '1px solid #e2e8f0' }}>
         Kawad Swad Udhyog · Sales Management System · Nimar, Madhya Pradesh
       </footer>
     </div>

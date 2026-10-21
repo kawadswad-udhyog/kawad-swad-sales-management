@@ -61,7 +61,70 @@ header {
   gap: 6px;
 }
 
-main {
+/* Layout & Shell Styling */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background-color: #f8fafc;
+}
+
+.app-body {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  width: 100%;
+  min-height: calc(100vh - 62px);
+  position: relative;
+}
+
+.app-sidebar {
+  width: 240px;
+  background: #ffffff;
+  border-right: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  flex-shrink: 0;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app-main-content {
+  flex: 1;
+  min-width: 0;
+  padding: 24px 32px;
+  background: #f8fafc;
+  max-width: 1600px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+@media (max-width: 768px) {
+  .app-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 50;
+    transform: translateX(-100%);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+  }
+
+  .app-sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .app-main-content {
+    padding: 16px 12px;
+  }
+
+  .hide-on-mobile {
+    display: none !important;
+  }
+}
+
+main:not(.app-main-content) {
   max-width: 1200px;
   margin: 24px auto;
   padding: 0 16px;

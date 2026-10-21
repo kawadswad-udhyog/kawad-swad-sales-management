@@ -22,37 +22,49 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonthStr = todayStr.slice(0, 7);
 
+  const safeSales = Array.isArray(sales) ? sales : [];
+  const safeExpenses = Array.isArray(expenses) ? expenses : [];
+  const safeClosings = Array.isArray(dailyClosings) ? dailyClosings : [];
+  const safeCustomers = Array.isArray(customers) ? customers : [];
+  const safeTransactions = Array.isArray(stockTransactions) ? stockTransactions : [];
+  const safeVisits = Array.isArray(shopVisits) ? shopVisits : [];
+
   // Metrics for Owner/PA using backend dashboard data or live ledger records
-  const todaySales = sales.filter(
-    (s) => String(s?.sale_datetime || '').slice(0, 10) === todayStr && s.bill_status === 'ISSUED'
+  const todaySales = safeSales.filter(
+    (s) => String(s?.sale_datetime || '').slice(0, 10) === todayStr && s?.bill_status === 'ISSUED'
   );
-  const monthSales = sales.filter(
-    (s) => String(s?.sale_datetime || '').slice(0, 7) === currentMonthStr && s.bill_status === 'ISSUED'
+  const monthSales = safeSales.filter(
+    (s) => String(s?.sale_datetime || '').slice(0, 7) === currentMonthStr && s?.bill_status === 'ISSUED'
   );
 
-  const todayBills = dashboardMetrics?.total_bills_today ?? todaySales.length;
-  const todayRevenue = dashboardMetrics?.today_sales ?? todaySales.reduce((sum, s) => sum + s.bill_total, 0);
-  const monthBills = monthSales.length;
-  const monthRevenue = monthSales.reduce((sum, s) => sum + s.bill_total, 0);
+  const todayBills = Number(dashboardMetrics?.total_bills_today ?? todaySales.length ?? 0);
+  const todayRevenue = Number(dashboardMetrics?.today_sales ?? todaySales.reduce((sum, s) => sum + (Number(s?.bill_total) || 0), 0) ?? 0);
+  const monthBills = Number(monthSales.length || 0);
+  const monthRevenue = Number(monthSales.reduce((sum, s) => sum + (Number(s?.bill_total) || 0), 0) || 0);
 
-  const pendingExpensesCount =
+  const pendingExpensesCount = Number(
     dashboardMetrics?.pending_expenses ??
-    expenses.filter((e) => e.approval_status === 'PENDING').length;
-  const pendingClosingsCount = dailyClosings.filter((c) => c.closing_status === 'SUBMITTED').length;
+    safeExpenses.filter((e) => e && String(e.approval_status || '').toUpperCase() === 'PENDING').length ??
+    0
+  );
+  const pendingClosingsCount = Number(
+    safeClosings.filter((c) => c && String(c.closing_status || '').toUpperCase() === 'SUBMITTED').length ??
+    0
+  );
 
   if (isSalesman) {
     // Stage 7: Mobile-first field salesman workspace
-    const todayVisits = shopVisits.filter(
+    const todayVisits = safeVisits.filter(
       (v) =>
         String(v?.visit_datetime || '').slice(0, 10) === todayStr &&
-        v.salesman_user_id === currentUser.user_id
+        v?.salesman_user_id === currentUser?.user_id
     );
-    const myTodaySales = sales.filter(
+    const myTodaySales = safeSales.filter(
       (s) =>
         String(s?.sale_datetime || '').slice(0, 10) === todayStr &&
-        (s.salesman_user_id === currentUser.user_id || s.entered_by_user_id === currentUser.user_id)
+        (s?.salesman_user_id === currentUser?.user_id || s?.entered_by_user_id === currentUser?.user_id)
     );
-    const myTodaySalesRevenue = myTodaySales.reduce((sum, s) => sum + s.bill_total, 0);
+    const myTodaySalesRevenue = myTodaySales.reduce((sum, s) => sum + (Number(s?.bill_total) || 0), 0);
 
     return (
       <div>
@@ -305,10 +317,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               })}
             </p>
             <p>
-              <strong>Active Customers in Directory:</strong> {customers.filter((c) => c.active).length}
+              <strong>Active Customers in Directory:</strong> {safeCustomers.filter((c) => c && (c.active === true || String(c.active).toLowerCase() === 'true')).length}
             </p>
             <p>
-              <strong>Total Stock Ledger Movements:</strong> {stockTransactions.length}
+              <strong>Total Stock Ledger Movements:</strong> {safeTransactions.length}
             </p>
             <p className="muted" style={{ marginTop: '8px' }}>
               All sales transactions automatically reflect full payment verification. No partial credit is
