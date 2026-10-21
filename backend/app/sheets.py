@@ -543,6 +543,37 @@ class SheetsDatabase:
                 raise RuntimeError(f"Persistent update failed for {tab_name}: {exc}") from exc
             return False
 
+    def delete_record(self, tab_name: str, id_field: str, id_value: str, raise_on_error: bool = False) -> bool:
+        self._invalidate_records_cache(tab_name)
+        if not (self.is_connected and self.spreadsheet):
+            if self.allow_in_memory_fallback:
+                prev_len = len(self.memory_store.get(tab_name, []))
+                self.memory_store[tab_name] = [item for item in self.memory_store.get(tab_name, []) if str(item.get(id_field)) != str(id_value)]
+                return len(self.memory_store[tab_name]) < prev_len
+            err_msg = (
+                f"Persistent storage is unavailable: Google Sheets is disconnected ({self.last_connection_error or 'not connected'}). "
+                f"Business delete for '{tab_name}' record {id_value} was blocked to prevent data loss."
+            )
+            logger.error(err_msg)
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return False
+
+        try:
+            worksheet = self._get_worksheet(tab_name)
+            records = worksheet.get_all_records()
+            for idx, row in enumerate(records, start=2):
+                if str(row.get(id_field)) == str(id_value):
+                    worksheet.delete_rows(idx)
+                    self.memory_store[tab_name] = [item for item in self.memory_store.get(tab_name, []) if str(item.get(id_field)) != str(id_value)]
+                    return True
+            return False
+        except Exception as exc:
+            logger.error("Error deleting record in %s: %s", tab_name, exc)
+            if raise_on_error:
+                raise RuntimeError(f"Persistent delete failed for {tab_name}: {exc}") from exc
+            return False
+
     def _max_sequence(self, tab_name: str, prefix: str) -> int:
         pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$")
         highest = 0

@@ -913,17 +913,35 @@ export const ProductionView: React.FC = () => {
                         <td style={{ padding: 9, color: '#64748b', fontSize: 12 }}>{String(a.created_by || '-')}</td>
                         {isOwner && (
                           <td style={{ padding: 9, textAlign: 'center' }}>
-                            <button
-                              type="button"
-                              style={{ ...btn, padding: '4px 8px', fontSize: 11, background: '#0284c7' }}
-                              onClick={() => {
-                                setEditingAttendance(a);
-                                setEditAttendanceStatus(String(a.status || 'PRESENT'));
-                                setEditAttendanceNotes('');
-                              }}
-                            >
-                              ✏️ Correct
-                            </button>
+                            <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+                              <button
+                                type="button"
+                                style={{ ...btn, padding: '4px 8px', fontSize: 11, background: '#0284c7' }}
+                                onClick={() => {
+                                  setEditingAttendance(a);
+                                  setEditAttendanceStatus(String(a.status || 'PRESENT'));
+                                  setEditAttendanceNotes('');
+                                }}
+                              >
+                                ✏️ Correct
+                              </button>
+                              {a.is_duplicate && (
+                                <button
+                                  type="button"
+                                  style={{ ...btn, padding: '4px 8px', fontSize: 11, background: '#dc2626' }}
+                                  disabled={busy}
+                                  onClick={() => {
+                                    runAction(
+                                      () => apiRequest(`/api/production/attendance/${encodeURIComponent(a.attendance_id)}`, { method: 'DELETE' }),
+                                      'Duplicate attendance record removed.',
+                                      refreshAttendance
+                                    );
+                                  }}
+                                >
+                                  🗑️ Remove Duplicate
+                                </button>
+                              )}
+                            </div>
                           </td>
                         )}
                       </tr>
@@ -1146,40 +1164,58 @@ export const ProductionView: React.FC = () => {
                     {b.product_name_snapshot}: <b>{b.net_quantity_kg} kg net</b>
                     {b.flour_base_used_kg && ` (Flour: ${b.flour_base_used_kg} kg)`}
                   </span>
-                  <button
-                    style={btn}
-                    disabled={busy}
-                    onClick={() =>
-                      runAction(
-                        () =>
-                          apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
-                            method: 'POST',
-                            body: JSON.stringify({ approved: true, notes: 'Approved by authorised user' }),
-                          }),
-                        'Production approved; recipe consumption and bulk stock recorded.',
-                        refreshBatches
-                      )
-                    }
-                  >
-                    Approve & deduct recipe
-                  </button>
-                  <button
-                    style={{ ...btn, background: '#b91c1c' }}
-                    disabled={busy}
-                    onClick={() =>
-                      runAction(
-                        () =>
-                          apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
-                            method: 'POST',
-                            body: JSON.stringify({ approved: false, notes: 'Rejected by authorised user' }),
-                          }),
-                        'Production rejected.',
-                        refreshBatches
-                      )
-                    }
-                  >
-                    Reject
-                  </button>
+                  {isOwner ? (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <button
+                        style={{
+                          ...btn,
+                          background: (!isGoogleSheetsConnected || !persistentWritesEnabled) ? '#64748b' : '#166534',
+                          cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                        }}
+                        disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled}
+                        title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch approval locked.' : ''}
+                        onClick={() =>
+                          runAction(
+                            () =>
+                              apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
+                                method: 'POST',
+                                body: JSON.stringify({ approved: true, notes: 'Approved by Owner' }),
+                              }),
+                            'Production approved; recipe consumption and bulk stock recorded.',
+                            refreshBatches
+                          )
+                        }
+                      >
+                        Approve & deduct recipe
+                      </button>
+                      <button
+                        style={{
+                          ...btn,
+                          background: (!isGoogleSheetsConnected || !persistentWritesEnabled) ? '#64748b' : '#b91c1c',
+                          cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                        }}
+                        disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled}
+                        title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch rejection locked.' : ''}
+                        onClick={() =>
+                          runAction(
+                            () =>
+                              apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
+                                method: 'POST',
+                                body: JSON.stringify({ approved: false, notes: 'Rejected by Owner' }),
+                              }),
+                            'Production rejected.',
+                            refreshBatches
+                          )
+                        }
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 12, color: '#64748b', fontStyle: 'italic', background: '#f1f5f9', padding: '4px 8px', borderRadius: 4 }}>
+                      ⏳ Awaiting Owner approval & recipe deduction
+                    </span>
+                  )}
                 </div>
               ))}
           </div>

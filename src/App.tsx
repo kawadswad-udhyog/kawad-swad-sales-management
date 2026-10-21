@@ -26,6 +26,7 @@ const MainAppContent: React.FC = () => {
     refreshData,
     isLoading,
     isRefreshing,
+    isBackendConnected,
     isGoogleSheetsConnected,
     persistentWritesEnabled,
     connectionError,
@@ -109,7 +110,45 @@ const MainAppContent: React.FC = () => {
   return (
     <div>
       <Header />
-      {(!isGoogleSheetsConnected || !persistentWritesEnabled) && (
+      {!isBackendConnected && (
+        <div style={{
+          background: '#451a03',
+          borderBottom: '2px solid #f97316',
+          padding: '12px 20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          color: '#ffedd5',
+          fontSize: '0.88rem',
+          flexWrap: 'wrap',
+          gap: '12px'
+        }}>
+          <div>
+            <strong>⚠️ Backend API Offline / Connecting:</strong> Cannot reach backend service at this moment.
+            <div style={{ fontSize: '0.80rem', marginTop: '2px', color: '#fed7aa' }}>
+              The server may be waking up from sleep (Render free tier) or experiencing network delay.
+              {connectionError ? ` Details: ${connectionError}` : ''}
+            </div>
+          </div>
+          <button
+            disabled={isRefreshing}
+            onClick={() => refreshData()}
+            style={{
+              padding: '6px 14px',
+              fontSize: '0.80rem',
+              fontWeight: 700,
+              background: isRefreshing ? '#9a3412' : '#ea580c',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: isRefreshing ? 'not-allowed' : 'pointer'
+            }}
+          >
+            {isRefreshing ? '⏳ Connecting…' : '🔄 Retry Backend Connection'}
+          </button>
+        </div>
+      )}
+      {isBackendConnected && (!isGoogleSheetsConnected || !persistentWritesEnabled) && (
         <div style={{
           background: '#450a0a',
           borderBottom: '2px solid #ef4444',
@@ -123,7 +162,7 @@ const MainAppContent: React.FC = () => {
           gap: '12px'
         }}>
           <div>
-            <strong>🔴 Persistent Storage Disconnected:</strong> Google Sheets is currently unreachable.
+            <strong>🔴 Persistent Storage Disconnected:</strong> Google Sheets is currently unreachable from the backend.
             <div style={{ fontSize: '0.80rem', marginTop: '2px', color: '#fca5a5' }}>
               Business writes (new sales bills, batch production, payments) are temporarily locked to prevent data loss.
               {connectionError ? ` Reason: ${connectionError}` : ''}
@@ -157,7 +196,7 @@ const MainAppContent: React.FC = () => {
           </button>
         </div>
       )}
-      {syncError && (
+      {syncError && isBackendConnected && (
         <div style={{
           background: '#fef2f2',
           borderBottom: '1px solid #fecaca',
@@ -173,18 +212,19 @@ const MainAppContent: React.FC = () => {
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
+              disabled={isRefreshing}
               onClick={() => refreshData()}
               style={{
                 padding: '4px 10px',
                 fontSize: '0.8rem',
-                background: '#dc2626',
+                background: isRefreshing ? '#991b1b' : '#dc2626',
                 color: '#fff',
                 border: 'none',
                 borderRadius: '4px',
-                cursor: 'pointer'
+                cursor: isRefreshing ? 'not-allowed' : 'pointer'
               }}
             >
-              Retry Sync
+              {isRefreshing ? '⏳ Syncing…' : 'Retry Sync'}
             </button>
             <button
               onClick={clearSyncError}

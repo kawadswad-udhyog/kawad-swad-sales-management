@@ -358,6 +358,29 @@ async def update_attendance(attendance_id: str, req: AttendanceUpdate, user: dic
     return {**existing, **updates}
 
 
+@router.delete("/attendance/{attendance_id}")
+async def delete_duplicate_attendance(attendance_id: str, user: dict = Depends(get_current_user)):
+    """Owner audited cleanup workflow for duplicate attendance records."""
+    actor, _ = require_owner(user)
+    require_persistent_store()
+    records = db.get_records("WorkerAttendance", fresh=True) or []
+    existing = next((r for r in records if str(field(r, "attendance_id")).strip() == attendance_id.strip()), None)
+    if not existing:
+        raise HTTPException(404, "Attendance record not found")
+    
+    # Check if this record is indeed a duplicate (same worker and date exists)
+    w_id = str(field(existing, "worker_id")).strip()
+    a_dt = str(field(existing, "attendance_date")).strip()
+    duplicates = [r for r in records if str(field(r, "worker_id")).strip() == w_id and str(field(r, "attendance_date")).strip() == a_dt]
+    if len(duplicates) <= 1:
+        raise HTTPException(400, "Cannot delete unique attendance record. Use update/correction workflow to adjust.")
+    
+    if not db.delete_record("WorkerAttendance", "attendance_id", attendance_id, raise_on_error=True):
+        raise HTTPException(503, "Could not remove attendance record")
+    db.log_audit(actor, "REMOVE_DUPLICATE_ATTENDANCE", "WorkerAttendance", attendance_id, reason=f"Removed duplicate attendance row for {field(existing, 'worker_name_snapshot')} on {a_dt}")
+    return {"status": "DELETED", "attendance_id": attendance_id}
+
+
 @router.get("/recipes")
 async def recipes(user: dict = Depends(get_current_user)):
     require_owner(user)

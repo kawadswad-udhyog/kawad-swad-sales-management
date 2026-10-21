@@ -62,7 +62,7 @@ export interface ApiRequestOptions extends RequestInit {
 export async function apiRequest<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const baseUrl = getApiBaseUrl();
   const token = getAuthToken();
-  const timeoutMs = options.timeoutMs ?? 20000;
+  const timeoutMs = options.timeoutMs ?? 35000;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -87,11 +87,23 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         signal: controller.signal,
       });
     } catch (primaryErr: unknown) {
-      // If direct call to external baseUrl fails (e.g. CORS preflight blocked on Render),
-      // seamlessly retry via the local same-origin dev proxy
+      // Dual-path resilience:
+      // If external baseUrl failed, try local dev proxy (path)
+      // If local proxy failed, try direct Render backend fallback
       if (baseUrl && (baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
         try {
           res = await fetch(path, {
+            ...options,
+            headers,
+            signal: controller.signal,
+          });
+        } catch {
+          throw primaryErr;
+        }
+      } else if (!baseUrl || baseUrl === '') {
+        try {
+          const directBackendUrl = `https://kawad-swad-sales-dev.onrender.com${path}`;
+          res = await fetch(directBackendUrl, {
             ...options,
             headers,
             signal: controller.signal,
