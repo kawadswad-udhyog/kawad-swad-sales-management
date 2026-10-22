@@ -1,4 +1,5 @@
 import asyncio
+
 from fastapi import APIRouter, Depends
 
 from app.auth import get_current_user
@@ -20,8 +21,11 @@ router = APIRouter(prefix="/api/workspace", tags=["Workspace"])
 
 
 @router.get("")
-async def load_workspace(current_user: dict = Depends(get_current_user)):
-    """Fast concurrent read for the signed-in screen so workspace hydrates immediately."""
+async def load_workspace(
+    current_user: dict = Depends(get_current_user),
+):
+    """Load workspace data and expose individual synchronization failures."""
+
     manager = is_manager(current_user)
 
     tasks = [
@@ -46,38 +50,84 @@ async def load_workspace(current_user: dict = Depends(get_current_user)):
             approvals_router.list_approval_requests(current_user),
         ])
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(
+        *tasks,
+        return_exceptions=True,
+    )
 
-    def _safe_val(idx: int, default_val):
-        if idx < len(results):
-            val = results[idx]
-            if not isinstance(val, Exception):
-                return val
-        return default_val
+    task_names = [
+        "products",
+        "customers",
+        "sales",
+        "payments",
+        "stock",
+        "stock_transactions",
+        "expenses",
+        "visits",
+        "closings",
+        "salary",
+        "stock_discrepancies",
+    ]
+
+    if manager:
+        task_names.extend([
+            "dashboard",
+            "users",
+            "audit_logs",
+            "approval_requests",
+        ])
+
+    sync_errors = [
+        {
+            "resource": task_names[index],
+            "message": str(result),
+        }
+        for index, result in enumerate(results)
+        if isinstance(result, Exception)
+    ]
+
+    def safe_value(index, default_value):
+        result = results[index]
+
+        if isinstance(result, Exception):
+            return default_value
+
+        return result
 
     payload = {
-        "products": _safe_val(0, []),
-        "customers": _safe_val(1, []),
-        "sales": _safe_val(2, []),
-        "payments": _safe_val(3, []),
-        "stock": _safe_val(4, {"company_stock": [], "salesman_stock": []}),
-        "stock_transactions": _safe_val(5, []),
-        "expenses": _safe_val(6, []),
-        "visits": _safe_val(7, []),
-        "closings": _safe_val(8, []),
-        "salary": _safe_val(9, []),
-        "stock_discrepancies": _safe_val(10, []),
+        "_sync_errors": sync_errors,
+        "products": safe_value(0, []),
+        "customers": safe_value(1, []),
+        "sales": safe_value(2, []),
+        "payments": safe_value(3, []),
+        "stock": safe_value(
+            4,
+            {
+                "company_stock": [],
+                "salesman_stock": [],
+            },
+        ),
+        "stock_transactions": safe_value(5, []),
+        "expenses": safe_value(6, []),
+        "visits": safe_value(7, []),
+        "closings": safe_value(8, []),
+        "salary": safe_value(9, []),
+        "stock_discrepancies": safe_value(10, []),
     }
 
     if manager:
-        payload["dashboard"] = _safe_val(11, None)
-        payload["users"] = _safe_val(12, [])
-        payload["audit_logs"] = _safe_val(13, [])
-        payload["approval_requests"] = _safe_val(14, [])
+        payload.update({
+            "dashboard": safe_value(11, None),
+            "users": safe_value(12, []),
+            "audit_logs": safe_value(13, []),
+            "approval_requests": safe_value(14, []),
+        })
     else:
-        payload["dashboard"] = None
-        payload["users"] = []
-        payload["audit_logs"] = []
-        payload["approval_requests"] = []
+        payload.update({
+            "dashboard": None,
+            "users": [],
+            "audit_logs": [],
+            "approval_requests": [],
+        })
 
     return payload
