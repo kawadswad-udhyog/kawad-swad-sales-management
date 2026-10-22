@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 
 from app.sheets import db
 from app.auth import hash_password, revoke_all_user_sessions, _USER_REVOKED_AT
+from app.permissions import canonical_role
 
 logger = logging.getLogger("kawad_swad.users")
 
@@ -119,7 +120,11 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
     return result
 
 
-VALID_ROLES = {"OWNER", "PA", "SALESMAN", "PRODUCTION", "DISPATCH"}
+VALID_ROLES = {
+    "OWNER", "OWNER_ADMIN", "ADMIN", "PA", "PERSONAL_ASSISTANT",
+    "SALESMAN", "FIELD_SALESMAN", "PRODUCTION", "DISPATCH",
+    "FACTORY_WORKER", "PRODUCTION_WORKER", "WORKER"
+}
 VALID_BOOLEANS = {"true", "false", "1", "0", "yes", "no"}
 PLACEHOLDER_NAMES = {"your full name", "test user", "placeholder", "dummy", "admin", "owner", ""}
 
@@ -241,6 +246,7 @@ def audit_user_reconciliation() -> Dict[str, Any]:
     username_mismatches = []
     ambiguous_identity_records = []
     role_mismatches = []
+    canonical_aliases = []
     status_mismatches = []
     malformed_or_invalid_records = []
     insecure_credentials = []
@@ -514,13 +520,28 @@ def audit_user_reconciliation() -> Dict[str, Any]:
             u_role = str(u.get("role") or "").strip().upper()
             a_role = str(a.get("role") or "").strip().upper()
             if u_role != a_role:
-                role_mismatches.append({
-                    "user_id": uid,
-                    "username": a_uname_raw or u_uname_raw,
-                    "users_role": u_role,
-                    "auth_role": a_role,
-                    "issue": f"Role mismatch: Users says '{u_role}' but AuthUsers says '{a_role}'.",
-                })
+                c_u = canonical_role(u_role)
+                c_a = canonical_role(a_role)
+                if c_u != c_a:
+                    role_mismatches.append({
+                        "user_id": uid,
+                        "username": a_uname_raw or u_uname_raw,
+                        "users_role": u_role,
+                        "auth_role": a_role,
+                        "canonical_users_role": c_u,
+                        "canonical_auth_role": c_a,
+                        "issue": f"Role mismatch: Users says '{u_role}' but AuthUsers says '{a_role}'.",
+                    })
+                else:
+                    canonical_aliases.append({
+                        "user_id": uid,
+                        "username": a_uname_raw or u_uname_raw,
+                        "users_role": u_role,
+                        "auth_role": a_role,
+                        "canonical_role": c_u,
+                        "status": "CANONICAL_EQUIVALENT",
+                        "notes": f"Users role '{u_role}' and AuthUsers role '{a_role}' map to the same canonical role '{c_u}'.",
+                    })
 
             # Check status mismatches
             u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}

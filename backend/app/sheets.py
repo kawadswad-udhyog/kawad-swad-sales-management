@@ -44,9 +44,11 @@ ID_PREFIXES = {
     "IncompleteTransactions": "TXN",
     "RevokedTokens": "RVK",
     "ApprovalRequests": "REQ",
+    "CustomRoles": "ROL",
 }
 
 REQUIRED_TABS = {
+    "CustomRoles": ["role_id", "role_name", "description", "permissions_json", "created_by", "created_at", "updated_at"],
     "IdAllocations": ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
     "RevokedTokens": ["token_id", "jti", "user_id", "revoked_at", "expires_at", "reason"],
     "ApprovalRequests": ["request_id", "request_type", "target_user_id", "requested_by", "requested_at", "payload_json", "status", "decided_by", "decided_at", "decision_notes", "execution_error", "executed_at"],

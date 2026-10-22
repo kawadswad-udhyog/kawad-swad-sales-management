@@ -3,8 +3,7 @@ Authoritative Inventory Engine
 Implements Part 2 and Part 7 of the specification.
 """
 
-from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from .units import (
     round_stock,
     to_decimal,
@@ -82,6 +81,92 @@ def calculate_finished_stock_balance(
         return {clean_pid: balances.get(clean_pid, 0)}
 
     return balances
+
+
+def calculate_warehouse_stock_balance(
+    salesman_stock_ledger: List[Dict[str, Any]],
+    product_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Calculate Central Warehouse (Company) packet balances from SalesmanStockLedger:
+    Warehouse = sum(COMPANY_RECEIPT + POSITIVE_ADJUSTMENT + RETURN_FROM_SALESMAN + COMPANY_ADJUSTMENT)
+              - sum(ISSUE_TO_SALESMAN + ISSUED + NEGATIVE_ADJUSTMENT)
+    """
+    balances: Dict[str, int] = {}
+    for txn in salesman_stock_ledger:
+        pid = str(txn.get("product_id", "")).strip()
+        if not pid:
+            continue
+        kind = str(txn.get("txn_type", "")).strip().upper()
+        try:
+            qty = abs(int(float(txn.get("quantity", 0) or 0)))
+        except (TypeError, ValueError):
+            qty = 0
+
+        if kind in {"COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT", "RETURN_FROM_SALESMAN", "COMPANY_ADJUSTMENT"}:
+            balances[pid] = balances.get(pid, 0) + qty
+        elif kind in {"ISSUE_TO_SALESMAN", "ISSUED", "NEGATIVE_ADJUSTMENT"}:
+            balances[pid] = balances.get(pid, 0) - qty
+
+    if product_id:
+        clean_pid = str(product_id).strip()
+        return {clean_pid: balances.get(clean_pid, 0)}
+    return balances
+
+
+def calculate_salesman_stock_balance(
+    salesman_stock_ledger: List[Dict[str, Any]],
+    salesman_user_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+) -> Any:
+    """
+    Calculate Salesman assigned packet balances from SalesmanStockLedger:
+    Salesman = sum(ISSUE_TO_SALESMAN + SALESMAN_POSITIVE_ADJUSTMENT + ISSUED)
+             - sum(RETURN_FROM_SALESMAN + SOLD_DELIVERY + SALE_DELIVERY + RETURNED + SALESMAN_NEGATIVE_ADJUSTMENT)
+    """
+    salesman_map: Dict[Tuple[str, str], int] = {}
+    for txn in salesman_stock_ledger:
+        pid = str(txn.get("product_id", "")).strip()
+        s_user = str(txn.get("salesman_user_id", "")).strip()
+        if not pid or not s_user:
+            continue
+        kind = str(txn.get("txn_type", "")).strip().upper()
+        try:
+            qty = abs(int(float(txn.get("quantity", 0) or 0)))
+        except (TypeError, ValueError):
+            qty = 0
+
+        key = (s_user, pid)
+        if kind in {"ISSUE_TO_SALESMAN", "SALESMAN_POSITIVE_ADJUSTMENT", "ISSUED"}:
+            salesman_map[key] = salesman_map.get(key, 0) + qty
+        elif kind in {"RETURN_FROM_SALESMAN", "SOLD_DELIVERY", "SALE_DELIVERY", "RETURNED", "SALESMAN_NEGATIVE_ADJUSTMENT"}:
+            salesman_map[key] = salesman_map.get(key, 0) - qty
+
+    if salesman_user_id and product_id:
+        return salesman_map.get((salesman_user_id.strip(), product_id.strip()), 0)
+    elif salesman_user_id:
+        return {pid: qty for (s_id, pid), qty in salesman_map.items() if s_id == salesman_user_id.strip()}
+    return salesman_map
+
+
+def calculate_physical_count_variance(
+    expected_count: int,
+    physical_count: int,
+) -> Dict[str, Any]:
+    """
+    Calculates physical stock reconciliation variance:
+    variance = physical_count - expected_count
+    """
+    expected = int(expected_count or 0)
+    physical = int(physical_count or 0)
+    variance = physical - expected
+    return {
+        "expected_stock": expected,
+        "physical_count": physical,
+        "variance": variance,
+        "status": "BALANCED" if variance == 0 else ("SURPLUS" if variance > 0 else "DEFICIT"),
+    }
+
 
 
 def calculate_raw_material_balance(

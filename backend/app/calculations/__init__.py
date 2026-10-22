@@ -43,6 +43,9 @@ from .costing import (
 from .inventory import (
     calculate_bulk_stock_balance,
     calculate_finished_stock_balance,
+    calculate_warehouse_stock_balance,
+    calculate_salesman_stock_balance,
+    calculate_physical_count_variance,
     calculate_raw_material_balance,
     calculate_consolidated_finished_goods_register,
 )
@@ -71,6 +74,9 @@ __all__ = [
     "calculate_finished_sku_cost",
     "calculate_bulk_stock_balance",
     "calculate_finished_stock_balance",
+    "calculate_warehouse_stock_balance",
+    "calculate_salesman_stock_balance",
+    "calculate_physical_count_variance",
     "calculate_raw_material_balance",
     "calculate_consolidated_finished_goods_register",
 ]

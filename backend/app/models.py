@@ -59,6 +59,19 @@ class UserStatusUpdate(BaseModel):
     active: bool
     reason: Optional[str] = ""
 
+class CustomRoleCreate(BaseModel):
+    role_name: str
+    description: Optional[str] = ""
+    permissions: Dict[str, List[str]]
+
+class CustomRoleResponse(BaseModel):
+    role_id: str
+    role_name: str
+    description: str = ""
+    permissions: Dict[str, List[str]]
+    created_at: str = ""
+    created_by: str = ""
+
 class ApprovalRequestModel(BaseModel):
     request_id: str
     request_type: str  # CREATE_USER, UPDATE_USER, DEACTIVATE_USER, REACTIVATE_USER, RESET_PASSWORD
