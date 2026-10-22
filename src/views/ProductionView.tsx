@@ -114,7 +114,17 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       apiRequest<Row[]>('/api/production/batches'),
       apiRequest<Row>('/api/production/summary'),
     ]);
-    if (bRes.status === 'fulfilled' && Array.isArray(bRes.value)) setBatches([...bRes.value].reverse());
+    if (bRes.status === 'fulfilled' && Array.isArray(bRes.value)) {
+      const normalized = bRes.value.map((b) => {
+        const id = String(b.production_id || b.batch_id || '').trim();
+        return {
+          ...b,
+          production_id: id,
+          batch_id: id,
+        };
+      });
+      setBatches([...normalized].reverse());
+    }
     if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
   };
 
@@ -1160,9 +1170,11 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
             {batches
               .filter(b => String(b.status).toUpperCase() === 'PENDING')
-              .map(b => (
+              .map(b => {
+                const bId = String(b.production_id || b.batch_id || '').trim();
+                return (
                 <div
-                  key={b.production_id}
+                  key={bId || Math.random()}
                   style={{
                     padding: '10px 0',
                     borderTop: '1px solid #e2e8f0',
@@ -1172,7 +1184,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     flexWrap: 'wrap',
                   }}
                 >
-                  <b>{b.production_id}</b>
+                  <b>{bId || 'Batch'}</b>
                   <span>
                     {b.product_name_snapshot}: <b>{b.net_quantity_kg} kg net</b>
                     {b.flour_base_used_kg && ` (Flour: ${b.flour_base_used_kg} kg)`}
@@ -1182,15 +1194,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       <button
                         style={{
                           ...btn,
-                          background: (!isGoogleSheetsConnected || !persistentWritesEnabled) ? '#64748b' : '#166534',
-                          cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                          background: (!isGoogleSheetsConnected || !persistentWritesEnabled || !bId) ? '#64748b' : '#166534',
+                          cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId) ? 'not-allowed' : 'pointer',
                         }}
-                        disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled}
+                        disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                         title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch approval locked.' : ''}
                         onClick={() =>
                           runAction(
                             () =>
-                              apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
+                              apiRequest(`/api/production/batches/${encodeURIComponent(bId)}/approval`, {
                                 method: 'POST',
                                 body: JSON.stringify({ approved: true, notes: 'Approved by Owner' }),
                               }),
@@ -1204,15 +1216,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       <button
                         style={{
                           ...btn,
-                          background: (!isGoogleSheetsConnected || !persistentWritesEnabled) ? '#64748b' : '#b91c1c',
-                          cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                          background: (!isGoogleSheetsConnected || !persistentWritesEnabled || !bId) ? '#64748b' : '#b91c1c',
+                          cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId) ? 'not-allowed' : 'pointer',
                         }}
-                        disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled}
+                        disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                         title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch rejection locked.' : ''}
                         onClick={() =>
                           runAction(
                             () =>
-                              apiRequest(`/api/production/batches/${encodeURIComponent(b.production_id)}/approval`, {
+                              apiRequest(`/api/production/batches/${encodeURIComponent(bId)}/approval`, {
                                 method: 'POST',
                                 body: JSON.stringify({ approved: false, notes: 'Rejected by Owner' }),
                               }),
@@ -1230,7 +1242,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     </span>
                   )}
                 </div>
-              ))}
+              );
+            })}
           </div>
         </>
       )}

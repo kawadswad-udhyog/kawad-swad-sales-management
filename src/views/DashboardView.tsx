@@ -254,6 +254,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             {pendingClosingsCount}
           </strong>
         </div>
+        {(dashboardMetrics?.pending_production_approvals || 0) > 0 && (
+          <div className="metric" style={{ background: '#ecfdf5', borderColor: '#a7f3d0' }}>
+            <span style={{ color: '#047857' }}>Production Approvals</span>
+            <strong style={{ color: '#047857' }}>{dashboardMetrics?.pending_production_approvals}</strong>
+          </div>
+        )}
         {(dashboardMetrics?.pending_discrepancies || 0) > 0 && (
           <div className="metric" style={{ background: '#fef2f2', borderColor: '#fca5a5' }}>
             <span style={{ color: '#b91c1c' }}>Stock Discrepancies</span>
@@ -273,6 +279,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
         <div className="card">
           <h2>Quick Actions</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {(dashboardMetrics?.pending_production_approvals || 0) > 0 && (
+              <button
+                className="secondary"
+                style={{ justifyContent: 'flex-start', padding: '12px', borderColor: '#10b981', background: '#ecfdf5', color: '#065f46', fontWeight: 600 }}
+                onClick={() => onNavigate('approvals')}
+              >
+                🏭 Review Pending Production Batches ({dashboardMetrics?.pending_production_approvals})
+              </button>
+            )}
             <button
               className="secondary"
               style={{ justifyContent: 'flex-start', padding: '12px' }}

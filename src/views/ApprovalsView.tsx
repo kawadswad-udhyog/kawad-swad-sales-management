@@ -40,7 +40,15 @@ export const ApprovalsView: React.FC = () => {
     try {
       const res = await apiRequest<BatchRow[]>('/api/production/batches');
       if (Array.isArray(res)) {
-        setBatches([...res].reverse());
+        const normalized = res.map((b) => {
+          const id = String(b.production_id || b.batch_id || '').trim();
+          return {
+            ...b,
+            production_id: id,
+            batch_id: id,
+          };
+        });
+        setBatches([...normalized].reverse());
       }
     } catch (err) {
       console.warn('Could not load production batches for approvals', err);
@@ -328,11 +336,12 @@ export const ApprovalsView: React.FC = () => {
               </thead>
               <tbody>
                 {filteredBatches.map((b) => {
-                  const isBusy = busyActionId === b.production_id;
+                  const bId = String(b.production_id || b.batch_id || '').trim();
+                  const isBusy = busyActionId === bId;
                   const isPending = String(b.status).toUpperCase() === 'PENDING';
                   return (
-                    <tr key={b.production_id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                      <td style={{ padding: '10px 12px', fontWeight: 600, color: '#0f172a' }}>{b.production_id}</td>
+                    <tr key={bId || Math.random()} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '10px 12px', fontWeight: 600, color: '#0f172a' }}>{bId || '-'}</td>
                       <td style={{ padding: '10px 12px', color: '#64748b' }}>{b.production_date || '-'}</td>
                       <td style={{ padding: '10px 12px', fontWeight: 500 }}>{b.product_name_snapshot || '-'}</td>
                       <td style={{ padding: '10px 12px', textAlign: 'right' }}>{b.flour_base_used_kg || '-'}</td>
@@ -351,8 +360,8 @@ export const ApprovalsView: React.FC = () => {
                           isOwner ? (
                             <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
                               <button
-                                disabled={isBusy || !isGoogleSheetsConnected || !persistentWritesEnabled}
-                                onClick={() => handleApproveBatch(b.production_id)}
+                                disabled={isBusy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
+                                onClick={() => handleApproveBatch(bId)}
                                 style={{
                                   padding: '5px 10px',
                                   fontSize: '0.78rem',
@@ -361,15 +370,15 @@ export const ApprovalsView: React.FC = () => {
                                   color: '#ffffff',
                                   border: 'none',
                                   borderRadius: '6px',
-                                  cursor: isBusy ? 'not-allowed' : 'pointer',
+                                  cursor: isBusy || !bId ? 'not-allowed' : 'pointer',
                                 }}
                                 title="Approve batch, consume recipe raw materials, and credit bulk stock"
                               >
                                 {isBusy ? 'Saving…' : 'Approve'}
                               </button>
                               <button
-                                disabled={isBusy || !isGoogleSheetsConnected || !persistentWritesEnabled}
-                                onClick={() => handleRejectBatch(b.production_id)}
+                                disabled={isBusy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
+                                onClick={() => handleRejectBatch(bId)}
                                 style={{
                                   padding: '5px 10px',
                                   fontSize: '0.78rem',
@@ -378,7 +387,7 @@ export const ApprovalsView: React.FC = () => {
                                   color: '#ffffff',
                                   border: 'none',
                                   borderRadius: '6px',
-                                  cursor: isBusy ? 'not-allowed' : 'pointer',
+                                  cursor: isBusy || !bId ? 'not-allowed' : 'pointer',
                                 }}
                               >
                                 Reject
