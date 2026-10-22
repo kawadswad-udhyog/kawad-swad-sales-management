@@ -219,8 +219,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           <strong>₹{todayRevenue.toFixed(2)}</strong>
         </div>
         <div className="metric">
-          <span>Today’s Papad (kg)</span>
+          <span>Today’s Papad Sold</span>
           <strong>{typeof dashboardMetrics?.today_kg_sold === 'number' ? `${dashboardMetrics.today_kg_sold.toFixed(1)} kg` : '0.0 kg'}</strong>
+        </div>
+        <div className="metric">
+          <span>Today’s Production</span>
+          <strong style={{ color: '#166534' }}>{(dashboardMetrics?.today_production_kg ?? 0).toFixed(1)} kg</strong>
+        </div>
+        <div className="metric">
+          <span>Available Finished Stock</span>
+          <strong style={{ color: '#0369a1' }}>{(dashboardMetrics?.available_finished_packets ?? 0).toLocaleString()} pkts</strong>
+        </div>
+        <div className="metric">
+          <span>Floor Attendance Today</span>
+          <strong>
+            {dashboardMetrics?.workers_present_today ?? 0} / {dashboardMetrics?.active_workers_count ?? 0} Present
+          </strong>
         </div>
         <div className="metric">
           <span>Month bills</span>
@@ -231,7 +245,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           <strong>₹{monthRevenue.toFixed(2)}</strong>
         </div>
         <div className="metric">
-          <span>Month Papad (kg)</span>
+          <span>Month Papad Sold</span>
           <strong>{typeof dashboardMetrics?.monthly_kg_sold === 'number' ? `${dashboardMetrics.monthly_kg_sold.toFixed(1)} kg` : '0.0 kg'}</strong>
         </div>
         <div className="metric">
@@ -257,7 +271,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
         {(dashboardMetrics?.pending_production_approvals || 0) > 0 && (
           <div className="metric" style={{ background: '#ecfdf5', borderColor: '#a7f3d0' }}>
             <span style={{ color: '#047857' }}>Production Approvals</span>
-            <strong style={{ color: '#047857' }}>{dashboardMetrics?.pending_production_approvals}</strong>
+            <strong style={{ color: '#047857' }}>
+              {dashboardMetrics?.pending_production_approvals} ({(dashboardMetrics?.pending_production_kg || 0).toFixed(1)} kg)
+            </strong>
+          </div>
+        )}
+        {(dashboardMetrics?.zero_stock_items_count || 0) > 0 && (
+          <div className="metric" style={{ background: '#fef2f2', borderColor: '#fca5a5' }}>
+            <span style={{ color: '#b91c1c' }}>Zero Stock SKUs</span>
+            <strong style={{ color: '#b91c1c' }}>{dashboardMetrics?.zero_stock_items_count} items</strong>
           </div>
         )}
         {(dashboardMetrics?.pending_discrepancies || 0) > 0 && (
@@ -291,6 +313,27 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             <button
               className="secondary"
               style={{ justifyContent: 'flex-start', padding: '12px' }}
+              onClick={() => onNavigate('production')}
+            >
+              🏭 Record Daily Production (Bulk Papad)
+            </button>
+            <button
+              className="secondary"
+              style={{ justifyContent: 'flex-start', padding: '12px' }}
+              onClick={() => onNavigate('attendance')}
+            >
+              👥 Mark Floor Worker Attendance
+            </button>
+            <button
+              className="secondary"
+              style={{ justifyContent: 'flex-start', padding: '12px' }}
+              onClick={() => onNavigate('packaging')}
+            >
+              📦 Record Packaging (Packets from Bulk)
+            </button>
+            <button
+              className="secondary"
+              style={{ justifyContent: 'flex-start', padding: '12px' }}
               onClick={() => onNavigate('sales')}
             >
               📄 Issue New Sale & Generate Bill
@@ -300,7 +343,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               style={{ justifyContent: 'flex-start', padding: '12px' }}
               onClick={() => onNavigate('stock')}
             >
-              📦 Record Stock Movement / Dispatch
+              📦 Finished Goods Register & Inventory
             </button>
             <button
               className="secondary"

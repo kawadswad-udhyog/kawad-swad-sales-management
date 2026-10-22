@@ -44,6 +44,7 @@ from .inventory import (
     calculate_bulk_stock_balance,
     calculate_finished_stock_balance,
     calculate_raw_material_balance,
+    calculate_consolidated_finished_goods_register,
 )
 
 __all__ = [
@@ -71,4 +72,5 @@ __all__ = [
     "calculate_bulk_stock_balance",
     "calculate_finished_stock_balance",
     "calculate_raw_material_balance",
+    "calculate_consolidated_finished_goods_register",
 ]

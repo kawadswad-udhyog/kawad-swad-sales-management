@@ -424,12 +424,32 @@ class AuditLogCreate(BaseModel):
     reason: Optional[str] = ""
     related_record_id: Optional[str] = ""
 
+# Attendance Models
+class BulkAttendanceItem(BaseModel):
+    worker_id: str
+    status: str = "PRESENT"
+    notes: Optional[str] = ""
+
+class BulkAttendanceCreate(BaseModel):
+    attendance_date: str
+    records: List[BulkAttendanceItem]
+
+class BulkAttendanceResponse(BaseModel):
+    status: str
+    attendance_date: str
+    saved_count: int
+    skipped_count: int
+    saved_records: List[Dict[str, Any]] = []
+    skipped_workers: List[Dict[str, Any]] = []
+    message: str
+
 # Dashboard Models
 class DashboardMetrics(BaseModel):
     today_sales: float = 0.0
     today_cash: float = 0.0
     pending_expenses: int = 0
     low_stock_items: int = 0
+    zero_stock_items_count: int = 0
     active_salesmen: int = 0
     total_bills_today: int = 0
     monthly_sales: float = 0.0
@@ -439,7 +459,13 @@ class DashboardMetrics(BaseModel):
     incomplete_transactions_count: int = 0
     pending_discrepancies: int = 0
     pending_production_approvals: int = 0
+    today_production_kg: float = 0.0
+    pending_production_kg: float = 0.0
+    available_finished_packets: int = 0
+    active_workers_count: int = 0
+    workers_present_today: int = 0
     role: str = "OWNER"
     salesman_user_id: Optional[str] = None
+
 
 

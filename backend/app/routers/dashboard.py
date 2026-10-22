@@ -127,13 +127,51 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
             if s_id == user_id:
                 company_stock[p_id] = company_stock.get(p_id, 0) + qty
 
-    low_stock_items = sum(1 for p_id, bal in company_stock.items() if bal < 50)
+    low_stock_items = sum(1 for p_id, bal in company_stock.items() if 0 < bal < 50)
+    zero_stock_items = sum(1 for p_id, bal in company_stock.items() if bal <= 0)
+
+    # Production metrics
+    today_prod_kg = sum(
+        float(b.get("net_quantity_kg") or b.get("saleable_output_kg") or b.get("quantity_kg") or 0.0)
+        for b in production_batches
+        if str(b.get("status", "")).upper() == "APPROVED" and str(b.get("production_date", "")).strip() == today_str
+    ) if manager_view else 0.0
+
+    pending_prod_kg = sum(
+        float(b.get("net_quantity_kg") or b.get("saleable_output_kg") or b.get("quantity_kg") or 0.0)
+        for b in production_batches
+        if str(b.get("status", "")).upper() == "PENDING"
+    ) if manager_view else 0.0
+
+    # Attendance metrics
+    workers = db.get_records("Workers", fresh=False)
+    worker_attendance = db.get_records("WorkerAttendance", fresh=False)
+    active_workers_count = sum(1 for w in workers if str(w.get("active", "true")).lower() == "true")
+    workers_present_today = sum(
+        1 for a in worker_attendance
+        if str(a.get("attendance_date", "")).strip() == today_str and str(a.get("status", "")).upper() in {"PRESENT", "HALF_DAY"}
+    )
+
+    # Finished stock available across factory and warehouse
+    prod_stock_ledger = db.get_records("ProductionStockLedger", fresh=False)
+    factory_pkts = 0
+    for p_txn in prod_stock_ledger:
+        m_type = str(p_txn.get("movement_type", "")).upper()
+        pkts = int(float(p_txn.get("quantity_packets", 0) or 0))
+        if m_type in {"PACKED", "POSITIVE_ADJUSTMENT", "PACKAGING_RECOVERY", "FACTORY_RECONCILIATION"}:
+            factory_pkts += pkts
+        elif m_type in {"DISPATCH", "NEGATIVE_ADJUSTMENT"}:
+            factory_pkts -= pkts
+    factory_pkts = max(0, factory_pkts)
+    warehouse_pkts = sum(max(0, bal) for bal in company_stock.values()) if manager_view else sum(max(0, bal) for p_id, bal in company_stock.items())
+    total_finished_pkts = factory_pkts + warehouse_pkts
 
     return DashboardMetrics(
         today_sales=round(today_sales_total, 2),
         today_cash=round(today_cash_total, 2),
         pending_expenses=pending_expenses,
         low_stock_items=low_stock_items,
+        zero_stock_items_count=zero_stock_items,
         active_salesmen=active_salesmen,
         total_bills_today=total_bills_today,
         monthly_sales=round(monthly_sales_total, 2),
@@ -143,6 +181,12 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
         incomplete_transactions_count=incomplete_count,
         pending_discrepancies=pending_disc,
         pending_production_approvals=pending_prod,
+        today_production_kg=round(today_prod_kg, 2),
+        pending_production_kg=round(pending_prod_kg, 2),
+        available_finished_packets=total_finished_pkts,
+        active_workers_count=active_workers_count,
+        workers_present_today=workers_present_today,
         role=role_name,
         salesman_user_id=user_id if not manager_view else None,
     )
+

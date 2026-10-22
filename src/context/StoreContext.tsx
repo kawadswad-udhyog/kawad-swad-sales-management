@@ -74,6 +74,12 @@ export interface DashboardMetrics {
   incomplete_transactions_count?: number;
   pending_discrepancies?: number;
   pending_production_approvals?: number;
+  today_production_kg?: number;
+  pending_production_kg?: number;
+  available_finished_packets?: number;
+  active_workers_count?: number;
+  workers_present_today?: number;
+  zero_stock_items_count?: number;
   role?: string;
   salesman_user_id?: string | null;
 }

@@ -312,33 +312,40 @@ class TestERPStabilization(unittest.TestCase):
     # =========================================================
 
     def test_owner_only_production_access_enforcement(self):
-        # 1. Owner CAN access
+        # 1. Owner CAN access summary
         summary = asyncio.run(prod.summary(self.owner_user))
         self.assertIn("bulk_stock", summary)
 
-        # 2. PA MUST BE DENIED (403)
-        with self.assertRaises(HTTPException) as ctx_pa:
-            asyncio.run(prod.summary(self.pa_user))
-        self.assertEqual(ctx_pa.exception.status_code, 403)
-        self.assertIn("Only the Owner", str(ctx_pa.exception.detail))
+        # 2. PA has entry access in ERP 2.0
+        pa_summary = asyncio.run(prod.summary(self.pa_user))
+        self.assertIn("bulk_stock", pa_summary)
 
-        # 3. Salesman MUST BE DENIED (403)
+        # 3. PA can create pending batch
+        batch = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(product_id="PRD-M-200", production_date="2026-10-20", quantity_kg=10),
+            self.pa_user,
+        ))
+        self.assertEqual(batch["status"], "PENDING")
+
+        # 4. PA MUST BE DENIED (403) on batch approval (strictly Owner-only)
+        with self.assertRaises(HTTPException) as ctx_approve:
+            asyncio.run(prod.approve_batch(
+                batch["batch_id"],
+                prod.ApprovalRequest(approved=True),
+                self.pa_user,
+            ))
+        self.assertEqual(ctx_approve.exception.status_code, 403)
+        self.assertIn("Owner", str(ctx_approve.exception.detail))
+
+        # 5. Salesman MUST BE DENIED (403) from production access
         with self.assertRaises(HTTPException) as ctx_sales:
             asyncio.run(prod.summary(self.salesman_user))
         self.assertEqual(ctx_sales.exception.status_code, 403)
 
-        # 4. Factory Worker MUST BE DENIED (403)
+        # 6. Factory Worker MUST BE DENIED (403) from production access
         with self.assertRaises(HTTPException) as ctx_worker:
             asyncio.run(prod.summary(self.worker_user))
         self.assertEqual(ctx_worker.exception.status_code, 403)
-
-        # 5. Direct batch creation attempt by PA must be rejected
-        with self.assertRaises(HTTPException) as ctx_batch:
-            asyncio.run(prod.create_batch(
-                prod.ProductionCreate(product_id="PRD-M-200", production_date="2026-10-20", quantity_kg=10),
-                self.pa_user,
-            ))
-        self.assertEqual(ctx_batch.exception.status_code, 403)
 
 
 if __name__ == "__main__":

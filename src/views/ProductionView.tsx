@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { apiRequest } from '../services/api';
 import { useStore } from '../context/StoreContext';
+import { exportSheetToExcel } from '../utils/exportToExcel';
+import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
 
 type Product = { product_id: string; product_name: string; sku: string; active: boolean; pack_weight_g: number };
 type Row = Record<string, any>;
@@ -29,6 +31,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [packaging, setPackaging] = useState<Row[]>([]);
   const [dispatches, setDispatches] = useState<Row[]>([]);
   const [summary, setSummary] = useState<Row>({ bulk_stock: [], finished_stock: [], workers_active: 0, pending_production: 0 });
+  const [registerItems, setRegisterItems] = useState<FinishedGoodsRegisterItem[]>([]);
+  const [registerSummary, setRegisterSummary] = useState<FinishedGoodsRegisterSummary | null>(null);
+  const [registerFamilyFilter, setRegisterFamilyFilter] = useState<string>('ALL');
+  const [registerWeightFilter, setRegisterWeightFilter] = useState<string>('ALL');
+  const [registerSearch, setRegisterSearch] = useState<string>('');
+  const [hideZeroStock, setHideZeroStock] = useState<boolean>(false);
+  const [recoveringBatchId, setRecoveringBatchId] = useState<string | null>(null);
   const [tab, setTab] = useState(initialTab);
   const [batchSearch, setBatchSearch] = useState('');
   const [batchStatusFilter, setBatchStatusFilter] = useState('ALL');
@@ -71,9 +80,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       apiRequest<Row[]>('/api/production/dispatches'),
       apiRequest<Row>('/api/production/summary'),
       apiRequest<Row[]>('/api/production/attendance'),
+      apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>('/api/production/finished-goods-register'),
     ]);
 
-    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes] = results;
+    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes] = results;
 
     if (pRes.status === 'fulfilled' && Array.isArray(pRes.value)) setProducts(pRes.value);
     if (wRes.status === 'fulfilled' && Array.isArray(wRes.value)) setWorkers(wRes.value);
@@ -82,7 +92,19 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     if (bRes.status === 'fulfilled' && Array.isArray(bRes.value)) setBatches([...bRes.value].reverse());
     if (pkRes.status === 'fulfilled' && Array.isArray(pkRes.value)) setPackaging([...pkRes.value].reverse());
     if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) setDispatches([...dRes.value].reverse());
-    if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+    if (sRes.status === 'fulfilled' && sRes.value) {
+      setSummary(sRes.value);
+      if (sRes.value.finished_goods_register && Array.isArray(sRes.value.finished_goods_register)) {
+        setRegisterItems(sRes.value.finished_goods_register);
+      }
+      if (sRes.value.register_summary) {
+        setRegisterSummary(sRes.value.register_summary);
+      }
+    }
+    if (regRes.status === 'fulfilled' && regRes.value) {
+      if (Array.isArray(regRes.value.register)) setRegisterItems(regRes.value.register);
+      if (regRes.value.summary) setRegisterSummary(regRes.value.summary);
+    }
     if (aRes.status === 'fulfilled' && Array.isArray(aRes.value)) setAttendance([...aRes.value].reverse());
 
     const anyFailed = results.some(r => r.status === 'rejected');
@@ -94,7 +116,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const refreshSummary = async () => {
     try {
       const s = await apiRequest<Row>('/api/production/summary');
-      if (s) setSummary(s);
+      if (s) {
+        setSummary(s);
+        if (s.finished_goods_register && Array.isArray(s.finished_goods_register)) {
+          setRegisterItems(s.finished_goods_register);
+        }
+        if (s.register_summary) {
+          setRegisterSummary(s.register_summary);
+        }
+      }
     } catch (e) {
       console.warn('Could not refresh summary', e);
     }
@@ -137,6 +167,32 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
   };
 
+  const refreshRegister = async () => {
+    try {
+      const res = await apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>(
+        '/api/production/finished-goods-register'
+      );
+      if (res?.register) setRegisterItems(res.register);
+      if (res?.summary) setRegisterSummary(res.summary);
+    } catch (e) {
+      console.warn('Could not refresh finished goods register', e);
+    }
+  };
+
+  const handleRecoverPackaging = async (packagingId: string) => {
+    if (busy || !packagingId) return;
+    setRecoveringBatchId(packagingId);
+    await runAction(
+      () => apiRequest(`/api/production/packaging/${encodeURIComponent(packagingId)}/recover`, { method: 'POST' }),
+      `Packaging batch ${packagingId} recovered successfully. Stock ledger movements posted.`,
+      async () => {
+        await refreshPackaging();
+        await refreshRegister();
+      }
+    );
+    setRecoveringBatchId(null);
+  };
+
   const refreshWorkers = async () => {
     const [wRes, sRes] = await Promise.allSettled([
       apiRequest<Row[]>('/api/production/workers'),
@@ -175,8 +231,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     }
   }, [canManage]);
 
-  const runAction = async (fn: () => Promise<unknown>, success: string, targetedRefresh?: () => Promise<void>) => {
-    if (busy) return;
+  const runAction = async (fn: () => Promise<unknown>, success: string, targetedRefresh?: () => Promise<void>): Promise<boolean> => {
+    if (busy) return false;
     setBusy(true);
     setMessage('');
     try {
@@ -192,8 +248,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
         console.warn('Post-action screen refresh warning:', refreshErr);
         setMessage(`${success} (Data saved, refreshing screen...)`);
       }
+      return true;
     } catch (e: any) {
       setMessage(e?.message || 'Action failed.');
+      return false;
     } finally {
       setBusy(false);
     }
@@ -306,6 +364,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       )}
 
       <div>
+        {sectionButton('finished_goods', '📦 Finished Goods Register')}
         {sectionButton('master_recipes', '📜 Papad Formula Master (v2.0)')}
         {sectionButton('overview', 'Overview & Stock')}
         {sectionButton('workers', 'Workers')}
@@ -1056,9 +1115,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             </p>
 
             <form
-              onSubmit={e => {
+              onSubmit={async e => {
                 e.preventDefault();
-                runAction(
+                const ok = await runAction(
                   () =>
                     apiRequest('/api/production/batches', {
                       method: 'POST',
@@ -1069,10 +1128,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         flour_base_used_kg: production.flour_base_used_kg ? Number(production.flour_base_used_kg) : undefined,
                       }),
                     }),
-                  'Production batch recorded and sent for approval.',
+                  'Production batch saved as PENDING APPROVAL. Owner will review before stock is credited.',
                   refreshBatches
                 );
-                setProduction({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });
+                if (ok) {
+                  setProduction({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });
+                }
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10 }}
             >
@@ -1098,7 +1159,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 type="number"
                 min="0.001"
                 step="0.001"
-                placeholder="Gross produced kg"
+                placeholder="Gross Produced (kg) *"
                 value={production.quantity_kg}
                 onChange={e => setProduction({ ...production, quantity_kg: e.target.value })}
                 required
@@ -1108,13 +1169,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 type="number"
                 min="0"
                 step="0.001"
-                placeholder="Rejected / wastage kg"
+                placeholder="Rejected / Wastage (kg)"
                 value={production.wastage_kg}
                 onChange={e => setProduction({ ...production, wastage_kg: e.target.value })}
               />
               <input
                 style={input}
-                placeholder="Notes / Batch shift"
+                placeholder="Notes / Batch shift (Optional)"
                 value={production.notes}
                 onChange={e => setProduction({ ...production, notes: e.target.value })}
               />
@@ -1143,11 +1204,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     marginLeft: 'auto',
                     background: (!isGoogleSheetsConnected || !persistentWritesEnabled) ? '#64748b' : '#166534',
                     cursor: (busy || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                    fontWeight: 700,
                   }}
                   disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled}
                   title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch creation locked to prevent data loss.' : ''}
                 >
-                  {(!isGoogleSheetsConnected || !persistentWritesEnabled) ? '🔒 Locked (Sheets Disconnected)' : 'Save pending production'}
+                  {(!isGoogleSheetsConnected || !persistentWritesEnabled) ? '🔒 Locked (Sheets Disconnected)' : 'SAVE PRODUCTION'}
                 </button>
               </div>
             </form>
@@ -1253,10 +1315,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
         <>
           <div style={card}>
             <h3>Convert Unpackaged Bulk Papad into Packets</h3>
+            <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 12px' }}>
+              Recording packaging credits finished packets directly to the <b>ProductionStockLedger</b>. Product availability is pre-validated
+              before creating the batch record to prevent orphaned rows.
+            </p>
             <form
-              onSubmit={e => {
+              onSubmit={async e => {
                 e.preventDefault();
-                runAction(
+                const ref = 'PKG-' + Date.now();
+                const ok = await runAction(
                   () =>
                     apiRequest('/api/production/packaging', {
                       method: 'POST',
@@ -1266,20 +1333,26 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         packets_200g: Number(pack.packets_200g),
                         packets_500g: Number(pack.packets_500g),
                         packets_1000g: Number(pack.packets_1000g),
+                        reference: ref,
                       }),
                     }),
-                  'Packaging recorded. Review any flagged kg difference.',
-                  refreshPackaging
+                  'Packaging recorded. Finished packets credited to factory stock ledger.',
+                  async () => {
+                    await refreshPackaging();
+                    await refreshRegister();
+                  }
                 );
-                setPack({
-                  product_id: '',
-                  packaging_date: today,
-                  bulk_kg_used: '',
-                  packets_200g: '0',
-                  packets_500g: '0',
-                  packets_1000g: '0',
-                  notes: '',
-                });
+                if (ok) {
+                  setPack({
+                    product_id: '',
+                    packaging_date: today,
+                    bulk_kg_used: '',
+                    packets_200g: '0',
+                    packets_500g: '0',
+                    packets_1000g: '0',
+                    notes: '',
+                  });
+                }
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))', gap: 10 }}
             >
@@ -1338,21 +1411,82 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               </button>
             </form>
             <p style={{ color: '#64748b' }}>
-              Expected kg = 200 g packets × 0.2 + 500 g packets × 0.5 + 1 kg packets × 1. The system records and flags the difference
-              for review.
+              Expected kg = 200 g packets × 0.2 + 500 g packets × 0.5 + 1 kg packets × 1. The system records and flags any difference
+              for physical audit reconciliation.
             </p>
           </div>
           <div style={card}>
-            <h3>Packaging history</h3>
-            {rowsTable(packaging, [
-              ['packaging_date', 'Date'],
-              ['product_name_snapshot', 'Product'],
-              ['bulk_kg_used', 'Bulk kg used'],
-              ['total_packets', 'Packets made'],
-              ['expected_kg', 'Expected kg'],
-              ['difference_kg', 'Difference kg'],
-              ['difference_status', 'Review status'],
-            ])}
+            <h3>Packaging history &amp; ledger recovery</h3>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: '#f1f5f9' }}>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Date</th>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Product</th>
+                    <th style={{ textAlign: 'right', padding: 9 }}>Bulk kg</th>
+                    <th style={{ textAlign: 'right', padding: 9 }}>Packets</th>
+                    <th style={{ textAlign: 'right', padding: 9 }}>Expected kg</th>
+                    <th style={{ textAlign: 'right', padding: 9 }}>Diff kg</th>
+                    <th style={{ textAlign: 'center', padding: 9 }}>Status</th>
+                    <th style={{ textAlign: 'center', padding: 9 }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {packaging.map((p, idx) => {
+                    const pId = String(p.packaging_id || idx);
+                    const isIncomplete = String(p.status).toUpperCase() === 'INCOMPLETE';
+                    const diff = Number(p.difference_kg || 0);
+                    return (
+                      <tr key={pId} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                        <td style={{ padding: 9 }}>{String(p.packaging_date || '-')}</td>
+                        <td style={{ padding: 9 }}><b>{String(p.product_name_snapshot || p.product_id || '-')}</b></td>
+                        <td style={{ textAlign: 'right', padding: 9 }}>{String(p.bulk_kg_used ?? '-')}</td>
+                        <td style={{ textAlign: 'right', padding: 9 }}>{String(p.total_packets ?? '-')}</td>
+                        <td style={{ textAlign: 'right', padding: 9 }}>{String(p.expected_kg ?? '-')}</td>
+                        <td style={{ textAlign: 'right', padding: 9, fontWeight: 600, color: diff !== 0 ? '#b91c1c' : '#166534' }}>
+                          {diff > 0 ? `+${diff}` : diff} kg
+                        </td>
+                        <td style={{ textAlign: 'center', padding: 9 }}>
+                          <span
+                            style={{
+                              padding: '3px 8px',
+                              borderRadius: 6,
+                              fontSize: 11,
+                              fontWeight: 600,
+                              background: isIncomplete ? '#fee2e2' : '#dcfce7',
+                              color: isIncomplete ? '#991b1b' : '#166534',
+                            }}
+                          >
+                            {String(p.status || (isIncomplete ? 'INCOMPLETE' : 'RECORDED'))}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: 'center', padding: 9 }}>
+                          {isIncomplete ? (
+                            <button
+                              style={{ ...btn, background: '#d97706', padding: '4px 10px', fontSize: 11 }}
+                              disabled={busy || recoveringBatchId === pId}
+                              onClick={() => handleRecoverPackaging(pId)}
+                              title="Post missing stock movements for this incomplete packaging batch"
+                            >
+                              {recoveringBatchId === pId ? 'Recovering...' : '⚠️ Recover Movements'}
+                            </button>
+                          ) : (
+                            <span style={{ color: '#64748b', fontSize: 12 }}>✓ Reconciled</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {packaging.length === 0 && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: 14, textAlign: 'center', color: '#64748b' }}>
+                        No packaging batches recorded yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </>
       )}
@@ -1361,11 +1495,14 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       {tab === 'dispatch' && (
         <>
           <div style={card}>
-            <h3>Dispatch Finished Packets to Sales Channels</h3>
+            <h3>Dispatch Finished Packets to Sales Channels &amp; Central Warehouse</h3>
+            <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 12px' }}>
+              Internal factory dispatches to <b>Central Warehouse</b> transfer factory stock into Company Warehouse stock without affecting external sales. Dispatches to external channels are tracked separately from completed sales.
+            </p>
             <form
-              onSubmit={e => {
+              onSubmit={async e => {
                 e.preventDefault();
-                runAction(
+                const ok = await runAction(
                   () =>
                     apiRequest('/api/production/dispatch', {
                       method: 'POST',
@@ -1374,20 +1511,39 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         quantity_packets: Number(dispatch.quantity_packets),
                       }),
                     }),
-                  'Dispatch recorded. It is a stock transfer, not a sale.',
-                  refreshDispatches
+                  dispatch.channel === 'WAREHOUSE'
+                    ? 'Dispatch recorded to Central Warehouse and credited to Company Stock.'
+                    : 'Dispatch recorded. It is a stock transfer, not a sale.',
+                  async () => {
+                    await refreshDispatches();
+                    await refreshRegister();
+                  }
                 );
-                setDispatch({ ...dispatch, quantity_packets: '', destination: '', reference: '', notes: '' });
+                if (ok) {
+                  setDispatch({ ...dispatch, quantity_packets: '', destination: '', reference: '', notes: '' });
+                }
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10 }}
             >
               {productSelect(dispatch.product_id, v => setDispatch({ ...dispatch, product_id: v }))}
-              <select style={input} value={dispatch.channel} onChange={e => setDispatch({ ...dispatch, channel: e.target.value })}>
-                <option value="ECOMMERCE">E-commerce</option>
-                <option value="RETAIL">Retail</option>
-                <option value="SALESMAN">Salesman</option>
-                <option value="WHOLESALE">Wholesale</option>
-                <option value="DISTRIBUTOR">Distributor</option>
+              <select
+                style={input}
+                value={dispatch.channel}
+                onChange={e => {
+                  const ch = e.target.value;
+                  setDispatch({
+                    ...dispatch,
+                    channel: ch,
+                    destination: ch === 'WAREHOUSE' && !dispatch.destination ? 'Company Central Warehouse' : dispatch.destination,
+                  });
+                }}
+              >
+                <option value="WAREHOUSE">🏢 Central Warehouse (Company Stock)</option>
+                <option value="ECOMMERCE">🛒 E-commerce (External Channel)</option>
+                <option value="RETAIL">🏪 Retail Counter (External Channel)</option>
+                <option value="SALESMAN">🚶 Salesman Field Stock</option>
+                <option value="WHOLESALE">📦 Wholesale</option>
+                <option value="DISTRIBUTOR">🚚 Distributor</option>
               </select>
               <input
                 style={input}
@@ -1437,6 +1593,270 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           </div>
         </>
       )}
+
+      {/* FINISHED GOODS REGISTER TAB */}
+      {tab === 'finished_goods' && (() => {
+        const filteredRegister = registerItems.filter(item => {
+          if (hideZeroStock && item.total_internal_on_hand_packets <= 0 && item.channels_dispatched_packets <= 0) {
+            return false;
+          }
+          if (registerFamilyFilter !== 'ALL') {
+            const fam = String(item.category || '').toUpperCase();
+            if (!fam.includes(registerFamilyFilter)) return false;
+          }
+          if (registerWeightFilter !== 'ALL') {
+            if (String(item.pack_weight_g) !== registerWeightFilter) return false;
+          }
+          if (registerSearch.trim()) {
+            const q = registerSearch.trim().toLowerCase();
+            const skuMatch = String(item.sku || '').toLowerCase().includes(q);
+            const nameMatch = String(item.product_name || '').toLowerCase().includes(q);
+            if (!skuMatch && !nameMatch) return false;
+          }
+          return true;
+        });
+
+        const handleExportExcel = () => {
+          const exportRows = filteredRegister.map(item => ({
+            'SKU': item.sku,
+            'Product Name': item.product_name,
+            'Category': item.category,
+            'Pack Weight (g)': item.pack_weight_g,
+            'Selling Unit': item.selling_unit,
+            'Factory Packets': item.factory_packets,
+            'Warehouse Packets': item.warehouse_packets,
+            'Salesmen In-Hand Packets': item.salesmen_packets,
+            'Total Internal On-Hand': item.total_internal_on_hand_packets,
+            'External Channels Dispatched': item.channels_dispatched_packets,
+            'Stock Status': item.stock_status,
+            'Active in Master': item.active ? 'YES' : 'NO',
+          }));
+          exportSheetToExcel('Kawad_Swad_Finished_Goods_Register', exportRows);
+        };
+
+        return (
+          <>
+            {/* KPI Summary Banner */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 12, marginBottom: 16 }}>
+              <div style={{ ...card, background: '#f8fafc', borderColor: '#cbd5e1' }}>
+                <small style={{ color: '#64748b' }}>Active Packet SKUs</small>
+                <h2 style={{ margin: '4px 0 0', color: '#0f172a' }}>
+                  {registerSummary?.active_skus ?? registerItems.length}
+                </h2>
+                <span style={{ fontSize: 11, color: '#475569' }}>
+                  {registerSummary?.active_with_stock ?? 0} with stock · {registerSummary?.active_zero_stock ?? 0} zero stock
+                </span>
+              </div>
+              <div style={{ ...card, background: '#f0fdf4', borderColor: '#bbf7d0' }}>
+                <small style={{ color: '#166534' }}>Factory Finished Packets</small>
+                <h2 style={{ margin: '4px 0 0', color: '#15803d' }}>
+                  {registerSummary?.factory_packets ?? 0}
+                </h2>
+                <span style={{ fontSize: 11, color: '#166534' }}>Packaged at factory</span>
+              </div>
+              <div style={{ ...card, background: '#eff6ff', borderColor: '#bfdbfe' }}>
+                <small style={{ color: '#1e40af' }}>Central Warehouse Packets</small>
+                <h2 style={{ margin: '4px 0 0', color: '#1d4ed8' }}>
+                  {registerSummary?.warehouse_packets ?? 0}
+                </h2>
+                <span style={{ fontSize: 11, color: '#1e40af' }}>Company stock in warehouse</span>
+              </div>
+              <div style={{ ...card, background: '#fdf4ff', borderColor: '#f5d0fe' }}>
+                <small style={{ color: '#86198f' }}>Salesmen In-Hand Packets</small>
+                <h2 style={{ margin: '4px 0 0', color: '#a21caf' }}>
+                  {registerSummary?.salesmen_packets ?? 0}
+                </h2>
+                <span style={{ fontSize: 11, color: '#86198f' }}>Field stock balances</span>
+              </div>
+              <div style={{ ...card, background: '#fefce8', borderColor: '#fef08a' }}>
+                <small style={{ color: '#854d0e', fontWeight: 600 }}>Total Internal On-Hand</small>
+                <h2 style={{ margin: '4px 0 0', color: '#a16207' }}>
+                  {registerSummary?.total_internal_on_hand_packets ?? 0}
+                </h2>
+                <span style={{ fontSize: 11, color: '#854d0e' }}>Factory + Warehouse + Salesmen</span>
+              </div>
+              <div style={{ ...card, background: '#f8fafc', borderColor: '#e2e8f0' }}>
+                <small style={{ color: '#475569' }}>Channels Dispatched</small>
+                <h2 style={{ margin: '4px 0 0', color: '#334155' }}>
+                  {registerSummary?.channels_dispatched_packets ?? 0}
+                </h2>
+                <span style={{ fontSize: 11, color: '#475569' }}>E-com / Retail / Wholesalers</span>
+              </div>
+            </div>
+
+            {/* Filter and Action Bar */}
+            <div style={{ ...card, padding: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
+                <div>
+                  <h3 style={{ margin: 0, color: '#14532d' }}>Consolidated Finished Goods Register</h3>
+                  <p style={{ margin: '3px 0 0', fontSize: 12, color: '#64748b' }}>
+                    Authoritative ready-packet inventory across Factory, Central Warehouse, Field Salesmen, and Channels. All active SKUs are tracked, including zero-stock items.
+                  </p>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    style={{ ...btn, background: '#0284c7', fontSize: 12, padding: '7px 12px' }}
+                    onClick={refreshRegister}
+                    disabled={busy}
+                  >
+                    🔄 Refresh Register
+                  </button>
+                  <button
+                    type="button"
+                    style={{ ...btn, background: '#047857', fontSize: 12, padding: '7px 12px' }}
+                    onClick={handleExportExcel}
+                  >
+                    📥 Export Register (.xlsx)
+                  </button>
+                </div>
+              </div>
+
+              {/* Filter Controls */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, alignItems: 'center' }}>
+                <input
+                  style={input}
+                  placeholder="🔍 Search SKU or Product Name..."
+                  value={registerSearch}
+                  onChange={e => setRegisterSearch(e.target.value)}
+                />
+                <select
+                  style={input}
+                  value={registerFamilyFilter}
+                  onChange={e => setRegisterFamilyFilter(e.target.value)}
+                >
+                  <option value="ALL">All Categories / Families</option>
+                  <option value="MOONG">Moong Papad</option>
+                  <option value="CHANA">Chana Papad</option>
+                  <option value="URAD">Urad Papad</option>
+                  <option value="MASALA">Masala</option>
+                  <option value="KATRAN">Katran</option>
+                </select>
+                <select
+                  style={input}
+                  value={registerWeightFilter}
+                  onChange={e => setRegisterWeightFilter(e.target.value)}
+                >
+                  <option value="ALL">All Pack Sizes</option>
+                  <option value="200">200 g Packets</option>
+                  <option value="500">500 g Packets</option>
+                  <option value="1000">1,000 g (1 kg) Packets</option>
+                </select>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#334155' }}>
+                  <input
+                    type="checkbox"
+                    checked={hideZeroStock}
+                    onChange={e => setHideZeroStock(e.target.checked)}
+                  />
+                  <span>Hide Zero-Stock SKUs</span>
+                </label>
+              </div>
+            </div>
+
+            {/* Authoritative Inventory Table */}
+            <div style={card}>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', color: '#334155' }}>
+                      <th style={{ textAlign: 'left', padding: '10px 8px' }}>SKU</th>
+                      <th style={{ textAlign: 'left', padding: '10px 8px' }}>Product</th>
+                      <th style={{ textAlign: 'left', padding: '10px 8px' }}>Category</th>
+                      <th style={{ textAlign: 'center', padding: '10px 8px' }}>Pack Size</th>
+                      <th style={{ textAlign: 'right', padding: '10px 8px', color: '#166534' }}>Factory</th>
+                      <th style={{ textAlign: 'right', padding: '10px 8px', color: '#1e40af' }}>Warehouse</th>
+                      <th style={{ textAlign: 'right', padding: '10px 8px', color: '#86198f' }}>Salesmen</th>
+                      <th style={{ textAlign: 'right', padding: '10px 8px', background: '#fefce8', color: '#854d0e', fontWeight: 700 }}>
+                        Total On-Hand
+                      </th>
+                      <th style={{ textAlign: 'right', padding: '10px 8px', color: '#475569' }}>Channels</th>
+                      <th style={{ textAlign: 'center', padding: '10px 8px' }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredRegister.map(item => {
+                      const isZero = item.total_internal_on_hand_packets <= 0;
+                      const isLow = item.total_internal_on_hand_packets > 0 && item.total_internal_on_hand_packets < 20;
+                      return (
+                        <tr
+                          key={item.product_id}
+                          style={{
+                            borderBottom: '1px solid #e2e8f0',
+                            background: isZero ? '#fafafa' : '#fff',
+                          }}
+                        >
+                          <td style={{ padding: '9px 8px' }}>
+                            <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#0f172a' }}>
+                              {item.sku}
+                            </span>
+                          </td>
+                          <td style={{ padding: '9px 8px' }}>
+                            <b>{item.product_name}</b>
+                          </td>
+                          <td style={{ padding: '9px 8px', color: '#64748b' }}>
+                            {item.category || 'Papad'}
+                          </td>
+                          <td style={{ textAlign: 'center', padding: '9px 8px' }}>
+                            <span style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4, fontSize: 11 }}>
+                              {item.pack_weight_g} g
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: item.factory_packets > 0 ? 600 : 400, color: item.factory_packets > 0 ? '#15803d' : '#94a3b8' }}>
+                            {item.factory_packets}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: item.warehouse_packets > 0 ? 600 : 400, color: item.warehouse_packets > 0 ? '#1d4ed8' : '#94a3b8' }}>
+                            {item.warehouse_packets}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: item.salesmen_packets > 0 ? 600 : 400, color: item.salesmen_packets > 0 ? '#a21caf' : '#94a3b8' }}>
+                            {item.salesmen_packets}
+                          </td>
+                          <td
+                            style={{
+                              textAlign: 'right',
+                              padding: '9px 8px',
+                              background: isZero ? '#fef2f2' : '#fefce8',
+                              color: isZero ? '#b91c1c' : '#854d0e',
+                              fontWeight: 700,
+                              fontSize: 14,
+                            }}
+                          >
+                            {item.total_internal_on_hand_packets}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '9px 8px', color: '#475569' }}>
+                            {item.channels_dispatched_packets}
+                          </td>
+                          <td style={{ textAlign: 'center', padding: '9px 8px' }}>
+                            <span
+                              style={{
+                                padding: '3px 8px',
+                                borderRadius: 12,
+                                fontSize: 11,
+                                fontWeight: 600,
+                                background: isZero ? '#fee2e2' : isLow ? '#fef3c7' : '#dcfce7',
+                                color: isZero ? '#991b1b' : isLow ? '#b45309' : '#166534',
+                              }}
+                            >
+                              {isZero ? 'ZERO STOCK' : isLow ? 'LOW STOCK' : 'IN STOCK'}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {filteredRegister.length === 0 && (
+                      <tr>
+                        <td colSpan={10} style={{ padding: 18, textAlign: 'center', color: '#64748b' }}>
+                          No finished goods match the selected filters.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        );
+      })()}
     </section>
   );
 };
+

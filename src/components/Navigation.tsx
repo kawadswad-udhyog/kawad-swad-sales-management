@@ -81,19 +81,19 @@ export const Navigation: React.FC<NavigationProps> = ({
       view: 'production',
       label: 'Production',
       icon: <Factory size={18} />,
-      roles: ['OWNER'],
+      roles: ['OWNER', 'PA'],
     },
     {
       view: 'attendance',
       label: 'Attendance',
       icon: <UserCheck size={18} />,
-      roles: ['OWNER'],
+      roles: ['OWNER', 'PA'],
     },
     {
       view: 'packaging',
       label: 'Packaging',
       icon: <Package size={18} />,
-      roles: ['OWNER'],
+      roles: ['OWNER', 'PA'],
     },
     {
       view: 'stock',

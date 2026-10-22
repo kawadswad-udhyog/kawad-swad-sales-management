@@ -277,3 +277,31 @@ export interface ReconciliationReport {
   }>;
 }
 
+export interface FinishedGoodsRegisterItem {
+  product_id: string;
+  sku: string;
+  product_name: string;
+  category: string;
+  pack_weight_g: number;
+  selling_unit: string;
+  active: boolean;
+  factory_packets: number;
+  warehouse_packets: number;
+  salesmen_packets: number;
+  channels_dispatched_packets: number;
+  total_internal_on_hand_packets: number;
+  stock_status: 'IN_STOCK' | 'LOW_STOCK' | 'ZERO_STOCK';
+}
+
+export interface FinishedGoodsRegisterSummary {
+  total_skus: number;
+  active_skus: number;
+  active_with_stock: number;
+  active_zero_stock: number;
+  factory_packets: number;
+  warehouse_packets: number;
+  salesmen_packets: number;
+  channels_dispatched_packets: number;
+  total_internal_on_hand_packets: number;
+}
+

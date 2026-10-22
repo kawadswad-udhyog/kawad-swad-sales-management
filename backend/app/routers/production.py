@@ -1,3 +1,4 @@
+import logging
 from app.timeutil import business_today, now_iso
 from typing import Any, Dict, List, Optional
 import json
@@ -7,6 +8,7 @@ from pydantic import BaseModel, Field
 from app.auth import get_current_user
 from app.sheets import db
 from app.config import SALES_GOOGLE_SPREADSHEET_ID
+from app.models import BulkAttendanceCreate, BulkAttendanceResponse, BulkAttendanceItem
 from app.recipes_master import (
     MASTER_RECIPES_DEFINITION,
     RAW_MATERIALS_SEED,
@@ -15,6 +17,7 @@ from app.recipes_master import (
     normalize_quantity_to_std_unit,
 )
 
+logger = logging.getLogger(__name__)
 _ATTENDANCE_LOCK = threading.Lock()
 from app.calculations import (
     normalize_to_canonical_unit,
@@ -33,13 +36,15 @@ from app.calculations import (
     calculate_bulk_stock_balance,
     calculate_finished_stock_balance,
     calculate_raw_material_balance,
+    calculate_consolidated_finished_goods_register,
     DEFAULT_PACKING_TOLERANCE_KG,
 )
 
 router = APIRouter(prefix="/api/production", tags=["Production"])
 
-# Part 2 & Part 8: Only the Owner may access production operations.
+# Role permissions: Owner has full control including approvals; PA has data entry & operational access.
 OWNER_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN"}
+PRODUCTION_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN", "PA"}
 
 
 def actor_info(user: dict):
@@ -47,12 +52,23 @@ def actor_info(user: dict):
 
 
 def require_owner(user: dict):
-    """Enforce strict Owner-only access for all production endpoints."""
+    """Enforce strict Owner-only access for sensitive approval and recipe confirmation endpoints."""
     actor, role = actor_info(user)
     if role not in OWNER_ROLES:
         raise HTTPException(
             status_code=403,
-            detail="Only the Owner can access production and packaging operations."
+            detail="Only the Owner can approve batches, recipes, or discrepancies."
+        )
+    return actor, role
+
+
+def require_production_access(user: dict):
+    """Allow Owner or PA to access production data entry, attendance, packaging, and overview."""
+    actor, role = actor_info(user)
+    if role not in PRODUCTION_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the Owner or PA can access production operations."
         )
     return actor, role
 
@@ -202,13 +218,21 @@ class DispatchCreate(BaseModel):
 
 @router.get("/summary")
 async def summary(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     ledger = db.get_records("ProductionStockLedger")
     products_records = db.get_records("Products")
-    products = {str(field(p, "product_id")): p for p in products_records}
+    salesman_ledger = db.get_records("SalesmanStockLedger")
+    users_records = db.get_records("Users")
+    sale_items = db.get_records("SaleItems")
 
     bulk_balances = calculate_bulk_stock_balance(ledger)
-    finished_balances = calculate_finished_stock_balance(ledger)
+    reg_data = calculate_consolidated_finished_goods_register(
+        products_master=products_records,
+        production_stock_ledger=ledger,
+        salesman_stock_ledger=salesman_ledger,
+        users_master=users_records,
+        sale_items_records=sale_items,
+    )
 
     bulk_stock_list = []
     for bulk_key, qty in bulk_balances.items():
@@ -219,34 +243,60 @@ async def summary(user: dict = Depends(get_current_user)):
             "quantity_kg": round_stock(qty),
         })
 
+    # Consolidated finished stock list: includes EVERY active packet SKU (even with 0 stock)
     finished_stock_list = []
-    for pid, qty in finished_balances.items():
-        p_name = str(field(products.get(pid, {}), "product_name", default=pid))
-        p_sku = str(field(products.get(pid, {}), "sku", default=""))
+    for r in reg_data["register"]:
         finished_stock_list.append({
-            "product_id": pid,
-            "product_name": f"{p_name} ({p_sku})" if p_sku else p_name,
-            "quantity_packets": qty,
+            "product_id": r["product_id"],
+            "sku": r["sku"],
+            "product_name": f"{r['product_name']} ({r['sku']})" if r.get("sku") else r["product_name"],
+            "quantity_packets": r["factory_stock"],
+            "warehouse_stock": r["warehouse_stock"],
+            "salesmen_stock": r["salesmen_stock"],
+            "total_internal_on_hand": r["total_internal_on_hand"],
+            "pack_weight_g": r["pack_weight_g"],
+            "category": r["category"],
+            "status": r["status"],
         })
 
     return {
         "bulk_stock": bulk_stock_list,
         "finished_stock": finished_stock_list,
+        "finished_goods_register": reg_data["register"],
+        "register_summary": reg_data["summary"],
         "workers_active": sum(1 for w in db.get_records("Workers") if truthy(field(w, "active", default="true"))),
         "wage_accrued_today": round(sum(float(field(a, "wage_accrued", default=0) or 0) for a in db.get_records("WorkerAttendance") if str(field(a, "attendance_date")) == business_today()), 2),
         "pending_production": sum(1 for b in db.get_records("ProductionBatches") if str(field(b, "status")).upper() == "PENDING"),
     }
 
 
+@router.get("/finished-goods-register")
+async def get_finished_goods_register(user: dict = Depends(get_current_user)):
+    require_production_access(user)
+    products_records = db.get_records("Products", fresh=True)
+    production_ledger = db.get_records("ProductionStockLedger", fresh=True)
+    salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+    users_records = db.get_records("Users", fresh=True)
+    sale_items = db.get_records("SaleItems", fresh=True)
+
+    return calculate_consolidated_finished_goods_register(
+        products_master=products_records,
+        production_stock_ledger=production_ledger,
+        salesman_stock_ledger=salesman_ledger,
+        users_master=users_records,
+        sale_items_records=sale_items,
+    )
+
+
 @router.get("/workers")
 async def workers(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     return db.get_records("Workers")
 
 
 @router.post("/workers")
 async def add_worker(req: WorkerCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+    actor, _ = require_production_access(user)
     require_persistent_store()
     if any(str(field(w, "worker_name")).strip().lower() == req.worker_name.strip().lower() and truthy(field(w, "active", default="true")) for w in db.get_records("Workers")):
         raise HTTPException(409, "An active worker with this name already exists")
@@ -268,7 +318,7 @@ async def add_worker(req: WorkerCreate, user: dict = Depends(get_current_user)):
 
 @router.get("/attendance")
 async def attendance(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     records = db.get_records("WorkerAttendance") or []
     # Count occurrences of (worker_id, attendance_date) to detect duplicate rows in sheet
     counts: Dict[tuple, int] = {}
@@ -290,7 +340,7 @@ async def attendance(user: dict = Depends(get_current_user)):
 
 @router.post("/attendance")
 async def record_attendance(req: AttendanceCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+    actor, _ = require_production_access(user)
     require_persistent_store()
     status_value = req.status.strip().upper()
     if status_value not in {"PRESENT", "ABSENT", "HALF_DAY"}:
@@ -330,10 +380,115 @@ async def record_attendance(req: AttendanceCreate, user: dict = Depends(get_curr
         return rec
 
 
+@router.post("/attendance/bulk", response_model=BulkAttendanceResponse)
+async def record_bulk_attendance(req: BulkAttendanceCreate, user: dict = Depends(get_current_user)):
+    """
+    Mark bulk attendance for multiple active workers on a single date.
+    Prevents duplicate attendance records, validates active workers, calculates daily wages,
+    and returns a summary of saved vs skipped records.
+    """
+    actor, _ = require_production_access(user)
+    require_persistent_store()
+
+    date_clean = req.attendance_date.strip()
+    if not date_clean:
+        raise HTTPException(400, "attendance_date is required")
+
+    if not req.records:
+        raise HTTPException(400, "No worker attendance records provided")
+
+    with _ATTENDANCE_LOCK:
+        workers = db.get_records("Workers", fresh=True) or []
+        workers_by_id = {str(field(w, "worker_id")).strip(): w for w in workers}
+        
+        attendance_records = db.get_records("WorkerAttendance", fresh=True) or []
+        existing_worker_ids = {
+            str(field(a, "worker_id")).strip()
+            for a in attendance_records
+            if str(field(a, "attendance_date")).strip() == date_clean
+        }
+
+        saved_records = []
+        skipped_workers = []
+
+        for item in req.records:
+            w_id = str(item.worker_id).strip()
+            status_value = str(item.status or "PRESENT").strip().upper()
+            if status_value not in {"PRESENT", "ABSENT", "HALF_DAY"}:
+                skipped_workers.append({"worker_id": w_id, "reason": f"Invalid status: {status_value}"})
+                continue
+
+            worker = workers_by_id.get(w_id)
+            if not worker:
+                skipped_workers.append({"worker_id": w_id, "reason": "Worker not found"})
+                continue
+
+            if not truthy(field(worker, "active", default="true")):
+                skipped_workers.append({
+                    "worker_id": w_id,
+                    "worker_name": field(worker, "worker_name"),
+                    "reason": "Worker is inactive"
+                })
+                continue
+
+            if w_id in existing_worker_ids:
+                skipped_workers.append({
+                    "worker_id": w_id,
+                    "worker_name": field(worker, "worker_name"),
+                    "reason": f"Attendance already recorded on {date_clean}"
+                })
+                continue
+
+            daily_wage = float(field(worker, "daily_wage", default=0) or 0)
+            payable = daily_wage if status_value == "PRESENT" else (daily_wage * 0.5 if status_value == "HALF_DAY" else 0.0)
+
+            att_id = make_id("WorkerAttendance")
+            rec = {
+                "attendance_id": att_id,
+                "worker_id": w_id,
+                "worker_name_snapshot": field(worker, "worker_name"),
+                "attendance_date": date_clean,
+                "status": status_value,
+                "daily_wage_snapshot": daily_wage,
+                "wage_accrued": round(payable, 2),
+                "notes": (item.notes or "").strip(),
+                "created_at": now(),
+                "created_by": actor,
+            }
+
+            if not db.append_record("WorkerAttendance", rec, raise_on_error=True):
+                raise HTTPException(503, f"Could not save attendance for worker {field(worker, 'worker_name')}")
+
+            existing_worker_ids.add(w_id)
+            saved_records.append(rec)
+
+        db.log_audit(
+            actor,
+            "RECORD_BULK_WORKER_ATTENDANCE",
+            "WorkerAttendance",
+            f"{len(saved_records)}_workers",
+            reason=f"Bulk attendance on {date_clean}: {len(saved_records)} saved, {len(skipped_workers)} skipped"
+        )
+
+        msg = f"Successfully marked attendance for {len(saved_records)} worker(s)."
+        if skipped_workers:
+            msg += f" {len(skipped_workers)} worker(s) were skipped (already recorded or invalid)."
+
+        return BulkAttendanceResponse(
+            status="SUCCESS",
+            attendance_date=date_clean,
+            saved_count=len(saved_records),
+            skipped_count=len(skipped_workers),
+            saved_records=saved_records,
+            skipped_workers=skipped_workers,
+            message=msg,
+        )
+
+
 @router.put("/attendance/{attendance_id}")
 async def update_attendance(attendance_id: str, req: AttendanceUpdate, user: dict = Depends(get_current_user)):
-    """Owner audited correction workflow for existing attendance records."""
-    actor, _ = require_owner(user)
+    """Audited correction workflow for existing attendance records."""
+    actor, _ = require_production_access(user)
     require_persistent_store()
     records = db.get_records("WorkerAttendance", fresh=True) or []
     existing = next((r for r in records if str(field(r, "attendance_id")).strip() == attendance_id.strip()), None)
@@ -383,13 +538,13 @@ async def delete_duplicate_attendance(attendance_id: str, user: dict = Depends(g
 
 @router.get("/recipes")
 async def recipes(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     return db.get_records("Recipes")
 
 
 @router.post("/recipes")
 async def save_recipe(req: RecipeSave, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+    actor, _ = require_production_access(user)
     require_persistent_store()
     product = next((p for p in db.get_records("Products") if str(field(p, "product_id")) == req.product_id), None)
     if not product:
@@ -429,7 +584,7 @@ async def save_recipe(req: RecipeSave, user: dict = Depends(get_current_user)):
 
 @router.get("/recipes/master")
 async def get_master_recipes(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     custom_recipes = db.get_records("Recipes")
     enriched = []
     for master in MASTER_RECIPES_DEFINITION:
@@ -595,7 +750,7 @@ async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, user:
 
 @router.post("/recipes/calculate")
 async def calculate_custom_recipe_cost(req: RecipeCalculateRequest, user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     return calculate_recipe_cost(req.items, req.expected_yield_kg)
 
 
@@ -605,13 +760,13 @@ async def calculate_custom_recipe_cost(req: RecipeCalculateRequest, user: dict =
 
 @router.get("/batches")
 async def batches(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     return db.get_records("ProductionBatches")
 
 
 @router.post("/batches")
 async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+    actor, _ = require_production_access(user)
     require_persistent_store()
 
     product = next((p for p in db.get_records("Products") if str(field(p, "product_id")) == req.product_id), None)
@@ -701,7 +856,7 @@ async def issue_materials(production_id: str, user: dict = Depends(get_current_u
     Deducts raw materials exactly once, snapshots purchase rates, and assigns a unique transaction ID.
     Idempotent: Re-calling for an already issued batch returns the existing issue without re-deducting.
     """
-    actor, _ = require_owner(user)
+    actor, _ = require_production_access(user)
     require_persistent_store()
 
     batch = next((b for b in db.get_records("ProductionBatches") if str(field(b, "production_id")) == production_id), None)
@@ -986,13 +1141,13 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
 
 @router.get("/packaging")
 async def packaging(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     return db.get_records("PackagingBatches")
 
 
 @router.post("/packaging")
 async def create_packaging(req: PackagingCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+    actor, _ = require_production_access(user)
     require_persistent_store()
 
     product = next((p for p in db.get_records("Products") if str(field(p, "product_id")) == req.product_id), None)
@@ -1126,6 +1281,37 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             db.log_audit(actor, "RECONCILE_PACKAGING", "PackagingBatches", pack_id, reason=f"Reconciled packaging batch {pack_id}")
             return existing_pack
 
+    # Pre-validate all requested SKU products and assemble movements BEFORE writing to PackagingBatches
+    all_products = db.get_records("Products")
+    sku_movements = []
+    for weight_g, packet_count in [(200, req.packets_200g), (500, req.packets_500g), (1000, req.packets_1000g)]:
+        if packet_count <= 0:
+            continue
+        sku_product = next((p for p in all_products if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
+        if not sku_product:
+            raise HTTPException(400, f"No active {weight_g} g SKU product found for '{field(product, 'product_name')}'. Please create/activate that pack-size product in Products before packaging.")
+        sku_movements.append({
+            "movement_type": "PACKETS_PACKAGED",
+            "quantity_kg": 0,
+            "quantity_packets": packet_count,
+            "channel": "FACTORY_FINISHED",
+            "product_id": str(field(sku_product, "product_id")),
+            "bulk_product_key": bulk_key,
+            "product_name_snapshot": field(sku_product, "product_name"),
+            "sku_snapshot": field(sku_product, "sku"),
+            "pack_weight_g": weight_g,
+        })
+
+    movements = [{
+        "movement_type": "BULK_PACKAGED",
+        "quantity_kg": req.bulk_kg_used,
+        "quantity_packets": 0,
+        "channel": "FACTORY_BULK",
+        "product_id": req.product_id,
+        "bulk_product_key": bulk_key,
+        "product_name_snapshot": field(product, "product_name"),
+    }] + sku_movements
+
     # New Packaging Record
     pack_id = make_id("PackagingBatches")
     rec = {
@@ -1155,34 +1341,6 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         raise HTTPException(503, "Could not save packaging record")
 
     # Stock ledger postings
-    movements = [{
-        "movement_type": "BULK_PACKAGED",
-        "quantity_kg": req.bulk_kg_used,
-        "quantity_packets": 0,
-        "channel": "FACTORY_BULK",
-        "product_id": req.product_id,
-        "bulk_product_key": bulk_key,
-        "product_name_snapshot": field(product, "product_name"),
-    }]
-
-    for weight_g, packet_count in [(200, req.packets_200g), (500, req.packets_500g), (1000, req.packets_1000g)]:
-        if packet_count <= 0:
-            continue
-        sku_product = next((p for p in db.get_records("Products") if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
-        if not sku_product:
-            raise HTTPException(400, f"No active {weight_g} g SKU found for {field(product, 'product_name')}. Create/activate that pack-size product first.")
-        movements.append({
-            "movement_type": "PACKETS_PACKAGED",
-            "quantity_kg": 0,
-            "quantity_packets": packet_count,
-            "channel": "FACTORY_FINISHED",
-            "product_id": str(field(sku_product, "product_id")),
-            "bulk_product_key": bulk_key,
-            "product_name_snapshot": field(sku_product, "product_name"),
-            "sku_snapshot": field(sku_product, "sku"),
-            "pack_weight_g": weight_g,
-        })
-
     try:
         for m in movements:
             row = {
@@ -1204,6 +1362,79 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
 
     db.log_audit(actor, "RECORD_PACKAGING", "PackagingBatches", pack_id, reason=f"Used {req.bulk_kg_used} kg, packed {total_packets} packets, variance {unexplained_variance:+.3f} kg")
     return rec
+
+
+@router.post("/packaging/{packaging_id}/recover")
+async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_user)):
+    """
+    Recover an INCOMPLETE packaging batch by idempotently posting any missing stock movements.
+    """
+    actor, _ = require_production_access(user)
+    require_persistent_store()
+
+    batch = next((p for p in db.get_records("PackagingBatches") if str(field(p, "packaging_id")) == packaging_id), None)
+    if not batch:
+        raise HTTPException(404, "Packaging batch not found")
+
+    ledger = db.get_records("ProductionStockLedger")
+    bulk_key = str(field(batch, "product_name_snapshot")).strip().lower()
+    bulk_kg = float(field(batch, "bulk_kg_used", default=0) or 0)
+    p200 = int(float(field(batch, "packets_200g", default=0) or 0))
+    p500 = int(float(field(batch, "packets_500g", default=0) or 0))
+    p1000 = int(float(field(batch, "packets_1000g", default=0) or 0))
+
+    # Check existing bulk deduction
+    existing_bulk = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
+    if not existing_bulk and bulk_kg > 0:
+        row = {
+            "movement_id": make_id("ProductionStockLedger"),
+            "txn_datetime": now(),
+            "movement_type": "BULK_PACKAGED",
+            "quantity_kg": bulk_kg,
+            "quantity_packets": 0,
+            "channel": "FACTORY_BULK",
+            "product_id": str(field(batch, "product_id")),
+            "bulk_product_key": bulk_key,
+            "product_name_snapshot": field(batch, "product_name_snapshot"),
+            "reference_id": packaging_id,
+            "created_by": actor,
+            "notes": "Recovered bulk deduction for incomplete batch",
+        }
+        if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+            raise HTTPException(503, "Could not append recovered bulk movement.")
+
+    # Check packet movements
+    all_prods = db.get_records("Products")
+    for weight_g, count in [(200, p200), (500, p500), (1000, p1000)]:
+        if count <= 0:
+            continue
+        sku_prod = next((p for p in all_prods if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
+        if sku_prod:
+            target_id = str(field(sku_prod, "product_id"))
+            existing_sku = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "product_id")) == target_id and str(field(m, "movement_type")).upper() == "PACKETS_PACKAGED"), None)
+            if not existing_sku:
+                row = {
+                    "movement_id": make_id("ProductionStockLedger"),
+                    "txn_datetime": now(),
+                    "movement_type": "PACKETS_PACKAGED",
+                    "quantity_kg": 0,
+                    "quantity_packets": count,
+                    "channel": "FACTORY_FINISHED",
+                    "product_id": target_id,
+                    "bulk_product_key": bulk_key,
+                    "product_name_snapshot": field(sku_prod, "product_name"),
+                    "sku_snapshot": field(sku_prod, "sku"),
+                    "pack_weight_g": weight_g,
+                    "reference_id": packaging_id,
+                    "created_by": actor,
+                    "notes": "Recovered packet movement for incomplete batch",
+                }
+                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                    raise HTTPException(503, f"Could not append recovered {weight_g}g packet movement.")
+
+    db.update_record("PackagingBatches", "packaging_id", packaging_id, {"status": "RECORDED", "notes": f"{field(batch, 'notes')} [RECOVERED]"})
+    db.log_audit(actor, "RECOVER_PACKAGING", "PackagingBatches", packaging_id, reason="Recovered missing ledger movements for packaging batch")
+    return {"status": "RECORDED", "packaging_id": packaging_id, "message": "Incomplete packaging movements recovered."}
 
 
 @router.post("/packaging/{packaging_id}/approve-discrepancy")
@@ -1294,13 +1525,13 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
 
 @router.post("/dispatch")
 async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+    actor, _ = require_production_access(user)
     require_persistent_store()
 
     product = next((p for p in db.get_records("Products") if str(field(p, "product_id")) == req.product_id), None)
     if not product:
         raise HTTPException(404, "Product not found")
-    if req.channel.upper() not in {"ECOMMERCE", "RETAIL", "SALESMAN", "WHOLESALE", "DISTRIBUTOR"}:
+    if req.channel.upper() not in {"ECOMMERCE", "RETAIL", "SALESMAN", "WHOLESALE", "DISTRIBUTOR", "WAREHOUSE"}:
         raise HTTPException(400, "Unsupported distribution channel")
 
     ledger = db.get_records("ProductionStockLedger")
@@ -1337,6 +1568,29 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
                 }
                 if not db.append_record("ProductionStockLedger", movement, raise_on_error=True):
                     raise HTTPException(503, "Production stock deduction failed during dispatch recovery.")
+
+            if req.channel.upper() == "WAREHOUSE":
+                salesman_ledger = db.get_records("SalesmanStockLedger")
+                existing_wh_mvt = next((m for m in salesman_ledger if str(field(m, "reference_id")) == disp_id and str(field(m, "txn_type")).upper() == "COMPANY_RECEIPT"), None)
+                if not existing_wh_mvt:
+                    if not db.append_record("SalesmanStockLedger", {
+                        "stock_txn_id": make_id("SalesmanStockLedger"),
+                        "txn_datetime": now(),
+                        "salesman_user_id": "",
+                        "product_id": req.product_id,
+                        "sku_snapshot": field(product, "sku"),
+                        "txn_type": "COMPANY_RECEIPT",
+                        "quantity": req.quantity_packets,
+                        "unit": "PACKET",
+                        "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+                        "related_sale_id": "",
+                        "issued_by_user_id": actor,
+                        "received_by_user_id": "WAREHOUSE",
+                        "confirmed_by_user_id": actor,
+                        "reference_id": disp_id,
+                        "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'} (Reconciled retry).",
+                    }, raise_on_error=True):
+                        raise HTTPException(503, "Warehouse stock movement failed during dispatch recovery.")
 
             if req.channel.upper() == "SALESMAN" and req.destination:
                 salesman_ledger = db.get_records("SalesmanStockLedger")
@@ -1401,6 +1655,26 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
         if not db.append_record("ProductionStockLedger", movement, raise_on_error=True):
             raise RuntimeError("ProductionStockLedger append returned False")
 
+        if req.channel.upper() == "WAREHOUSE":
+            if not db.append_record("SalesmanStockLedger", {
+                "stock_txn_id": make_id("SalesmanStockLedger"),
+                "txn_datetime": now(),
+                "salesman_user_id": "",
+                "product_id": req.product_id,
+                "sku_snapshot": field(product, "sku"),
+                "txn_type": "COMPANY_RECEIPT",
+                "quantity": req.quantity_packets,
+                "unit": "PACKET",
+                "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+                "related_sale_id": "",
+                "issued_by_user_id": actor,
+                "received_by_user_id": "WAREHOUSE",
+                "confirmed_by_user_id": actor,
+                "reference_id": disp_id,
+                "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'}. Internal stock transfer.",
+            }, raise_on_error=True):
+                raise RuntimeError("SalesmanStockLedger append returned False for WAREHOUSE dispatch")
+
         if req.channel.upper() == "SALESMAN" and req.destination:
             if not db.append_record("SalesmanStockLedger", {
                 "stock_txn_id": make_id("SalesmanStockLedger"),
@@ -1433,7 +1707,7 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
 
 @router.get("/dispatches")
 async def dispatches(user: dict = Depends(get_current_user)):
-    require_owner(user)
+    require_production_access(user)
     return db.get_records("ProductionDispatches")
 
 
@@ -1446,7 +1720,7 @@ async def get_batch_costing(production_id: str, user: dict = Depends(get_current
     """
     Get attributable actual batch production cost from issued materials and attendance expenses.
     """
-    require_owner(user)
+    require_production_access(user)
     batch = next((b for b in db.get_records("ProductionBatches") if str(field(b, "production_id")) == production_id), None)
     if not batch:
         raise HTTPException(404, "Production batch not found")
@@ -1481,7 +1755,7 @@ async def get_sku_costing(product_id: str, user: dict = Depends(get_current_user
     """
     Calculate finished packet cost for a given SKU based on its net weight and production cost.
     """
-    require_owner(user)
+    require_production_access(user)
     product = next((p for p in db.get_records("Products") if str(field(p, "product_id")) == product_id), None)
     if not product:
         raise HTTPException(404, "Product not found")

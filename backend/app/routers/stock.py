@@ -7,6 +7,10 @@ from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_manager
 from app.stock_math import balances, salesman_available
+from app.calculations import (
+    calculate_consolidated_finished_goods_register,
+    calculate_finished_stock_balance,
+)
 
 router = APIRouter(prefix="/api/stock", tags=["Stock"])
 
@@ -309,4 +313,217 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
         reason=f"{status_str} stock discrepancy {discrepancy_id}. Adjustment: {diff if action == 'APPROVE' else 0}. Notes: {req.notes}",
     )
     return {"ok": True, "status": status_str, "discrepancy_id": discrepancy_id}
+
+
+class PhysicalStockReconcile(BaseModel):
+    product_id: str
+    location: str  # "FACTORY", "WAREHOUSE", or a salesman user_id like "USR-SALES-01"
+    physical_count: int
+    reason: str
+    notes: str = ""
+
+
+@router.get("/finished-goods-register")
+async def get_stock_finished_goods_register(current_user: dict = Depends(get_current_user)):
+    """
+    Consolidated Finished Goods Stock Register across Factory, Warehouse, and Salesmen.
+    """
+    if not is_manager(current_user):
+        raise HTTPException(status_code=403, detail="Only Owner or PA can view the Finished Goods Stock Register.")
+    products_records = db.get_records("Products", fresh=True)
+    production_ledger = db.get_records("ProductionStockLedger", fresh=True)
+    salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+    users_records = db.get_records("Users", fresh=True)
+    sale_items = db.get_records("SaleItems", fresh=True)
+
+    return calculate_consolidated_finished_goods_register(
+        products_master=products_records,
+        production_stock_ledger=production_ledger,
+        salesman_stock_ledger=salesman_ledger,
+        users_master=users_records,
+        sale_items_records=sale_items,
+    )
+
+
+@router.post("/reconcile-opening", dependencies=[Depends(require_sheets_connection)])
+async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: dict = Depends(get_current_user)):
+    """
+    Authorized Physical Stock Reconciliation & Opening Balance Entry.
+    Compares physical count against recorded ledger balance for the selected location
+    (Factory, Warehouse, or Salesman) and writes an audited adjustment without duplicate entries.
+    """
+    if not is_manager(current_user):
+        raise HTTPException(status_code=403, detail="Only Owner or PA can perform physical stock reconciliation.")
+
+    actor = str(current_user.get("user_id", ""))
+    products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
+    product = products.get(req.product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail=f"Product {req.product_id} not found.")
+
+    if req.physical_count < 0:
+        raise HTTPException(status_code=422, detail="Physical count cannot be negative.")
+    if not req.reason.strip():
+        raise HTTPException(status_code=422, detail="An explanation/reason is required for physical stock reconciliation.")
+
+    sku = str(product.get("sku", req.product_id))
+    p_name = str(product.get("product_name", req.product_id))
+    pack_weight = int(float(product.get("pack_weight_g", 0) or 0))
+    loc = req.location.strip().upper()
+    now_iso = datetime.utcnow().isoformat()
+
+    if loc == "FACTORY":
+        prod_ledger = db.get_records("ProductionStockLedger", fresh=True)
+        current_factory = calculate_finished_stock_balance(prod_ledger, req.product_id).get(req.product_id, 0)
+        diff = req.physical_count - current_factory
+        if diff == 0:
+            return {
+                "ok": True,
+                "message": f"Physical count matches recorded factory stock ({current_factory} packets). No adjustment needed.",
+                "adjusted": 0,
+                "current_stock": current_factory,
+            }
+
+        mvt_id = db.generate_id("ProductionStockLedger")
+        row = {
+            "movement_id": mvt_id,
+            "txn_datetime": now_iso,
+            "movement_type": "PACKET_ADJUSTMENT",
+            "quantity_kg": 0,
+            "quantity_packets": diff,
+            "channel": "FACTORY_FINISHED",
+            "product_id": req.product_id,
+            "bulk_product_key": p_name.strip().lower(),
+            "product_name_snapshot": p_name,
+            "sku_snapshot": sku,
+            "pack_weight_g": pack_weight,
+            "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
+            "created_by": actor,
+            "notes": f"Physical reconciliation by {actor}: {req.reason}. {req.notes}".strip(),
+        }
+        if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+            raise HTTPException(status_code=503, detail="Could not record factory stock adjustment.")
+
+        db.log_audit(
+            actor,
+            "RECONCILE_FACTORY_STOCK",
+            "ProductionStockLedger",
+            mvt_id,
+            reason=f"Factory {sku} reconciled from {current_factory} to {req.physical_count} ({diff:+d}). Reason: {req.reason}",
+        )
+        return {
+            "ok": True,
+            "location": "FACTORY",
+            "product_id": req.product_id,
+            "previous_stock": current_factory,
+            "new_stock": req.physical_count,
+            "adjustment": diff,
+            "message": f"Factory stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
+        }
+
+    # Warehouse or Salesman
+    salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+    company_bal, salesman_bal = balances(salesman_ledger)
+
+    if loc in {"WAREHOUSE", "COMPANY_WAREHOUSE", "COMPANY"}:
+        current_wh = company_bal.get(req.product_id, 0)
+        diff = req.physical_count - current_wh
+        if diff == 0:
+            return {
+                "ok": True,
+                "message": f"Physical count matches recorded warehouse stock ({current_wh} packets). No adjustment needed.",
+                "adjusted": 0,
+                "current_stock": current_wh,
+            }
+
+        txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "NEGATIVE_ADJUSTMENT"
+        txn_id = db.generate_id("SalesmanStockLedger")
+        row = {
+            "stock_txn_id": txn_id,
+            "txn_datetime": now_iso,
+            "salesman_user_id": "",
+            "product_id": req.product_id,
+            "sku_snapshot": sku,
+            "txn_type": txn_type,
+            "quantity": abs(diff),
+            "unit": str(product.get("selling_unit", "PACKET")),
+            "pack_weight_g": pack_weight,
+            "related_sale_id": "",
+            "issued_by_user_id": actor,
+            "received_by_user_id": "WAREHOUSE",
+            "confirmed_by_user_id": actor,
+            "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
+            "notes": f"Warehouse physical reconciliation: {req.reason}. {req.notes}".strip(),
+        }
+        if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
+            raise HTTPException(status_code=503, detail="Could not record warehouse stock adjustment.")
+
+        db.log_audit(
+            actor,
+            "RECONCILE_WAREHOUSE_STOCK",
+            "SalesmanStockLedger",
+            txn_id,
+            reason=f"Warehouse {sku} reconciled from {current_wh} to {req.physical_count} ({diff:+d}). Reason: {req.reason}",
+        )
+        return {
+            "ok": True,
+            "location": "WAREHOUSE",
+            "product_id": req.product_id,
+            "previous_stock": current_wh,
+            "new_stock": req.physical_count,
+            "adjustment": diff,
+            "message": f"Warehouse stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
+        }
+
+    # Otherwise, loc is salesman_user_id (e.g. USR-SALES-01)
+    salesman_id = req.location.strip()
+    current_s = salesman_available(salesman_ledger, salesman_id, req.product_id)
+    diff = req.physical_count - current_s
+    if diff == 0:
+        return {
+            "ok": True,
+            "message": f"Physical count matches recorded salesman stock ({current_s} packets). No adjustment needed.",
+            "adjusted": 0,
+            "current_stock": current_s,
+        }
+
+    txn_type = "SALESMAN_POSITIVE_ADJUSTMENT" if diff > 0 else "SALESMAN_NEGATIVE_ADJUSTMENT"
+    txn_id = db.generate_id("SalesmanStockLedger")
+    row = {
+        "stock_txn_id": txn_id,
+        "txn_datetime": now_iso,
+        "salesman_user_id": salesman_id,
+        "product_id": req.product_id,
+        "sku_snapshot": sku,
+        "txn_type": txn_type,
+        "quantity": abs(diff),
+        "unit": str(product.get("selling_unit", "PACKET")),
+        "pack_weight_g": pack_weight,
+        "related_sale_id": "",
+        "issued_by_user_id": actor,
+        "received_by_user_id": salesman_id,
+        "confirmed_by_user_id": actor,
+        "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
+        "notes": f"Salesman {salesman_id} physical reconciliation: {req.reason}. {req.notes}".strip(),
+    }
+    if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
+        raise HTTPException(status_code=503, detail="Could not record salesman stock adjustment.")
+
+    db.log_audit(
+        actor,
+        "RECONCILE_SALESMAN_STOCK",
+        "SalesmanStockLedger",
+        txn_id,
+        reason=f"Salesman {salesman_id} {sku} reconciled from {current_s} to {req.physical_count} ({diff:+d}). Reason: {req.reason}",
+    )
+    return {
+        "ok": True,
+        "location": salesman_id,
+        "product_id": req.product_id,
+        "previous_stock": current_s,
+        "new_stock": req.physical_count,
+        "adjustment": diff,
+        "message": f"Salesman {salesman_id} stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
+    }
+
 

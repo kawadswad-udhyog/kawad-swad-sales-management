@@ -40,8 +40,9 @@ class TestStabilizationUpgrade(unittest.TestCase):
         db.is_connected = True
         db.allow_in_memory_fallback = True
 
-        for k in db.memory_store:
+        for k in list(db.memory_store.keys()):
             db.memory_store[k] = []
+        db.memory_store.setdefault("AuthUsers", [])
 
         # Clear brute force tracker
         auth_router._LOGIN_ATTEMPTS.clear()
