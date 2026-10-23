@@ -108,13 +108,23 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   if (!isBackendConnected) {
-    statusBadge = {
-      label: 'Connecting API…',
-      color: '#b45309',
-      bg: '#fffbeb',
-      border: '#fde68a',
-      icon: <AlertTriangle size={13} />,
-    };
+    if (connectionError) {
+      statusBadge = {
+        label: 'API Offline',
+        color: '#b91c1c',
+        bg: '#fef2f2',
+        border: '#fecaca',
+        icon: <WifiOff size={13} />,
+      };
+    } else {
+      statusBadge = {
+        label: 'Connecting API…',
+        color: '#b45309',
+        bg: '#fffbeb',
+        border: '#fde68a',
+        icon: <AlertTriangle size={13} />,
+      };
+    }
   } else if (!isGoogleSheetsConnected || !persistentWritesEnabled) {
     statusBadge = {
       label: 'Sheets Offline',

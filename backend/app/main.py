@@ -1,5 +1,6 @@
 import logging
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import SALES_CORS_ORIGINS, assert_runtime_config
 from app.sheets import db
@@ -29,6 +30,14 @@ app = FastAPI(
     description="FastAPI Google Sheets backend for Kawad Swad Udhyog sales, billing, stock, and expenses.",
     version="1.0.0",
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled server error on {request.method} {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred. Please contact the system administrator."},
+    )
 
 # Configure CORS
 configured_origins = [o.strip().rstrip("/") for o in SALES_CORS_ORIGINS.split(",") if o.strip()]

@@ -285,12 +285,18 @@ export interface FinishedGoodsRegisterItem {
   pack_weight_g: number;
   selling_unit: string;
   active: boolean;
-  factory_packets: number;
-  warehouse_packets: number;
-  salesmen_packets: number;
-  channels_dispatched_packets: number;
-  total_internal_on_hand_packets: number;
-  stock_status: 'IN_STOCK' | 'LOW_STOCK' | 'ZERO_STOCK';
+  factory_packets?: number;
+  warehouse_packets?: number;
+  salesmen_packets?: number;
+  factory_stock?: number;
+  warehouse_stock?: number;
+  salesmen_stock?: number;
+  total_internal_on_hand?: number;
+  available_to_sell?: number;
+  channels_dispatched_packets?: number;
+  total_internal_on_hand_packets?: number;
+  stock_status?: 'IN_STOCK' | 'LOW_STOCK' | 'ZERO_STOCK';
+  status?: string;
 }
 
 export interface FinishedGoodsRegisterSummary {

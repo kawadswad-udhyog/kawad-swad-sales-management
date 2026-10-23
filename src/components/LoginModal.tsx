@@ -12,6 +12,7 @@ export const LoginModal: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading) return;
     setError('');
 
     if (!username.trim() || !password) {
@@ -79,7 +80,7 @@ export const LoginModal: React.FC = () => {
 
         {error && (
           <div className="notice-error" style={{ fontSize: '0.85rem', marginTop: '12px' }}>
-            <strong>Authentication Error:</strong> {error}
+            <strong>Authentication Notice:</strong> {error}
             {error.includes('timed out') && (
               <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
                 Tip: Render free services sleep after inactivity and can take ~40 seconds to spin up on the first request.
@@ -95,9 +96,9 @@ export const LoginModal: React.FC = () => {
                 This account has a legacy password. Run <code>python backend/scripts/reset_password.py</code> to set an upgraded PBKDF2 password.
               </p>
             )}
-            {(error.toLowerCase().includes('failed to fetch') || error.toLowerCase().includes('network error')) && (
+            {(error.toLowerCase().includes('unable to reach') || error.toLowerCase().includes('network') || error.toLowerCase().includes('fetch')) && (
               <p style={{ margin: '6px 0 0', fontSize: '0.8rem', opacity: 0.9 }}>
-                Cannot connect to backend server. Verify connection settings below and ensure <code>kawad-swad-sales-dev.onrender.com</code> is operational.
+                Cannot connect to backend server. Verify your internet connection or check backend service status.
               </p>
             )}
             {(error.toLowerCase().includes('quota') || error.includes('429')) && (
@@ -146,7 +147,7 @@ export const LoginModal: React.FC = () => {
             type="url"
             value={customUrl}
             onChange={(e) => setCustomUrl(e.target.value)}
-            placeholder="https://kawad-swad-sales-dev.onrender.com"
+            placeholder="https://kawad-swad-sales-backend.onrender.com"
             required
             style={{ marginBottom: '8px', fontSize: '0.80rem' }}
           />
@@ -157,8 +158,8 @@ export const LoginModal: React.FC = () => {
               className="secondary"
               style={{ padding: '5px 10px', fontSize: '0.78rem' }}
               onClick={() => {
-                setCustomUrl('https://kawad-swad-sales-dev.onrender.com');
-                updateBackendUrl('https://kawad-swad-sales-dev.onrender.com');
+                setCustomUrl('https://kawad-swad-sales-backend.onrender.com');
+                updateBackendUrl('https://kawad-swad-sales-backend.onrender.com');
                 setShowServerConfig(false);
               }}
             >
