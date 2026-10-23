@@ -18,18 +18,18 @@ export function getApiBaseUrl(): string {
     const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/$/, '');
     if (saved) {
       if (
-        saved === 'https://kawad-swad-sales-dev.onrender.com' &&
+        saved.includes('-dev.onrender.com') &&
         !isProduction
       ) {
         return '';
       }
       return saved;
     }
-    if (!isProduction && !DEFAULT_API_BASE_URL) {
-      return '';
+    if (!DEFAULT_API_BASE_URL) {
+      return isProduction ? 'https://kawad-swad-sales-backend.onrender.com' : '';
     }
   }
-  return (DEFAULT_API_BASE_URL || 'https://kawad-swad-sales-dev.onrender.com').replace(/\/$/, '');
+  return (DEFAULT_API_BASE_URL || '').replace(/\/$/, '');
 }
 
 export function setApiBaseUrl(url: string): void {

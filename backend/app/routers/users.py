@@ -3,7 +3,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, Field
 
-from app.models import UserProfile, UserCreate, UserUpdate, UserStatusUpdate
+from app.models import UserProfile, UserCreate, UserUpdate, UserStatusUpdate, CustomRoleCreate, CustomRoleResponse
 from app.sheets import db
 from app.auth import get_current_user
 from app.permissions import is_manager, is_owner, require_manager, require_owner
@@ -223,3 +223,154 @@ async def get_user_references(user_id: str, current_user: dict = Depends(get_cur
     """Owner-only audit tool to check all historical transactions referencing user_id before renumbering."""
     require_owner(current_user)
     return inspect_user_references(user_id)
+
+
+@router.get("/roles")
+async def list_roles(current_user: dict = Depends(get_current_user)):
+    """List all available roles (built-in and custom) with module permissions."""
+    require_manager(current_user)
+    from app.permissions import DEFAULT_ROLE_PERMISSIONS
+
+    roles = []
+    # Built-in roles
+    for r_name, perms in DEFAULT_ROLE_PERMISSIONS.items():
+        roles.append({
+            "role_name": r_name,
+            "is_system": True,
+            "description": f"Standard {r_name} role",
+            "permissions": perms,
+        })
+
+    # Custom roles
+    custom_records = db.get_records("CustomRoles") or []
+    for cr in custom_records:
+        raw_p = cr.get("permissions_json") or "{}"
+        try:
+            import json
+            perms = json.loads(raw_p) if isinstance(raw_p, str) else raw_p
+        except Exception:
+            perms = {}
+        roles.append({
+            "role_id": cr.get("role_id"),
+            "role_name": cr.get("role_name"),
+            "is_system": False,
+            "description": cr.get("description", ""),
+            "permissions": perms,
+            "created_by": cr.get("created_by", ""),
+            "created_at": cr.get("created_at", ""),
+        })
+    return roles
+
+
+@router.post("/roles")
+async def create_or_update_custom_role(req: CustomRoleCreate, current_user: dict = Depends(get_current_user)):
+    """Owner creates or updates custom role with module-based permissions."""
+    require_owner(current_user)
+    from app.permissions import validate_custom_role_permissions, OWNERS
+    import json
+
+    clean_name = str(req.role_name or "").strip().upper()
+    if not clean_name or len(clean_name) < 2:
+        raise HTTPException(422, "Role name must be at least 2 characters.")
+
+    if clean_name in OWNERS or clean_name in {"PA", "SALESMAN", "FACTORY_WORKER"}:
+        raise HTTPException(400, f"Cannot override system role '{clean_name}'.")
+
+    # Validate that custom role does not grant Owner-level permissions
+    validate_custom_role_permissions(req.permissions)
+
+    actor_id = str(current_user.get("user_id") or "")
+    existing = next((r for r in db.get_records("CustomRoles") if str(r.get("role_name", "")).upper() == clean_name), None)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if existing:
+        role_id = str(existing.get("role_id"))
+        db.update_record("CustomRoles", "role_id", role_id, {
+            "description": req.description or "",
+            "permissions_json": json.dumps(req.permissions),
+            "updated_at": now_iso,
+        }, raise_on_error=True)
+        db.log_audit(actor_id, "UPDATE_CUSTOM_ROLE", "CustomRoles", role_id, reason=f"Updated permissions for custom role {clean_name}")
+        return {"ok": True, "role_id": role_id, "role_name": clean_name, "message": f"Updated custom role {clean_name}"}
+    else:
+        role_id = db.generate_id("CustomRoles")
+        row = {
+            "role_id": role_id,
+            "role_name": clean_name,
+            "description": req.description or "",
+            "permissions_json": json.dumps(req.permissions),
+            "created_by": actor_id,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+        db.append_record("CustomRoles", row, raise_on_error=True)
+        db.log_audit(actor_id, "CREATE_CUSTOM_ROLE", "CustomRoles", role_id, reason=f"Created custom role {clean_name}")
+        return {"ok": True, "role_id": role_id, "role_name": clean_name, "message": f"Created custom role {clean_name}"}
+
+
+@router.delete("/roles/{role_name}")
+async def delete_custom_role(role_name: str, current_user: dict = Depends(get_current_user)):
+    """Owner deletes a custom role if no active users are assigned to it."""
+    require_owner(current_user)
+    clean_name = str(role_name or "").strip().upper()
+
+    existing = next((r for r in db.get_records("CustomRoles") if str(r.get("role_name", "")).upper() == clean_name), None)
+    if not existing:
+        raise HTTPException(404, f"Custom role '{clean_name}' not found.")
+
+    # Check if assigned to any user
+    users = db.get_records("Users") or []
+    auth_users = db.get_records("AuthUsers") or []
+    assigned_count = sum(1 for u in users if str(u.get("role", "")).upper() == clean_name) + \
+                     sum(1 for a in auth_users if str(a.get("role", "")).upper() == clean_name)
+    if assigned_count > 0:
+        raise HTTPException(400, f"Cannot delete role '{clean_name}': {assigned_count} employee(s) are assigned to it.")
+
+    role_id = str(existing.get("role_id"))
+    db.update_record("CustomRoles", "role_id", role_id, {"deleted": "true", "active": "false"})
+    db.log_audit(str(current_user.get("user_id")), "DELETE_CUSTOM_ROLE", "CustomRoles", role_id, reason=f"Deleted custom role {clean_name}")
+    return {"ok": True, "message": f"Custom role {clean_name} deleted."}
+
+
+@router.post("/reconcile-role-alias")
+async def reconcile_role_alias(user_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Owner synchronizes canonical role mapping across Users and AuthUsers.
+    For example: USR-000003 where Users.role is FIELD_SALESMAN and AuthUsers.role is SALESMAN,
+    both map to canonical SALESMAN.
+    """
+    require_owner(current_user)
+    clean_uid = str(user_id or "").strip()
+    from app.permissions import canonical_role
+
+    users = db.get_records("Users", fresh=True) or []
+    auth_users = db.get_records("AuthUsers", fresh=True) or []
+    u_match = next((u for u in users if str(u.get("user_id", "")).strip() == clean_uid), None)
+    a_match = next((a for a in auth_users if str(a.get("user_id", "")).strip() == clean_uid), None)
+
+    if not u_match and not a_match:
+        raise HTTPException(404, f"User '{clean_uid}' not found.")
+
+    u_role = str((u_match or {}).get("role", "")).strip().upper()
+    a_role = str((a_match or {}).get("role", "")).strip().upper()
+
+    target_canonical = canonical_role(a_role or u_role)
+    actor_id = str(current_user.get("user_id") or "")
+
+    changes = []
+    if u_match and u_role != target_canonical:
+        db.update_record("Users", "user_id", clean_uid, {"role": target_canonical})
+        changes.append(f"Users sheet role '{u_role}' -> '{target_canonical}'")
+    if a_match and a_role != target_canonical:
+        db.update_record("AuthUsers", "user_id", clean_uid, {"role": target_canonical})
+        changes.append(f"AuthUsers sheet role '{a_role}' -> '{target_canonical}'")
+
+    db.log_audit(actor_id, "RECONCILE_ROLE_ALIAS", "Users", clean_uid, reason=f"Reconciled role to canonical {target_canonical}: {'; '.join(changes) or 'Already aligned'}")
+    return {
+        "ok": True,
+        "user_id": clean_uid,
+        "canonical_role": target_canonical,
+        "changes": changes,
+        "message": f"User {clean_uid} role aligned to {target_canonical}."
+    }
+

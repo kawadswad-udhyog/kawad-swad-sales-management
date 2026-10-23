@@ -621,6 +621,7 @@ def audit_user_reconciliation() -> Dict[str, Any]:
         "duplicate_auth_ids": duplicate_auth_ids,
         "duplicate_usernames": duplicate_usernames,
         "role_mismatches": role_mismatches,
+        "canonical_aliases": canonical_aliases,
         "status_mismatches": status_mismatches,
         "insecure_credentials": insecure_credentials,
         "incomplete_owner_profiles": incomplete_owner_profiles,

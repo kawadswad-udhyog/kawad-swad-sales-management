@@ -9,7 +9,7 @@ services:
         destination: /index.html
     envVars:
       - key: VITE_API_URL
-        value: https://kawad-swad-sales-dev.onrender.com
+        value: https://kawad-swad-sales-backend.onrender.com
 
   - type: web
     name: kawad-swad-sales-backend

@@ -3,6 +3,7 @@ Authoritative Inventory Engine
 Implements Part 2 and Part 7 of the specification.
 """
 
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from .units import (
     round_stock,

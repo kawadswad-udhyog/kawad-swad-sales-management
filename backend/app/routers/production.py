@@ -1224,6 +1224,23 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         ref_clean = req.reference.strip()
         existing_pack = next((p for p in db.get_records("PackagingBatches") if str(field(p, "reference", default="")).strip() == ref_clean), None)
         if existing_pack:
+            # Reject conflicting reuse of idempotency reference
+            old_pid = str(field(existing_pack, "product_id", default="")).strip()
+            old_bulk = float(field(existing_pack, "bulk_kg_used", default=0) or 0)
+            old_p200 = int(float(field(existing_pack, "packets_200g", default=0) or 0))
+            old_p500 = int(float(field(existing_pack, "packets_500g", default=0) or 0))
+            old_p1000 = int(float(field(existing_pack, "packets_1000g", default=0) or 0))
+
+            if (old_pid != req.product_id.strip() or
+                abs(old_bulk - req.bulk_kg_used) > 0.005 or
+                old_p200 != req.packets_200g or
+                old_p500 != req.packets_500g or
+                old_p1000 != req.packets_1000g):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This packaging reference has already been used with conflicting payload data. Start a new packaging batch with a unique reference."
+                )
+
             pack_id = str(field(existing_pack, "packaging_id"))
             pack_status = str(field(existing_pack, "status")).upper()
             if pack_status in {"RECORDED", "COMPLETE"}:
@@ -1544,6 +1561,21 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
         ref_clean = req.reference.strip()
         existing_disp = next((d for d in db.get_records("ProductionDispatches") if str(field(d, "reference")).strip() == ref_clean), None)
         if existing_disp:
+            # Reject conflicting reuse of idempotency reference
+            old_pid = str(field(existing_disp, "product_id", default="")).strip()
+            old_chan = str(field(existing_disp, "channel", default="")).strip().upper()
+            old_dest = str(field(existing_disp, "destination", default="")).strip()
+            old_qty = int(float(field(existing_disp, "quantity_packets", default=0) or 0))
+
+            if (old_pid != req.product_id.strip() or
+                old_chan != req.channel.strip().upper() or
+                old_dest != (req.destination or "").strip() or
+                old_qty != req.quantity_packets):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This dispatch reference has already been used with conflicting payload data. Start a new dispatch with a unique reference."
+                )
+
             disp_id = str(field(existing_disp, "dispatch_id"))
             disp_status = str(field(existing_disp, "status")).upper()
             if disp_status == "DISPATCHED_NOT_SALE":

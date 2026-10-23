@@ -233,10 +233,12 @@ class TestProductionAndAttendanceV2(unittest.TestCase):
 
     def test_dashboard_metrics_includes_production_and_attendance(self):
         # Create a pending batch
+        from app.timeutil import business_today
+        today_date = business_today()
         asyncio.run(create_batch(
             ProductionCreate(
                 product_id="PRD-MOONG-MASTER",
-                production_date="2026-10-22",
+                production_date=today_date,
                 quantity_kg=120.0,
             ),
             self.pa_user,
@@ -244,7 +246,7 @@ class TestProductionAndAttendanceV2(unittest.TestCase):
 
         # Record attendance for 1 worker
         asyncio.run(record_attendance(
-            AttendanceCreate(worker_id="WRK-001", attendance_date="2026-10-22", status="PRESENT"),
+            AttendanceCreate(worker_id="WRK-001", attendance_date=today_date, status="PRESENT"),
             self.pa_user,
         ))
 
