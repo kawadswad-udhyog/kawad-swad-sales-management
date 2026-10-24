@@ -1,6 +1,17 @@
 import logging
-from fastapi import FastAPI, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Depends
+try:
+    from fastapi import Request
+except ImportError:
+    class Request:  # type: ignore
+        pass
+try:
+    from fastapi.responses import JSONResponse
+except ImportError:
+    class JSONResponse:  # type: ignore
+        def __init__(self, content, status_code=200):
+            self.content = content
+            self.status_code = status_code
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import SALES_CORS_ORIGINS, assert_runtime_config
 from app.sheets import db
@@ -31,13 +42,14 @@ app = FastAPI(
     version="1.0.0",
 )
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.exception(f"Unhandled server error on {request.method} {request.url.path}: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "An internal server error occurred. Please contact the system administrator."},
-    )
+if hasattr(app, "exception_handler"):
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        logger.exception(f"Unhandled server error on {request.method} {request.url.path}: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "An internal server error occurred. Please contact the system administrator."},
+        )
 
 # Configure CORS
 configured_origins = [o.strip().rstrip("/") for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
@@ -53,9 +65,8 @@ origins = list(default_origins.union(configured_origins))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"^https?://.*$",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
 )

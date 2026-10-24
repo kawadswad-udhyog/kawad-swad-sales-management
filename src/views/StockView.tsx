@@ -78,11 +78,11 @@ export const StockView: React.FC = () => {
     if (!reconProductId) return 0;
     if (reconLocation === 'FACTORY') {
       const reg = registerItems.find(r => r.product_id === reconProductId);
-      return reg ? reg.factory_packets : 0;
+      return reg ? (reg.factory_packets ?? reg.factory_stock ?? 0) : 0;
     }
     if (reconLocation === 'WAREHOUSE') {
       const reg = registerItems.find(r => r.product_id === reconProductId);
-      if (reg) return reg.warehouse_packets;
+      if (reg) return reg.warehouse_packets ?? reg.warehouse_stock ?? 0;
       const comp = companyStockSummary.find(c => c.product_id === reconProductId);
       return comp ? comp.company_quantity : 0;
     }
@@ -90,7 +90,7 @@ export const StockView: React.FC = () => {
     return sm ? sm.quantity : 0;
   }, [reconLocation, reconProductId, registerItems, companyStockSummary, salesmanStockSummary]);
 
-  const liveAdjustmentDiff = Number(reconPhysicalCount) - currentExpectedCount;
+  const liveAdjustmentDiff = Number(reconPhysicalCount) - (currentExpectedCount ?? 0);
 
   const handleReconcileOpening = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -199,7 +199,9 @@ export const StockView: React.FC = () => {
     : stockTransactions;
 
   const filteredRegister = registerItems.filter((item) => {
-    if (hideZeroStock && item.total_internal_on_hand_packets <= 0 && item.channels_dispatched_packets <= 0) {
+    const totalInternalOnHand = item.total_internal_on_hand_packets ?? item.total_internal_on_hand ?? 0;
+    const channelsDispatched = item.channels_dispatched_packets ?? 0;
+    if (hideZeroStock && totalInternalOnHand <= 0 && channelsDispatched <= 0) {
       return false;
     }
     if (registerFamily !== 'ALL') {
@@ -225,11 +227,11 @@ export const StockView: React.FC = () => {
       'Category': item.category,
       'Pack Weight (g)': item.pack_weight_g,
       'Selling Unit': item.selling_unit,
-      'Factory Packets': item.factory_packets,
-      'Warehouse Packets': item.warehouse_packets,
-      'Salesmen In-Hand Packets': item.salesmen_packets,
-      'Total Internal On-Hand': item.total_internal_on_hand_packets,
-      'External Channels Dispatched': item.channels_dispatched_packets,
+      'Factory Packets': item.factory_packets ?? item.factory_stock ?? 0,
+      'Warehouse Packets': item.warehouse_packets ?? item.warehouse_stock ?? 0,
+      'Salesmen In-Hand Packets': item.salesmen_packets ?? item.salesmen_stock ?? 0,
+      'Total Internal On-Hand': item.total_internal_on_hand_packets ?? item.total_internal_on_hand ?? 0,
+      'External Channels Dispatched': item.channels_dispatched_packets ?? 0,
       'Stock Status': item.stock_status,
       'Active': item.active ? 'YES' : 'NO',
     }));
@@ -398,28 +400,33 @@ export const StockView: React.FC = () => {
                 </thead>
                 <tbody>
                   {filteredRegister.map((item) => {
-                    const isZero = item.total_internal_on_hand_packets <= 0;
-                    const isLow = item.total_internal_on_hand_packets > 0 && item.total_internal_on_hand_packets < 20;
+                    const totalOnHand = item.total_internal_on_hand_packets ?? item.total_internal_on_hand ?? 0;
+                    const factoryPackets = item.factory_packets ?? item.factory_stock ?? 0;
+                    const warehousePackets = item.warehouse_packets ?? item.warehouse_stock ?? 0;
+                    const salesmenPackets = item.salesmen_packets ?? item.salesmen_stock ?? 0;
+                    const channelsDispatched = item.channels_dispatched_packets ?? 0;
+                    const isZero = totalOnHand <= 0;
+                    const isLow = totalOnHand > 0 && totalOnHand < 20;
                     return (
                       <tr key={item.product_id} style={{ background: isZero ? '#fafafa' : undefined }}>
                         <td><strong>{item.sku}</strong></td>
                         <td>{item.product_name}</td>
                         <td className="muted">{item.category || 'Papad'}</td>
                         <td style={{ textAlign: 'center' }}>{item.pack_weight_g} g</td>
-                        <td style={{ textAlign: 'right', fontWeight: item.factory_packets > 0 ? 700 : 400, color: item.factory_packets > 0 ? '#15803d' : '#94a3b8' }}>
-                          {item.factory_packets}
+                        <td style={{ textAlign: 'right', fontWeight: factoryPackets > 0 ? 700 : 400, color: factoryPackets > 0 ? '#15803d' : '#94a3b8' }}>
+                          {factoryPackets}
                         </td>
-                        <td style={{ textAlign: 'right', fontWeight: item.warehouse_packets > 0 ? 700 : 400, color: item.warehouse_packets > 0 ? '#1d4ed8' : '#94a3b8' }}>
-                          {item.warehouse_packets}
+                        <td style={{ textAlign: 'right', fontWeight: warehousePackets > 0 ? 700 : 400, color: warehousePackets > 0 ? '#1d4ed8' : '#94a3b8' }}>
+                          {warehousePackets}
                         </td>
-                        <td style={{ textAlign: 'right', fontWeight: item.salesmen_packets > 0 ? 700 : 400, color: item.salesmen_packets > 0 ? '#a21caf' : '#94a3b8' }}>
-                          {item.salesmen_packets}
+                        <td style={{ textAlign: 'right', fontWeight: salesmenPackets > 0 ? 700 : 400, color: salesmenPackets > 0 ? '#a21caf' : '#94a3b8' }}>
+                          {salesmenPackets}
                         </td>
                         <td style={{ textAlign: 'right', background: isZero ? '#fef2f2' : '#fefce8', color: isZero ? '#b91c1c' : '#854d0e', fontWeight: 700 }}>
-                          {item.total_internal_on_hand_packets}
+                          {totalOnHand}
                         </td>
                         <td style={{ textAlign: 'right', color: '#475569' }}>
-                          {item.channels_dispatched_packets}
+                          {channelsDispatched}
                         </td>
                         <td style={{ textAlign: 'center' }}>
                           <span

@@ -1597,7 +1597,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       {/* FINISHED GOODS REGISTER TAB */}
       {tab === 'finished_goods' && (() => {
         const filteredRegister = registerItems.filter(item => {
-          if (hideZeroStock && item.total_internal_on_hand_packets <= 0 && item.channels_dispatched_packets <= 0) {
+          const totalOnHand = item.total_internal_on_hand_packets ?? item.total_internal_on_hand ?? 0;
+          const channelsDispatched = item.channels_dispatched_packets ?? 0;
+          if (hideZeroStock && totalOnHand <= 0 && channelsDispatched <= 0) {
             return false;
           }
           if (registerFamilyFilter !== 'ALL') {
@@ -1623,11 +1625,11 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             'Category': item.category,
             'Pack Weight (g)': item.pack_weight_g,
             'Selling Unit': item.selling_unit,
-            'Factory Packets': item.factory_packets,
-            'Warehouse Packets': item.warehouse_packets,
-            'Salesmen In-Hand Packets': item.salesmen_packets,
-            'Total Internal On-Hand': item.total_internal_on_hand_packets,
-            'External Channels Dispatched': item.channels_dispatched_packets,
+            'Factory Packets': item.factory_packets ?? item.factory_stock ?? 0,
+            'Warehouse Packets': item.warehouse_packets ?? item.warehouse_stock ?? 0,
+            'Salesmen In-Hand Packets': item.salesmen_packets ?? item.salesmen_stock ?? 0,
+            'Total Internal On-Hand': item.total_internal_on_hand_packets ?? item.total_internal_on_hand ?? 0,
+            'External Channels Dispatched': item.channels_dispatched_packets ?? 0,
             'Stock Status': item.stock_status,
             'Active in Master': item.active ? 'YES' : 'NO',
           }));
@@ -1775,8 +1777,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   </thead>
                   <tbody>
                     {filteredRegister.map(item => {
-                      const isZero = item.total_internal_on_hand_packets <= 0;
-                      const isLow = item.total_internal_on_hand_packets > 0 && item.total_internal_on_hand_packets < 20;
+                      const totalOnHand = item.total_internal_on_hand_packets ?? item.total_internal_on_hand ?? 0;
+                      const factoryPackets = item.factory_packets ?? item.factory_stock ?? 0;
+                      const warehousePackets = item.warehouse_packets ?? item.warehouse_stock ?? 0;
+                      const salesmenPackets = item.salesmen_packets ?? item.salesmen_stock ?? 0;
+                      const channelsDispatched = item.channels_dispatched_packets ?? 0;
+                      const isZero = totalOnHand <= 0;
+                      const isLow = totalOnHand > 0 && totalOnHand < 20;
                       return (
                         <tr
                           key={item.product_id}
@@ -1801,14 +1808,14 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                               {item.pack_weight_g} g
                             </span>
                           </td>
-                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: item.factory_packets > 0 ? 600 : 400, color: item.factory_packets > 0 ? '#15803d' : '#94a3b8' }}>
-                            {item.factory_packets}
+                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: factoryPackets > 0 ? 600 : 400, color: factoryPackets > 0 ? '#15803d' : '#94a3b8' }}>
+                            {factoryPackets}
                           </td>
-                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: item.warehouse_packets > 0 ? 600 : 400, color: item.warehouse_packets > 0 ? '#1d4ed8' : '#94a3b8' }}>
-                            {item.warehouse_packets}
+                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: warehousePackets > 0 ? 600 : 400, color: warehousePackets > 0 ? '#1d4ed8' : '#94a3b8' }}>
+                            {warehousePackets}
                           </td>
-                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: item.salesmen_packets > 0 ? 600 : 400, color: item.salesmen_packets > 0 ? '#a21caf' : '#94a3b8' }}>
-                            {item.salesmen_packets}
+                          <td style={{ textAlign: 'right', padding: '9px 8px', fontWeight: salesmenPackets > 0 ? 600 : 400, color: salesmenPackets > 0 ? '#a21caf' : '#94a3b8' }}>
+                            {salesmenPackets}
                           </td>
                           <td
                             style={{
@@ -1820,10 +1827,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                               fontSize: 14,
                             }}
                           >
-                            {item.total_internal_on_hand_packets}
+                            {totalOnHand}
                           </td>
                           <td style={{ textAlign: 'right', padding: '9px 8px', color: '#475569' }}>
-                            {item.channels_dispatched_packets}
+                            {channelsDispatched}
                           </td>
                           <td style={{ textAlign: 'center', padding: '9px 8px' }}>
                             <span
