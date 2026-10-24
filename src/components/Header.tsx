@@ -6,13 +6,14 @@ import {
   Menu,
   RefreshCw,
   LogOut,
-  Shield,
   Wifi,
   WifiOff,
-  Database,
   CheckCircle2,
   AlertTriangle,
   X,
+  Server,
+  Database,
+  ExternalLink,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -43,95 +44,93 @@ export const Header: React.FC<HeaderProps> = ({
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [tempUrl, setTempUrl] = useState(backendUrl);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [lastSyncTime, setLastSyncTime] = useState<string>('Just now');
 
   const getRoleBadge = (role?: UserRole) => {
     switch (role) {
       case 'OWNER':
-        return { label: 'Owner / Admin', bg: '#fef08a', text: '#854d0e' };
+        return { label: 'Admin / Owner', bg: 'bg-amber-100 text-amber-800 border-amber-200' };
       case 'PA':
-        return { label: 'Personal Assistant', bg: '#dbeafe', text: '#1e40af' };
+        return { label: 'Personal Assistant', bg: 'bg-blue-100 text-blue-800 border-blue-200' };
       case 'SALESMAN':
-        return { label: 'Field Sales', bg: '#dcfce7', text: '#15803d' };
+        return { label: 'Field Sales', bg: 'bg-emerald-100 text-emerald-800 border-emerald-200' };
       default:
-        return { label: role || 'Staff', bg: '#f1f5f9', text: '#475569' };
+        return { label: role || 'Staff', bg: 'bg-slate-100 text-slate-700 border-slate-200' };
     }
   };
 
-  const getViewTitle = (v: ViewType) => {
+  const getViewBreadcrumb = (v: ViewType) => {
     switch (v) {
       case 'dashboard':
-        return currentUser?.role === 'SALESMAN' ? 'Field Workspace' : 'Overview Dashboard';
+        return { group: 'Overview', title: currentUser?.role === 'SALESMAN' ? 'Field Workspace' : 'Dashboard' };
       case 'production':
-        return 'Daily Production & Batches';
+        return { group: 'Operations', title: 'Daily Production & Batches' };
       case 'attendance':
-        return 'Worker Attendance & Wages';
+        return { group: 'Operations', title: 'Worker Attendance & Wages' };
       case 'packaging':
-        return 'Packaging & Packet Reconciliation';
+        return { group: 'Operations', title: 'Packaging & Reconciliation' };
       case 'stock':
-        return 'Inventory & Stock Ledgers';
-      case 'sales':
-        return 'Sales Billing & Invoicing';
+        return { group: 'Inventory', title: 'Finished Goods & Ledgers' };
       case 'approvals':
-        return 'Approvals Management';
+        return { group: 'Inventory', title: 'Approvals & Requests' };
+      case 'sales':
+        return { group: 'Commercial', title: 'Sales Billing & Invoicing' };
       case 'customers':
-        return 'Customer Directory';
+        return { group: 'Commercial', title: 'Customer Directory' };
       case 'products':
-        return 'Product Catalogue';
+        return { group: 'Commercial', title: 'Product Catalogue' };
       case 'expenses':
-        return 'Expenses & Claims';
+        return { group: 'Commercial', title: 'Expenses & Claims' };
       case 'visits':
-        return 'Shop Visits & Field Activity';
+        return { group: 'Commercial', title: 'Shop Visits & GPS Logs' };
       case 'closing':
-        return 'Daily Cash Closing';
+        return { group: 'Commercial', title: 'Daily Cash Closing' };
       case 'salary':
-        return 'Salary & Incentives';
+        return { group: 'Management', title: 'Salary & Payroll' };
       case 'reports':
-        return 'Reports & Data Exports';
+        return { group: 'Management', title: 'Reports & Data Exports' };
       case 'users':
-        return 'User Management & Security';
+        return { group: 'Management', title: 'Team & User Security' };
       case 'audit':
-        return 'Audit Logs & Sheet Integrity';
+        return { group: 'Management', title: 'Audit Trail & Sheets Health' };
       default:
-        return 'Management System';
+        return { group: 'Operations', title: 'Management System' };
     }
   };
 
   const roleBadge = getRoleBadge(currentUser?.role);
+  const breadcrumb = getViewBreadcrumb(currentView);
 
   // Status configuration
   let statusBadge = {
-    label: 'Connected',
-    color: '#15803d',
-    bg: '#ecfdf5',
-    border: '#bbf7d0',
-    icon: <CheckCircle2 size={13} />,
+    label: 'Online',
+    color: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+    dot: 'bg-emerald-500',
+    icon: <CheckCircle2 size={13} className="text-emerald-600" />,
   };
 
   if (!isBackendConnected) {
     if (connectionError) {
       statusBadge = {
         label: 'API Offline',
-        color: '#b91c1c',
-        bg: '#fef2f2',
-        border: '#fecaca',
-        icon: <WifiOff size={13} />,
+        color: 'text-red-700 bg-red-50 border-red-200',
+        dot: 'bg-red-500',
+        icon: <WifiOff size={13} className="text-red-600" />,
       };
     } else {
       statusBadge = {
-        label: 'Connecting API…',
-        color: '#b45309',
-        bg: '#fffbeb',
-        border: '#fde68a',
-        icon: <AlertTriangle size={13} />,
+        label: 'Connecting…',
+        color: 'text-amber-700 bg-amber-50 border-amber-200',
+        dot: 'bg-amber-500 animate-pulse',
+        icon: <AlertTriangle size={13} className="text-amber-600" />,
       };
     }
   } else if (!isGoogleSheetsConnected || !persistentWritesEnabled) {
     statusBadge = {
       label: 'Sheets Offline',
-      color: '#b91c1c',
-      bg: '#fef2f2',
-      border: '#fecaca',
-      icon: <WifiOff size={13} />,
+      color: 'text-red-700 bg-red-50 border-red-200',
+      dot: 'bg-red-500',
+      icon: <WifiOff size={13} className="text-red-600" />,
     };
   }
 
@@ -141,68 +140,42 @@ export const Header: React.FC<HeaderProps> = ({
       const res = await reconnectGoogleSheets();
       if (res.success) {
         await refreshData();
+        setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       }
     } finally {
       setIsReconnecting(false);
     }
   };
 
-  const handleSaveUrl = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (tempUrl.trim()) {
-      updateBackendUrl(tempUrl.trim());
-      setShowStatusModal(false);
-    }
+  const handleRefresh = async () => {
+    await refreshData();
+    setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
   };
 
   return (
     <>
-      <header
-        style={{
-          background: '#ffffff',
-          borderBottom: '1px solid #e2e8f0',
-          padding: '10px 20px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '16px',
-          height: '62px',
-          boxSizing: 'border-box',
-          position: 'sticky',
-          top: 0,
-          zIndex: 30,
-        }}
-      >
+      <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 sticky top-0 z-20 shrink-0">
         {/* Left Side: Mobile Menu Button & Breadcrumb */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div className="flex items-center gap-3 min-w-0">
           {onToggleMobileNav && (
             <button
               onClick={onToggleMobileNav}
-              style={{
-                background: 'transparent',
-                border: '1px solid #e2e8f0',
-                borderRadius: '8px',
-                padding: '7px',
-                color: '#475569',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-              className="mobile-nav-toggle"
+              className="lg:hidden p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors"
               title="Open Navigation"
             >
               <Menu size={18} />
             </button>
           )}
 
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', color: '#64748b' }}>
-              <span>Kawad Swad</span>
+          <div className="flex flex-col min-w-0">
+            <nav className="flex items-center gap-1.5 text-xs text-slate-500">
+              <span className="font-semibold text-emerald-800">Kawad Swad</span>
               <span>/</span>
-              <span style={{ fontWeight: 600, color: '#0f172a' }}>{getViewTitle(currentView)}</span>
-            </div>
-            <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+              <span className="hidden sm:inline text-slate-400">{breadcrumb.group}</span>
+              <span className="hidden sm:inline">/</span>
+              <span className="font-semibold text-slate-900 truncate">{breadcrumb.title}</span>
+            </nav>
+            <div className="text-[11px] text-slate-400 font-medium">
               {new Date().toLocaleDateString('en-IN', {
                 weekday: 'short',
                 day: 'numeric',
@@ -214,89 +187,41 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Right Side: Quick Actions, Connection Pill & User Info */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {/* Refresh Button */}
           <button
-            onClick={() => refreshData()}
+            onClick={handleRefresh}
             disabled={isRefreshing}
-            style={{
-              background: '#f8fafc',
-              border: '1px solid #e2e8f0',
-              borderRadius: '8px',
-              padding: '6px 10px',
-              color: '#475569',
-              fontSize: '0.80rem',
-              fontWeight: 500,
-              cursor: isRefreshing ? 'not-allowed' : 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-            }}
-            title="Refresh active workspace data"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors disabled:opacity-50"
+            title={`Refresh active workspace data (Last synced: ${lastSyncTime})`}
           >
-            <RefreshCw size={13} className={isRefreshing ? 'spin-icon' : ''} />
-            <span className="hide-on-mobile">{isRefreshing ? 'Syncing…' : 'Sync'}</span>
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin text-emerald-600' : 'text-slate-500'} />
+            <span className="hidden md:inline">{isRefreshing ? 'Syncing…' : 'Sync'}</span>
           </button>
 
           {/* Connection Status Pill */}
-          <div
+          <button
             onClick={() => setShowStatusModal(true)}
-            role="button"
-            tabIndex={0}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              cursor: 'pointer',
-              fontSize: '0.76rem',
-              fontWeight: 600,
-              background: statusBadge.bg,
-              color: statusBadge.color,
-              border: `1px solid ${statusBadge.border}`,
-              padding: '5px 10px',
-              borderRadius: '999px',
-            }}
-            title="Click to check connection status"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-semibold transition-all hover:shadow-xs cursor-pointer ${statusBadge.color}`}
+            title="Inspect backend & Google Sheets connection health"
           >
+            <span className={`w-1.5 h-1.5 rounded-full ${statusBadge.dot}`} />
             {statusBadge.icon}
             <span>{statusBadge.label}</span>
-          </div>
+          </button>
 
           {/* Logged in User Badge */}
           {currentUser && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  padding: '4px 8px',
-                  borderRadius: '8px',
-                  background: '#f8fafc',
-                  border: '1px solid #e2e8f0',
-                }}
-              >
-                <div
-                  style={{
-                    width: '28px',
-                    height: '28px',
-                    borderRadius: '50%',
-                    background: '#166534',
-                    color: '#ffffff',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: '0.78rem',
-                    fontWeight: 700,
-                  }}
-                >
-                  {currentUser.full_name ? currentUser.full_name.slice(0, 1).toUpperCase() : 'U'}
+            <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+              <div className="flex items-center gap-2 p-1 rounded-lg">
+                <div className="w-8 h-8 rounded-full bg-emerald-800 text-white flex items-center justify-center text-xs font-bold shrink-0 shadow-xs">
+                  {currentUser.full_name ? currentUser.full_name.charAt(0).toUpperCase() : 'U'}
                 </div>
-                <div className="hide-on-mobile" style={{ textAlign: 'left', lineHeight: 1.15 }}>
-                  <div style={{ fontSize: '0.80rem', fontWeight: 600, color: '#0f172a' }}>
+                <div className="hidden sm:flex flex-col text-left leading-tight">
+                  <div className="text-xs font-bold text-slate-900 truncate max-w-[130px]">
                     {currentUser.full_name}
                   </div>
-                  <div style={{ fontSize: '0.70rem', color: roleBadge.text, fontWeight: 700 }}>
+                  <div className="text-[10px] font-semibold text-emerald-800">
                     {roleBadge.label}
                   </div>
                 </div>
@@ -305,153 +230,117 @@ export const Header: React.FC<HeaderProps> = ({
               {/* Logout Button */}
               <button
                 onClick={logout}
-                style={{
-                  background: 'transparent',
-                  border: '1px solid #e2e8f0',
-                  borderRadius: '8px',
-                  padding: '7px 10px',
-                  color: '#64748b',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  fontSize: '0.78rem',
-                  fontWeight: 600,
-                }}
+                className="p-2 text-slate-500 hover:text-red-700 hover:bg-red-50 rounded-lg border border-transparent hover:border-red-200 transition-colors"
                 title="Sign out of ERP"
               >
-                <LogOut size={14} />
-                <span className="hide-on-mobile">Logout</span>
+                <LogOut size={16} />
               </button>
             </div>
           )}
         </div>
       </header>
 
-      {/* Connection Details Modal */}
+      {/* Connection Details Diagnostic Modal */}
       {showStatusModal && (
         <div
           onClick={() => setShowStatusModal(false)}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(15, 23, 42, 0.45)',
-            zIndex: 50,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '16px',
-            backdropFilter: 'blur(2px)',
-          }}
+          className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4"
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            style={{
-              background: '#ffffff',
-              borderRadius: '14px',
-              maxWidth: '520px',
-              width: '100%',
-              padding: '24px',
-              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
-              border: '1px solid #e2e8f0',
-            }}
+            className="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150"
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Wifi size={20} color="#166534" />
-                <h3 style={{ margin: 0, fontSize: '1.15rem', color: '#0f172a' }}>System Connection Health</h3>
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-50 text-emerald-800 rounded-lg">
+                  <Server size={18} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-base m-0">Connection Diagnostics</h3>
+                  <p className="text-xs text-slate-500 m-0">FastAPI Backend & Google Sheets Persistence</p>
+                </div>
               </div>
               <button
                 onClick={() => setShowStatusModal(false)}
-                style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', padding: '4px' }}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-md"
               >
-                <X size={20} />
+                <X size={18} />
               </button>
             </div>
 
-            {/* Status Checklist */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: isBackendConnected ? '#ecfdf5' : '#fffbeb',
-                  border: isBackendConnected ? '1px solid #bbf7d0' : '1px solid #fde68a',
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '0.88rem', color: '#0f172a' }}>Backend API Service</div>
-                  <div style={{ fontSize: '0.78rem', color: '#64748b' }}>FastAPI on Render ({backendUrl || 'Proxy / direct'})</div>
+            {/* Checklist items */}
+            <div className="py-4 space-y-3">
+              {/* Backend API */}
+              <div className={`p-3.5 rounded-lg border flex items-center justify-between ${
+                isBackendConnected ? 'bg-emerald-50/50 border-emerald-200' : 'bg-amber-50/60 border-amber-200'
+              }`}>
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-md ${isBackendConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                    <Server size={16} />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-900 text-xs">FastAPI Backend Service</div>
+                    <div className="text-[11px] text-slate-500 truncate max-w-[240px]">
+                      {backendUrl || 'Direct / Proxy'}
+                    </div>
+                  </div>
                 </div>
-                <span style={{ fontSize: '0.80rem', fontWeight: 700, color: isBackendConnected ? '#15803d' : '#b45309' }}>
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${
+                  isBackendConnected ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                }`}>
                   {isBackendConnected ? 'Online ✓' : 'Connecting / Waking…'}
                 </span>
               </div>
 
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: isGoogleSheetsConnected ? '#ecfdf5' : '#fef2f2',
-                  border: isGoogleSheetsConnected ? '1px solid #bbf7d0' : '1px solid #fecaca',
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '0.88rem', color: '#0f172a' }}>Google Sheets Persistent Storage</div>
-                  <div style={{ fontSize: '0.78rem', color: '#64748b' }}>Master 28-tab Google Sheets Database</div>
+              {/* Google Sheets Persistence */}
+              <div className={`p-3.5 rounded-lg border flex items-center justify-between ${
+                isGoogleSheetsConnected && persistentWritesEnabled
+                  ? 'bg-emerald-50/50 border-emerald-200'
+                  : 'bg-red-50/60 border-red-200'
+              }`}>
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-md ${
+                    isGoogleSheetsConnected && persistentWritesEnabled
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-red-100 text-red-700'
+                  }`}>
+                    <Database size={16} />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-900 text-xs">Google Sheets Persistence</div>
+                    <div className="text-[11px] text-slate-500">28-sheet enterprise ledger & auth database</div>
+                  </div>
                 </div>
-                <span style={{ fontSize: '0.80rem', fontWeight: 700, color: isGoogleSheetsConnected ? '#15803d' : '#b91c1c' }}>
-                  {isGoogleSheetsConnected ? 'Connected ✓' : 'Disconnected ✗'}
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${
+                  isGoogleSheetsConnected && persistentWritesEnabled
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : 'bg-red-100 text-red-800'
+                }`}>
+                  {isGoogleSheetsConnected && persistentWritesEnabled ? 'Connected ✓' : 'Disconnected ✗'}
                 </span>
               </div>
 
               {connectionError && (
-                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px', fontSize: '0.78rem', color: '#64748b' }}>
-                  <strong>Diagnostic note:</strong> {connectionError}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+                  <span className="font-semibold text-slate-700">Diagnostic message:</span> {connectionError}
                 </div>
               )}
             </div>
 
-            {/* Actions */}
-            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+            {/* Modal Actions */}
+            <div className="flex items-center justify-between pt-4 border-t border-slate-100 gap-2">
               <button
                 disabled={isReconnecting}
                 onClick={handleManualReconnect}
-                style={{
-                  padding: '8px 14px',
-                  fontSize: '0.84rem',
-                  fontWeight: 600,
-                  background: '#166534',
-                  color: '#ffffff',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: isReconnecting ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                }}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold transition-colors disabled:opacity-50"
               >
-                <RefreshCw size={14} className={isReconnecting ? 'spin-icon' : ''} />
-                {isReconnecting ? 'Reconnecting Sheets…' : 'Test & Reconnect Sheets'}
+                <RefreshCw size={14} className={isReconnecting ? 'animate-spin' : ''} />
+                <span>{isReconnecting ? 'Reconnecting Sheets…' : 'Reconnect Google Sheets'}</span>
               </button>
+
               <button
                 onClick={() => setShowStatusModal(false)}
-                style={{
-                  padding: '8px 14px',
-                  fontSize: '0.84rem',
-                  fontWeight: 600,
-                  background: '#f1f5f9',
-                  color: '#475569',
-                  border: '1px solid #cbd5e1',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                }}
+                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 text-xs font-semibold transition-colors"
               >
                 Close
               </button>

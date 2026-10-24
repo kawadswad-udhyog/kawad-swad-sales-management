@@ -311,3 +311,27 @@ export interface FinishedGoodsRegisterSummary {
   total_internal_on_hand_packets: number;
 }
 
+export interface DashboardMetrics {
+  today_sales: number;
+  today_cash: number;
+  total_bills_today: number;
+  pending_expenses: number;
+  low_stock_items: number;
+  active_salesmen: number;
+  monthly_sales?: number;
+  today_kg_sold?: number;
+  monthly_kg_sold?: number;
+  digital_collections_today?: number;
+  incomplete_transactions_count?: number;
+  pending_discrepancies?: number;
+  pending_production_approvals?: number;
+  today_production_kg?: number;
+  pending_production_kg?: number;
+  available_finished_packets?: number;
+  active_workers_count?: number;
+  workers_present_today?: number;
+  zero_stock_items_count?: number;
+  role?: string;
+  salesman_user_id?: string | null;
+}
+

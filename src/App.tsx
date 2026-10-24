@@ -19,6 +19,7 @@ import { UsersView } from './views/UsersView';
 import { ProductionView } from './views/ProductionView';
 import { AttendanceView } from './views/AttendanceView';
 import { ApprovalsView } from './views/ApprovalsView';
+import { AlertTriangle, AlertCircle, RefreshCw, X, ShieldAlert } from 'lucide-react';
 
 const MainAppContent: React.FC = () => {
   const {
@@ -34,6 +35,7 @@ const MainAppContent: React.FC = () => {
     connectionError,
     reconnectGoogleSheets,
   } = useStore();
+
   const [currentView, setCurrentView] = useState<ViewType>(() => {
     if (typeof window !== 'undefined') {
       const saved = sessionStorage.getItem('ks_current_view');
@@ -54,13 +56,15 @@ const MainAppContent: React.FC = () => {
 
   if (isLoading && !currentUser) {
     return (
-      <div className="app-shell">
+      <div className="min-h-screen bg-slate-50 flex flex-col">
         <Header />
-        <main style={{ padding: '80px 20px', textAlign: 'center', color: '#475569' }}>
-          <div style={{ fontSize: '2.5rem', marginBottom: '16px' }}>⏳</div>
-          <h2 style={{ margin: '0 0 8px', color: '#14532d' }}>Kawad Swad Udhyog</h2>
-          <p style={{ margin: 0, fontSize: '0.95rem', color: '#64748b' }}>
-            Restoring session and syncing catalogue data…
+        <main className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+          <div className="w-12 h-12 rounded-2xl bg-emerald-800 text-white flex items-center justify-center font-extrabold text-lg mb-4 shadow-sm animate-pulse">
+            KS
+          </div>
+          <h2 className="text-base font-bold text-slate-900 m-0">Kawad Swad Udhyog</h2>
+          <p className="text-xs text-slate-500 mt-1 max-w-xs">
+            Restoring session and initializing secure ERP workspace…
           </p>
         </main>
       </div>
@@ -69,9 +73,9 @@ const MainAppContent: React.FC = () => {
 
   if (!currentUser) {
     return (
-      <div className="app-shell">
+      <div className="min-h-screen bg-slate-50 flex flex-col">
         <Header />
-        <main>
+        <main className="flex-1">
           <LoginModal />
         </main>
       </div>
@@ -118,68 +122,46 @@ const MainAppContent: React.FC = () => {
   };
 
   return (
-    <div className="app-shell">
+    <div className="min-h-screen bg-slate-50 flex flex-col antialiased">
       <Header
         currentView={currentView}
         onToggleMobileNav={() => setIsMobileNavOpen((prev) => !prev)}
         onNavigate={handleSelectView}
       />
+
+      {/* Critical Status Banners */}
       {!isBackendConnected && (
-        <div style={{
-          background: '#451a03',
-          borderBottom: '2px solid #f97316',
-          padding: '12px 20px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          color: '#ffedd5',
-          fontSize: '0.88rem',
-          flexWrap: 'wrap',
-          gap: '12px'
-        }}>
-          <div>
-            <strong>⚠️ Backend API Offline / Connecting:</strong> Cannot reach backend service at this moment.
-            <div style={{ fontSize: '0.80rem', marginTop: '2px', color: '#fed7aa' }}>
-              The server may be waking up from sleep (Render free tier) or experiencing network delay.
-              {connectionError ? ` Details: ${connectionError}` : ''}
+        <div className="bg-amber-900 text-amber-50 px-4 py-2.5 flex items-center justify-between text-xs flex-wrap gap-2 border-b border-amber-700">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-amber-300 shrink-0" />
+            <div>
+              <span className="font-bold">Backend API Standby:</span> Cannot reach backend service right now.
+              <span className="text-amber-200 ml-1.5 hidden sm:inline">
+                The Render server may be spinning up from cold sleep (~40s).
+                {connectionError ? ` (${connectionError})` : ''}
+              </span>
             </div>
           </div>
           <button
             disabled={isRefreshing}
             onClick={() => refreshData()}
-            style={{
-              padding: '6px 14px',
-              fontSize: '0.80rem',
-              fontWeight: 700,
-              background: isRefreshing ? '#9a3412' : '#ea580c',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: isRefreshing ? 'not-allowed' : 'pointer'
-            }}
+            className="flex items-center gap-1.5 px-3 py-1 rounded bg-amber-700 hover:bg-amber-600 font-semibold text-xs transition-colors shrink-0 cursor-pointer disabled:opacity-50"
           >
-            {isRefreshing ? '⏳ Connecting…' : '🔄 Retry Backend Connection'}
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+            <span>{isRefreshing ? 'Connecting…' : 'Retry Connection'}</span>
           </button>
         </div>
       )}
+
       {isBackendConnected && (!isGoogleSheetsConnected || !persistentWritesEnabled) && (
-        <div style={{
-          background: '#450a0a',
-          borderBottom: '2px solid #ef4444',
-          padding: '12px 20px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          color: '#fee2e2',
-          fontSize: '0.88rem',
-          flexWrap: 'wrap',
-          gap: '12px'
-        }}>
-          <div>
-            <strong>🔴 Persistent Storage Disconnected:</strong> Google Sheets is currently unreachable from the backend.
-            <div style={{ fontSize: '0.80rem', marginTop: '2px', color: '#fca5a5' }}>
-              Business writes (new sales bills, batch production, payments) are temporarily locked to prevent data loss.
-              {connectionError ? ` Reason: ${connectionError}` : ''}
+        <div className="bg-red-900 text-red-50 px-4 py-2.5 flex items-center justify-between text-xs flex-wrap gap-2 border-b border-red-700">
+          <div className="flex items-center gap-2">
+            <ShieldAlert size={16} className="text-red-300 shrink-0" />
+            <div>
+              <span className="font-bold">Persistent Storage Locked:</span> Google Sheets is currently disconnected from the backend.
+              <span className="text-red-200 ml-1.5 hidden sm:inline">
+                New sales, production approvals, and payment writes are paused to prevent silent data loss.
+              </span>
             </div>
           </div>
           <button
@@ -195,85 +177,55 @@ const MainAppContent: React.FC = () => {
                 setIsReconnecting(false);
               }
             }}
-            style={{
-              padding: '6px 14px',
-              fontSize: '0.80rem',
-              fontWeight: 700,
-              background: isReconnecting ? '#991b1b' : '#ef4444',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: isReconnecting ? 'not-allowed' : 'pointer'
-            }}
+            className="flex items-center gap-1.5 px-3 py-1 rounded bg-red-700 hover:bg-red-600 font-semibold text-xs transition-colors shrink-0 cursor-pointer disabled:opacity-50"
           >
-            {isReconnecting ? '⏳ Reconnecting…' : '🔄 Reconnect Google Sheets'}
+            <RefreshCw size={13} className={isReconnecting ? 'animate-spin' : ''} />
+            <span>{isReconnecting ? 'Reconnecting…' : 'Reconnect Sheets'}</span>
           </button>
         </div>
       )}
+
       {syncError && isBackendConnected && isGoogleSheetsConnected && persistentWritesEnabled && (
-        <div style={{
-          background: '#fef2f2',
-          borderBottom: '1px solid #fecaca',
-          padding: '10px 20px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          color: '#991b1b',
-          fontSize: '0.88rem'
-        }}>
-          <div>
-            <strong>⚠️ Database Sync Warning:</strong> {syncError}
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-between text-xs text-amber-800">
+          <div className="flex items-center gap-2">
+            <AlertCircle size={15} className="text-amber-600 shrink-0" />
+            <span><strong>Sync Warning:</strong> {syncError}</span>
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div className="flex items-center gap-2">
             <button
               disabled={isRefreshing}
               onClick={() => refreshData()}
-              style={{
-                padding: '4px 10px',
-                fontSize: '0.8rem',
-                background: isRefreshing ? '#991b1b' : '#dc2626',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: isRefreshing ? 'not-allowed' : 'pointer'
-              }}
+              className="text-xs font-semibold text-amber-800 hover:underline"
             >
-              {isRefreshing ? '⏳ Syncing…' : 'Retry Sync'}
+              Retry
             </button>
             <button
               onClick={clearSyncError}
-              style={{
-                padding: '4px 8px',
-                fontSize: '0.8rem',
-                background: 'transparent',
-                color: '#991b1b',
-                border: 'none',
-                cursor: 'pointer'
-              }}
+              className="p-1 text-amber-600 hover:text-amber-900"
             >
-              ✕
+              <X size={14} />
             </button>
           </div>
         </div>
       )}
 
-      {/* Main ERP Layout: Sidebar on Left, Main Content on Right */}
-      <div className="app-body">
+      {/* Main ERP Layout: Sidebar on Left, Content Area on Right */}
+      <div className="flex-1 flex overflow-hidden">
         <Navigation
           currentView={currentView}
           onSelectView={handleSelectView}
           isOpenMobile={isMobileNavOpen}
           onCloseMobile={() => setIsMobileNavOpen(false)}
         />
-        <main className="app-main-content">
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
           <ErrorBoundary>
             {renderView()}
           </ErrorBoundary>
         </main>
       </div>
 
-      <footer style={{ textAlign: 'center', padding: '20px 16px', color: '#94a3b8', fontSize: '0.82rem', background: '#ffffff', borderTop: '1px solid #e2e8f0' }}>
-        Kawad Swad Udhyog · Sales Management System · Nimar, Madhya Pradesh
+      <footer className="bg-white border-t border-slate-200 py-3 px-6 text-center text-xs text-slate-400">
+        Kawad Swad Udhyog · Sales & Factory Management ERP · Nimar, Madhya Pradesh
       </footer>
     </div>
   );

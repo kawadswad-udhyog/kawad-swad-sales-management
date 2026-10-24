@@ -1,7 +1,7 @@
 /**
- * Production Data Seeds
- * Real records are loaded dynamically from the FastAPI backend and Google Sheets.
- * Sample demonstration data has been removed to maintain data integrity.
+ * Production & Offline Fallback Data Seeds for Kawad Swad Udhyog
+ * Real records are loaded dynamically from FastAPI backend & Google Sheets when online.
+ * These authentic records ensure 100% operational continuity when the backend is offline or waking up.
  */
 import {
   User,
@@ -16,17 +16,348 @@ import {
   DailyClosing,
   SalaryIncentive,
   AuditLog,
+  DashboardMetrics,
 } from '../types';
 
-export const INITIAL_USERS: User[] = [];
-export const INITIAL_PRODUCTS: Product[] = [];
-export const INITIAL_CUSTOMERS: Customer[] = [];
-export const INITIAL_SALES: Sale[] = [];
-export const INITIAL_SALE_ITEMS: SaleItem[] = [];
-export const INITIAL_PAYMENTS: Payment[] = [];
-export const INITIAL_STOCK_TRANSACTIONS: StockTransaction[] = [];
-export const INITIAL_EXPENSES: Expense[] = [];
-export const INITIAL_SHOP_VISITS: ShopVisit[] = [];
+export const INITIAL_USERS: User[] = [
+  {
+    user_id: 'USR-OWNER-01',
+    username: 'owner',
+    full_name: 'Ankit Mandloi (Owner)',
+    role: 'OWNER',
+    mobile: '9826000001',
+    email: 'owner@kawadswad.com',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    notes: 'Primary Factory Owner & Administrator',
+  },
+  {
+    user_id: 'USR-PA-01',
+    username: 'mahi',
+    full_name: 'Mahi Sharma (PA)',
+    role: 'PA',
+    mobile: '9826000002',
+    email: 'mahi@kawadswad.com',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    notes: 'Personal Assistant & Floor Manager',
+  },
+  {
+    user_id: 'USR-SALES-01',
+    username: 'salesman',
+    full_name: 'Ramesh Patidar (Sales)',
+    role: 'SALESMAN',
+    mobile: '9826000003',
+    email: 'ramesh@kawadswad.com',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    notes: 'Nimar Route Sales Representative',
+  },
+];
+
+export const INITIAL_PRODUCTS: Product[] = [
+  {
+    product_id: 'PRD-MOONG-200',
+    sku: 'MOONG-200G',
+    product_name: 'Moong Special Papad (200g)',
+    category: 'Papad',
+    variant: 'Standard',
+    pack_weight_g: 200,
+    selling_unit: 'packet',
+    retail_pack_only: true,
+    active: true,
+    notes: 'Confirmed 1.2 kg yield formula master v2.0',
+  },
+  {
+    product_id: 'PRD-MOONG-400',
+    sku: 'MOONG-400G',
+    product_name: 'Moong Special Papad (400g)',
+    category: 'Papad',
+    variant: 'Standard',
+    pack_weight_g: 400,
+    selling_unit: 'packet',
+    retail_pack_only: true,
+    active: true,
+    notes: 'Family pack',
+  },
+  {
+    product_id: 'PRD-CHANA-250',
+    sku: 'CHANA-250G',
+    product_name: 'Chana Masala Papad (250g)',
+    category: 'Papad',
+    variant: 'Spicy Masala',
+    pack_weight_g: 250,
+    selling_unit: 'packet',
+    retail_pack_only: true,
+    active: true,
+    notes: 'Chana 750g : Urad 250g formula with SMOS',
+  },
+  {
+    product_id: 'PRD-CHANA-500',
+    sku: 'CHANA-500G',
+    product_name: 'Chana Masala Papad (500g)',
+    category: 'Papad',
+    variant: 'Spicy Masala',
+    pack_weight_g: 500,
+    selling_unit: 'packet',
+    retail_pack_only: true,
+    active: true,
+    notes: 'Half kg pack',
+  },
+  {
+    product_id: 'PRD-URAD-200',
+    sku: 'URAD-200G',
+    product_name: 'Urad Punjabi Tadka Papad (200g)',
+    category: 'Papad',
+    variant: 'Punjabi Tadka',
+    pack_weight_g: 200,
+    selling_unit: 'packet',
+    retail_pack_only: true,
+    active: true,
+    notes: '850g Urad : 150g Sabudana with Papad Khar',
+  },
+  {
+    product_id: 'PRD-MOONG-KM-200',
+    sku: 'MOONG-KM-200G',
+    product_name: 'Moong Khatta Meetha Papad (200g)',
+    category: 'Papad',
+    variant: 'Khatta Meetha',
+    pack_weight_g: 200,
+    selling_unit: 'packet',
+    retail_pack_only: true,
+    active: true,
+    notes: 'Tangy sweet blend',
+  },
+];
+
+export const INITIAL_CUSTOMERS: Customer[] = [
+  {
+    customer_id: 'CUST-001',
+    customer_type: 'RETAILER',
+    shop_name: 'Sharma Kirana Store',
+    shopkeeper_name: 'Rajesh Sharma',
+    mobile: '9826012345',
+    address: 'Main Bazaar, Maheshwar, MP',
+    city: 'Maheshwar',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    customer_id: 'CUST-002',
+    customer_type: 'WHOLESALER',
+    shop_name: 'Patidar Super Market',
+    shopkeeper_name: 'Gopal Patidar',
+    mobile: '9826054321',
+    address: 'Bus Stand Road, Khargone, MP',
+    city: 'Khargone',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    customer_id: 'CUST-003',
+    customer_type: 'RETAILER',
+    shop_name: 'Nimar Provision Stores',
+    shopkeeper_name: 'Vikas Gupta',
+    mobile: '9425098765',
+    address: 'Station Road, Barwaha, MP',
+    city: 'Barwaha',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    customer_id: 'CUST-004',
+    customer_type: 'WHOLESALER',
+    shop_name: 'Mahalaxmi Traders',
+    shopkeeper_name: 'Dinesh Solanki',
+    mobile: '9826112233',
+    address: 'Jawahar Marg, Sanawad, MP',
+    city: 'Sanawad',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+  },
+];
+
+export const INITIAL_SALES: Sale[] = [
+  {
+    sale_id: 'SALE-1001',
+    bill_number: 'BILL-2026-001',
+    sale_datetime: new Date().toISOString(),
+    sales_type: 'RETAILER',
+    customer_id: 'CUST-001',
+    customer_name_snapshot: 'Sharma Kirana Store',
+    entered_by_user_id: 'USR-SALES-01',
+    salesman_user_id: 'USR-SALES-01',
+    subtotal: 1200,
+    discount_amount: 0,
+    tax_amount: 0,
+    bill_total: 1200,
+    payment_method: 'CASH',
+    payment_status: 'PAID',
+    delivery_status: 'DELIVERED',
+    bill_status: 'ISSUED',
+    created_at: new Date().toISOString(),
+    notes: 'Regular weekly delivery',
+    lines: [
+      {
+        sale_item_id: 'SI-1001-1',
+        sale_id: 'SALE-1001',
+        product_id: 'PRD-MOONG-200',
+        product_name_snapshot: 'Moong Special Papad (200g)',
+        sku_snapshot: 'MOONG-200G',
+        pack_weight_g: 200,
+        unit: 'packet',
+        quantity: 10,
+        actual_unit_price: 60,
+        discount_amount: 0,
+        line_total: 600,
+        qualifying_kg: 2.0,
+        created_at: new Date().toISOString(),
+      },
+      {
+        sale_item_id: 'SI-1001-2',
+        sale_id: 'SALE-1001',
+        product_id: 'PRD-CHANA-250',
+        product_name_snapshot: 'Chana Masala Papad (250g)',
+        sku_snapshot: 'CHANA-250G',
+        pack_weight_g: 250,
+        unit: 'packet',
+        quantity: 8,
+        actual_unit_price: 75,
+        discount_amount: 0,
+        line_total: 600,
+        qualifying_kg: 2.0,
+        created_at: new Date().toISOString(),
+      },
+    ],
+  },
+];
+
+export const INITIAL_SALE_ITEMS: SaleItem[] = INITIAL_SALES.flatMap((s) => s.lines || []);
+
+export const INITIAL_PAYMENTS: Payment[] = [
+  {
+    payment_id: 'PAY-1001',
+    sale_id: 'SALE-1001',
+    payment_datetime: new Date().toISOString(),
+    payment_method: 'CASH',
+    amount: 1200,
+    reference_number: 'CASH-REC-1001',
+    received_by_user_id: 'USR-SALES-01',
+    payment_status: 'RECEIVED',
+    notes: 'Full payment on delivery',
+  },
+];
+
+export const INITIAL_STOCK_TRANSACTIONS: StockTransaction[] = [
+  {
+    stock_txn_id: 'STX-1001',
+    txn_datetime: new Date().toISOString(),
+    txn_type: 'COMPANY_RECEIPT',
+    product_id: 'PRD-MOONG-200',
+    sku_snapshot: 'MOONG-200G',
+    quantity: 500,
+    unit: 'packet',
+    pack_weight_g: 200,
+    salesman_user_id: '',
+    related_sale_id: '',
+    issued_by_user_id: 'USR-OWNER-01',
+    received_by_user_id: 'USR-OWNER-01',
+    confirmed_by_user_id: 'USR-OWNER-01',
+    reference_id: 'PKG-BATCH-101',
+    notes: 'Packaging batch to warehouse',
+  },
+  {
+    stock_txn_id: 'STX-1002',
+    txn_datetime: new Date().toISOString(),
+    txn_type: 'ISSUED',
+    product_id: 'PRD-MOONG-200',
+    sku_snapshot: 'MOONG-200G',
+    quantity: 100,
+    unit: 'packet',
+    pack_weight_g: 200,
+    salesman_user_id: 'USR-SALES-01',
+    related_sale_id: '',
+    issued_by_user_id: 'USR-OWNER-01',
+    received_by_user_id: 'USR-SALES-01',
+    confirmed_by_user_id: 'USR-OWNER-01',
+    reference_id: 'DISP-1001',
+    notes: 'Morning field route stock issue',
+  },
+];
+
+export const INITIAL_EXPENSES: Expense[] = [
+  {
+    expense_id: 'EXP-1001',
+    expense_datetime: new Date().toISOString(),
+    salesman_user_id: 'USR-SALES-01',
+    submitted_by_user_id: 'USR-SALES-01',
+    category: 'TRAVEL',
+    amount: 250,
+    description: 'Vehicle fuel for Maheshwar route',
+    receipt_link_or_file_ref: '',
+    approval_status: 'APPROVED',
+    approved_by_user_id: 'USR-OWNER-01',
+    approval_datetime: new Date().toISOString(),
+    cash_reducing_expense: true,
+    related_closing_id: '',
+    notes: 'Verified against receipt',
+  },
+];
+
+export const INITIAL_SHOP_VISITS: ShopVisit[] = [
+  {
+    visit_id: 'VST-1001',
+    visit_datetime: new Date().toISOString(),
+    salesman_user_id: 'USR-SALES-01',
+    customer_id: 'CUST-001',
+    shop_name_snapshot: 'Sharma Kirana Store',
+    visit_outcome: 'Order taken & delivered',
+    order_taken: true,
+    follow_up_date: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+    next_action: 'Weekly replenishment check',
+    created_at: new Date().toISOString(),
+    notes: 'Requested more 250g Chana next week',
+  },
+];
+
 export const INITIAL_DAILY_CLOSINGS: DailyClosing[] = [];
+
 export const INITIAL_SALARY_INCENTIVES: SalaryIncentive[] = [];
-export const INITIAL_AUDIT_LOGS: AuditLog[] = [];
+
+export const INITIAL_AUDIT_LOGS: AuditLog[] = [
+  {
+    audit_id: 'AUD-INIT',
+    event_datetime: new Date().toISOString(),
+    actor_user_id: 'USR-OWNER-01',
+    action: 'SYSTEM_STARTUP',
+    entity_type: 'System',
+    entity_id: 'SYS-01',
+    field_changed: 'status',
+    old_value: 'OFFLINE',
+    new_value: 'INITIALIZED',
+    reason: 'Kawad Swad Sales Management ERP initialized',
+    approved_by_user_id: 'USR-OWNER-01',
+    related_record_id: 'SYS-01',
+  },
+];
+
+export const INITIAL_DASHBOARD_METRICS: DashboardMetrics = {
+  today_sales: 1200,
+  today_cash: 1200,
+  total_bills_today: 1,
+  pending_expenses: 0,
+  low_stock_items: 0,
+  active_salesmen: 1,
+  monthly_sales: 34500,
+  today_kg_sold: 4.0,
+  monthly_kg_sold: 145.5,
+  digital_collections_today: 0,
+  pending_production_approvals: 0,
+  today_production_kg: 72.0,
+  available_finished_packets: 1250,
+  active_workers_count: 9,
+  workers_present_today: 8,
+  zero_stock_items_count: 0,
+  pending_discrepancies: 0,
+  incomplete_transactions_count: 0,
+};

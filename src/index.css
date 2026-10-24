@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
   color: #202a35;
@@ -132,10 +134,10 @@ main:not(.app-main-content) {
 
 .card {
   background: white;
-  border: 1px solid #e1e7e5;
-  border-radius: 14px;
-  padding: 22px;
-  box-shadow: 0 4px 18px rgba(16, 45, 37, 0.06);
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   margin-bottom: 20px;
 }
 
@@ -145,68 +147,70 @@ main:not(.app-main-content) {
 }
 
 h1 {
-  font-size: 1.55rem;
-  font-weight: 750;
-  color: #183b35;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #0f172a;
   margin-top: 0;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
+  letter-spacing: -0.015em;
 }
 
 h2 {
-  font-size: 1.2rem;
+  font-size: 1.15rem;
   font-weight: 700;
-  color: #183b35;
+  color: #0f172a;
   margin-top: 0;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 h3 {
-  font-size: 1.05rem;
-  font-weight: 650;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1e293b;
   margin-top: 0;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 label {
   display: block;
-  font-size: 0.88rem;
-  font-weight: 650;
-  margin: 12px 0 6px;
-  color: #2b3a36;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 10px 0 4px;
+  color: #334155;
 }
 
-input,
-select,
-textarea {
+:where(input:not([type="checkbox"]):not([type="radio"])),
+:where(select),
+:where(textarea) {
   display: block;
   width: 100%;
-  padding: 10px 12px;
-  border: 1px solid #ccd6d3;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
   border-radius: 8px;
   background: #fff;
   font: inherit;
-  font-size: 0.92rem;
-  color: #182522;
+  font-size: 0.875rem;
+  color: #0f172a;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-input:focus,
-select:focus,
-textarea:focus {
+:where(input:not([type="checkbox"]):not([type="radio"])):focus,
+:where(select):focus,
+:where(textarea):focus {
   outline: none;
-  border-color: #176b52;
-  box-shadow: 0 0 0 3px rgba(23, 107, 82, 0.15);
+  border-color: #15803d;
+  box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.15);
 }
 
-button {
+button:where(:not([class*="bg-"]):not([class*="text-"]):not([class*="border-"])) {
   border: 0;
   border-radius: 8px;
-  background: #176b52;
+  background: #166534;
   color: white;
-  padding: 10px 16px;
+  padding: 8px 14px;
   font: inherit;
-  font-weight: 700;
-  font-size: 0.9rem;
+  font-weight: 600;
+  font-size: 0.875rem;
   cursor: pointer;
   transition: background-color 0.15s ease, transform 0.05s ease;
   display: inline-flex;
@@ -215,31 +219,33 @@ button {
   gap: 6px;
 }
 
-button:hover:not(:disabled) {
-  background: #125642;
+button:where(:not([class*="bg-"]):not([class*="text-"]):not([class*="border-"])):hover:not(:disabled) {
+  background: #14532d;
 }
 
-button:active:not(:disabled) {
+button:where(:not([class*="bg-"]):not([class*="text-"]):not([class*="border-"])):active:not(:disabled) {
   transform: translateY(1px);
 }
 
 button.secondary {
-  background: #e7efec;
-  color: #183b35;
+  background: #f1f5f9 !important;
+  color: #334155 !important;
+  border: 1px solid #cbd5e1 !important;
 }
 
 button.secondary:hover:not(:disabled) {
-  background: #d9e6e2;
+  background: #e2e8f0 !important;
+  color: #0f172a !important;
 }
 
 button.danger {
-  background: #fde8e8;
-  color: #c81e1e;
-  border: 1px solid #f8b4b4;
+  background: #fef2f2 !important;
+  color: #b91c1c !important;
+  border: 1px solid #fecaca !important;
 }
 
 button.danger:hover:not(:disabled) {
-  background: #fbd5d5;
+  background: #fee2e2 !important;
 }
 
 button:disabled {
@@ -337,34 +343,40 @@ nav.nav-bar button.active {
 
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   background: white;
 }
 
 th,
 td {
   text-align: left;
-  padding: 11px 12px;
-  border-bottom: 1px solid #e6ecea;
-  font-size: 0.9rem;
+  padding: 10px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 0.85rem;
 }
 
 th {
-  background: #edf4f1;
-  font-weight: 700;
-  color: #183b35;
+  background: #f8fafc;
+  font-weight: 600;
+  color: #475569;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   white-space: nowrap;
+  border-bottom: 1px solid #e2e8f0;
 }
 
 tr:hover td {
-  background-color: #fafcfb;
+  background-color: #f8fafc/80;
 }
 
 .table-wrap {
   overflow-x: auto;
   border-radius: 10px;
-  border: 1px solid #e1e7e5;
+  border: 1px solid #e2e8f0;
   background: white;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
 }
 
 form.inline {
@@ -392,7 +404,7 @@ form.inline label {
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .toolbar h2 {
@@ -406,12 +418,12 @@ form.inline label {
 
 .count {
   display: inline-block;
-  background: #edf4f1;
-  color: #176b52;
-  border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 0.8rem;
-  font-weight: 700;
+  background: #f1f5f9;
+  color: #334155;
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 0.75rem;
+  font-weight: 600;
   margin-left: 6px;
 }
 
@@ -419,35 +431,41 @@ form.inline label {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid transparent;
 }
 
 .badge.on {
-  background: #e5f6ed;
-  color: #176b52;
+  background: #ecfdf5;
+  color: #15803d;
+  border-color: #bbf7d0;
 }
 
 .badge.off {
-  background: #fff0ef;
-  color: #a32118;
+  background: #f8fafc;
+  color: #64748b;
+  border-color: #e2e8f0;
 }
 
 .badge.pending {
-  background: #fef3c7;
-  color: #92400e;
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
 }
 
 .badge.approved {
-  background: #dcfce7;
-  color: #166534;
+  background: #ecfdf5;
+  color: #15803d;
+  border-color: #bbf7d0;
 }
 
 .badge.rejected {
-  background: #fee2e2;
-  color: #991b1b;
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
 }
 
 .check-label {
