@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-const backendTarget = process.env.VITE_API_URL || 'https://kawad-swad-sales-dev.onrender.com';
+const backendTarget = process.env.VITE_API_URL || 'https://kawad-swad-sales-backend.onrender.com';
 
 export default defineConfig({
   plugins: [react()],
