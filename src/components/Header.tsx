@@ -320,6 +320,34 @@ export const Header: React.FC<HeaderProps> = ({
                 </span>
               </div>
 
+              {(!isGoogleSheetsConnected || !persistentWritesEnabled) && (
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 space-y-2">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-800">
+                    <AlertTriangle size={14} className="text-amber-700" />
+                    <span>How to connect your live Google Sheet:</span>
+                  </div>
+                  <ol className="list-decimal pl-4 space-y-1 text-amber-800 text-[11px] leading-relaxed">
+                    <li>
+                      <strong>Spreadsheet ID:</strong> Open your Google Sheet (<code className="bg-amber-100/70 px-1 py-0.5 rounded">Kawad_Swad_Sales_Management</code>), copy the ID from the URL between <code className="bg-amber-100/70 px-1 py-0.5 rounded">/d/</code> and <code className="bg-amber-100/70 px-1 py-0.5 rounded">/edit</code>.
+                    </li>
+                    <li>
+                      <strong>Share with Service Account:</strong> In Google Sheets, click <strong>Share</strong> and add your Google Service Account email (<code className="bg-amber-100/70 px-1 py-0.5 rounded">...@...iam.gserviceaccount.com</code>) with <strong>Editor</strong> permission.
+                    </li>
+                    <li>
+                      <strong>Configure Render Backend:</strong> In your Render dashboard &rarr; <code className="bg-amber-100/70 px-1 py-0.5 rounded">kawad-swad-sales-backend</code> &rarr; <strong>Environment</strong>, add:
+                      <div className="mt-1 font-mono text-[10px] bg-white/80 p-2 rounded border border-amber-200 space-y-0.5">
+                        <div>SALES_GOOGLE_SPREADSHEET_ID = (Your Sheet ID)</div>
+                        <div>SALES_GOOGLE_SERVICE_ACCOUNT_JSON = (Paste full JSON key)</div>
+                        <div>SALES_ENV = production</div>
+                      </div>
+                    </li>
+                    <li>
+                      Click <strong>Save Changes</strong> on Render, wait ~30s for redeployment, then click <strong>Reconnect Google Sheets</strong> below.
+                    </li>
+                  </ol>
+                </div>
+              )}
+
               {connectionError && (
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
                   <span className="font-semibold text-slate-700">Diagnostic message:</span> {connectionError}
