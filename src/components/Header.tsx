@@ -46,7 +46,10 @@ export const Header: React.FC<HeaderProps> = ({
   } = useStore();
 
   const [showStatusModal, setShowStatusModal] = useState(false);
-  const [tempUrl, setTempUrl] = useState(backendUrl);
+  const [isEditingUrl, setIsEditingUrl] = useState(false);
+  const [urlInput, setUrlInput] = useState(backendUrl);
+  const [isTestingBackend, setIsTestingBackend] = useState(false);
+  const [backendTestStatus, setBackendTestStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isVerifyingTabs, setIsVerifyingTabs] = useState(false);
   const [verifyResult, setVerifyResult] = useState<any>(null);
@@ -117,21 +120,12 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   if (!isBackendConnected) {
-    if (connectionError) {
-      statusBadge = {
-        label: 'API Offline',
-        color: 'text-red-700 bg-red-50 border-red-200',
-        dot: 'bg-red-500',
-        icon: <WifiOff size={13} className="text-red-600" />,
-      };
-    } else {
-      statusBadge = {
-        label: 'Connecting…',
-        color: 'text-amber-700 bg-amber-50 border-amber-200',
-        dot: 'bg-amber-500 animate-pulse',
-        icon: <AlertTriangle size={13} className="text-amber-600" />,
-      };
-    }
+    statusBadge = {
+      label: 'Standby Mode (Local)',
+      color: 'text-amber-800 bg-amber-50 border-amber-300',
+      dot: 'bg-amber-500',
+      icon: <Server size={13} className="text-amber-600" />,
+    };
   } else if (!isGoogleSheetsConnected || !persistentWritesEnabled) {
     statusBadge = {
       label: 'Sheets Standby',
@@ -289,25 +283,96 @@ export const Header: React.FC<HeaderProps> = ({
             {/* Checklist items */}
             <div className="py-4 space-y-3">
               {/* Backend API */}
-              <div className={`p-3.5 rounded-lg border flex items-center justify-between ${
+              <div className={`p-3.5 rounded-lg border ${
                 isBackendConnected ? 'bg-emerald-50/50 border-emerald-200' : 'bg-amber-50/60 border-amber-200'
               }`}>
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-md ${isBackendConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                    <Server size={16} />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-900 text-xs">FastAPI Backend Service</div>
-                    <div className="text-[11px] text-slate-500 truncate max-w-[240px]">
-                      {backendUrl || 'Direct / Proxy'}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-md ${isBackendConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                      <Server size={16} />
+                    </div>
+                    <div>
+                      <div className="font-semibold text-slate-900 text-xs">FastAPI Backend Service</div>
+                      <div className="text-[11px] text-slate-500 truncate max-w-[220px]">
+                        {backendUrl || 'Proxy Rewrites (/api)'}
+                      </div>
                     </div>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsEditingUrl(!isEditingUrl);
+                        setUrlInput(backendUrl || 'https://kawad-swad-sales-backend.onrender.com');
+                      }}
+                      className="text-[11px] font-semibold text-emerald-800 underline hover:text-emerald-950 cursor-pointer"
+                    >
+                      {isEditingUrl ? 'Cancel' : 'Change URL'}
+                    </button>
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${
+                      isBackendConnected ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {isBackendConnected ? 'Online ✓' : 'Standby / Waking…'}
+                    </span>
+                  </div>
                 </div>
-                <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${
-                  isBackendConnected ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                }`}>
-                  {isBackendConnected ? 'Online ✓' : 'Connecting / Waking…'}
-                </span>
+
+                {/* Inline URL configuration input */}
+                {isEditingUrl && (
+                  <div className="mt-3 pt-3 border-t border-amber-200/70 space-y-2">
+                    <label className="block text-[11px] font-bold text-slate-700">
+                      Backend Service URL (Render):
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="url"
+                        value={urlInput}
+                        onChange={(e) => setUrlInput(e.target.value)}
+                        placeholder="https://your-backend.onrender.com"
+                        className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-mono"
+                      />
+                      <button
+                        type="button"
+                        disabled={isTestingBackend}
+                        onClick={async () => {
+                          setIsTestingBackend(true);
+                          setBackendTestStatus(null);
+                          try {
+                            const clean = urlInput.trim();
+                            updateBackendUrl(clean);
+                            const res = await reconnectGoogleSheets();
+                            setBackendTestStatus({
+                              ok: res.success || isBackendConnected,
+                              msg: res.success ? 'Connected to live backend and Google Sheets!' : 'Backend URL saved! Service pinged.',
+                            });
+                            setIsEditingUrl(false);
+                          } catch (e: unknown) {
+                            setBackendTestStatus({
+                              ok: false,
+                              msg: e instanceof Error ? e.message : 'Backend connection attempt failed.',
+                            });
+                          } finally {
+                            setIsTestingBackend(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white font-semibold text-xs rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+                      >
+                        {isTestingBackend ? 'Testing…' : 'Save & Connect'}
+                      </button>
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      💡 Tip: Copy the web service URL from your Render dashboard (Tab 2) and paste here.
+                    </div>
+                  </div>
+                )}
+
+                {backendTestStatus && (
+                  <div className={`mt-2 p-2 rounded text-xs font-semibold ${
+                    backendTestStatus.ok ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
+                  }`}>
+                    {backendTestStatus.msg}
+                  </div>
+                )}
               </div>
 
               {/* Google Sheets Persistence */}

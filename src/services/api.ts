@@ -65,33 +65,24 @@ export function clearApiDebugLogs(): void {
  */
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
-    const hostname = window.location.hostname;
-    const isDedicatedProdFrontend = hostname === 'kawad-swad-sales-frontend.onrender.com';
-
     const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
     if (saved) {
       // Migrate away from deprecated -dev Render domains
       if (saved.includes('-dev.onrender.com') || saved.includes('kawad-swad-sales-dev')) {
-        const replacement = isDedicatedProdFrontend ? 'https://kawad-swad-sales-backend.onrender.com' : '';
-        if (replacement) {
-          localStorage.setItem(STORAGE_API_KEY, replacement);
-        } else {
-          localStorage.removeItem(STORAGE_API_KEY);
-        }
-        return replacement;
+        localStorage.removeItem(STORAGE_API_KEY);
+        return '';
       }
       return saved;
     }
 
-    // On dedicated production frontend (Render static), connect directly to Render backend
-    if (isDedicatedProdFrontend) {
-      return 'https://kawad-swad-sales-backend.onrender.com';
-    }
-
-    // In Vite dev server / preview environments:
-    // If DEFAULT_API_BASE_URL is explicitly set via VITE_API_URL or window.KAWAD_API_URL, use it.
-    // Otherwise, return empty string so requests hit the local Vite proxy (/api, /health, /auth).
-    if (DEFAULT_API_BASE_URL) {
+    // Prefer relative path routing ('') by default:
+    // 1) On Render static hosting (kawad-swad-sales-frontend.onrender.com),
+    //    server-side rewrites in _redirects handle proxying without CORS or preflight errors.
+    // 2) On Vite dev server, Vite's proxy handles forwarding.
+    // 3) Custom backend URLs saved in localStorage will take precedence.
+    const hostname = window.location.hostname;
+    const isDedicatedProdFrontend = hostname === 'kawad-swad-sales-frontend.onrender.com';
+    if (!isDedicatedProdFrontend && DEFAULT_API_BASE_URL) {
       return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
     }
     return '';

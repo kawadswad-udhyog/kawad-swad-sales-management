@@ -70,8 +70,7 @@ cors_kwargs = {
     "expose_headers": ["*"],
 }
 
-if SALES_ENV != "production":
-    cors_kwargs["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1|.*\.run\.app|.*\.onrender\.com)(:\d+)?"
+cors_kwargs["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1|.*\.run\.app|.*\.onrender\.com)(:\d+)?"
 
 app.add_middleware(
     CORSMiddleware,

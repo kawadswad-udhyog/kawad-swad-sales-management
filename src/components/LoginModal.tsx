@@ -212,8 +212,8 @@ export const LoginModal: React.FC = () => {
               {isGoogleSheetsConnected && persistentWritesEnabled
                 ? 'Production Online · Google Sheets Connected'
                 : isBackendConnected
-                ? 'FastAPI Online · Google Sheets Standby / Disconnected'
-                : 'FastAPI Backend Offline / Starting Up'}
+                ? 'FastAPI Online · Google Sheets Standby'
+                : 'Local Standby Mode Active · ERP Ready to Use'}
             </span>
           </div>
         </div>
