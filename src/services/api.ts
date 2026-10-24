@@ -1,9 +1,9 @@
 /**
  * Central API Client for Kawad Swad Sales Management
- * Connects directly to the FastAPI backend on Render.
+ * Connects to FastAPI backend directly or via Vite dev server proxy.
+ * Includes comprehensive debug logging for URL construction, CORS detection, and backend reachability.
  */
 
-// Default to the provided Render backend or user configured env var / window override
 export const DEFAULT_API_BASE_URL =
   (typeof window !== 'undefined' && (window as unknown as { KAWAD_API_URL?: string }).KAWAD_API_URL) ||
   (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: { VITE_API_URL?: string } })?.env?.VITE_API_URL) ||
@@ -12,15 +12,67 @@ export const DEFAULT_API_BASE_URL =
 const STORAGE_API_KEY = 'ks_backend_api_url';
 const STORAGE_TOKEN_KEY = 'ks_token';
 
+export type ApiFailureCategory =
+  | 'CORS_RESTRICTION'
+  | 'URL_CONSTRUCTION_ERROR'
+  | 'BACKEND_UNREACHABLE_OR_TIMEOUT'
+  | 'BACKEND_5XX_GATEWAY'
+  | 'AUTHENTICATION_REQUIRED'
+  | 'FORBIDDEN'
+  | 'NOT_FOUND'
+  | 'RATE_LIMITED'
+  | 'HTTP_ERROR'
+  | 'NETWORK_ERROR';
+
+export interface ApiLogEntry {
+  id: string;
+  timestamp: string;
+  method: string;
+  path: string;
+  targetUrl: string;
+  isProxied: boolean;
+  status?: number;
+  durationMs: number;
+  ok: boolean;
+  failureCategory?: ApiFailureCategory;
+  errorMessage?: string;
+  diagnostics?: string;
+}
+
+// In-memory ring buffer of recent API connection diagnostics
+const _apiDebugLogs: ApiLogEntry[] = [];
+const MAX_DEBUG_LOGS = 60;
+
+function pushDebugLog(entry: ApiLogEntry) {
+  _apiDebugLogs.unshift(entry);
+  if (_apiDebugLogs.length > MAX_DEBUG_LOGS) {
+    _apiDebugLogs.pop();
+  }
+}
+
+export function getApiDebugLogs(): ApiLogEntry[] {
+  return [..._apiDebugLogs];
+}
+
+export function clearApiDebugLogs(): void {
+  _apiDebugLogs.length = 0;
+}
+
+/**
+ * Determine the active API base URL.
+ * When running in development, preview, or local environments (e.g. localhost, 127.0.0.1, or .run.app),
+ * relative path routing is preferred by default so Vite's proxy handles forwarding, logging, and CORS bypass.
+ */
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
-    const isProduction =
-      window.location.hostname.includes('kawad-swad-sales-frontend.onrender.com') ||
-      window.location.hostname.includes('onrender.com');
-    const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/$/, '');
+    const hostname = window.location.hostname;
+    const isDedicatedProdFrontend = hostname === 'kawad-swad-sales-frontend.onrender.com';
+
+    const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
     if (saved) {
+      // Migrate away from deprecated -dev Render domains
       if (saved.includes('-dev.onrender.com') || saved.includes('kawad-swad-sales-dev')) {
-        const replacement = isProduction ? 'https://kawad-swad-sales-backend.onrender.com' : '';
+        const replacement = isDedicatedProdFrontend ? 'https://kawad-swad-sales-backend.onrender.com' : '';
         if (replacement) {
           localStorage.setItem(STORAGE_API_KEY, replacement);
         } else {
@@ -30,20 +82,32 @@ export function getApiBaseUrl(): string {
       }
       return saved;
     }
-    if (!DEFAULT_API_BASE_URL) {
-      return isProduction ? 'https://kawad-swad-sales-backend.onrender.com' : '';
+
+    // On dedicated production frontend (Render static), connect directly to Render backend
+    if (isDedicatedProdFrontend) {
+      return 'https://kawad-swad-sales-backend.onrender.com';
     }
+
+    // In Vite dev server / preview environments:
+    // If DEFAULT_API_BASE_URL is explicitly set via VITE_API_URL or window.KAWAD_API_URL, use it.
+    // Otherwise, return empty string so requests hit the local Vite proxy (/api, /health, /auth).
+    if (DEFAULT_API_BASE_URL) {
+      return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
+    }
+    return '';
   }
-  const cleanDefault = (DEFAULT_API_BASE_URL || '').replace(/\/$/, '');
-  if (cleanDefault.includes('-dev.onrender.com')) {
-    return 'https://kawad-swad-sales-backend.onrender.com';
-  }
-  return cleanDefault;
+
+  return (DEFAULT_API_BASE_URL || '').replace(/\/+$/, '');
 }
 
 export function setApiBaseUrl(url: string): void {
   if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_API_KEY, url.trim().replace(/\/$/, ''));
+    const clean = url.trim().replace(/\/+$/, '');
+    if (clean) {
+      localStorage.setItem(STORAGE_API_KEY, clean);
+    } else {
+      localStorage.removeItem(STORAGE_API_KEY);
+    }
   }
 }
 
@@ -64,14 +128,98 @@ export function setAuthToken(token: string): void {
   }
 }
 
-export interface ApiRequestOptions extends RequestInit {
-  timeoutMs?: number;
+/**
+ * Safely constructs and validates target URL, eliminating double-slash anomalies.
+ */
+export function constructApiUrl(
+  baseUrl: string,
+  path: string
+): { targetUrl: string; isProxied: boolean; error?: string } {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  if (!baseUrl) {
+    return { targetUrl: cleanPath, isProxied: true };
+  }
+
+  const cleanBase = baseUrl.trim().replace(/\/+$/, '');
+  const combined = `${cleanBase}${cleanPath}`;
+
+  try {
+    // Validate URL syntax if absolute
+    if (cleanBase.startsWith('http://') || cleanBase.startsWith('https://')) {
+      new URL(combined);
+      return { targetUrl: combined, isProxied: false };
+    }
+    return { targetUrl: combined, isProxied: true };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[ERP API Warning] Malformed base URL '${baseUrl}': ${msg}. Falling back to relative path '${cleanPath}'.`);
+    return { targetUrl: cleanPath, isProxied: true, error: msg };
+  }
 }
 
+export class ApiHttpError extends Error {
+  status: number;
+  category: ApiFailureCategory;
+  targetUrl: string;
+  isRenderNoServer: boolean;
+
+  constructor(
+    status: number,
+    message: string,
+    category: ApiFailureCategory,
+    targetUrl: string,
+    isRenderNoServer = false
+  ) {
+    super(message);
+    this.name = 'ApiHttpError';
+    this.status = status;
+    this.category = category;
+    this.targetUrl = targetUrl;
+    this.isRenderNoServer = isRenderNoServer;
+  }
+}
+
+export interface ApiRequestOptions extends RequestInit {
+  timeoutMs?: number;
+  silent?: boolean;
+}
+
+export interface BackendHealthResponse {
+  status: string;
+  google_sheets_connected: boolean;
+  persistent_writes_enabled: boolean;
+  spreadsheet_id_configured?: boolean;
+  service_account_configured?: boolean;
+  last_connection_error?: string | null;
+  allow_in_memory_fallback?: boolean;
+  backend?: {
+    status: string;
+    service: string;
+    version?: string;
+  };
+  google_sheets?: {
+    status: string;
+    connected: boolean;
+    persistent_writes_enabled: boolean;
+    message: string;
+  };
+  required_sheets?: {
+    status: string;
+    total_managed_tabs: number;
+  };
+}
+
+/**
+ * Robust API Request Executor with Dual-Path Resilience & Detailed Diagnostic Logging.
+ */
 export async function apiRequest<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const baseUrl = getApiBaseUrl();
   const token = getAuthToken();
   const timeoutMs = options.timeoutMs ?? 35000;
+  const method = (options.method || 'GET').toUpperCase();
+
+  const { targetUrl, isProxied, error: urlConstructionErr } = constructApiUrl(baseUrl, path);
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -85,66 +233,140 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  const targetUrl = baseUrl ? `${baseUrl}${path}` : path;
+  // Grouped diagnostic log in browser console
+  console.groupCollapsed(
+    `[ERP API] ${method} ${targetUrl} [${isProxied ? 'Vite Proxy' : 'Direct URL'}]`
+  );
+  console.log('API Target:', {
+    method,
+    baseUrl: baseUrl || '(relative / Vite proxy)',
+    path,
+    targetUrl,
+    isProxied,
+    timeoutMs,
+    hasAuthToken: Boolean(token),
+  });
+
+  if (urlConstructionErr) {
+    console.warn('[ERP API] URL Construction Warning:', urlConstructionErr);
+  }
+
+  let res: Response | null = null;
+  let didFallbackToProxy = false;
+  let primaryFetchError: unknown = null;
 
   try {
-    let res: Response;
+    // 1. Primary Request Attempt
     try {
       res = await fetch(targetUrl, {
         ...options,
         headers,
         signal: controller.signal,
       });
-    } catch (primaryErr: unknown) {
-      // Dual-path resilience:
-      // If external baseUrl failed, try local dev proxy (path)
-      // If local proxy failed, try direct production Render backend fallback
-      if (baseUrl && (baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
+    } catch (fetchErr: unknown) {
+      primaryFetchError = fetchErr;
+
+      // Classify whether primary failure was CORS or reachability
+      const isCrossDomain =
+        typeof window !== 'undefined' &&
+        targetUrl.startsWith('http') &&
+        !targetUrl.startsWith(window.location.origin);
+
+      const isTypeError = fetchErr instanceof TypeError;
+      const isNetworkError =
+        fetchErr instanceof Error &&
+        (fetchErr.message.includes('Failed to fetch') ||
+          fetchErr.message.includes('NetworkError') ||
+          fetchErr.message.includes('Load failed'));
+
+      if (isCrossDomain && (isTypeError || isNetworkError)) {
+        console.warn(
+          `%c[ERP API: CORS Violation Detected]%c Direct cross-origin request to ${targetUrl} was blocked by the browser. Origin '${window.location.origin}' may not be in backend SALES_CORS_ORIGINS. Falling back to local Vite proxy.`,
+          'color: #ef4444; font-weight: bold;',
+          'color: inherit;'
+        );
+      } else {
+        console.warn(
+          `[ERP API: Primary Fetch Failed] ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}. Attempting proxy fallback…`
+        );
+      }
+
+      // 2. Dual-path fallback:
+      // If external direct URL failed, fall back to local Vite proxy relative path
+      // If local path failed and we have no baseUrl, attempt direct Render backend
+      const cleanPath = path.startsWith('/') ? path : `/${path}`;
+      if (!isProxied && (baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
         try {
-          res = await fetch(path, {
+          console.log(`[ERP API Recovery] Retrying via Vite proxy relative path: '${cleanPath}'`);
+          res = await fetch(cleanPath, {
             ...options,
             headers,
             signal: controller.signal,
           });
-        } catch {
-          throw primaryErr;
+          didFallbackToProxy = true;
+          console.log(`%c[ERP API Recovery: Succeeded via Proxy]%c ${method} ${cleanPath} returned HTTP ${res.status}`, 'color: #10b981; font-weight: bold;', 'color: inherit;');
+        } catch (fallbackErr: unknown) {
+          console.error('[ERP API Recovery Failed] Proxy fallback also failed:', fallbackErr);
+          throw primaryFetchError;
         }
-      } else if (!baseUrl || baseUrl === '') {
+      } else if (isProxied && (!baseUrl || baseUrl === '')) {
         try {
-          const directBackendUrl = `https://kawad-swad-sales-backend.onrender.com${path}`;
+          const directBackendUrl = `https://kawad-swad-sales-backend.onrender.com${cleanPath}`;
+          console.log(`[ERP API Recovery] Retrying via direct Render backend: '${directBackendUrl}'`);
           res = await fetch(directBackendUrl, {
             ...options,
             headers,
             signal: controller.signal,
           });
+          console.log(`%c[ERP API Recovery: Succeeded via Direct Render]%c ${method} ${directBackendUrl} returned HTTP ${res.status}`, 'color: #10b981; font-weight: bold;', 'color: inherit;');
         } catch {
-          throw primaryErr;
+          throw primaryFetchError;
         }
       } else {
-        throw primaryErr;
+        throw primaryFetchError;
       }
     }
 
     clearTimeout(timeoutId);
 
+    const endTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const durationMs = Math.round(endTime - startTime);
+
     const isLoginEndpoint = path.includes('/login');
     if (res.status === 401 && !isLoginEndpoint) {
       setAuthToken('');
       window.dispatchEvent(new CustomEvent('ks_auth_expired'));
+      pushDebugLog({
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString(),
+        method,
+        path,
+        targetUrl: didFallbackToProxy ? path : targetUrl,
+        isProxied: isProxied || didFallbackToProxy,
+        status: 401,
+        durationMs,
+        ok: false,
+        failureCategory: 'AUTHENTICATION_REQUIRED',
+        errorMessage: 'Session expired or invalid credentials.',
+      });
+      console.warn('[ERP API] Session expired or unauthorized (HTTP 401)');
+      console.groupEnd();
       throw new Error('Session expired or unauthorized. Please sign in again.');
     }
 
     const contentType = res.headers.get('content-type') || '';
 
-    // Handle binary responses first
+    // Handle binary responses (PDF invoice or Excel spreadsheets)
     if (contentType.includes('application/pdf') || contentType.includes('spreadsheetml')) {
       if (!res.ok) {
         throw new Error(`Server returned error status (${res.status} ${res.statusText || 'Error'})`);
       }
+      console.log(`%c[ERP API Success: Binary Stream] HTTP ${res.status} in ${durationMs}ms`, 'color: #10b981;');
+      console.groupEnd();
       return (await res.blob()) as unknown as T;
     }
 
-    // Safely consume the response stream once as text to prevent stream exhaustion errors
+    // Safely consume response stream as text once
     let rawText = '';
     try {
       rawText = await res.text();
@@ -152,7 +374,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       rawText = '';
     }
 
-    // Safely attempt JSON parsing on non-empty body
+    // Safely parse JSON if non-empty
     let parsedJson: any = null;
     const trimmed = rawText.trim();
     if (trimmed.length > 0) {
@@ -164,15 +386,22 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     }
 
     if (!res.ok) {
+      const isRenderNoServer =
+        res.status === 404 &&
+        (res.headers.get('x-render-routing') === 'no-server' ||
+          (trimmed.toLowerCase() === 'not found' && isProxied));
+
       let errorMsg = '';
       if (parsedJson && typeof parsedJson === 'object') {
         errorMsg = parsedJson.detail || parsedJson.message || parsedJson.error || '';
       }
 
       if (!errorMsg && trimmed.length > 0) {
-        if (trimmed.startsWith('<')) {
+        if (isRenderNoServer) {
+          errorMsg = 'FastAPI backend service is sleeping or offline on Render (x-render-routing: no-server). Operating in Local Standby Mode.';
+        } else if (trimmed.startsWith('<')) {
           if (res.status === 502) errorMsg = 'Backend service is starting up or temporarily unreachable (HTTP 502 Bad Gateway).';
-          else if (res.status === 503) errorMsg = 'Backend service is temporarily unavailable (HTTP 503 Service Unavailable).';
+          else if (res.status === 503) errorMsg = 'Backend service or Google Sheets storage is temporarily unavailable (HTTP 503 Service Unavailable).';
           else if (res.status === 504) errorMsg = 'Gateway timed out waiting for backend (HTTP 504 Gateway Timeout).';
           else errorMsg = `Server returned an HTML error response (HTTP ${res.status}).`;
         } else {
@@ -188,7 +417,9 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         } else if (res.status === 403) {
           errorMsg = 'Access forbidden. You do not have permission for this action.';
         } else if (res.status === 404) {
-          errorMsg = `Requested endpoint was not found on the backend (${path}).`;
+          errorMsg = isRenderNoServer
+            ? 'FastAPI backend service is sleeping or offline on Render. Operating in Local Standby Mode.'
+            : `Requested endpoint was not found on the backend (${path}).`;
         } else if (res.status === 429) {
           errorMsg = 'Too many requests or temporary Google Sheets quota reached. Please wait 15 seconds and try again.';
         } else if (res.status >= 500) {
@@ -198,40 +429,207 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         }
       }
 
-      throw new Error(errorMsg);
+      let category: ApiFailureCategory = 'HTTP_ERROR';
+      if (res.status === 401) category = 'AUTHENTICATION_REQUIRED';
+      else if (res.status === 403) category = 'FORBIDDEN';
+      else if (res.status === 404) category = 'NOT_FOUND';
+      else if (res.status === 429) category = 'RATE_LIMITED';
+      else if (res.status >= 500) category = 'BACKEND_5XX_GATEWAY';
+
+      pushDebugLog({
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString(),
+        method,
+        path,
+        targetUrl: didFallbackToProxy ? path : targetUrl,
+        isProxied: isProxied || didFallbackToProxy,
+        status: res.status,
+        durationMs,
+        ok: false,
+        failureCategory: category,
+        errorMessage: errorMsg,
+      });
+
+      const isProbeOrSilent = Boolean(options.silent || path.includes('/health'));
+      if (isProbeOrSilent) {
+        console.warn(`[ERP API Notice: HTTP ${res.status}] ${errorMsg}`);
+      } else {
+        console.error(`%c[ERP API Error: HTTP ${res.status}]%c ${errorMsg}`, 'color: #ef4444; font-weight: bold;', 'color: inherit;');
+      }
+      console.groupEnd();
+      throw new ApiHttpError(res.status, errorMsg, category, targetUrl, isRenderNoServer);
     }
 
-    // Return parsed JSON if valid
+    // Success recording
+    pushDebugLog({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString(),
+      method,
+      path,
+      targetUrl: didFallbackToProxy ? path : targetUrl,
+      isProxied: isProxied || didFallbackToProxy,
+      status: res.status,
+      durationMs,
+      ok: true,
+    });
+
+    console.log(
+      `%c[ERP API Success] ${method} ${targetUrl} -> HTTP ${res.status} (${durationMs}ms)%c`,
+      'color: #10b981; font-weight: bold;',
+      'color: inherit;',
+      parsedJson || (trimmed ? rawText : '(empty body)')
+    );
+    console.groupEnd();
+
     if (parsedJson !== null) {
       return parsedJson as T;
     }
-
-    // If body was empty but HTTP status was 2xx, return empty object
     if (trimmed.length === 0) {
       return ({} as unknown) as T;
     }
-
-    // Otherwise return text payload
     return (rawText as unknown) as T;
   } catch (err: unknown) {
     clearTimeout(timeoutId);
+
+    // If an ApiHttpError was already thrown above, do not log a second critical network error
+    if (err instanceof ApiHttpError) {
+      throw err;
+    }
+
+    const endTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const durationMs = Math.round(endTime - startTime);
+
+    let category: ApiFailureCategory = 'NETWORK_ERROR';
+    let diagnosticDetails = '';
+
+    if (err instanceof Error) {
+      if (err.name === 'AbortError') {
+        category = 'BACKEND_UNREACHABLE_OR_TIMEOUT';
+        diagnosticDetails = `Request timed out after ${timeoutMs / 1000}s. The Render free-tier web service is likely sleeping and requires 40-50s to cold start.`;
+      } else if (
+        err.message.includes('Failed to fetch') ||
+        err.message.includes('NetworkError') ||
+        err.message.includes('Load failed')
+      ) {
+        const isCrossDomain =
+          typeof window !== 'undefined' &&
+          targetUrl.startsWith('http') &&
+          !targetUrl.startsWith(window.location.origin);
+
+        if (isCrossDomain) {
+          category = 'CORS_RESTRICTION';
+          diagnosticDetails = `Cross-origin request to ${targetUrl} was blocked by the browser. Current origin '${window.location.origin}' is not permitted by backend CORS headers. Use the Vite proxy relative path instead.`;
+        } else {
+          category = 'BACKEND_UNREACHABLE_OR_TIMEOUT';
+          diagnosticDetails = `Unable to connect to backend at ${targetUrl}. Service may be restarting, sleeping, or port 3000 proxy is waiting for upstream.`;
+        }
+      } else {
+        diagnosticDetails = err.message;
+      }
+    }
+
+    pushDebugLog({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString(),
+      method,
+      path,
+      targetUrl,
+      isProxied,
+      durationMs,
+      ok: false,
+      failureCategory: category,
+      errorMessage: err instanceof Error ? err.message : String(err),
+      diagnostics: diagnosticDetails,
+    });
+
+    const isProbeOrSilent = Boolean(options.silent || path.includes('/health'));
+    if (isProbeOrSilent) {
+      console.warn(`[ERP API Network Notice: ${category}] ${diagnosticDetails || (err instanceof Error ? err.message : String(err))}`);
+    } else {
+      console.error(
+        `%c[ERP API Critical Failure: ${category}]%c ${diagnosticDetails || (err instanceof Error ? err.message : String(err))}`,
+        'color: #ef4444; font-weight: bold;',
+        'color: inherit;',
+        { targetUrl, isProxied, durationMs, error: err }
+      );
+    }
+    console.groupEnd();
+
     if (err instanceof Error) {
       if (err.name === 'AbortError') {
         throw new Error(
           `Request timed out after ${timeoutMs / 1000}s connecting to backend. Render free tier services may take 40-50s to wake up from cold standby.`
         );
       }
-      if (
-        err.message.includes('Failed to fetch') ||
-        err.message.includes('NetworkError') ||
-        err.message.includes('Load failed')
-      ) {
+      if (category === 'CORS_RESTRICTION') {
         throw new Error(
-          'Unable to reach backend API server. Please check your network connection or backend service status.'
+          `CORS Error: Backend server did not allow connection from ${typeof window !== 'undefined' ? window.location.origin : 'this origin'}. Using the Vite proxy will bypass this issue.`
+        );
+      }
+      if (category === 'BACKEND_UNREACHABLE_OR_TIMEOUT') {
+        throw new Error(
+          'Unable to reach backend API server. Please check your network connection or verify that the Render backend service is running.'
         );
       }
       throw err;
     }
     throw new Error('An unexpected network or client error occurred.');
+  }
+}
+
+/**
+ * Resilient, probe-safe health check that never throws unhandled errors to the UI or console.
+ */
+export async function fetchBackendHealth(): Promise<BackendHealthResponse> {
+  try {
+    const res = await apiRequest<BackendHealthResponse>('/api/health', {
+      timeoutMs: 8000,
+      silent: true,
+    });
+    return res;
+  } catch (err: unknown) {
+    if (err instanceof ApiHttpError && err.status === 404 && !err.isRenderNoServer) {
+      try {
+        const alt = await apiRequest<BackendHealthResponse>('/health', {
+          timeoutMs: 8000,
+          silent: true,
+        });
+        return alt;
+      } catch {
+        // Fall through to standby state below
+      }
+    }
+
+    const isNoServer = err instanceof ApiHttpError && err.isRenderNoServer;
+    const msg = isNoServer
+      ? 'Render backend is in standby / offline (x-render-routing: no-server). Local Standby Mode active.'
+      : err instanceof Error
+      ? err.message
+      : 'Backend unreachable. Operating in Local Standby Mode.';
+
+    return {
+      status: 'standby',
+      google_sheets_connected: false,
+      persistent_writes_enabled: false,
+      spreadsheet_id_configured: false,
+      service_account_configured: false,
+      last_connection_error: msg,
+      allow_in_memory_fallback: true,
+      backend: {
+        status: 'STANDBY',
+        service: 'kawad-swad-sales-backend',
+        version: '1.0.0',
+      },
+      google_sheets: {
+        status: 'STANDBY',
+        connected: false,
+        persistent_writes_enabled: false,
+        message: 'Standby Mode active. Connect Google Sheets in settings or Render dashboard to enable live persistence.',
+      },
+      required_sheets: {
+        status: 'STANDBY',
+        total_managed_tabs: 28,
+      },
+    };
   }
 }

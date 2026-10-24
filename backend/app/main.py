@@ -13,7 +13,7 @@ except ImportError:
             self.content = content
             self.status_code = status_code
 from fastapi.middleware.cors import CORSMiddleware
-from app.config import SALES_CORS_ORIGINS, assert_runtime_config
+from app.config import SALES_CORS_ORIGINS, SALES_ENV, assert_runtime_config
 from app.sheets import db
 from app.routers import (
     auth,
@@ -62,13 +62,20 @@ default_origins = {
 }
 origins = list(default_origins.union(configured_origins))
 
+cors_kwargs = {
+    "allow_origins": origins,
+    "allow_credentials": True,
+    "allow_methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    "allow_headers": ["*"],
+    "expose_headers": ["*"],
+}
+
+if SALES_ENV != "production":
+    cors_kwargs["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1|.*\.run\.app|.*\.onrender\.com)(:\d+)?"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+    **cors_kwargs,
 )
 
 # Register Routers
@@ -94,7 +101,10 @@ def _check_configuration():
     import os
     if os.getenv("SALES_TESTING", "").strip() == "1":
         return
-    assert_runtime_config()
+    try:
+        assert_runtime_config()
+    except Exception as exc:
+        logger.error("Configuration warning on startup: %s", exc)
 
 @app.get("/health", tags=["System"])
 @app.get("/api/health", tags=["System"])

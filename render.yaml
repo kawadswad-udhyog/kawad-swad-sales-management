@@ -5,6 +5,15 @@ services:
     staticPublishPath: ./dist
     routes:
       - type: rewrite
+        source: /api/*
+        destination: https://kawad-swad-sales-backend.onrender.com/api/*
+      - type: rewrite
+        source: /health
+        destination: https://kawad-swad-sales-backend.onrender.com/health
+      - type: rewrite
+        source: /auth/*
+        destination: https://kawad-swad-sales-backend.onrender.com/auth/*
+      - type: rewrite
         source: /*
         destination: /index.html
     envVars:

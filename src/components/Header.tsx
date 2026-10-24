@@ -14,6 +14,9 @@ import {
   Server,
   Database,
   ExternalLink,
+  Copy,
+  Check,
+  FileSpreadsheet,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -37,6 +40,7 @@ export const Header: React.FC<HeaderProps> = ({
     persistentWritesEnabled,
     connectionError,
     reconnectGoogleSheets,
+    verifyGoogleSheetsTabs,
     refreshData,
     isRefreshing,
   } = useStore();
@@ -44,6 +48,9 @@ export const Header: React.FC<HeaderProps> = ({
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [tempUrl, setTempUrl] = useState(backendUrl);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [isVerifyingTabs, setIsVerifyingTabs] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<any>(null);
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string>('Just now');
 
   const getRoleBadge = (role?: UserRole) => {
@@ -127,10 +134,10 @@ export const Header: React.FC<HeaderProps> = ({
     }
   } else if (!isGoogleSheetsConnected || !persistentWritesEnabled) {
     statusBadge = {
-      label: 'Sheets Offline',
-      color: 'text-red-700 bg-red-50 border-red-200',
-      dot: 'bg-red-500',
-      icon: <WifiOff size={13} className="text-red-600" />,
+      label: 'Sheets Standby',
+      color: 'text-amber-800 bg-amber-50 border-amber-300',
+      dot: 'bg-amber-500 animate-pulse',
+      icon: <Database size={13} className="text-amber-600" />,
     };
   }
 
@@ -144,6 +151,17 @@ export const Header: React.FC<HeaderProps> = ({
       }
     } finally {
       setIsReconnecting(false);
+    }
+  };
+
+  const handleManualVerifyTabs = async () => {
+    setIsVerifyingTabs(true);
+    setVerifyResult(null);
+    try {
+      const res = await verifyGoogleSheetsTabs();
+      setVerifyResult(res);
+    } finally {
+      setIsVerifyingTabs(false);
     }
   };
 
@@ -335,16 +353,42 @@ export const Header: React.FC<HeaderProps> = ({
                     </li>
                     <li>
                       <strong>Configure Render Backend:</strong> In your Render dashboard &rarr; <code className="bg-amber-100/70 px-1 py-0.5 rounded">kawad-swad-sales-backend</code> &rarr; <strong>Environment</strong>, add:
-                      <div className="mt-1 font-mono text-[10px] bg-white/80 p-2 rounded border border-amber-200 space-y-0.5">
+                      <div className="mt-1 font-mono text-[10px] bg-white/80 p-2 rounded border border-amber-200 space-y-0.5 relative">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const snippet = 'SALES_GOOGLE_SPREADSHEET_ID=(Your Sheet ID)\nSALES_ENV=production\nSALES_TESTING=0\nSALES_JWT_SECRET=kawad-swad-production-jwt-signing-secret-2026-nimar';
+                            navigator.clipboard.writeText(snippet);
+                            setCopiedSnippet(true);
+                            setTimeout(() => setCopiedSnippet(false), 2000);
+                          }}
+                          className="absolute top-1.5 right-1.5 text-[10px] font-bold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 hover:bg-emerald-100 flex items-center gap-1 cursor-pointer"
+                        >
+                          {copiedSnippet ? <Check size={11} /> : <Copy size={11} />}
+                          <span>{copiedSnippet ? 'Copied' : 'Copy'}</span>
+                        </button>
                         <div>SALES_GOOGLE_SPREADSHEET_ID = (Your Sheet ID)</div>
                         <div>SALES_GOOGLE_SERVICE_ACCOUNT_JSON = (Paste full JSON key)</div>
                         <div>SALES_ENV = production</div>
+                        <div>SALES_TESTING = 0</div>
                       </div>
                     </li>
                     <li>
                       Click <strong>Save Changes</strong> on Render, wait ~30s for redeployment, then click <strong>Reconnect Google Sheets</strong> below.
                     </li>
                   </ol>
+                </div>
+              )}
+
+              {verifyResult && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1.5 max-h-40 overflow-y-auto">
+                  <div className="font-bold text-slate-800 flex items-center justify-between">
+                    <span>Sheet Verification Status:</span>
+                    <span className={verifyResult.all_tabs_accessible ? 'text-emerald-700 font-bold' : 'text-amber-700 font-bold'}>
+                      {verifyResult.all_tabs_accessible ? 'All 28 Tabs Accessible ✓' : 'Partial / Standby'}
+                    </span>
+                  </div>
+                  {verifyResult.error && <p className="text-red-600 m-0">{verifyResult.error}</p>}
                 </div>
               )}
 
@@ -356,19 +400,30 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             {/* Modal Actions */}
-            <div className="flex items-center justify-between pt-4 border-t border-slate-100 gap-2">
-              <button
-                disabled={isReconnecting}
-                onClick={handleManualReconnect}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold transition-colors disabled:opacity-50"
-              >
-                <RefreshCw size={14} className={isReconnecting ? 'animate-spin' : ''} />
-                <span>{isReconnecting ? 'Reconnecting Sheets…' : 'Reconnect Google Sheets'}</span>
-              </button>
+            <div className="flex flex-wrap items-center justify-between pt-4 border-t border-slate-100 gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  disabled={isReconnecting}
+                  onClick={handleManualReconnect}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  <RefreshCw size={14} className={isReconnecting ? 'animate-spin' : ''} />
+                  <span>{isReconnecting ? 'Reconnecting…' : 'Reconnect Google Sheets'}</span>
+                </button>
+
+                <button
+                  disabled={isVerifyingTabs}
+                  onClick={handleManualVerifyTabs}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  <FileSpreadsheet size={14} className={isVerifyingTabs ? 'animate-spin text-emerald-700' : ''} />
+                  <span>{isVerifyingTabs ? 'Checking…' : 'Verify 28 Tabs'}</span>
+                </button>
+              </div>
 
               <button
                 onClick={() => setShowStatusModal(false)}
-                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 text-xs font-semibold transition-colors"
+                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 text-xs font-semibold transition-colors cursor-pointer"
               >
                 Close
               </button>

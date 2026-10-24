@@ -17,6 +17,7 @@ from app.auth import (
     security,
 )
 from app.permissions import ui_role
+from app.timeutil import now_iso
 
 router = APIRouter(tags=["Authentication"])
 
@@ -178,3 +179,73 @@ async def change_password(req: ChangePasswordRequest, current_user: dict = Depen
         raise HTTPException(status_code=503, detail="Password was not saved. Try again.")
     db.log_audit(user_id, "CHANGE_PASSWORD", "AuthUsers", user_id, reason="User changed password and invalidated prior sessions")
     return {"ok": True}
+
+
+class BootstrapOwnerRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=6, max_length=128)
+    full_name: Optional[str] = None
+
+
+@router.post("/api/auth/bootstrap-owner")
+@router.post("/auth/bootstrap-owner")
+async def bootstrap_owner(req: BootstrapOwnerRequest):
+    """Initialize the first Owner account when AuthUsers tab in Google Sheets is completely empty."""
+    clean_username = req.username.strip().lower()
+    full_name = (req.full_name or req.username).strip()
+    if not clean_username or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 chars and password at least 6 chars")
+
+    try:
+        auth_records = db.get_records("AuthUsers", fresh=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Cannot inspect Google Sheets AuthUsers: {exc}",
+        )
+
+    if auth_records and len(auth_records) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bootstrap rejected: Google Sheets AuthUsers already contains initialized accounts.",
+        )
+
+    user_id = db.generate_id("Users")
+    auth_id = db.generate_id("AuthUsers")
+    iso_now = now_iso()
+
+    user_record = {
+        "user_id": user_id,
+        "full_name": full_name,
+        "username": clean_username,
+        "role": "OWNER",
+        "mobile": "",
+        "email": "",
+        "active": "true",
+        "created_at": iso_now,
+        "notes": "Initial Owner account created via bootstrap onboarding wizard",
+    }
+    db.append_record("Users", user_record)
+
+    hashed_pw = hash_password(req.password)
+    auth_record = {
+        "auth_id": auth_id,
+        "user_id": user_id,
+        "username": clean_username,
+        "password_hash": hashed_pw,
+        "role": "OWNER",
+        "active": "true",
+        "created_at": iso_now,
+        "must_change_password": "false",
+        "sessions_revoked_at": "",
+    }
+    db.append_record("AuthUsers", auth_record)
+
+    return {
+        "success": True,
+        "message": f"Owner account '{clean_username}' successfully created in Google Sheets! You can now sign in.",
+        "user_id": user_id,
+        "username": clean_username,
+        "role": "OWNER",
+    }
+

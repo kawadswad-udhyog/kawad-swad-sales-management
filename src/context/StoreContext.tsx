@@ -22,6 +22,7 @@ import {
   setAuthToken,
   getApiBaseUrl,
   setApiBaseUrl,
+  fetchBackendHealth,
 } from '../services/api';
 import {
   INITIAL_USERS,
@@ -228,6 +229,8 @@ export interface StoreContextType {
   connectionError: string | null;
   checkHealth: () => Promise<{ backendConnected: boolean; sheetsConnected: boolean; persistentWrites: boolean; error?: string }>;
   reconnectGoogleSheets: () => Promise<{ success: boolean; message: string }>;
+  verifyGoogleSheetsTabs: () => Promise<{ connected: boolean; all_tabs_accessible: boolean; error?: string; tabs?: Record<string, any> }>;
+  bootstrapOwnerAccount: (username: string, password: string, fullName?: string) => Promise<{ success: boolean; message: string }>;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
@@ -292,35 +295,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     persistentWrites: boolean;
     error?: string;
   }> => {
-    try {
-      const res = await apiRequest<{
-        status: string;
-        google_sheets_connected: boolean;
-        persistent_writes_enabled: boolean;
-        last_connection_error?: string;
-      }>('/api/health', { timeoutMs: 35000 });
-      setIsBackendConnected(true);
-      setIsGoogleSheetsConnected(res.google_sheets_connected ?? true);
-      setPersistentWritesEnabled(res.persistent_writes_enabled ?? true);
-      setConnectionError(res.last_connection_error || null);
-      return {
-        backendConnected: true,
-        sheetsConnected: res.google_sheets_connected ?? true,
-        persistentWrites: res.persistent_writes_enabled ?? true,
-        error: res.last_connection_error,
-      };
-    } catch (err: unknown) {
-      const errDetail = err instanceof Error ? err.message : String(err);
-      setIsBackendConnected(false);
-      // Backend is unreachable; do not falsely attribute to Google Sheets
-      setConnectionError(errDetail);
-      return {
-        backendConnected: false,
-        sheetsConnected: false,
-        persistentWrites: false,
-        error: errDetail,
-      };
-    }
+    const res = await fetchBackendHealth();
+    const isOnline = res.status === 'ok' || res.backend?.status === 'CONNECTED';
+    setIsBackendConnected(isOnline);
+    setIsGoogleSheetsConnected(res.google_sheets_connected ?? false);
+    setPersistentWritesEnabled(res.persistent_writes_enabled ?? false);
+    setConnectionError(res.last_connection_error || null);
+    return {
+      backendConnected: isOnline,
+      sheetsConnected: res.google_sheets_connected ?? false,
+      persistentWrites: res.persistent_writes_enabled ?? false,
+      error: res.last_connection_error || undefined,
+    };
   }, []);
 
   const reconnectGoogleSheets = useCallback(async (): Promise<{ success: boolean; message: string }> => {
@@ -342,6 +328,40 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return { success: res.success, message: res.message };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Reconnection failed to reach backend.';
+      return { success: false, message: msg };
+    }
+  }, []);
+
+  const verifyGoogleSheetsTabs = useCallback(async () => {
+    try {
+      const res = await apiRequest<{
+        connected: boolean;
+        all_tabs_accessible: boolean;
+        error?: string;
+        tabs?: Record<string, { status: string; columns?: number; error?: string }>;
+      }>('/api/health/verify-tabs', { timeoutMs: 35000 });
+      return res;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to reach verification endpoint';
+      return { connected: false, all_tabs_accessible: false, error: msg, tabs: {} };
+    }
+  }, []);
+
+  const bootstrapOwnerAccount = useCallback(async (username: string, password: string, fullName?: string) => {
+    try {
+      const res = await apiRequest<{
+        success: boolean;
+        message: string;
+        user_id?: string;
+        username?: string;
+      }>('/api/auth/bootstrap-owner', {
+        method: 'POST',
+        body: JSON.stringify({ username, password, full_name: fullName }),
+        timeoutMs: 25000,
+      });
+      return { success: res.success ?? true, message: res.message || 'Owner account created successfully in Google Sheets!' };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to bootstrap owner account.';
       return { success: false, message: msg };
     }
   }, []);
@@ -449,6 +469,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         method: 'POST',
         body: JSON.stringify({ username: username.trim(), password }),
         timeoutMs: 15000,
+        silent: true,
       });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes('404')) {
@@ -464,6 +485,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             method: 'POST',
             body: JSON.stringify({ username: username.trim(), password }),
             timeoutMs: 15000,
+            silent: true,
           });
         } catch {
           // Ignore secondary 404
@@ -1470,6 +1492,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         connectionError,
         checkHealth,
         reconnectGoogleSheets,
+        verifyGoogleSheetsTabs,
+        bootstrapOwnerAccount,
       }}
     >
       {children}
