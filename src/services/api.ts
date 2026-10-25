@@ -73,7 +73,13 @@ export function getApiBaseUrl(): string {
     if (isProductionFrontend) return '';
 
     const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
-    if (saved) return saved;
+    if (saved) {
+      if (saved.includes('kawad-swad-sales-backend.onrender.com')) {
+        localStorage.removeItem(STORAGE_API_KEY);
+      } else {
+        return saved;
+      }
+    }
 
     if (DEFAULT_API_BASE_URL) return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
     return '';

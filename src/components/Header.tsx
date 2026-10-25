@@ -303,7 +303,7 @@ export const Header: React.FC<HeaderProps> = ({
                       type="button"
                       onClick={() => {
                         setIsEditingUrl(!isEditingUrl);
-                        setUrlInput(backendUrl || 'https://kawad-swad-sales-backend.onrender.com');
+                        setUrlInput(backendUrl || 'https://kawad-swad-sales-dev.onrender.com');
                       }}
                       className="text-[11px] font-semibold text-emerald-800 underline hover:text-emerald-950 cursor-pointer"
                     >
@@ -417,12 +417,12 @@ export const Header: React.FC<HeaderProps> = ({
                       <strong>Share with Service Account:</strong> In Google Sheets, click <strong>Share</strong> and add your Google Service Account email (<code className="bg-amber-100/70 px-1 py-0.5 rounded">...@...iam.gserviceaccount.com</code>) with <strong>Editor</strong> permission.
                     </li>
                     <li>
-                      <strong>Configure Render Backend:</strong> In your Render dashboard &rarr; <code className="bg-amber-100/70 px-1 py-0.5 rounded">kawad-swad-sales-backend</code> &rarr; <strong>Environment</strong>, add:
+                      <strong>Configure Render Backend:</strong> In your Render dashboard &rarr; <code className="bg-amber-100/70 px-1 py-0.5 rounded">kawad-swad-sales-dev</code> &rarr; <strong>Environment</strong>, add:
                       <div className="mt-1 font-mono text-[10px] bg-white/80 p-2 rounded border border-amber-200 space-y-0.5 relative">
                         <button
                           type="button"
                           onClick={() => {
-                            const snippet = 'SALES_GOOGLE_SPREADSHEET_ID=(Your Sheet ID)\nSALES_ENV=production\nSALES_TESTING=0\nSALES_JWT_SECRET=kawad-swad-production-jwt-signing-secret-2026-nimar';
+                            const snippet = 'SALES_GOOGLE_SPREADSHEET_ID=(Your Sheet ID)\nSALES_ENV=production\nSALES_TESTING=0\nSALES_JWT_SECRET=(Set in Render Environment Settings)';
                             navigator.clipboard.writeText(snippet);
                             setCopiedSnippet(true);
                             setTimeout(() => setCopiedSnippet(false), 2000);

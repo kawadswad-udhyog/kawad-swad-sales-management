@@ -90,6 +90,42 @@ export const LoginModal: React.FC = () => {
     }
   };
 
+  // Distinct 4-state connection indicator conforming to Section 4 verification standards
+  const getConnectionState = () => {
+    if (!isBackendConnected) {
+      return {
+        badgeLabel: 'API Offline · Check Server Connection',
+        badgeDot: 'bg-rose-400',
+        lowerDot: 'bg-rose-500',
+        lowerText: 'API Offline',
+      };
+    }
+    if (!isGoogleSheetsConnected) {
+      return {
+        badgeLabel: 'API Connected · Google Sheets Disconnected',
+        badgeDot: 'bg-amber-400',
+        lowerDot: 'bg-amber-400',
+        lowerText: 'API Connected · Google Sheets Disconnected',
+      };
+    }
+    if (!persistentWritesEnabled) {
+      return {
+        badgeLabel: 'API Connected · Persistent Storage Not Verified',
+        badgeDot: 'bg-amber-400 animate-pulse',
+        lowerDot: 'bg-amber-400 animate-pulse',
+        lowerText: 'API Connected · Storage Not Verified',
+      };
+    }
+    return {
+      badgeLabel: 'API Connected · Persistent Storage Verified',
+      badgeDot: 'bg-emerald-400',
+      lowerDot: 'bg-emerald-500',
+      lowerText: 'API Connected · Persistent Storage Verified',
+    };
+  };
+
+  const connState = getConnectionState();
+
   return (
     <div className="min-h-[calc(100vh-64px)] flex items-center justify-center p-4 bg-slate-50/70 py-10">
       <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xl overflow-hidden">
@@ -107,22 +143,8 @@ export const LoginModal: React.FC = () => {
 
           {/* Connection Status Indicator */}
           <div className="mt-4 inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 backdrop-blur-md border border-white/15">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                isGoogleSheetsConnected && persistentWritesEnabled
-                  ? 'bg-emerald-400'
-                  : isBackendConnected
-                  ? 'bg-amber-400 animate-pulse'
-                  : 'bg-rose-400'
-              }`}
-            />
-            <span>
-              {isGoogleSheetsConnected && persistentWritesEnabled
-                ? 'ERP Connected · Persistent Storage Verified'
-                : isBackendConnected
-                ? 'API Online · Storage Not Verified'
-                : 'API Offline · Check Server Connection'}
-            </span>
+            <span className={`w-2 h-2 rounded-full ${connState.badgeDot}`} />
+            <span>{connState.badgeLabel}</span>
           </div>
         </div>
 
@@ -239,17 +261,9 @@ export const LoginModal: React.FC = () => {
           {/* Connection Status & Optional Server Settings */}
           <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
             <div className="flex items-center gap-1.5">
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  isBackendConnected && isGoogleSheetsConnected && persistentWritesEnabled
-                    ? 'bg-emerald-500'
-                    : isBackendConnected
-                    ? 'bg-amber-400'
-                    : 'bg-rose-500'
-                }`}
-              />
+              <span className={`w-2 h-2 rounded-full ${connState.lowerDot}`} />
               <span className="text-[11px] font-medium text-slate-600">
-                {isBackendConnected ? 'Backend API Reachable' : 'Backend API Offline'}
+                {connState.lowerText}
               </span>
             </div>
 
