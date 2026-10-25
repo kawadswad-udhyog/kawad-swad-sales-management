@@ -1,4 +1,5 @@
 import logging
+import re
 from app.timeutil import business_today, now_iso
 from typing import Any, Dict, List, Optional
 import json
@@ -849,104 +850,433 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
     return rec
 
 
+_BATCH_LOCKS: Dict[str, threading.Lock] = {}
+_BATCH_LOCKS_GUARD = threading.Lock()
+
+
+def get_batch_lock(production_id: str) -> threading.Lock:
+    with _BATCH_LOCKS_GUARD:
+        clean_id = str(production_id).strip()
+        if clean_id not in _BATCH_LOCKS:
+            _BATCH_LOCKS[clean_id] = threading.Lock()
+        return _BATCH_LOCKS[clean_id]
+
+
+def execute_material_issue(
+    production_id: str,
+    actor: str,
+    notes: str = "",
+    force_recipe_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Idempotent and recoverable raw-material issuance engine.
+    Ensures:
+    1. Single-flight process-local serialization per batch via get_batch_lock.
+    2. Multi-process concurrency tracking via IncompleteTransactions.
+    3. Re-entry safety: Returns ALREADY_ISSUED if already complete, without duplicating deductions.
+    4. Partial-failure recovery: Resumes missing work after an interrupted issuance.
+    5. Unit normalization (g -> kg, ml -> L) and duplicate recipe line aggregation.
+    6. All-or-nothing stock pre-flight check before appending any new ledger rows.
+    7. Recipe version consistency check: Blocks silent formulation drift on retries.
+    8. Verification of ledger completeness before updating batch materials_issued status.
+    """
+    prod_id_clean = str(production_id or "").strip()
+    if not prod_id_clean:
+        raise HTTPException(400, "production_id is required")
+
+    with get_batch_lock(prod_id_clean):
+        # 1. Fetch batch
+        batches = db.get_records("ProductionBatches", fresh=True)
+        batch = next(
+            (b for b in batches if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
+            None
+        )
+        if not batch:
+            raise HTTPException(404, f"Production batch '{prod_id_clean}' not found")
+
+        prod_id = str(field(batch, "product_id", default="")).strip()
+        prod_name = str(field(batch, "product_name_snapshot", default="")).strip()
+        production_kg = float(field(batch, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0)
+        batch_recipe_id = str(field(batch, "recipe_id", default="")).strip()
+        is_materials_issued = truthy(field(batch, "materials_issued"))
+        existing_issue_txn_id = str(field(batch, "material_issue_txn_id", default="")).strip()
+
+        # 2. Inspect existing consumption rows in RawMaterialLedger
+        raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+        existing_deductions = [
+            x for x in raw_ledger
+            if str(field(x, "production_id", default="")).strip() == prod_id_clean
+            and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+        ]
+
+        # 3. Identify and lock the recipe
+        locked_recipe_id = force_recipe_id or batch_recipe_id
+        if not locked_recipe_id and existing_deductions:
+            for row in existing_deductions:
+                row_notes = str(field(row, "notes", default=""))
+                match = re.search(r'Recipe\s+([A-Za-z0-9_\-]+)', row_notes)
+                if match:
+                    locked_recipe_id = match.group(1).strip()
+                    break
+
+        all_recipes = db.get_records("Recipes", fresh=True)
+        approved_recipes = [
+            r for r in all_recipes
+            if (
+                (prod_id and str(field(r, "product_id", default="")).strip() == prod_id)
+                or (prod_name and str(field(r, "product_name_snapshot", default="")).strip().lower() == prod_name.lower())
+            )
+            and truthy(field(r, "approved"))
+        ]
+
+        active_recipe = None
+        if approved_recipes:
+            active_recipe = sorted(approved_recipes, key=lambda r: int(float(field(r, "version", default=0) or 0)))[-1]
+        else:
+            master_match = next(
+                (m for m in MASTER_RECIPES_DEFINITION if (prod_id and m.get("product_id") == prod_id) or m.get("product_name", "").strip().lower() == prod_name.lower()),
+                None
+            )
+            if master_match:
+                active_recipe = master_match
+
+        if not active_recipe and not locked_recipe_id:
+            raise HTTPException(400, "No approved recipe exists for this product. Save and approve recipe before issuing materials.")
+
+        target_recipe = None
+        if locked_recipe_id:
+            target_recipe = next((r for r in all_recipes if str(field(r, "recipe_id", default="")).strip() == locked_recipe_id), None)
+            if not target_recipe:
+                target_recipe = next((m for m in MASTER_RECIPES_DEFINITION if m.get("recipe_id") == locked_recipe_id), None)
+
+        if not target_recipe:
+            target_recipe = active_recipe
+
+        if not target_recipe:
+            raise HTTPException(400, f"Referenced recipe '{locked_recipe_id}' could not be resolved.")
+
+        # Check for recipe formulation conflict if partial deductions already exist
+        current_active_id = str(field(active_recipe, "recipe_id", default="") or active_recipe.get("recipe_id", "")).strip() if active_recipe else ""
+        target_recipe_id = str(field(target_recipe, "recipe_id", default="") or target_recipe.get("recipe_id", "")).strip()
+        target_recipe_ver = str(field(target_recipe, "version", default="1") or target_recipe.get("version", "1")).strip()
+
+        if existing_deductions and current_active_id and target_recipe_id != current_active_id:
+            logger.warning("Recipe version mismatch for batch %s: locked=%s, active=%s", prod_id_clean, target_recipe_id, current_active_id)
+            raise HTTPException(
+                409,
+                f"Recipe change detected: Batch {prod_id_clean} was initiated with recipe '{target_recipe_id}', "
+                f"but active recipe for {prod_name or prod_id} is now '{current_active_id}'. "
+                f"Cannot silently mix formulations during retry. Manual reconciliation required."
+            )
+
+        # 4. Parse and normalize recipe items
+        raw_items = []
+        if isinstance(target_recipe.get("items_json"), str):
+            try:
+                raw_items = json.loads(target_recipe["items_json"])
+            except Exception as exc:
+                logger.error("Failed to parse items_json for recipe %s: %s", target_recipe_id, exc)
+                raw_items = []
+        elif isinstance(target_recipe.get("items"), list):
+            raw_items = target_recipe["items"]
+
+        if not raw_items:
+            raise HTTPException(400, f"Recipe '{target_recipe_id}' contains no ingredient items.")
+
+        raw_master = db.get_records("RawMaterials", fresh=True)
+        aggregated: Dict[str, Dict[str, Any]] = {}
+
+        for item in raw_items:
+            item_name = str(item.get("material_name", "")).strip()
+            if not item_name:
+                continue
+
+            mat_row = next(
+                (r for r in raw_master
+                 if str(field(r, "material_name", "raw_material_name", "name", default="")).strip().lower() == item_name.lower()
+                 or str(field(r, "raw_material_id", default="")).strip().lower() == item_name.lower()),
+                None
+            )
+            if not mat_row:
+                raise HTTPException(400, f"Raw material '{item_name}' is missing from RawMaterials master. Add it before issuing materials.")
+
+            raw_mat_id = str(field(mat_row, "raw_material_id", default="")).strip() or item_name
+            canonical_name = str(field(mat_row, "material_name", default=item_name)).strip()
+            stock_unit = str(field(mat_row, "unit", default="kg")).strip()
+
+            if item.get("quantity_per_kg") is not None:
+                item_qty_per_kg = float(item["quantity_per_kg"] or 0)
+                item_unit = str(item.get("unit", stock_unit)).strip()
+            elif item.get("quantity") is not None:
+                exp_yield = float(field(target_recipe, "expected_yield_kg", default=1.2) or 1.2)
+                item_qty_per_kg = float(item["quantity"] or 0) / exp_yield if exp_yield > 0 else float(item["quantity"] or 0)
+                item_unit = str(item.get("unit", stock_unit)).strip()
+            else:
+                item_qty_per_kg = 0.0
+                item_unit = stock_unit
+
+            # Standard unit conversions
+            iu_low = item_unit.lower()
+            su_low = stock_unit.lower()
+            if iu_low in {"g", "gram", "grams", "ml", "milliliter", "milliliters", "millilitres"}:
+                if su_low in {"kg", "kilogram", "kgs", "l", "liter", "litres", "litre"}:
+                    item_qty_per_kg = item_qty_per_kg / 1000.0
+            elif iu_low in {"kg", "kilogram", "kgs", "l", "liter", "litres", "litre"}:
+                if su_low in {"g", "gram", "grams", "ml", "milliliter", "milliliters", "millilitres"}:
+                    item_qty_per_kg = item_qty_per_kg * 1000.0
+
+            required_qty = round(item_qty_per_kg * production_kg, 4)
+
+            agg_key = raw_mat_id.lower()
+            if agg_key not in aggregated:
+                rate_info = get_latest_purchase_rate(canonical_name, raw_master, raw_ledger)
+                aggregated[agg_key] = {
+                    "raw_material_id": raw_mat_id,
+                    "material_name": canonical_name,
+                    "stock_unit": stock_unit,
+                    "required_qty": 0.0,
+                    "rate_per_unit": rate_info.get("rate_per_canonical_unit") or "",
+                }
+            aggregated[agg_key]["required_qty"] = round(aggregated[agg_key]["required_qty"] + required_qty, 4)
+
+        # 5. Calculate remaining deductions (partial completion check)
+        missing_plans: Dict[str, Dict[str, Any]] = {}
+        for agg_key, plan in aggregated.items():
+            existing_for_mat = [
+                x for x in existing_deductions
+                if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
+                or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
+            ]
+            already_deducted = round(sum(float(field(x, "quantity", default=0) or 0) for x in existing_for_mat), 4)
+            total_required = round(plan["required_qty"], 4)
+            needed = round(total_required - already_deducted, 4)
+
+            if already_deducted > total_required + 0.001:
+                raise HTTPException(
+                    409,
+                    f"Deduction anomaly for '{plan['material_name']}': already deducted {already_deducted} {plan['stock_unit']}, "
+                    f"exceeding required {total_required} {plan['stock_unit']}. Manual reconciliation required."
+                )
+
+            if needed > 0.0001:
+                missing_plans[agg_key] = {
+                    **plan,
+                    "already_deducted_qty": already_deducted,
+                    "needed_qty": needed,
+                }
+
+        # 6. If no deductions needed:
+        if not missing_plans:
+            if not is_materials_issued:
+                issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
+                try:
+                    db.update_record("ProductionBatches", "production_id", prod_id_clean, {
+                        "materials_issued": "true",
+                        "material_issue_txn_id": issue_txn_id,
+                        "recipe_id": target_recipe_id,
+                        "recipe_version": str(target_recipe_ver),
+                    }, raise_on_error=True)
+                except Exception as recov_exc:
+                    logger.error("Failed to update status on recovery for %s: %s", prod_id_clean, recov_exc)
+                    raise HTTPException(503, "Could not update batch status during recovery. Safe to retry.")
+                db.log_audit(actor, "RECOVER_RAW_MATERIALS_STATUS", "ProductionBatches", prod_id_clean, reason="Marked materials_issued after verifying complete ledger entries.")
+
+            return {
+                "status": "ALREADY_ISSUED",
+                "production_id": prod_id_clean,
+                "material_issue_txn_id": existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}",
+                "issued_items_count": len(existing_deductions),
+                "message": "Raw materials were already issued for this batch. No duplicate deduction made.",
+            }
+
+        # 7. Pre-flight stock availability check for all remaining items
+        for agg_key, plan in missing_plans.items():
+            name = plan["material_name"]
+            needed = plan["needed_qty"]
+            stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=prod_id_clean)
+            current_avail = round(stock_bal["available"] - plan["already_deducted_qty"], 4)
+            if current_avail < needed:
+                raise HTTPException(
+                    400,
+                    f"Insufficient stock for {name}: need {needed} {plan['stock_unit']}, available {max(0.0, current_avail)}."
+                )
+
+        # 8. Record in-flight intent in IncompleteTransactions
+        issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
+        idempotency_key = f"RAW_ISSUE_{prod_id_clean}"
+        try:
+            db.append_record("IncompleteTransactions", {
+                "transaction_id": make_id("IncompleteTransactions"),
+                "transaction_type": "RAW_MATERIAL_ISSUE",
+                "idempotency_key": idempotency_key,
+                "status": "IN_PROGRESS",
+                "payload_json": json.dumps({"production_id": prod_id_clean, "recipe_id": target_recipe_id, "needed": {k: p["needed_qty"] for k, p in missing_plans.items()}}),
+                "error_details": "",
+                "created_at": now(),
+                "updated_at": now(),
+                "resolved_by": "",
+                "resolved_at": "",
+            })
+        except Exception as exc:
+            logger.debug("Non-fatal: IncompleteTransactions logging bypassed: %s", exc)
+
+        # 9. Append missing deduction rows
+        appended_rows = []
+        try:
+            for agg_key, plan in missing_plans.items():
+                needed = plan["needed_qty"]
+                if needed <= 0:
+                    continue
+
+                mat_clean = re.sub(r'[^a-zA-Z0-9]', '', plan['raw_material_id'] or plan['material_name'])[:10]
+                existing_count = len([x for x in existing_deductions if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key])
+                suffix = f"-{existing_count + 1}" if existing_count > 0 else ""
+                txn_id = f"RML-{prod_id_clean}-{mat_clean}{suffix}"
+
+                row = {
+                    "raw_material_txn_id": txn_id,
+                    "txn_datetime": now(),
+                    "material_name": plan["material_name"],
+                    "raw_material_id": plan["raw_material_id"],
+                    "movement_type": "PRODUCTION_CONSUMPTION",
+                    "quantity": needed,
+                    "unit": plan["stock_unit"],
+                    "rate_per_unit": plan["rate_per_unit"],
+                    "production_id": prod_id_clean,
+                    "issue_txn_id": issue_txn_id,
+                    "created_by": actor,
+                    "notes": f"Batch {prod_id_clean} material issue under Recipe {target_recipe_id} (v{target_recipe_ver})",
+                }
+                if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
+                    raise RuntimeError(f"Could not record raw material deduction for '{plan['material_name']}' in ledger.")
+                appended_rows.append(row)
+        except Exception as exc:
+            logger.error("Error during raw material deduction appends for batch %s: %s", prod_id_clean, exc)
+            try:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": make_id("IncompleteTransactions"),
+                    "transaction_type": "RAW_MATERIAL_ISSUE",
+                    "idempotency_key": idempotency_key,
+                    "status": "PARTIAL_FAILED",
+                    "payload_json": json.dumps({"production_id": prod_id_clean, "appended_count": len(appended_rows)}),
+                    "error_details": str(exc),
+                    "created_at": now(),
+                    "updated_at": now(),
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception:
+                pass
+            raise HTTPException(503, f"Raw material deduction interrupted: {exc}. Safe to retry; existing deductions are preserved.")
+
+        # 10. Post-deduction verification
+        raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
+        all_deductions_after = [
+            x for x in raw_ledger_after
+            if str(field(x, "production_id", default="")).strip() == prod_id_clean
+            and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+        ]
+
+        for agg_key, plan in aggregated.items():
+            total_deducted = round(sum(
+                float(field(x, "quantity", default=0) or 0)
+                for x in all_deductions_after
+                if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
+                or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
+            ), 4)
+            if abs(total_deducted - plan["required_qty"]) > 0.001:
+                raise HTTPException(
+                    503,
+                    f"Material issuance verification failed for '{plan['material_name']}': "
+                    f"deducted {total_deducted} != required {plan['required_qty']}. Safe to retry."
+                )
+
+        # 11. Update batch materials_issued status
+        batch_updates = {
+            "materials_issued": "true",
+            "material_issue_txn_id": issue_txn_id,
+            "recipe_id": target_recipe_id,
+            "recipe_version": str(target_recipe_ver),
+        }
+        try:
+            saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, batch_updates, raise_on_error=True)
+            if not saved:
+                saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, batch_updates, raise_on_error=True)
+        except Exception as upd_exc:
+            logger.error("Failed to update ProductionBatches for %s: %s", prod_id_clean, upd_exc)
+            saved = False
+
+        if not saved:
+            raise HTTPException(
+                503,
+                "Material deductions succeeded and verified, but failed to update batch status. "
+                "Safe to retry; retry will update status without duplicating deductions."
+            )
+
+        try:
+            db.append_record("IncompleteTransactions", {
+                "transaction_id": make_id("IncompleteTransactions"),
+                "transaction_type": "RAW_MATERIAL_ISSUE",
+                "idempotency_key": idempotency_key,
+                "status": "COMPLETED",
+                "payload_json": json.dumps({"production_id": prod_id_clean, "issue_txn_id": issue_txn_id}),
+                "error_details": "",
+                "created_at": now(),
+                "updated_at": now(),
+                "resolved_by": actor,
+                "resolved_at": now(),
+            })
+        except Exception:
+            pass
+
+        db.log_audit(actor, "ISSUE_RAW_MATERIALS", "ProductionBatches", prod_id_clean, reason=f"Issued raw materials for {production_kg} kg papad under Recipe {target_recipe_id}")
+
+        return {
+            "status": "MATERIALS_ISSUED",
+            "production_id": prod_id_clean,
+            "material_issue_txn_id": issue_txn_id,
+            "recipe_id": target_recipe_id,
+            "recipe_version": target_recipe_ver,
+            "deductions_appended": len(appended_rows),
+            "total_items_issued": len(aggregated),
+            "deductions": [
+                {
+                    "material_name": r["material_name"],
+                    "raw_material_id": r["raw_material_id"],
+                    "quantity": r["required_qty"],
+                    "unit": r["stock_unit"],
+                    "rate_per_unit": r["rate_per_unit"],
+                }
+                for r in aggregated.values()
+            ],
+        }
+
+
 @router.post("/batches/{production_id}/issue-materials")
-async def issue_materials(production_id: str, user: dict = Depends(get_current_user)):
+async def issue_materials(
+    production_id: str,
+    user: Any = Depends(get_current_user),
+    req: Optional[MaterialIssueRequest] = None,
+):
     """
     Issue raw materials to a production batch.
     Deducts raw materials exactly once, snapshots purchase rates, and assigns a unique transaction ID.
-    Idempotent: Re-calling for an already issued batch returns the existing issue without re-deducting.
+    Idempotent and recoverable:
+    - Re-calling for an already issued batch returns ALREADY_ISSUED without re-deducting.
+    - Interrupted / partially issued batches resume missing items without duplicating.
+    - Pre-flight stock check verifies full remaining requirement before any write.
     """
-    actor, _ = require_production_access(user)
+    actual_user = user
+    notes = ""
+    if isinstance(user, MaterialIssueRequest):
+        notes = user.notes
+        actual_user = req if req is not None else {}
+    elif req is not None:
+        notes = req.notes
+
+    actor, _ = require_production_access(actual_user)
     require_persistent_store()
-
-    batch = next((b for b in db.get_records("ProductionBatches") if str(field(b, "production_id")) == production_id), None)
-    if not batch:
-        raise HTTPException(404, "Production batch not found")
-
-    # Idempotency check: Have materials already been issued for this production_id?
-    raw_ledger = db.get_records("RawMaterialLedger")
-    existing_issue = [x for x in raw_ledger if str(field(x, "production_id")) == production_id and str(field(x, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"]
-    if existing_issue and truthy(field(batch, "materials_issued")):
-        return {
-            "status": "ALREADY_ISSUED",
-            "production_id": production_id,
-            "issued_items_count": len(existing_issue),
-            "message": "Raw materials were already issued for this batch. No duplicate deduction made.",
-        }
-
-    # Find approved recipe
-    prod_id = str(field(batch, "product_id"))
-    prod_name = str(field(batch, "product_name_snapshot"))
-    recipe_rows = [
-        r for r in db.get_records("Recipes")
-        if (
-            str(field(r, "product_name_snapshot")).strip().lower() == prod_name.strip().lower()
-            or (prod_id and str(field(r, "product_id")) == prod_id)
-        )
-        and truthy(field(r, "approved"))
-    ]
-    if not recipe_rows:
-        raise HTTPException(400, "No approved recipe exists for this product. Save and approve recipe before issuing materials.")
-    recipe = sorted(recipe_rows, key=lambda r: int(float(field(r, "version", default=0) or 0)))[-1]
-    items = json.loads(str(field(recipe, "items_json", default="[]")))
-
-    production_kg = float(field(batch, "net_quantity_kg", default=0) or 0)
-    raw_master = db.get_records("RawMaterials")
-
-    # Validate stock sufficiency before any deduction
-    deductions = []
-    for item in items:
-        name = str(item.get("material_name", "")).strip()
-        required = round(float(item.get("quantity_per_kg", 0)) * production_kg, 4)
-        stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=production_id)
-        if not stock_bal["exists"]:
-            raise HTTPException(400, f"Raw material '{name}' is missing from RawMaterials master. Add it before issuing materials.")
-        if stock_bal["available"] < required:
-            raise HTTPException(400, f"Insufficient stock for {name}: need {required} {stock_bal['unit']}, available {stock_bal['available']}.")
-
-        rate_info = get_latest_purchase_rate(name, raw_master, raw_ledger)
-        deductions.append({
-            "material_name": name,
-            "quantity": required,
-            "unit": stock_bal["unit"],
-            "raw_material_id": stock_bal["raw_material_id"],
-            "rate_per_unit": rate_info.get("rate_per_canonical_unit") or "",
-        })
-
-    issue_txn_id = make_id("RawMaterialLedger")
-    for d in deductions:
-        if d["quantity"] <= 0:
-            continue
-        row = {
-            "raw_material_txn_id": make_id("RawMaterialLedger"),
-            "txn_datetime": now(),
-            "material_name": d["material_name"],
-            "raw_material_id": d["raw_material_id"],
-            "movement_type": "PRODUCTION_CONSUMPTION",
-            "quantity": d["quantity"],
-            "unit": d["unit"],
-            "rate_per_unit": d["rate_per_unit"],
-            "production_id": production_id,
-            "issue_txn_id": issue_txn_id,
-            "created_by": actor,
-            "notes": f"Batch {production_id} material issue under Recipe {field(recipe, 'recipe_id')}",
-        }
-        if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
-            raise HTTPException(503, "Could not record raw material deduction in ledger.")
-
-    db.update_record("ProductionBatches", "production_id", production_id, {
-        "materials_issued": "true",
-        "material_issue_txn_id": issue_txn_id,
-        "recipe_id": field(recipe, "recipe_id"),
-    })
-    db.log_audit(actor, "ISSUE_RAW_MATERIALS", "ProductionBatches", production_id, reason=f"Issued raw materials for {production_kg} kg papad")
-
-    return {
-        "status": "MATERIALS_ISSUED",
-        "production_id": production_id,
-        "material_issue_txn_id": issue_txn_id,
-        "deductions": deductions,
-    }
+    return execute_material_issue(production_id, actor, notes=notes)
 
 
 @router.post("/batches/{production_id}/approval")
@@ -954,7 +1284,7 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
     """
     Approve production batch.
     - If materials were already issued, DO NOT deduct them again.
-    - If not issued, issue them now idempotently.
+    - If not issued, issues them idempotently.
     - Crediting bulk output to inventory occurs exactly once.
     """
     actor, _ = require_owner(user)
@@ -997,94 +1327,15 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
         db.log_audit(actor, "REJECT_PRODUCTION", "ProductionBatches", prod_id_clean, reason=req.notes)
         return {**rec, **updates}
 
-    # Find approved recipe
-    rec_prod_name = str(field(rec, "product_name_snapshot", default="")).strip().lower()
-    rec_prod_id = str(field(rec, "product_id", default="")).strip()
-    rec_recipe_id = str(field(rec, "recipe_id", default="")).strip()
-
-    recipe_rows = [
-        r for r in db.get_records("Recipes")
-        if (
-            (rec_recipe_id and str(field(r, "recipe_id", default="")).strip() == rec_recipe_id)
-            or (rec_prod_name and str(field(r, "product_name_snapshot", default="")).strip().lower() == rec_prod_name)
-            or (rec_prod_id and str(field(r, "product_id", default="")).strip() == rec_prod_id)
-        )
-        and truthy(field(r, "approved"))
-    ]
-
-    recipe = None
-    items = []
-    if recipe_rows:
-        recipe = sorted(recipe_rows, key=lambda r: int(float(field(r, "version", default=0) or 0)))[-1]
-        try:
-            items = json.loads(str(field(recipe, "items_json", default="[]")))
-        except Exception:
-            items = []
-    else:
-        # Fallback to master recipes definition
-        master_match = next(
-            (m for m in MASTER_RECIPES_DEFINITION if (rec_prod_id and m.get("product_id") == rec_prod_id) or m.get("product_name", "").strip().lower() == rec_prod_name),
-            None
-        )
-        if master_match:
-            recipe = master_match
-            items = master_match.get("items", [])
-        else:
-            raise HTTPException(400, "No approved recipe exists for this product. Save and approve its recipe before approving production.")
+    # Ensure materials are issued idempotently and recoverably
+    is_issued = truthy(field(rec, "materials_issued"))
+    if not is_issued:
+        execute_material_issue(prod_id_clean, actor)
 
     production_kg = float(field(rec, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0)
 
-    # Check if materials were already issued
-    raw_ledger = db.get_records("RawMaterialLedger")
-    already_issued = any(
-        str(field(x, "production_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"
-        for x in raw_ledger
-    )
-
-    if not already_issued and items:
-        # Issue materials now (only if not previously issued)
-        raw_master = db.get_records("RawMaterials")
-        deductions = []
-        for item in items:
-            name = str(item.get("material_name", "")).strip()
-            required = round(float(item.get("quantity_per_kg", 0)) * production_kg, 4)
-            stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=prod_id_clean)
-            if not stock_bal["exists"]:
-                raise HTTPException(400, f"Raw material '{name}' is missing from RawMaterials master.")
-            if stock_bal["available"] < required:
-                raise HTTPException(400, f"Insufficient stock for {name}: need {required} {stock_bal['unit']}, available {stock_bal['available']}.")
-            rate_info = get_latest_purchase_rate(name, raw_master, raw_ledger)
-            deductions.append({
-                "material_name": name,
-                "quantity": required,
-                "unit": stock_bal["unit"],
-                "raw_material_id": stock_bal["raw_material_id"],
-                "rate_per_unit": rate_info.get("rate_per_canonical_unit") or "",
-            })
-
-        issue_txn_id = make_id("RawMaterialLedger")
-        for d in deductions:
-            if d["quantity"] <= 0:
-                continue
-            ledger_row = {
-                "raw_material_txn_id": make_id("RawMaterialLedger"),
-                "txn_datetime": now(),
-                "material_name": d["material_name"],
-                "raw_material_id": d["raw_material_id"],
-                "movement_type": "PRODUCTION_CONSUMPTION",
-                "quantity": d["quantity"],
-                "unit": d["unit"],
-                "rate_per_unit": d["rate_per_unit"],
-                "production_id": prod_id_clean,
-                "issue_txn_id": issue_txn_id,
-                "created_by": actor,
-                "notes": f"Batch {prod_id_clean} approval material deduction under Recipe {field(recipe, 'recipe_id')}",
-            }
-            if not db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True):
-                raise HTTPException(503, "Could not record raw material consumption.")
-
     # Post bulk output to inventory exactly once
-    existing_bulk = next((x for x in db.get_records("ProductionStockLedger") if str(field(x, "reference_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "BULK_PRODUCED"), None)
+    existing_bulk = next((x for x in db.get_records("ProductionStockLedger", fresh=True) if str(field(x, "reference_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "BULK_PRODUCED"), None)
     if not existing_bulk:
         stock = {
             "movement_id": make_id("ProductionStockLedger"),
@@ -1108,7 +1359,6 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
         "approved_by": actor,
         "approved_at": now(),
         "approval_notes": req.notes,
-        "recipe_id": field(recipe, "recipe_id"),
         "materials_issued": "true",
     }
     saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)

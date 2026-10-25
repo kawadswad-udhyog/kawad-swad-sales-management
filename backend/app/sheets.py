@@ -119,7 +119,7 @@ REQUIRED_TABS = {
         "quantity_kg", "wastage_kg", "net_quantity_kg", "flour_base_used_kg",
         "benchmark_yield_kg", "actual_yield_ratio", "yield_variance_kg", "recipe_id",
         "status", "notes", "created_at", "created_by", "approved_by", "approved_at",
-        "approval_notes",
+        "approval_notes", "materials_issued", "material_issue_txn_id", "recipe_version",
     ],
     "PackagingBatches": [
         "packaging_id", "packaging_date", "product_id", "product_name_snapshot",
@@ -139,7 +139,7 @@ REQUIRED_TABS = {
     ],
     "RawMaterialLedger": [
         "raw_material_txn_id", "txn_datetime", "material_name", "raw_material_id",
-        "movement_type", "quantity", "unit", "production_id", "created_by", "notes",
+        "movement_type", "quantity", "unit", "rate_per_unit", "production_id", "issue_txn_id", "created_by", "notes",
     ],
     "Workers": [
         "worker_id", "worker_name", "mobile", "daily_wage", "active", "notes", "created_at",
