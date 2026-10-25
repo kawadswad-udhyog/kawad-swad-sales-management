@@ -65,21 +65,17 @@ export function clearApiDebugLogs(): void {
  */
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
-    const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
-    if (saved) {
-      return saved;
-    }
-
-    // Prefer relative path routing ('') by default:
-    // 1) On Render static hosting (kawad-swad-sales-frontend.onrender.com),
-    //    server-side rewrites in _redirects handle proxying without CORS or preflight errors.
-    // 2) On Vite dev server, Vite's proxy handles forwarding to the configured backend.
-    // 3) Custom backend URLs saved in localStorage will take precedence.
     const hostname = window.location.hostname;
-    const isDedicatedProdFrontend = hostname === 'kawad-swad-sales-frontend.onrender.com';
-    if (!isDedicatedProdFrontend && DEFAULT_API_BASE_URL) {
-      return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
-    }
+    const isProductionFrontend = hostname === 'kawad-swad-sales-frontend.onrender.com';
+
+    // Production must use the Render static site's configured rewrites. Never let a
+    // stale URL saved by Server Config redirect production traffic to an old/dev API.
+    if (isProductionFrontend) return '';
+
+    const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
+    if (saved) return saved;
+
+    if (DEFAULT_API_BASE_URL) return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
     return '';
   }
 
@@ -296,18 +292,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           throw primaryFetchError;
         }
       } else if (isProxied && (!baseUrl || baseUrl === '')) {
-        try {
-          const directBackendUrl = `https://kawad-swad-sales-dev.onrender.com${cleanPath}`;
-          console.log(`[ERP API Recovery] Retrying via direct Render backend: '${directBackendUrl}'`);
-          res = await fetch(directBackendUrl, {
-            ...options,
-            headers,
-            signal: controller.signal,
-          });
-          console.log(`%c[ERP API Recovery: Succeeded via Direct Render]%c ${method} ${directBackendUrl} returned HTTP ${res.status}`, 'color: #10b981; font-weight: bold;', 'color: inherit;');
-        } catch {
-          throw primaryFetchError;
-        }
+        // On production, relative URLs must go through the Render rewrite. Do not
+        // silently jump to a hard-coded development service: that can authenticate
+        // against the wrong database and split production data across environments.
+        throw primaryFetchError;
       } else {
         throw primaryFetchError;
       }

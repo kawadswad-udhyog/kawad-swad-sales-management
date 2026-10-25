@@ -283,8 +283,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(INITIAL_DASHBOARD_METRICS);
   const [stockDiscrepancies, setStockDiscrepancies] = useState<any[]>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [isGoogleSheetsConnected, setIsGoogleSheetsConnected] = useState<boolean>(true);
-  const [persistentWritesEnabled, setPersistentWritesEnabled] = useState<boolean>(true);
+  const [isGoogleSheetsConnected, setIsGoogleSheetsConnected] = useState<boolean>(false);
+  const [persistentWritesEnabled, setPersistentWritesEnabled] = useState<boolean>(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const clearSyncError = () => setSyncError(null);

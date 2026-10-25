@@ -113,15 +113,15 @@ export const LoginModal: React.FC = () => {
                   ? 'bg-emerald-400'
                   : isBackendConnected
                   ? 'bg-amber-400 animate-pulse'
-                  : 'bg-emerald-400'
+                  : 'bg-rose-400'
               }`}
             />
             <span>
               {isGoogleSheetsConnected && persistentWritesEnabled
-                ? 'Production Online · Google Sheets Connected'
+                ? 'ERP Connected · Persistent Storage Verified'
                 : isBackendConnected
-                ? 'Server Online · Storage Verifying'
-                : 'ERP Ready · Authenticating with Backend'}
+                ? 'API Online · Storage Not Verified'
+                : 'API Offline · Check Server Connection'}
             </span>
           </div>
         </div>
@@ -241,11 +241,15 @@ export const LoginModal: React.FC = () => {
             <div className="flex items-center gap-1.5">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  isGoogleSheetsConnected ? 'bg-emerald-500' : 'bg-emerald-400'
+                  isBackendConnected && isGoogleSheetsConnected && persistentWritesEnabled
+                    ? 'bg-emerald-500'
+                    : isBackendConnected
+                    ? 'bg-amber-400'
+                    : 'bg-rose-500'
                 }`}
               />
               <span className="text-[11px] font-medium text-slate-600">
-                Authoritative Backend Auth Active
+                {isBackendConnected ? 'Backend API Reachable' : 'Backend API Offline'}
               </span>
             </div>
 
