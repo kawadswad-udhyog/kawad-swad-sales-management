@@ -373,7 +373,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const logout = useCallback(() => {
-    apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    const token = getAuthToken();
+    if (token && !token.startsWith('ks-local-jwt-')) {
+      apiRequest('/api/auth/logout', { method: 'POST', silent: true }).catch(() => {});
+    }
     setAuthToken('');
     if (typeof window !== 'undefined') {
       localStorage.removeItem('ks_user');

@@ -217,7 +217,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     ...(options.headers as Record<string, string> || {}),
   };
 
-  if (token) {
+  if (token && !token.startsWith('ks-local-jwt-')) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
@@ -324,9 +324,15 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     const durationMs = Math.round(endTime - startTime);
 
     const isLoginEndpoint = path.includes('/login');
+    const isLogoutEndpoint = path.includes('/logout');
     if (res.status === 401 && !isLoginEndpoint) {
-      setAuthToken('');
-      window.dispatchEvent(new CustomEvent('ks_auth_expired'));
+      const isLocalToken = Boolean(token && token.startsWith('ks-local-jwt-'));
+      if (!isLocalToken) {
+        setAuthToken('');
+        if (!isLogoutEndpoint) {
+          window.dispatchEvent(new CustomEvent('ks_auth_expired'));
+        }
+      }
       pushDebugLog({
         id: `log-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString(),
@@ -340,9 +346,15 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         failureCategory: 'AUTHENTICATION_REQUIRED',
         errorMessage: 'Session expired or invalid credentials.',
       });
-      console.warn('[ERP API] Session expired or unauthorized (HTTP 401)');
+      console.warn(`[ERP API Notice: HTTP 401] Session expired or unauthorized for ${path}`);
       console.groupEnd();
-      throw new Error('Session expired or unauthorized. Please sign in again.');
+      throw new ApiHttpError(
+        401,
+        'Session expired or unauthorized. Please sign in again.',
+        'AUTHENTICATION_REQUIRED',
+        targetUrl,
+        false
+      );
     }
 
     const contentType = res.headers.get('content-type') || '';

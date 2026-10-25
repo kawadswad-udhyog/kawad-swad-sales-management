@@ -71,16 +71,16 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
   const load = async () => {
     const results = await Promise.allSettled([
-      apiRequest<Product[]>('/api/products'),
-      apiRequest<Row[]>('/api/production/workers'),
-      apiRequest<Row[]>('/api/production/recipes'),
-      apiRequest<Row[]>('/api/production/recipes/master'),
-      apiRequest<Row[]>('/api/production/batches'),
-      apiRequest<Row[]>('/api/production/packaging'),
-      apiRequest<Row[]>('/api/production/dispatches'),
-      apiRequest<Row>('/api/production/summary'),
-      apiRequest<Row[]>('/api/production/attendance'),
-      apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>('/api/production/finished-goods-register'),
+      apiRequest<Product[]>('/api/products', { silent: true }),
+      apiRequest<Row[]>('/api/production/workers', { silent: true }),
+      apiRequest<Row[]>('/api/production/recipes', { silent: true }),
+      apiRequest<Row[]>('/api/production/recipes/master', { silent: true }),
+      apiRequest<Row[]>('/api/production/batches', { silent: true }),
+      apiRequest<Row[]>('/api/production/packaging', { silent: true }),
+      apiRequest<Row[]>('/api/production/dispatches', { silent: true }),
+      apiRequest<Row>('/api/production/summary', { silent: true }),
+      apiRequest<Row[]>('/api/production/attendance', { silent: true }),
+      apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>('/api/production/finished-goods-register', { silent: true }),
     ]);
 
     const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes] = results;
@@ -115,7 +115,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
   const refreshSummary = async () => {
     try {
-      const s = await apiRequest<Row>('/api/production/summary');
+      const s = await apiRequest<Row>('/api/production/summary', { silent: true });
       if (s) {
         setSummary(s);
         if (s.finished_goods_register && Array.isArray(s.finished_goods_register)) {
@@ -132,8 +132,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
   const refreshAttendance = async () => {
     const [aRes, sRes] = await Promise.allSettled([
-      apiRequest<Row[]>('/api/production/attendance'),
-      apiRequest<Row>('/api/production/summary'),
+      apiRequest<Row[]>('/api/production/attendance', { silent: true }),
+      apiRequest<Row>('/api/production/summary', { silent: true }),
     ]);
     if (aRes.status === 'fulfilled' && Array.isArray(aRes.value)) setAttendance([...aRes.value].reverse());
     if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
@@ -141,8 +141,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
   const refreshBatches = async () => {
     const [bRes, sRes] = await Promise.allSettled([
-      apiRequest<Row[]>('/api/production/batches'),
-      apiRequest<Row>('/api/production/summary'),
+      apiRequest<Row[]>('/api/production/batches', { silent: true }),
+      apiRequest<Row>('/api/production/summary', { silent: true }),
     ]);
     if (bRes.status === 'fulfilled' && Array.isArray(bRes.value)) {
       const normalized = bRes.value.map((b) => {
