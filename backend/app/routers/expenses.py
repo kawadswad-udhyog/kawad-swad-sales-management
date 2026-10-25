@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import Expense, ExpenseCreate, ExpenseApproveRequest
@@ -45,7 +45,7 @@ async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_cu
     salesman_id = req.salesman_user_id or user_id
     if is_salesman(current_user) and salesman_id != user_id:
         raise HTTPException(status_code=403, detail="A salesman can only submit an expense for themselves.")
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     expense_id = db.generate_id("Expenses")
 
     record = {
@@ -84,7 +84,7 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owner or PA can approve expenses")
 
     user_id = current_user.get("user_id")
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     status_str = "APPROVED" if req.approved else "REJECTED"
 
     updates = {

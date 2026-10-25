@@ -64,33 +64,36 @@ async def load_workspace(current_user: dict = Depends(get_current_user)):
                 "message": str(result) or result.__class__.__name__,
             })
 
-    def _safe_val(idx: int, default_val):
+    def _safe_val(idx: int):
         if idx < len(results):
             val = results[idx]
             if not isinstance(val, BaseException):
                 return val
-        return default_val
+        return None
+
+    failed_resources = [e["resource"] for e in sync_errors]
 
     payload = {
         "_sync_errors": sync_errors,
-        "products": _safe_val(0, []),
-        "customers": _safe_val(1, []),
-        "sales": _safe_val(2, []),
-        "payments": _safe_val(3, []),
-        "stock": _safe_val(4, {"company_stock": [], "salesman_stock": []}),
-        "stock_transactions": _safe_val(5, []),
-        "expenses": _safe_val(6, []),
-        "visits": _safe_val(7, []),
-        "closings": _safe_val(8, []),
-        "salary": _safe_val(9, []),
-        "stock_discrepancies": _safe_val(10, []),
+        "_failed_resources": failed_resources,
+        "products": _safe_val(0),
+        "customers": _safe_val(1),
+        "sales": _safe_val(2),
+        "payments": _safe_val(3),
+        "stock": _safe_val(4),
+        "stock_transactions": _safe_val(5),
+        "expenses": _safe_val(6),
+        "visits": _safe_val(7),
+        "closings": _safe_val(8),
+        "salary": _safe_val(9),
+        "stock_discrepancies": _safe_val(10),
     }
 
     if manager:
-        payload["dashboard"] = _safe_val(11, None)
-        payload["users"] = _safe_val(12, [])
-        payload["audit_logs"] = _safe_val(13, [])
-        payload["approval_requests"] = _safe_val(14, [])
+        payload["dashboard"] = _safe_val(11)
+        payload["users"] = _safe_val(12)
+        payload["audit_logs"] = _safe_val(13)
+        payload["approval_requests"] = _safe_val(14)
     else:
         payload["dashboard"] = None
         payload["users"] = []

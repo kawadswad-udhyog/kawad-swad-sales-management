@@ -67,18 +67,13 @@ export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
     const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
     if (saved) {
-      // Migrate away from deprecated -dev Render domains
-      if (saved.includes('-dev.onrender.com') || saved.includes('kawad-swad-sales-dev')) {
-        localStorage.removeItem(STORAGE_API_KEY);
-        return '';
-      }
       return saved;
     }
 
     // Prefer relative path routing ('') by default:
     // 1) On Render static hosting (kawad-swad-sales-frontend.onrender.com),
     //    server-side rewrites in _redirects handle proxying without CORS or preflight errors.
-    // 2) On Vite dev server, Vite's proxy handles forwarding.
+    // 2) On Vite dev server, Vite's proxy handles forwarding to the configured backend.
     // 3) Custom backend URLs saved in localStorage will take precedence.
     const hostname = window.location.hostname;
     const isDedicatedProdFrontend = hostname === 'kawad-swad-sales-frontend.onrender.com';
@@ -302,7 +297,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         }
       } else if (isProxied && (!baseUrl || baseUrl === '')) {
         try {
-          const directBackendUrl = `https://kawad-swad-sales-backend.onrender.com${cleanPath}`;
+          const directBackendUrl = `https://kawad-swad-sales-dev.onrender.com${cleanPath}`;
           console.log(`[ERP API Recovery] Retrying via direct Render backend: '${directBackendUrl}'`);
           res = await fetch(directBackendUrl, {
             ...options,

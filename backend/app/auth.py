@@ -81,7 +81,7 @@ def _token_identifier(token: str, payload: Optional[Dict[str, Any]] = None) -> s
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
 
 
-def revoke_token(token: str, user_id: str, reason: str = "Logout") -> None:
+def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_failure: bool = False) -> bool:
     """Revoke a single active JWT token (both in-memory and persisted)."""
     payload = decode_access_token(token)
     token_id = _token_identifier(token, payload)
@@ -97,19 +97,23 @@ def revoke_token(token: str, user_id: str, reason: str = "Logout") -> None:
     from app.sheets import db
     try:
         rev_id = db.generate_id("RevokedTokens")
-        db.append_record("RevokedTokens", {
+        persisted = db.append_record("RevokedTokens", {
             "token_id": rev_id,
             "jti": token_id,
             "user_id": user_id,
             "revoked_at": now_iso,
             "expires_at": exp_iso,
             "reason": reason,
-        })
-    except Exception:
-        pass
+        }, raise_on_error=raise_on_failure)
+        return bool(persisted)
+    except Exception as exc:
+        logger.error(f"Failed to persist token revocation for user {user_id}: {exc}")
+        if raise_on_failure:
+            raise
+        return False
 
 
-def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation") -> None:
+def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation", raise_on_failure: bool = False) -> bool:
     """Invalidate all active sessions across all devices for a user immediately."""
     clean_id = str(user_id or "").strip().lower()
     now_epoch = time.time()
@@ -118,11 +122,15 @@ def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation") 
 
     from app.sheets import db
     try:
-        db.update_record("AuthUsers", "user_id", user_id, {
+        updated = db.update_record("AuthUsers", "user_id", user_id, {
             "sessions_revoked_at": now_iso
-        })
-    except Exception:
-        pass
+        }, raise_on_error=raise_on_failure)
+        return bool(updated)
+    except Exception as exc:
+        logger.error(f"Failed to persist user-wide revocation for {user_id}: {exc}")
+        if raise_on_failure:
+            raise
+        return False
 
 
 def is_token_revoked(token: str, payload: Dict[str, Any]) -> bool:

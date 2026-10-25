@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from fastapi import APIRouter, Depends
 from app.models import ShopVisit, ShopVisitCreate
@@ -37,7 +37,7 @@ async def list_shop_visits(current_user: dict = Depends(get_current_user)):
 @router.post("", response_model=ShopVisit)
 async def log_shop_visit(req: ShopVisitCreate, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     visit_id = db.generate_id("ShopVisits")
 
     record = {

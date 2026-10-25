@@ -44,9 +44,8 @@ async def create_audit_log(
     require_manager(current_user)
     actor = current_user.get("user_id", "SYSTEM")
     audit_id = db.generate_id("AuditLog")
-    now_iso = db.get_records("AuditLog") # trigger or fetch
-    from datetime import datetime
-    now_iso_str = datetime.utcnow().isoformat()
+    from datetime import datetime, timezone
+    now_iso_str = datetime.now(timezone.utc).isoformat()
 
     record = {
         "audit_id": audit_id,

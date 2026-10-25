@@ -1,4 +1,4 @@
-/api/*  https://kawad-swad-sales-backend.onrender.com/api/:splat  200
-/health https://kawad-swad-sales-backend.onrender.com/health  200
-/auth/* https://kawad-swad-sales-backend.onrender.com/auth/:splat 200
+/api/*  https://kawad-swad-sales-dev.onrender.com/api/:splat  200
+/health https://kawad-swad-sales-dev.onrender.com/health  200
+/auth/* https://kawad-swad-sales-dev.onrender.com/auth/:splat 200
 /*      /index.html   200

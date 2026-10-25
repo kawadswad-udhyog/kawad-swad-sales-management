@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Union
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import SalaryRecord, SalaryCreateRequest, SalaryApproveRequest, SalaryPayRequest
@@ -275,7 +275,7 @@ async def mark_salary_paid(
     if str(matched.get("paid_datetime", "")).strip():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Salary record {record_id} has already been paid on {matched.get('paid_datetime')}.")
 
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     updates = {
         "paid_datetime": now_iso,
         "payment_reference": req.payment_reference,

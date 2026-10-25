@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import Customer, CustomerCreate
@@ -43,7 +43,7 @@ async def create_customer(req: CustomerCreate, current_user: dict = Depends(get_
         )
 
     customer_id = db.generate_id("Customers")
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     record = {
         "customer_id": customer_id,
         "customer_type": (req.customer_type or "RETAILER").strip(),

@@ -138,10 +138,11 @@ async def logout(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = str(current_user.get("user_id") or "")
+    persisted = True
     if credentials and credentials.credentials:
-        revoke_token(credentials.credentials, user_id, reason="User logged out")
+        persisted = revoke_token(credentials.credentials, user_id, reason="User logged out")
     db.log_audit(user_id, "LOGOUT", "AuthUsers", user_id, reason="User logged out and session revoked")
-    return {"ok": True, "message": "Signed out and session revoked successfully"}
+    return {"ok": True, "message": "Signed out and session revoked successfully", "persisted": persisted}
 
 
 @router.get("/api/auth/me")
@@ -183,7 +184,7 @@ async def change_password(req: ChangePasswordRequest, current_user: dict = Depen
 
 class BootstrapOwnerRequest(BaseModel):
     username: str = Field(min_length=3, max_length=50)
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     full_name: Optional[str] = None
 
 
@@ -193,8 +194,11 @@ async def bootstrap_owner(req: BootstrapOwnerRequest):
     """Initialize the first Owner account when AuthUsers tab in Google Sheets is completely empty."""
     clean_username = req.username.strip().lower()
     full_name = (req.full_name or req.username).strip()
-    if not clean_username or len(req.password) < 6:
-        raise HTTPException(status_code=400, detail="Username must be at least 3 chars and password at least 6 chars")
+    if not clean_username or len(req.password) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be at least 3 characters and password at least 8 characters."
+        )
 
     try:
         auth_records = db.get_records("AuthUsers", fresh=True)
@@ -225,7 +229,12 @@ async def bootstrap_owner(req: BootstrapOwnerRequest):
         "created_at": iso_now,
         "notes": "Initial Owner account created via bootstrap onboarding wizard",
     }
-    db.append_record("Users", user_record)
+    u_ok = db.append_record("Users", user_record, raise_on_error=False)
+    if not u_ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to write initial profile to Users table in Google Sheets."
+        )
 
     hashed_pw = hash_password(req.password)
     auth_record = {
@@ -239,7 +248,25 @@ async def bootstrap_owner(req: BootstrapOwnerRequest):
         "must_change_password": "false",
         "sessions_revoked_at": "",
     }
-    db.append_record("AuthUsers", auth_record)
+    a_ok = db.append_record("AuthUsers", auth_record, raise_on_error=False)
+    if not a_ok:
+        # Atomic rollback of Users record if AuthUsers write failed
+        try:
+            db.delete_record("Users", "user_id", user_id)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to write credentials to AuthUsers in Google Sheets. Rolled back initial user record."
+        )
+
+    db.log_audit(
+        actor=user_id,
+        action="BOOTSTRAP_OWNER",
+        entity_type="AuthUsers",
+        entity_id=user_id,
+        reason=f"Initial Owner account '{clean_username}' bootstrapped successfully"
+    )
 
     return {
         "success": True,

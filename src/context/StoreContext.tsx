@@ -447,9 +447,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  // Resilient Login: Authenticates with backend or provides local session fallback
+  // Secure Login: Authenticates exclusively with backend FastAPI server.
+  // Fails closed on invalid credentials or connection issues; never creates fake local sessions.
   const login = async (username: string, password: string): Promise<void> => {
-    const cleanUsername = username.trim().toLowerCase();
+    const cleanUsername = username.trim();
+    if (!cleanUsername || !password) {
+      throw new Error('Please enter both username and password.');
+    }
+
     let res: {
       access_token: string;
       token_type?: string;
@@ -458,7 +463,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       full_name?: string;
       role?: string;
     } | null = null;
-    let isLocalSession = false;
 
     try {
       res = await apiRequest<{
@@ -470,8 +474,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         role?: string;
       }>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ username: username.trim(), password }),
-        timeoutMs: 15000,
+        body: JSON.stringify({ username: cleanUsername, password }),
+        timeoutMs: 20000,
         silent: true,
       });
     } catch (err: unknown) {
@@ -486,58 +490,33 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             role?: string;
           }>('/auth/login', {
             method: 'POST',
-            body: JSON.stringify({ username: username.trim(), password }),
-            timeoutMs: 15000,
+            body: JSON.stringify({ username: cleanUsername, password }),
+            timeoutMs: 20000,
             silent: true,
           });
-        } catch {
-          // Ignore secondary 404
+        } catch (fallbackErr) {
+          throw fallbackErr;
         }
+      } else {
+        throw err;
       }
+    }
 
-      // If remote backend returned error or is offline, check fallback credentials
-      if (!res) {
-        if (cleanUsername === 'owner' || cleanUsername === 'admin') {
-          res = {
-            access_token: `ks-local-jwt-${Date.now()}`,
-            user: { user_id: 'USR-OWNER-01', full_name: 'Ankit Mandloi (Owner)', role: 'OWNER' },
-          };
-          isLocalSession = true;
-        } else if (cleanUsername === 'mahi' || cleanUsername === 'pa') {
-          res = {
-            access_token: `ks-local-jwt-${Date.now()}`,
-            user: { user_id: 'USR-PA-01', full_name: 'Mahi Sharma (PA)', role: 'PA' },
-          };
-          isLocalSession = true;
-        } else if (cleanUsername === 'salesman' || cleanUsername === 'ramesh') {
-          res = {
-            access_token: `ks-local-jwt-${Date.now()}`,
-            user: { user_id: 'USR-SALES-01', full_name: 'Ramesh Patidar (Sales)', role: 'SALESMAN' },
-          };
-          isLocalSession = true;
-        } else if (password && password.trim().length > 0) {
-          res = {
-            access_token: `ks-local-jwt-${Date.now()}`,
-            user: { user_id: `USR-${Date.now().toString(36).toUpperCase()}`, full_name: username.trim(), role: 'SALESMAN' },
-          };
-          isLocalSession = true;
-        } else {
-          throw err;
-        }
-      }
+    if (!res || !res.access_token) {
+      throw new Error('Authentication failed: No valid access token received from server.');
     }
 
     setAuthToken(res.access_token);
     const userPayload = res.user || {
-      user_id: res.user_id || username.trim(),
-      full_name: res.full_name || username.trim(),
+      user_id: res.user_id || cleanUsername,
+      full_name: res.full_name || cleanUsername,
       role: res.role || 'SALESMAN',
     };
 
     const newUser: User = {
-      user_id: userPayload.user_id || username.trim(),
-      full_name: userPayload.full_name || username.trim(),
-      username: username.trim(),
+      user_id: userPayload.user_id || cleanUsername,
+      full_name: userPayload.full_name || cleanUsername,
+      username: cleanUsername,
       role: (userPayload.role || 'SALESMAN') as User['role'],
       mobile: '',
       email: '',
@@ -550,12 +529,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (typeof window !== 'undefined') {
       localStorage.setItem('ks_user', JSON.stringify(newUser));
     }
-    setIsBackendConnected(!isLocalSession);
-    setSyncError(
-      isLocalSession
-        ? 'Signed in in offline/local mode. Backend service is currently in standby.'
-        : 'Signed in. Loading your latest workspace data…'
-    );
+    setIsBackendConnected(true);
+    setSyncError('Signed in. Loading your latest workspace data…');
     setIsRefreshing(true);
     void loadInitialData(userPayload.role).finally(() => setIsRefreshing(false));
   };
@@ -563,91 +538,120 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Load all live records from FastAPI backend
   const loadInitialData = useCallback(async (role?: string) => {
     const token = getAuthToken();
-    if (!token) return;
+    if (!token || token.startsWith('ks-local-jwt-')) return;
 
     try {
       const activeRole = role || currentUser?.role;
       // Parallel fetch for all core tables
       const workspace = await apiRequest<{
-        products: Product[];
-        customers: Customer[];
-        sales: Sale[];
-        payments: Payment[];
-        stock: { company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] };
-        stock_transactions: StockTransaction[];
-        expenses: Expense[];
-        visits: ShopVisit[];
-        closings: DailyClosing[];
-        salary: SalaryIncentive[];
+        products: Product[] | null;
+        customers: Customer[] | null;
+        sales: Sale[] | null;
+        payments: Payment[] | null;
+        stock: { company_stock: CompanyStockItem[]; salesman_stock: SalesmanStockItem[] } | null;
+        stock_transactions: StockTransaction[] | null;
+        expenses: Expense[] | null;
+        visits: ShopVisit[] | null;
+        closings: DailyClosing[] | null;
+        salary: SalaryIncentive[] | null;
         dashboard: DashboardMetrics | null;
-        users: User[];
-        stock_discrepancies?: any[];
-        audit_logs?: AuditLog[];
-        approval_requests?: ApprovalRequest[];
+        users: User[] | null;
+        stock_discrepancies?: any[] | null;
+        audit_logs?: AuditLog[] | null;
+        approval_requests?: ApprovalRequest[] | null;
         _sync_errors?: Array<{ resource: string; message: string }>;
+        _failed_resources?: string[];
       }>('/api/workspace', { silent: true });
 
-      const prodsData = workspace.products || [];
-      const custsData = workspace.customers || [];
-      const salesData = (workspace.sales || []).map((sale) => ({
-        ...sale,
-        lines: sale.lines && sale.lines.length ? sale.lines : sale.items || [],
-      }));
-      const stockSummaryData = workspace.stock || { company_stock: [], salesman_stock: [] };
-      const stockTxnsData = workspace.stock_transactions || [];
-      const salariesData = workspace.salary || [];
-      const auditData: AuditLog[] = workspace.audit_logs || [];
-      const closingsData = workspace.closings || [];
-      const expensesData = workspace.expenses || [];
-      const visitsData = workspace.visits || [];
-      const ownerData = { dashboard: workspace.dashboard, userList: workspace.users || [] };
-      const discData = workspace.stock_discrepancies || [];
-
-      setPayments(workspace.payments || []);
-      setSaleItems(salesData.flatMap((sale) => sale.lines || []));
-      setStockDiscrepancies(discData);
-      if (workspace.approval_requests) {
-        setApprovalRequests(workspace.approval_requests);
-      }
-
       const syncErrors = workspace._sync_errors || [];
+      const failedResources = new Set(
+        (workspace._failed_resources || []).concat(syncErrors.map((item) => item.resource))
+      );
+
       if (syncErrors.length > 0) {
         const details = syncErrors
           .map((item) => `${item.resource}: ${item.message}`)
           .join('; ');
-        setSyncError(`Partial data sync. Some records may be missing. ${details}`);
+        setSyncError(`Partial data sync. Some records could not be retrieved from storage. ${details}`);
       } else {
         setSyncError(null);
       }
 
-      const cleanProds = (prodsData || []).map((p) => ({
-        ...p,
-        active: typeof p.active === 'string' ? (p.active as string).toLowerCase() === 'true' : Boolean(p.active),
-        retail_pack_only: typeof p.retail_pack_only === 'string' ? (p.retail_pack_only as string).toLowerCase() === 'true' : Boolean(p.retail_pack_only),
-      }));
-      setProducts(cleanProds);
-      setCustomers(custsData);
-      setSales(salesData);
-      setCompanyStockSummary(stockSummaryData.company_stock || []);
-      setSalesmanStockSummary(stockSummaryData.salesman_stock || []);
-      setStockTransactions(stockTxnsData);
-      setSalaryIncentives(salariesData);
-      setAuditLogs(auditData);
-      setDailyClosings(closingsData);
+      // Safeguard against replacing verified tables with empty arrays on read failures:
+      if (!failedResources.has('products') && workspace.products !== null && workspace.products !== undefined) {
+        const cleanProds = (workspace.products || []).map((p) => ({
+          ...p,
+          active: typeof p.active === 'string' ? (p.active as string).toLowerCase() === 'true' : Boolean(p.active),
+          retail_pack_only: typeof p.retail_pack_only === 'string' ? (p.retail_pack_only as string).toLowerCase() === 'true' : Boolean(p.retail_pack_only),
+        }));
+        setProducts(cleanProds);
+      }
 
-      setExpenses(expensesData);
-      setShopVisits(visitsData);
-      if (ownerData.dashboard) setDashboardMetrics(ownerData.dashboard);
-      if (ownerData.userList) setUsers(ownerData.userList);
+      if (!failedResources.has('customers') && workspace.customers !== null && workspace.customers !== undefined) {
+        setCustomers(workspace.customers);
+      }
+
+      if (!failedResources.has('sales') && workspace.sales !== null && workspace.sales !== undefined) {
+        const salesData = (workspace.sales || []).map((sale) => ({
+          ...sale,
+          lines: sale.lines && sale.lines.length ? sale.lines : sale.items || [],
+        }));
+        setSales(salesData);
+        setSaleItems(salesData.flatMap((sale) => sale.lines || []));
+      }
+
+      if (!failedResources.has('payments') && workspace.payments !== null && workspace.payments !== undefined) {
+        setPayments(workspace.payments);
+      }
+
+      if (!failedResources.has('stock') && workspace.stock !== null && workspace.stock !== undefined) {
+        setCompanyStockSummary(workspace.stock.company_stock || []);
+        setSalesmanStockSummary(workspace.stock.salesman_stock || []);
+      }
+
+      if (!failedResources.has('stock_transactions') && workspace.stock_transactions !== null && workspace.stock_transactions !== undefined) {
+        setStockTransactions(workspace.stock_transactions);
+      }
+
+      if (!failedResources.has('expenses') && workspace.expenses !== null && workspace.expenses !== undefined) {
+        setExpenses(workspace.expenses);
+      }
+
+      if (!failedResources.has('visits') && workspace.visits !== null && workspace.visits !== undefined) {
+        setShopVisits(workspace.visits);
+      }
+
+      if (!failedResources.has('closings') && workspace.closings !== null && workspace.closings !== undefined) {
+        setDailyClosings(workspace.closings);
+      }
+
+      if (!failedResources.has('salary') && workspace.salary !== null && workspace.salary !== undefined) {
+        setSalaryIncentives(workspace.salary);
+      }
+
+      if (!failedResources.has('audit_logs') && workspace.audit_logs !== null && workspace.audit_logs !== undefined) {
+        setAuditLogs(workspace.audit_logs);
+      }
+
+      if (!failedResources.has('stock_discrepancies') && workspace.stock_discrepancies !== null && workspace.stock_discrepancies !== undefined) {
+        setStockDiscrepancies(workspace.stock_discrepancies);
+      }
+
+      if (workspace.approval_requests && !failedResources.has('approval_requests')) {
+        setApprovalRequests(workspace.approval_requests);
+      }
+
+      if (workspace.dashboard && !failedResources.has('dashboard')) {
+        setDashboardMetrics(workspace.dashboard);
+      }
+
+      if (workspace.users && !failedResources.has('users') && workspace.users.length > 0) {
+        setUsers(workspace.users);
+      }
 
       setIsBackendConnected(true);
     } catch (err) {
-      console.warn('Backend live sync notice (operating in local fallback):', err);
-      setProducts((prev) => (prev.length > 0 ? prev : INITIAL_PRODUCTS));
-      setCustomers((prev) => (prev.length > 0 ? prev : INITIAL_CUSTOMERS));
-      setSales((prev) => (prev.length > 0 ? prev : INITIAL_SALES));
-      setUsers((prev) => (prev.length > 0 ? prev : INITIAL_USERS));
-      setDashboardMetrics((prev) => prev || INITIAL_DASHBOARD_METRICS);
+      console.warn('Backend live sync notice:', err);
     }
   }, [currentUser?.role]);
 
@@ -666,7 +670,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     async function checkSession() {
       const token = getAuthToken();
-      if (!token) {
+      if (!token || token.startsWith('ks-local-jwt-')) {
+        if (token && token.startsWith('ks-local-jwt-')) {
+          setAuthToken('');
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('ks_user');
+          }
+        }
         setIsLoading(false);
         setCurrentUser(null);
         return;

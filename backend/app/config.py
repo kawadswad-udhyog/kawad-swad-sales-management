@@ -27,16 +27,22 @@ _INSECURE_SECRETS = {
 
 
 def jwt_secret() -> str:
-    """Return the configured signing secret or generate an ephemeral runtime secret."""
+    """Return the configured signing secret or generate an ephemeral runtime secret in dev."""
     secret = os.getenv("SALES_JWT_SECRET", "").strip()
     testing = os.getenv("SALES_TESTING", "").strip() == "1"
     if testing and not secret:
         return "test-only-secret-do-not-use-for-deployment-32"
     if secret in _INSECURE_SECRETS or len(secret) < 32:
+        if SALES_ENV == "production":
+            raise RuntimeError(
+                "SALES_JWT_SECRET is missing or under 32 characters in production. "
+                "Production deployment must fail-closed to prevent session loss on restart. "
+                "Configure a secure SALES_JWT_SECRET (>= 32 characters) in your environment variables."
+            )
         logger.warning(
             "SALES_JWT_SECRET is missing or under 32 characters in environment. "
-            "Using an ephemeral process secret so the service remains operational on Render. "
-            "Please configure SALES_JWT_SECRET in your Render environment variables."
+            "Using an ephemeral process secret in non-production. "
+            "Please configure SALES_JWT_SECRET in your environment variables."
         )
         return _EPHEMERAL_SECRET
     return secret

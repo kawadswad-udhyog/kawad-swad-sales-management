@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
@@ -126,7 +126,7 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     if role == "SALESMAN" and (txn_type != "RETURN_FROM_SALESMAN" or req.salesman_user_id != user_id):
         raise HTTPException(status_code=403, detail="Salesmen can only record returns for their own assigned stock.")
 
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     stock_txn_id = db.generate_id("SalesmanStockLedger")
 
     products = db.get_records("Products")
@@ -212,7 +212,7 @@ async def submit_stock_discrepancy(req: StockDiscrepancyCreate, current_user: di
         raise HTTPException(status_code=404, detail=f"Product {req.product_id} not found.")
 
     diff = req.physical_count - req.expected_stock
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     disc_id = db.generate_id("StockDiscrepancies")
 
     record = {
@@ -259,7 +259,7 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
     if action not in {"APPROVE", "REJECT"}:
         raise HTTPException(status_code=422, detail="Action must be APPROVE or REJECT.")
 
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     diff = int(match.get("difference", 0) or 0)
     loc = str(match.get("location", ""))
     p_id = str(match.get("product_id", ""))
@@ -370,7 +370,7 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
     p_name = str(product.get("product_name", req.product_id))
     pack_weight = int(float(product.get("pack_weight_g", 0) or 0))
     loc = req.location.strip().upper()
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     if loc == "FACTORY":
         prod_ledger = db.get_records("ProductionStockLedger", fresh=True)

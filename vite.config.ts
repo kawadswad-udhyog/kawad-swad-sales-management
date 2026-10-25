@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
-const rawBackendTarget = process.env.VITE_API_URL || 'https://kawad-swad-sales-backend.onrender.com';
+const rawBackendTarget = process.env.VITE_API_URL || 'https://kawad-swad-sales-dev.onrender.com';
 const backendTarget = rawBackendTarget.trim().replace(/\/$/, '');
 
 function createProxyRule(prefix: string) {
