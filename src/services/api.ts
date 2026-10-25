@@ -441,7 +441,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         errorMessage: errorMsg,
       });
 
-      const isProbeOrSilent = Boolean(options.silent || path.includes('/health'));
+      const isProbeOrSilent = Boolean(options.silent || path.includes('/health') || isRenderNoServer);
       if (isProbeOrSilent) {
         console.warn(`[ERP API Notice: HTTP ${res.status}] ${errorMsg}`);
       } else {
@@ -533,7 +533,9 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       diagnostics: diagnosticDetails,
     });
 
-    const isProbeOrSilent = Boolean(options.silent || path.includes('/health'));
+    const isProbeOrSilent = Boolean(
+      options.silent || path.includes('/health') || category === 'BACKEND_UNREACHABLE_OR_TIMEOUT'
+    );
     if (isProbeOrSilent) {
       console.warn(`[ERP API Network Notice: ${category}] ${diagnosticDetails || (err instanceof Error ? err.message : String(err))}`);
     } else {

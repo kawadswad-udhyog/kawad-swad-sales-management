@@ -582,7 +582,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         audit_logs?: AuditLog[];
         approval_requests?: ApprovalRequest[];
         _sync_errors?: Array<{ resource: string; message: string }>;
-      }>('/api/workspace');
+      }>('/api/workspace', { silent: true });
 
       const prodsData = workspace.products || [];
       const custsData = workspace.customers || [];
@@ -650,7 +650,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const refreshDashboardMetrics = useCallback(async () => {
     try {
-      const freshMetrics = await apiRequest<DashboardMetrics>('/api/dashboard');
+      const freshMetrics = await apiRequest<DashboardMetrics>('/api/dashboard', { silent: true });
       if (freshMetrics) {
         setDashboardMetrics(freshMetrics);
       }
@@ -682,10 +682,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
         let me: { user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean };
         try {
-          me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/api/auth/me');
+          me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/api/auth/me', { silent: true });
         } catch (err: unknown) {
           if (err instanceof Error && err.message.includes('404')) {
-            me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/auth/me');
+            me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/auth/me', { silent: true });
           } else {
             throw err;
           }
