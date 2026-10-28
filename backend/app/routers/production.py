@@ -220,7 +220,7 @@ class RawMaterialReceiveRequest(BaseModel):
     material_id: Optional[str] = None  # alias
     material_name: Optional[str] = None
     quantity: float = Field(gt=0, description="Inward quantity in kg or L (must be > 0)")
-    unit: str = Field(..., description="Quantity unit (kg, g, L, ml)")
+    unit: str = Field("kg", description="Quantity unit (kg, g, L, ml)")
     purchase_rate: float = Field(gt=0, description="Base supplier purchase rate per unit")
     supplier_id: Optional[str] = ""
     supplier_name: Optional[str] = ""
@@ -275,6 +275,88 @@ class RawMaterialBalanceItem(BaseModel):
     available_stock: float
     latest_landed_rate: Optional[float] = None
     rate_status: str
+
+
+class DalMillingCreate(BaseModel):
+    source_material_id: str = Field(..., description="Whole Dal ID (e.g. RM-WHOLE-MOONG-DAL)")
+    input_quantity_kg: float = Field(..., description="Gross Whole Dal quantity fed into mill (kg)")
+    flour_output_kg: float = Field(..., description="Actual Flour output produced from mill (kg)")
+    milling_expenses: Optional[float] = Field(0.0, description="Actual processing/milling expenses (₹)")
+    milling_date: Optional[str] = Field("", description="Milling batch date (YYYY-MM-DD)")
+    batch_reference: Optional[str] = Field("", description="External batch ref or machine run number")
+    idempotency_key: Optional[str] = Field(None, description="Unique client idempotency key")
+    notes: Optional[str] = Field("", description="Operator/machine notes")
+
+
+class DalMillingResponse(BaseModel):
+    success: bool
+    status: str
+    milling_batch_id: str
+    input_txn_id: str
+    output_txn_id: str
+    source_material_id: str
+    source_material_name: str
+    input_quantity_kg: float
+    target_flour_id: str
+    target_flour_name: str
+    flour_output_kg: float
+    processing_loss_kg: float
+    loss_percentage: float
+    source_unit_rate: float
+    milling_expenses: float
+    total_flour_cost: float
+    flour_unit_cost: float
+    new_whole_stock: float
+    new_flour_stock: float
+    is_replay: bool = False
+    message: str
+
+
+class DalMillingHistoryItem(BaseModel):
+    milling_batch_id: str
+    milling_date: str
+    source_material_id: str
+    source_material_name: str
+    input_quantity_kg: float
+    target_flour_id: str
+    target_flour_name: str
+    flour_output_kg: float
+    processing_loss_kg: float
+    loss_percentage: float
+    source_unit_rate: float
+    milling_expenses: float
+    total_flour_cost: float
+    flour_unit_cost: float
+    batch_reference: str
+    created_by: str
+    notes: str
+
+
+DAL_TO_FLOUR_MAPPING = {
+    "RM-WHOLE-MOONG-DAL": {
+        "target_flour_id": "RM-MOONG-FLOUR",
+        "target_flour_name": "Moong Dal Flour",
+        "canonical_dal_name": "Whole Moong Dal",
+    },
+    "RM-WHOLE-URAD-DAL": {
+        "target_flour_id": "RM-URAD-FLOUR",
+        "target_flour_name": "Urad Dal Flour",
+        "canonical_dal_name": "Whole Urad Dal",
+    },
+    "RM-WHOLE-CHANA-DAL": {
+        "target_flour_id": "RM-CHANA-FLOUR",
+        "target_flour_name": "Chana Dal Flour",
+        "canonical_dal_name": "Whole Chana Dal",
+    },
+}
+
+
+def resolve_dal_flour_pair(mat_key: str):
+    k = (mat_key or "").strip().lower()
+    for dal_id, mapping in DAL_TO_FLOUR_MAPPING.items():
+        if dal_id.lower() == k or mapping["canonical_dal_name"].lower() == k:
+            return dal_id, mapping
+    return None, None
 
 
 _RAW_MATERIAL_MUTEX = threading.RLock()
@@ -527,7 +609,7 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
             "line_key": line_key,
         }
         try:
-            db.append_record("IncompleteTransactions", {
+            if not db.append_record("IncompleteTransactions", {
                 "transaction_id": incomp_txn_id,
                 "transaction_type": "RAW_MATERIAL_RECEIPT",
                 "idempotency_key": clean_idemp_key,
@@ -538,9 +620,11 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
                 "updated_at": now(),
                 "resolved_by": "",
                 "resolved_at": "",
-            })
+            }, raise_on_error=True):
+                raise RuntimeError("Failed to record intent in IncompleteTransactions.")
         except Exception as incomp_err:
-            logger.debug("Non-fatal: IncompleteTransactions log bypassed: %s", incomp_err)
+            logger.error("Failed to record intent in IncompleteTransactions: %s", incomp_err)
+            raise HTTPException(503, f"Storage error recording transaction intent: {incomp_err}. Safe to retry.")
 
         # 7. Append single row to RawMaterialLedger
         ledger_txn_id = db.generate_id("RawMaterialLedger")
@@ -649,6 +733,369 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
             is_replay=False,
             message=f"Successfully received {std_qty} {std_unit} of {canonical_mat_name} at landed rate ₹{effective_unit_rate}/{std_unit}."
         )
+
+
+@router.post("/milling/record", response_model=DalMillingResponse)
+async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(get_current_user)):
+    actor, _ = require_production_access(user)
+    require_persistent_store()
+
+    # 1. Resolve source Dal and target Flour
+    dal_id, mapping = resolve_dal_flour_pair(req.source_material_id)
+    if not dal_id or not mapping:
+        raise HTTPException(
+            422,
+            f"Unsupported milling material '{req.source_material_id}'. Must be Whole Moong Dal, Whole Urad Dal, or Whole Chana Dal."
+        )
+
+    if req.input_quantity_kg <= 0:
+        raise HTTPException(422, "Input quantity must be strictly greater than zero.")
+
+    if req.flour_output_kg <= 0:
+        raise HTTPException(422, "Flour output quantity must be strictly greater than zero.")
+
+    if req.flour_output_kg > req.input_quantity_kg:
+        raise HTTPException(
+            422,
+            f"Flour output ({req.flour_output_kg} kg) cannot exceed whole dal input ({req.input_quantity_kg} kg). Processing loss cannot be negative."
+        )
+
+    milling_exp = round_money(max(0.0, float(req.milling_expenses or 0.0)))
+    clean_batch_ref = (req.batch_reference or "").strip()
+    milling_date = (req.milling_date or now()[:10]).strip()
+    clean_idemp_key = (req.idempotency_key or f"MIL:{clean_batch_ref or milling_date}:{dal_id}:{round_stock(req.input_quantity_kg)}:{round_stock(req.flour_output_kg)}").strip()
+
+    payload_dict = {
+        "source_material_id": dal_id,
+        "input_quantity_kg": round_stock(req.input_quantity_kg),
+        "flour_output_kg": round_stock(req.flour_output_kg),
+        "milling_expenses": round_money(milling_exp),
+        "milling_date": milling_date,
+        "batch_reference": clean_batch_ref,
+    }
+    payload_hash = hashlib.sha256(json.dumps(payload_dict, sort_keys=True).encode("utf-8")).hexdigest()
+
+    with _RAW_MATERIAL_MUTEX:
+        raw_master = db.get_records("RawMaterials", fresh=True)
+        raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+
+        # 2. Check Idempotency and Replay in RawMaterialLedger
+        existing_milling_out = next(
+            (r for r in raw_ledger
+             if str(r.get("movement_type", "")).strip().upper() == "MILLING_OUTPUT"
+             and (str(r.get("issue_txn_id", "")).strip() == clean_idemp_key or
+                  (clean_batch_ref and str(r.get("issue_txn_id", "")).strip() == clean_batch_ref) or
+                  (clean_idemp_key in str(r.get("notes", ""))))),
+            None
+        )
+
+        if existing_milling_out:
+            stored_notes = str(existing_milling_out.get("notes", ""))
+            stored_hash = None
+            try:
+                meta = json.loads(stored_notes)
+                stored_hash = meta.get("payload_hash")
+            except Exception:
+                pass
+
+            if stored_hash and stored_hash != payload_hash:
+                raise HTTPException(409, f"Conflict: Milling batch '{clean_idemp_key}' already recorded with different parameters.")
+
+            existing_batch_id = str(existing_milling_out.get("issue_txn_id", ""))
+            existing_out_id = str(existing_milling_out.get("raw_material_txn_id", ""))
+            existing_in_row = next((r for r in raw_ledger if str(r.get("issue_txn_id", "")) == existing_batch_id and str(r.get("movement_type", "")).upper() == "MILLING_CONSUMPTION"), None)
+            existing_in_id = str(existing_in_row.get("raw_material_txn_id", "")) if existing_in_row else ""
+
+            cur_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger)
+            cur_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger)
+
+            return DalMillingResponse(
+                success=True,
+                status="ALREADY_RECORDED",
+                milling_batch_id=existing_batch_id,
+                input_txn_id=existing_in_id,
+                output_txn_id=existing_out_id,
+                source_material_id=dal_id,
+                source_material_name=mapping["canonical_dal_name"],
+                input_quantity_kg=float(req.input_quantity_kg),
+                target_flour_id=mapping["target_flour_id"],
+                target_flour_name=mapping["target_flour_name"],
+                flour_output_kg=float(existing_milling_out.get("quantity", req.flour_output_kg)),
+                processing_loss_kg=round_stock(float(req.input_quantity_kg) - float(existing_milling_out.get("quantity", req.flour_output_kg))),
+                loss_percentage=round(((float(req.input_quantity_kg) - float(existing_milling_out.get("quantity", req.flour_output_kg))) / float(req.input_quantity_kg)) * 100, 2),
+                source_unit_rate=float(existing_in_row.get("rate_per_unit", 0) if existing_in_row else 0),
+                milling_expenses=milling_exp,
+                total_flour_cost=round_money(float(existing_milling_out.get("quantity", req.flour_output_kg)) * float(existing_milling_out.get("rate_per_unit", 0))),
+                flour_unit_cost=float(existing_milling_out.get("rate_per_unit", 0)),
+                new_whole_stock=float(cur_whole.get("available", 0.0)),
+                new_flour_stock=float(cur_flour.get("available", 0.0)),
+                is_replay=True,
+                message=f"[Idempotent Replay] Milling batch already recorded as {existing_batch_id}. Stock balance intact.",
+            )
+
+        # 3. Check Stock Availability
+        cur_whole_bal = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger)
+        available_whole = float(cur_whole_bal.get("available", 0.0))
+        if float(req.input_quantity_kg) > available_whole:
+            raise HTTPException(
+                400,
+                f"Insufficient {mapping['canonical_dal_name']} stock: requested {req.input_quantity_kg} kg but available balance is {available_whole} kg."
+            )
+
+        # 4. Check IncompleteTransactions for conflict
+        incomp_records = db.get_records("IncompleteTransactions", fresh=True)
+        existing_txn = next((t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key), None)
+        if existing_txn:
+            stored_payload_str = str(existing_txn.get("payload_json", "")).strip()
+            stored_hash = None
+            try:
+                stored_data = json.loads(stored_payload_str)
+                stored_hash = stored_data.get("payload_hash")
+            except Exception:
+                pass
+            if stored_hash and stored_hash != payload_hash:
+                raise HTTPException(409, "Conflict: Idempotency key reused with conflicting request payload parameters.")
+
+        # 5. Compute Landed Cost Math
+        dal_rate_info = get_latest_purchase_rate(mapping["canonical_dal_name"], raw_master, raw_ledger)
+        dal_unit_rate = float(dal_rate_info.get("rate_per_canonical_unit") or 110.0)
+        total_dal_cost = round_money(float(req.input_quantity_kg) * dal_unit_rate)
+        total_flour_cost = round_money(total_dal_cost + milling_exp)
+        flour_unit_rate = round_money(total_flour_cost / float(req.flour_output_kg))
+        loss_kg = round_stock(float(req.input_quantity_kg) - float(req.flour_output_kg))
+        loss_pct = round((loss_kg / float(req.input_quantity_kg)) * 100, 2)
+
+        # 6. Allocate IDs
+        incomp_txn_id = make_id("IncompleteTransactions")
+        input_txn_id = db.generate_id("RawMaterialLedger")
+        output_txn_id = db.generate_id("RawMaterialLedger")
+        milling_batch_id = f"MIL-{input_txn_id.replace('RML-', '')}"
+
+        # 7. Record Intent in IncompleteTransactions
+        intent_payload = {
+            "payload_hash": payload_hash,
+            "milling_batch_id": milling_batch_id,
+            "source_material_id": dal_id,
+            "input_quantity_kg": float(req.input_quantity_kg),
+            "target_flour_id": mapping["target_flour_id"],
+            "flour_output_kg": float(req.flour_output_kg),
+            "milling_expenses": float(milling_exp),
+            "flour_unit_cost": float(flour_unit_rate),
+            "input_txn_id": input_txn_id,
+            "output_txn_id": output_txn_id,
+            "idempotency_key": clean_idemp_key,
+        }
+        try:
+            if not db.append_record("IncompleteTransactions", {
+                "transaction_id": incomp_txn_id,
+                "transaction_type": "DAL_MILLING",
+                "idempotency_key": clean_idemp_key,
+                "status": "IN_PROGRESS",
+                "payload_json": json.dumps(intent_payload),
+                "error_details": "",
+                "created_at": now(),
+                "updated_at": now(),
+                "resolved_by": "",
+                "resolved_at": "",
+            }, raise_on_error=True):
+                raise RuntimeError("Failed to record milling intent in IncompleteTransactions.")
+        except Exception as incomp_err:
+            logger.error("Failed to record milling intent: %s", incomp_err)
+            raise HTTPException(503, f"Storage error recording milling intent: {incomp_err}. Safe to retry.")
+
+        # 8. Leg 1: Deduct Whole Dal from RawMaterialLedger
+        input_notes = json.dumps({
+            "_v": 1,
+            "kind": "MILLING_CONSUMPTION",
+            "milling_batch_id": milling_batch_id,
+            "idempotency_key": clean_idemp_key,
+            "payload_hash": payload_hash,
+            "target_flour_id": mapping["target_flour_id"],
+            "target_flour_name": mapping["target_flour_name"],
+            "input_quantity_kg": float(req.input_quantity_kg),
+            "flour_output_kg": float(req.flour_output_kg),
+            "processing_loss_kg": float(loss_kg),
+            "loss_percentage": float(loss_pct),
+            "source_unit_rate": float(dal_unit_rate),
+            "total_dal_cost": float(total_dal_cost),
+            "milling_expenses": float(milling_exp),
+            "batch_reference": clean_batch_ref,
+            "operator_notes": (req.notes or "").strip(),
+        })
+        leg1_row = {
+            "raw_material_txn_id": input_txn_id,
+            "txn_datetime": milling_date,
+            "material_name": mapping["canonical_dal_name"],
+            "raw_material_id": dal_id,
+            "movement_type": "MILLING_CONSUMPTION",
+            "quantity": float(req.input_quantity_kg),
+            "unit": "kg",
+            "rate_per_unit": float(dal_unit_rate),
+            "production_id": "",
+            "issue_txn_id": milling_batch_id,
+            "created_by": actor,
+            "notes": input_notes,
+        }
+        try:
+            if not db.append_record("RawMaterialLedger", leg1_row, raise_on_error=True):
+                raise RuntimeError("Failed to append whole dal deduction row to RawMaterialLedger.")
+        except Exception as leg1_err:
+            try:
+                db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
+                    "status": "PARTIAL_FAILED",
+                    "error_details": f"Leg 1 failure: {leg1_err}",
+                    "updated_at": now(),
+                })
+            except Exception:
+                pass
+            raise HTTPException(503, f"Storage error during dal deduction: {leg1_err}. Safe to retry.")
+
+        # Update intent status to INPUT_COMMITTED
+        try:
+            db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
+                "status": "INPUT_COMMITTED",
+                "updated_at": now(),
+            })
+        except Exception:
+            pass
+
+        # 9. Leg 2: Credit Flour to RawMaterialLedger
+        output_notes = json.dumps({
+            "_v": 1,
+            "kind": "MILLING_OUTPUT",
+            "milling_batch_id": milling_batch_id,
+            "idempotency_key": clean_idemp_key,
+            "payload_hash": payload_hash,
+            "source_material_id": dal_id,
+            "source_material_name": mapping["canonical_dal_name"],
+            "input_quantity_kg": float(req.input_quantity_kg),
+            "flour_output_kg": float(req.flour_output_kg),
+            "processing_loss_kg": float(loss_kg),
+            "loss_percentage": float(loss_pct),
+            "source_unit_rate": float(dal_unit_rate),
+            "total_dal_cost": float(total_dal_cost),
+            "milling_expenses": float(milling_exp),
+            "total_flour_cost": float(total_flour_cost),
+            "flour_unit_cost": float(flour_unit_rate),
+            "batch_reference": clean_batch_ref,
+            "operator_notes": (req.notes or "").strip(),
+        })
+        leg2_row = {
+            "raw_material_txn_id": output_txn_id,
+            "txn_datetime": milling_date,
+            "material_name": mapping["target_flour_name"],
+            "raw_material_id": mapping["target_flour_id"],
+            "movement_type": "MILLING_OUTPUT",
+            "quantity": float(req.flour_output_kg),
+            "unit": "kg",
+            "rate_per_unit": float(flour_unit_rate),
+            "production_id": "",
+            "issue_txn_id": milling_batch_id,
+            "created_by": actor,
+            "notes": output_notes,
+        }
+        try:
+            if not db.append_record("RawMaterialLedger", leg2_row, raise_on_error=True):
+                raise RuntimeError("Failed to append flour output row to RawMaterialLedger.")
+        except Exception as leg2_err:
+            try:
+                db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
+                    "status": "PARTIAL_FAILED",
+                    "error_details": f"Leg 2 failure: {leg2_err}",
+                    "updated_at": now(),
+                })
+            except Exception:
+                pass
+            raise HTTPException(503, f"Storage error during flour receipt: {leg2_err}. Safe to retry.")
+
+        # 10. Mark IncompleteTransactions COMPLETED
+        try:
+            db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
+                "status": "COMPLETED",
+                "resolved_by": actor,
+                "resolved_at": now(),
+                "updated_at": now(),
+            })
+        except Exception:
+            pass
+
+        # 11. Audit Log
+        db.log_audit(
+            actor,
+            "RECORD_MILLING_BATCH",
+            "RawMaterialLedger",
+            milling_batch_id,
+            reason=f"Milled {req.input_quantity_kg} kg of {mapping['canonical_dal_name']} into {req.flour_output_kg} kg of {mapping['target_flour_name']} (Loss: {loss_kg} kg / {loss_pct}%) at ₹{flour_unit_rate}/kg"
+        )
+
+        # 12. Calculate post-milling balances
+        raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
+        post_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger_after)
+        post_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger_after)
+
+        return DalMillingResponse(
+            success=True,
+            status="SUCCESS",
+            milling_batch_id=milling_batch_id,
+            input_txn_id=input_txn_id,
+            output_txn_id=output_txn_id,
+            source_material_id=dal_id,
+            source_material_name=mapping["canonical_dal_name"],
+            input_quantity_kg=float(req.input_quantity_kg),
+            target_flour_id=mapping["target_flour_id"],
+            target_flour_name=mapping["target_flour_name"],
+            flour_output_kg=float(req.flour_output_kg),
+            processing_loss_kg=float(loss_kg),
+            loss_percentage=float(loss_pct),
+            source_unit_rate=float(dal_unit_rate),
+            milling_expenses=float(milling_exp),
+            total_flour_cost=float(total_flour_cost),
+            flour_unit_cost=float(flour_unit_rate),
+            new_whole_stock=float(post_whole.get("available", 0.0)),
+            new_flour_stock=float(post_flour.get("available", 0.0)),
+            is_replay=False,
+            message=f"✓ Milled {req.input_quantity_kg} kg {mapping['canonical_dal_name']} into {req.flour_output_kg} kg {mapping['target_flour_name']} (Batch: {milling_batch_id}, Loss: {loss_kg} kg / {loss_pct}%). Landed flour rate: ₹{flour_unit_rate}/kg.",
+        )
+
+
+@router.get("/milling/history", response_model=List[DalMillingHistoryItem])
+async def list_milling_history(user: dict = Depends(get_current_user)):
+    require_production_access(user)
+    raw_ledger = db.get_records("RawMaterialLedger", fresh=False)
+    milling_outputs = [r for r in raw_ledger if str(r.get("movement_type", "")).strip().upper() == "MILLING_OUTPUT"]
+
+    items: List[DalMillingHistoryItem] = []
+    for row in milling_outputs:
+        batch_id = str(row.get("issue_txn_id", ""))
+        notes_str = str(row.get("notes", ""))
+        meta = {}
+        try:
+            meta = json.loads(notes_str)
+        except Exception:
+            pass
+
+        items.append(DalMillingHistoryItem(
+            milling_batch_id=batch_id,
+            milling_date=str(row.get("txn_datetime") or meta.get("milling_date") or ""),
+            source_material_id=str(meta.get("source_material_id") or ""),
+            source_material_name=str(meta.get("source_material_name") or ""),
+            input_quantity_kg=float(meta.get("input_quantity_kg", 0.0)),
+            target_flour_id=str(row.get("raw_material_id", "")),
+            target_flour_name=str(row.get("material_name", "")),
+            flour_output_kg=float(row.get("quantity", 0.0)),
+            processing_loss_kg=float(meta.get("processing_loss_kg", 0.0)),
+            loss_percentage=float(meta.get("loss_percentage", 0.0)),
+            source_unit_rate=float(meta.get("source_unit_rate", 0.0)),
+            milling_expenses=float(meta.get("milling_expenses", 0.0)),
+            total_flour_cost=float(meta.get("total_flour_cost", 0.0)),
+            flour_unit_cost=float(row.get("rate_per_unit", 0.0)),
+            batch_reference=str(meta.get("batch_reference") or ""),
+            created_by=str(row.get("created_by") or ""),
+            notes=str(meta.get("operator_notes") or ""),
+        ))
+
+    items.sort(key=lambda x: x.milling_date or "", reverse=True)
+    return items
 
 
 @router.get("/summary")

@@ -219,9 +219,9 @@ def calculate_raw_material_balance(
         typ = str(row.get("movement_type", "")).strip().upper()
         qty = to_decimal(row.get("quantity", 0) or 0)
 
-        if typ in {"PRODUCTION_CONSUMPTION", "ISSUE", "WASTAGE"}:
+        if typ in {"PRODUCTION_CONSUMPTION", "ISSUE", "WASTAGE", "MILLING_CONSUMPTION", "MILLING_INPUT"}:
             consumed += qty
-        elif typ in {"PURCHASE_RECEIPT", "STOCK_IN", "RETURN"}:
+        elif typ in {"PURCHASE_RECEIPT", "STOCK_IN", "RETURN", "MILLING_OUTPUT", "MILLING_RECEIPT"}:
             received += qty
 
     available = opening - consumed + received

@@ -1,5 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { apiRequest, getRawMaterials, receiveRawMaterial, RawMaterialSummary, RawMaterialReceiveInput } from '../services/api';
+import {
+  apiRequest,
+  getRawMaterials,
+  receiveRawMaterial,
+  RawMaterialSummary,
+  RawMaterialReceiveInput,
+  recordMillingBatch,
+  getMillingHistory,
+  DalMillingInput,
+  DalMillingResult,
+  DalMillingHistoryItem,
+} from '../services/api';
 import { useStore } from '../context/StoreContext';
 import { exportSheetToExcel } from '../utils/exportToExcel';
 import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
@@ -149,6 +160,68 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     }
   };
 
+  // Stage 2: Dal Milling State
+  const DAL_MILLING_CONFIG = [
+    {
+      id: 'RM-WHOLE-MOONG-DAL',
+      name: 'Whole Moong Dal',
+      flourId: 'RM-MOONG-FLOUR',
+      flourName: 'Moong Dal Flour',
+      badgeColor: '#166534',
+      bgColor: '#dcfce7',
+      borderColor: '#86efac',
+      expectedLoss: '2.0% typical loss (skin/bran removal)',
+    },
+    {
+      id: 'RM-WHOLE-URAD-DAL',
+      name: 'Whole Urad Dal',
+      flourId: 'RM-URAD-FLOUR',
+      flourName: 'Urad Dal Flour',
+      badgeColor: '#581c87',
+      bgColor: '#f3e8ff',
+      borderColor: '#d8b4fe',
+      expectedLoss: '2.0% typical loss (skin/bran removal)',
+    },
+    {
+      id: 'RM-WHOLE-CHANA-DAL',
+      name: 'Whole Chana Dal',
+      flourId: 'RM-CHANA-FLOUR',
+      flourName: 'Chana Dal Flour',
+      badgeColor: '#854d0e',
+      bgColor: '#fef9c3',
+      borderColor: '#fde047',
+      expectedLoss: '2.5% typical loss (skin/bran removal)',
+    },
+  ];
+
+  const [millingHistory, setMillingHistory] = useState<DalMillingHistoryItem[]>([]);
+  const [millingForm, setMillingForm] = useState<{
+    source_material_id: string;
+    input_quantity_kg: string;
+    flour_output_kg: string;
+    milling_expenses: string;
+    milling_date: string;
+    batch_reference: string;
+    notes: string;
+  }>({
+    source_material_id: 'RM-WHOLE-MOONG-DAL',
+    input_quantity_kg: '',
+    flour_output_kg: '',
+    milling_expenses: '0',
+    milling_date: today,
+    batch_reference: '',
+    notes: '',
+  });
+
+  const refreshMillingHistory = async () => {
+    try {
+      const history = await getMillingHistory();
+      if (Array.isArray(history)) setMillingHistory(history);
+    } catch (e) {
+      console.warn('Could not refresh milling history', e);
+    }
+  };
+
   const load = async () => {
     const results = await Promise.allSettled([
       apiRequest<Product[]>('/api/products', { silent: true }),
@@ -162,9 +235,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       apiRequest<Row[]>('/api/production/attendance', { silent: true }),
       apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>('/api/production/finished-goods-register', { silent: true }),
       getRawMaterials(),
+      getMillingHistory(),
     ]);
 
-    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes, rmRes] = results;
+    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes, rmRes, milRes] = results;
 
     if (pRes.status === 'fulfilled' && Array.isArray(pRes.value)) setProducts(pRes.value);
     if (wRes.status === 'fulfilled' && Array.isArray(wRes.value)) setWorkers(wRes.value);
@@ -188,6 +262,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     }
     if (aRes.status === 'fulfilled' && Array.isArray(aRes.value)) setAttendance([...aRes.value].reverse());
     if (rmRes.status === 'fulfilled' && Array.isArray(rmRes.value)) setRawMaterials(rmRes.value);
+    if (milRes.status === 'fulfilled' && Array.isArray(milRes.value)) setMillingHistory(milRes.value);
 
     const anyFailed = results.some(r => r.status === 'rejected');
     if (anyFailed) {
@@ -482,6 +557,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
         {sectionButton('finished_goods', '📦 Finished Goods Register')}
         {sectionButton('master_recipes', '📜 Papad Formula Master (v2.0)')}
         {sectionButton('raw_materials', '🌾 Raw Materials Inward')}
+        {sectionButton('milling', '🥣 Dal Milling (Flour Prep)')}
         {sectionButton('overview', 'Overview & Stock')}
         {sectionButton('workers', 'Workers')}
         {sectionButton('recipes', 'Custom Recipes')}
@@ -1367,6 +1443,481 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 </tbody>
               </table>
               {!rawMaterials.length && <p style={{ color: '#64748b', padding: 12 }}>No raw materials found.</p>}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* DAL MILLING TAB (STAGE 2) */}
+      {tab === 'milling' && (
+        <>
+          {/* Header & Controls */}
+          <div style={{ ...card, background: '#f8fafc', borderColor: '#cbd5e1' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+              <div>
+                <h3 style={{ margin: '0 0 4px', color: '#1e293b' }}>
+                  🥣 Internal Factory Dal Milling (Flour Preparation)
+                </h3>
+                <p style={{ margin: 0, fontSize: 13, color: '#475569' }}>
+                  Converts purchased Whole Dal into pure Milled Flour for papad production. Grinding expenses and milling loss are absorbed directly into the landed flour cost per kg.
+                </p>
+              </div>
+              <button
+                type="button"
+                style={{ ...btn, background: '#0f766e', display: 'flex', alignItems: 'center', gap: 6 }}
+                disabled={busy}
+                onClick={async () => {
+                  await runAction(
+                    async () => {
+                      await Promise.all([refreshRawMaterials(), refreshMillingHistory()]);
+                    },
+                    'Milling stock and history refreshed successfully.'
+                  );
+                }}
+              >
+                🔄 Refresh Stock & Milling Batches
+              </button>
+            </div>
+
+            {/* Live Conversion Pipeline Cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14, marginTop: 16 }}>
+              {DAL_MILLING_CONFIG.map(cfg => {
+                const wholeMat = rawMaterials.find(m => m.material_id === cfg.id);
+                const flourMat = rawMaterials.find(m => m.material_id === cfg.flourId);
+                const wholeAvail = wholeMat ? wholeMat.available_stock : 0;
+                const wholeRate = wholeMat?.latest_landed_rate || 0;
+                const flourAvail = flourMat ? flourMat.available_stock : 0;
+                const flourRate = flourMat?.latest_landed_rate || 0;
+
+                return (
+                  <div
+                    key={cfg.id}
+                    style={{
+                      background: cfg.bgColor,
+                      border: `1.5px solid ${cfg.borderColor}`,
+                      borderRadius: 10,
+                      padding: 14,
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <span style={{ fontWeight: 700, fontSize: 14, color: cfg.badgeColor }}>
+                        {cfg.name} ➔ {cfg.flourName}
+                      </span>
+                      <span style={{ fontSize: 11, background: '#fff', color: '#475569', padding: '2px 8px', borderRadius: 12, border: '1px solid #cbd5e1' }}>
+                        {cfg.expectedLoss}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, alignItems: 'center', background: '#ffffffcc', padding: 10, borderRadius: 8 }}>
+                      <div>
+                        <div style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>Whole Dal Stock</div>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: '#0f172a' }}>
+                          {wholeAvail} <span style={{ fontSize: 11, fontWeight: 500 }}>kg</span>
+                        </div>
+                        <small style={{ color: '#047857', fontWeight: 600 }}>
+                          {wholeRate > 0 ? `₹${wholeRate.toFixed(2)}/kg` : 'No rate'}
+                        </small>
+                      </div>
+
+                      <div style={{ fontSize: 18, color: cfg.badgeColor, fontWeight: 800 }}>➔</div>
+
+                      <div>
+                        <div style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>Milled Flour Stock</div>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: '#0f172a' }}>
+                          {flourAvail} <span style={{ fontSize: 11, fontWeight: 500 }}>kg</span>
+                        </div>
+                        <small style={{ color: '#047857', fontWeight: 600 }}>
+                          {flourRate > 0 ? `₹${flourRate.toFixed(2)}/kg` : 'No rate'}
+                        </small>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* New Milling Batch Form */}
+          <div style={card}>
+            <h3 style={{ margin: '0 0 4px', color: '#14532d' }}>⚙️ Record New Factory Milling Batch</h3>
+            <p style={{ margin: '0 0 16px', fontSize: 12, color: '#64748b' }}>
+              Appends a consumption record for Whole Dal and a production receipt record for Milled Flour in RawMaterialLedger.
+            </p>
+
+            {(() => {
+              const activeDalCfg = DAL_MILLING_CONFIG.find(c => c.id === millingForm.source_material_id) || DAL_MILLING_CONFIG[0];
+              const wholeMat = rawMaterials.find(m => m.material_id === activeDalCfg.id);
+              const wholeAvail = wholeMat ? wholeMat.available_stock : 0;
+              const wholeRate = wholeMat?.latest_landed_rate || 0;
+
+              const flourMat = rawMaterials.find(m => m.material_id === activeDalCfg.flourId);
+              const flourAvail = flourMat ? flourMat.available_stock : 0;
+
+              const inQty = parseFloat(millingForm.input_quantity_kg || '0') || 0;
+              const outQty = parseFloat(millingForm.flour_output_kg || '0') || 0;
+              const expVal = parseFloat(millingForm.milling_expenses || '0') || 0;
+
+              const dalCost = inQty * wholeRate;
+              const totalMilledCost = dalCost + expVal;
+              const lossKg = inQty > 0 && outQty > 0 ? inQty - outQty : 0;
+              const lossPct = inQty > 0 ? (lossKg / inQty) * 100 : 0;
+              const unitFlourCost = outQty > 0 ? totalMilledCost / outQty : 0;
+
+              const isOverStock = inQty > wholeAvail;
+              const isInvalidOutput = outQty > inQty && inQty > 0;
+
+              return (
+                <form
+                  onSubmit={async e => {
+                    e.preventDefault();
+                    if (!millingForm.source_material_id) {
+                      showError('Please select a source whole dal.');
+                      return;
+                    }
+                    if (inQty <= 0) {
+                      showError('Whole dal input quantity must be greater than zero.');
+                      return;
+                    }
+                    if (outQty <= 0) {
+                      showError('Flour output quantity must be greater than zero.');
+                      return;
+                    }
+                    if (outQty > inQty) {
+                      showError(`Flour output (${outQty} kg) cannot exceed whole dal input (${inQty} kg).`);
+                      return;
+                    }
+                    if (isOverStock) {
+                      showError(`Insufficient whole dal stock: requested ${inQty} kg but only ${wholeAvail} kg available.`);
+                      return;
+                    }
+
+                    await runAction(
+                      async () => {
+                        const payload: DalMillingInput = {
+                          source_material_id: millingForm.source_material_id,
+                          input_quantity_kg: inQty,
+                          flour_output_kg: outQty,
+                          milling_expenses: expVal,
+                          milling_date: millingForm.milling_date || today,
+                          batch_reference: millingForm.batch_reference.trim() || undefined,
+                          notes: millingForm.notes.trim() || undefined,
+                        };
+
+                        const res = await recordMillingBatch(payload);
+                        if (res.is_replay || (res as any).status === 'ALREADY_RECORDED') {
+                          const msg = `[Idempotent Replay] Milling batch ${res.milling_batch_id} already recorded. Stock balance intact.`;
+                          showSuccess(msg);
+                          return msg;
+                        }
+
+                        const msg = `✓ Milled ${res.input_quantity_kg} kg ${res.source_material_name} → ${res.flour_output_kg} kg ${res.target_flour_name} (Batch ${res.milling_batch_id}). Landed Flour Rate: ₹${res.flour_unit_cost.toFixed(2)}/kg (Loss: ${res.loss_percentage}%).`;
+                        showSuccess(msg);
+
+                        // Reset non-date form fields
+                        setMillingForm(prev => ({
+                          ...prev,
+                          input_quantity_kg: '',
+                          flour_output_kg: '',
+                          milling_expenses: '0',
+                          batch_reference: '',
+                          notes: '',
+                        }));
+
+                        return msg;
+                      },
+                      'Dal milling batch recorded successfully.',
+                      async () => {
+                        await Promise.all([refreshRawMaterials(), refreshMillingHistory()]);
+                      }
+                    );
+                  }}
+                >
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14, marginBottom: 14 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Source Whole Dal *
+                      </label>
+                      <select
+                        style={input}
+                        value={millingForm.source_material_id}
+                        onChange={e => setMillingForm(prev => ({ ...prev, source_material_id: e.target.value }))}
+                        required
+                      >
+                        {DAL_MILLING_CONFIG.map(cfg => {
+                          const m = rawMaterials.find(rm => rm.material_id === cfg.id);
+                          const avail = m ? m.available_stock : 0;
+                          return (
+                            <option key={cfg.id} value={cfg.id}>
+                              {cfg.name} ➔ produces {cfg.flourName} (Available: {avail} kg)
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <small style={{ color: isOverStock ? '#dc2626' : '#64748b', fontWeight: isOverStock ? 700 : 400 }}>
+                        Current available stock: <b>{wholeAvail} kg</b> {wholeRate > 0 ? `(@ ₹${wholeRate.toFixed(2)}/kg)` : ''}
+                      </small>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Whole Dal Input Quantity (kg) *
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        max={wholeAvail > 0 ? wholeAvail : undefined}
+                        style={{
+                          ...input,
+                          borderColor: isOverStock ? '#ef4444' : '#cbd5e1',
+                          background: isOverStock ? '#fef2f2' : '#fff',
+                        }}
+                        placeholder="e.g. 100.00"
+                        value={millingForm.input_quantity_kg}
+                        onChange={e => setMillingForm(prev => ({ ...prev, input_quantity_kg: e.target.value }))}
+                        required
+                      />
+                      {isOverStock && (
+                        <small style={{ color: '#dc2626', fontWeight: 600 }}>
+                          ⚠️ Exceeds available whole dal stock ({wholeAvail} kg)
+                        </small>
+                      )}
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Flour Output Produced (kg) *
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        style={{
+                          ...input,
+                          borderColor: isInvalidOutput ? '#ef4444' : '#cbd5e1',
+                          background: isInvalidOutput ? '#fef2f2' : '#fff',
+                        }}
+                        placeholder="e.g. 98.00"
+                        value={millingForm.flour_output_kg}
+                        onChange={e => setMillingForm(prev => ({ ...prev, flour_output_kg: e.target.value }))}
+                        required
+                      />
+                      {isInvalidOutput && (
+                        <small style={{ color: '#dc2626', fontWeight: 600 }}>
+                          ⚠️ Output cannot exceed input quantity ({inQty} kg)
+                        </small>
+                      )}
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Milling / Grinding Expenses (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        style={input}
+                        placeholder="e.g. 300.00 (electricity, labor, milling charge)"
+                        value={millingForm.milling_expenses}
+                        onChange={e => setMillingForm(prev => ({ ...prev, milling_expenses: e.target.value }))}
+                      />
+                      <small style={{ color: '#64748b' }}>Absorbed into flour landed rate per kg</small>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Milling Run Date *
+                      </label>
+                      <input
+                        type="date"
+                        style={input}
+                        value={millingForm.milling_date}
+                        onChange={e => setMillingForm(prev => ({ ...prev, milling_date: e.target.value }))}
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Machine / Batch Reference (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        style={input}
+                        placeholder="e.g. MILL-RUN-01 or Machine #2"
+                        value={millingForm.batch_reference}
+                        onChange={e => setMillingForm(prev => ({ ...prev, batch_reference: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                      Operator / Process Notes (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      style={input}
+                      placeholder="e.g. Grade A clean moong, stone ground, 2% moisture loss"
+                      value={millingForm.notes}
+                      onChange={e => setMillingForm(prev => ({ ...prev, notes: e.target.value }))}
+                    />
+                  </div>
+
+                  {/* Real-time Calculation Summary Box */}
+                  <div
+                    style={{
+                      background: '#f8fafc',
+                      border: '1.5px solid #cbd5e1',
+                      borderRadius: 10,
+                      padding: 14,
+                      marginBottom: 16,
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                      gap: 12,
+                    }}
+                  >
+                    <div>
+                      <span style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>
+                        Whole Dal Cost Basis
+                      </span>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>
+                        ₹{dalCost.toFixed(2)}
+                      </div>
+                      <small style={{ color: '#64748b' }}>
+                        {inQty} kg @ ₹{wholeRate.toFixed(2)}/kg
+                      </small>
+                    </div>
+
+                    <div>
+                      <span style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>
+                        Milling Loss
+                      </span>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: lossPct > 5 ? '#dc2626' : '#d97706' }}>
+                        {lossKg.toFixed(2)} kg ({lossPct.toFixed(1)}%)
+                      </div>
+                      <small style={{ color: '#64748b' }}>
+                        Target: ~2.0% - 2.5%
+                      </small>
+                    </div>
+
+                    <div>
+                      <span style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>
+                        Total Flour Cost Value
+                      </span>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: '#0f172a' }}>
+                        ₹{totalMilledCost.toFixed(2)}
+                      </div>
+                      <small style={{ color: '#047857' }}>
+                        Dal (₹{dalCost.toFixed(2)}) + Exp (₹{expVal.toFixed(2)})
+                      </small>
+                    </div>
+
+                    <div style={{ borderLeft: '2px solid #86efac', paddingLeft: 12 }}>
+                      <span style={{ fontSize: 11, color: '#14532d', textTransform: 'uppercase', fontWeight: 700 }}>
+                        New Landed Flour Rate
+                      </span>
+                      <div style={{ fontSize: 22, fontWeight: 800, color: '#14532d' }}>
+                        ₹{unitFlourCost.toFixed(2)} <span style={{ fontSize: 12, fontWeight: 500 }}>/ kg</span>
+                      </div>
+                      <small style={{ color: '#475569' }}>
+                        Automatically feeds recipe costing
+                      </small>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    style={{
+                      ...btn,
+                      background: '#15803d',
+                      width: '100%',
+                      padding: '12px 16px',
+                      fontSize: 15,
+                    }}
+                    disabled={busy || inQty <= 0 || outQty <= 0 || isOverStock || isInvalidOutput}
+                  >
+                    🥣 {busy ? 'Processing Dal Milling Batch...' : 'Commit Factory Dal Milling Batch'}
+                  </button>
+                </form>
+              );
+            })()}
+          </div>
+
+          {/* Milling History Table */}
+          <div style={card}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div>
+                <h3 style={{ margin: '0 0 4px', color: '#1e293b' }}>📜 Completed Dal Milling Batches</h3>
+                <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
+                  Two-legged ledger entries: Whole Dal issue (MILLING_CONSUMPTION) + Flour receipt (MILLING_OUTPUT).
+                </p>
+              </div>
+              <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>
+                Total Batches: {millingHistory.length}
+              </span>
+            </div>
+
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: '#f1f5f9', borderBottom: '2px solid #cbd5e1' }}>
+                    <th style={{ textAlign: 'left', padding: '9px 10px' }}>Batch ID</th>
+                    <th style={{ textAlign: 'left', padding: '9px 10px' }}>Date</th>
+                    <th style={{ textAlign: 'left', padding: '9px 10px' }}>Whole Dal Consumed</th>
+                    <th style={{ textAlign: 'left', padding: '9px 10px' }}>Flour Produced</th>
+                    <th style={{ textAlign: 'right', padding: '9px 10px' }}>Loss (kg / %)</th>
+                    <th style={{ textAlign: 'right', padding: '9px 10px' }}>Milling Exp</th>
+                    <th style={{ textAlign: 'right', padding: '9px 10px' }}>Landed Flour Rate</th>
+                    <th style={{ textAlign: 'right', padding: '9px 10px' }}>Total Cost</th>
+                    <th style={{ textAlign: 'left', padding: '9px 10px' }}>Ref / Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {millingHistory.map(item => (
+                    <tr key={item.milling_batch_id} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                      <td style={{ padding: '8px 10px', fontWeight: 700, fontFamily: 'monospace', color: '#0f766e' }}>
+                        {item.milling_batch_id}
+                      </td>
+                      <td style={{ padding: '8px 10px', color: '#475569' }}>
+                        {item.milling_date}
+                      </td>
+                      <td style={{ padding: '8px 10px', color: '#991b1b', fontWeight: 600 }}>
+                        -{item.input_quantity_kg} kg {item.source_material_name}
+                        <br />
+                        <span style={{ fontSize: 10, color: '#64748b' }}>@ ₹{item.source_unit_rate.toFixed(2)}/kg</span>
+                      </td>
+                      <td style={{ padding: '8px 10px', color: '#166534', fontWeight: 600 }}>
+                        +{item.flour_output_kg} kg {item.target_flour_name}
+                      </td>
+                      <td style={{ textAlign: 'right', padding: '8px 10px', color: item.loss_percentage > 5 ? '#dc2626' : '#d97706', fontWeight: 600 }}>
+                        {item.processing_loss_kg.toFixed(2)} kg
+                        <br />
+                        <span style={{ fontSize: 10 }}>({item.loss_percentage.toFixed(1)}%)</span>
+                      </td>
+                      <td style={{ textAlign: 'right', padding: '8px 10px', color: '#475569' }}>
+                        ₹{item.milling_expenses.toFixed(2)}
+                      </td>
+                      <td style={{ textAlign: 'right', padding: '8px 10px', fontWeight: 800, color: '#166534' }}>
+                        ₹{item.flour_unit_cost.toFixed(2)}/kg
+                      </td>
+                      <td style={{ textAlign: 'right', padding: '8px 10px', fontWeight: 700, color: '#0f172a' }}>
+                        ₹{item.total_flour_cost.toFixed(2)}
+                      </td>
+                      <td style={{ padding: '8px 10px', color: '#64748b' }}>
+                        {item.batch_reference ? <span style={{ fontWeight: 600 }}>[{item.batch_reference}] </span> : null}
+                        {item.notes || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!millingHistory.length && (
+                <p style={{ color: '#64748b', padding: '16px 12px', textAlign: 'center', margin: 0 }}>
+                  No milling batches recorded yet. Record your first dal-to-flour grinding run above.
+                </p>
+              )}
             </div>
           </div>
         </>

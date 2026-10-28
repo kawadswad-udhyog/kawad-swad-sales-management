@@ -687,3 +687,70 @@ export async function receiveRawMaterial(data: RawMaterialReceiveInput): Promise
     body: JSON.stringify(data),
   });
 }
+
+export interface DalMillingInput {
+  source_material_id: string;
+  input_quantity_kg: number;
+  flour_output_kg: number;
+  milling_expenses?: number;
+  milling_date?: string;
+  batch_reference?: string;
+  idempotency_key?: string;
+  notes?: string;
+}
+
+export interface DalMillingResult {
+  success: boolean;
+  status: string;
+  milling_batch_id: string;
+  input_txn_id: string;
+  output_txn_id: string;
+  source_material_id: string;
+  source_material_name: string;
+  input_quantity_kg: number;
+  target_flour_id: string;
+  target_flour_name: string;
+  flour_output_kg: number;
+  processing_loss_kg: number;
+  loss_percentage: number;
+  source_unit_rate: number;
+  milling_expenses: number;
+  total_flour_cost: number;
+  flour_unit_cost: number;
+  new_whole_stock: number;
+  new_flour_stock: number;
+  is_replay: boolean;
+  message: string;
+}
+
+export interface DalMillingHistoryItem {
+  milling_batch_id: string;
+  milling_date: string;
+  source_material_id: string;
+  source_material_name: string;
+  input_quantity_kg: number;
+  target_flour_id: string;
+  target_flour_name: string;
+  flour_output_kg: number;
+  processing_loss_kg: number;
+  loss_percentage: number;
+  source_unit_rate: number;
+  milling_expenses: number;
+  total_flour_cost: number;
+  flour_unit_cost: number;
+  batch_reference: string;
+  created_by: string;
+  notes: string;
+}
+
+export async function recordMillingBatch(data: DalMillingInput): Promise<DalMillingResult> {
+  return apiRequest<DalMillingResult>('/api/production/milling/record', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getMillingHistory(): Promise<DalMillingHistoryItem[]> {
+  return apiRequest<DalMillingHistoryItem[]>('/api/production/milling/history');
+}
+

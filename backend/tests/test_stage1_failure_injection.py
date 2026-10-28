@@ -47,7 +47,7 @@ class TestStage1FailureInjection(unittest.IsolatedAsyncioTestCase):
         )
         return float(res.get("available", 0.0))
 
-    # Scenario A: Failure during IncompleteTransactions append (non-fatal bypass)
+    # Scenario A: Failure during IncompleteTransactions append (fails closed, safe retry)
     async def test_failure_point_1_incomplete_transactions_write_failure(self):
         req = RawMaterialReceiveRequest(
             material_id="RM-WHOLE-MOONG-DAL",
@@ -60,18 +60,31 @@ class TestStage1FailureInjection(unittest.IsolatedAsyncioTestCase):
         )
 
         original_append = db.append_record
+        first_attempt = True
         def simulated_append(tab, record, raise_on_error=False):
-            if tab == "IncompleteTransactions":
+            nonlocal first_attempt
+            if tab == "IncompleteTransactions" and first_attempt:
+                first_attempt = False
                 raise RuntimeError("Simulated network timeout appending IncompleteTransactions")
             return original_append(tab, record, raise_on_error=raise_on_error)
 
         with patch.object(db, "append_record", side_effect=simulated_append):
+            with self.assertRaises(HTTPException) as ctx:
+                await receive_raw_material(req, self.owner_user)
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("intent", ctx.exception.detail.lower())
+
+            # Verify no ledger row created and stock remains 0
+            self.assertEqual(len(db.get_records("RawMaterialLedger")), 0)
+            self.assertEqual(self._get_stock(), 0.0)
+
+            # Retry succeeds cleanly
             res = await receive_raw_material(req, self.owner_user)
             self.assertEqual(res.status, "SUCCESS")
             self.assertEqual(res.quantity, 100.0)
             self.assertEqual(self._get_stock(), 100.0)
 
-        # Ledger contains 1 row
+        # Ledger now contains exactly 1 row
         ledger = db.get_records("RawMaterialLedger")
         self.assertEqual(len(ledger), 1)
 
