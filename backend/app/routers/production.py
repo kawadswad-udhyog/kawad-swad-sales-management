@@ -1,5 +1,6 @@
 import logging
 import re
+import hashlib
 from app.timeutil import business_today, now_iso
 from typing import Any, Dict, List, Optional
 import json
@@ -21,6 +22,7 @@ from app.recipes_master import (
 logger = logging.getLogger(__name__)
 _ATTENDANCE_LOCK = threading.Lock()
 from app.calculations import (
+    to_decimal,
     normalize_to_canonical_unit,
     round_stock,
     round_money,
@@ -213,9 +215,441 @@ class DispatchCreate(BaseModel):
     notes: str = ""
 
 
+class RawMaterialReceiveRequest(BaseModel):
+    raw_material_id: Optional[str] = None
+    material_id: Optional[str] = None  # alias
+    material_name: Optional[str] = None
+    quantity: float = Field(gt=0, description="Inward quantity in kg or L (must be > 0)")
+    unit: str = Field(..., description="Quantity unit (kg, g, L, ml)")
+    purchase_rate: float = Field(gt=0, description="Base supplier purchase rate per unit")
+    supplier_id: Optional[str] = ""
+    supplier_name: Optional[str] = ""
+    invoice_number: Optional[str] = None
+    invoice_reference: Optional[str] = None  # alias
+    line_number: Optional[int] = Field(1, ge=1, description="Invoice line item number (default 1)")
+    receipt_date: Optional[str] = ""
+    freight_amount: Optional[float] = Field(0.0, ge=0, description="Freight / transport expenses")
+    other_expenses_amount: Optional[float] = Field(0.0, ge=0, description="Other landed expenses (unloading, cartage)")
+    other_expenses: Optional[float] = None  # alias
+    gst_amount: Optional[float] = Field(0.0, ge=0, description="GST amount charged")
+    gst_treatment: Optional[str] = Field("RECOVERABLE_ITC", description="RECOVERABLE_ITC, CAPITALIZED_TO_COST, or EXEMPT_NIL_RATED")
+    idempotency_key: Optional[str] = Field(None, description="Unique client idempotency key")
+    notes: Optional[str] = ""
+
+
+class RawMaterialReceiveResponse(BaseModel):
+    success: bool
+    status: str
+    raw_material_txn_id: str
+    transaction_id: Optional[str] = None
+    raw_material_id: str
+    material_id: Optional[str] = None
+    material_name: str
+    quantity_received: float
+    quantity: Optional[float] = None
+    unit: str
+    base_purchase_value: float
+    base_value: Optional[float] = None
+    freight_amount: float
+    other_expenses_amount: float
+    other_expenses: Optional[float] = None
+    gst_amount: float
+    gst_treatment: str
+    total_landed_cost: float
+    effective_unit_cost: float
+    landed_rate_per_unit: Optional[float] = None
+    previous_available_stock: float
+    new_available_stock: float
+    is_replay: bool = False
+    message: str
+
+
+class RawMaterialBalanceItem(BaseModel):
+    raw_material_id: str
+    material_name: str
+    category: str
+    unit: str
+    opening_stock: float
+    consumed: float
+    received: float
+    available_stock: float
+    latest_landed_rate: Optional[float] = None
+    rate_status: str
+
+
+_RAW_MATERIAL_MUTEX = threading.RLock()
+
+
 # -------------------------------------------------------------
 # Endpoints
 # -------------------------------------------------------------
+
+@router.get("/raw-materials", response_model=List[RawMaterialBalanceItem])
+async def list_raw_materials(user: dict = Depends(get_current_user)):
+    require_production_access(user)
+    raw_master = db.get_records("RawMaterials", fresh=False)
+    if not raw_master:
+        raw_master = RAW_MATERIALS_SEED
+
+    known_names = {str(field(r, "material_name", "name", default="")).strip().lower() for r in raw_master}
+    combined_master = list(raw_master)
+    for s in RAW_MATERIALS_SEED:
+        if s["material_name"].strip().lower() not in known_names:
+            combined_master.append(s)
+            known_names.add(s["material_name"].strip().lower())
+
+    raw_ledger = db.get_records("RawMaterialLedger", fresh=False)
+
+    results = []
+    for rm in combined_master:
+        mat_id = str(field(rm, "raw_material_id", default="")).strip()
+        mat_name = str(field(rm, "material_name", "name", default="")).strip()
+        cat = str(field(rm, "category", default="RAW_MATERIAL")).strip()
+        unit = str(field(rm, "unit", default="kg")).strip()
+
+        bal = calculate_raw_material_balance(mat_name, combined_master, raw_ledger)
+        rate_info = get_latest_purchase_rate(mat_name, combined_master, raw_ledger)
+        latest_rate = rate_info.get("rate_per_canonical_unit")
+        rate_status = rate_info.get("status", "CONFIRMED") if latest_rate is not None else "PENDING"
+
+        results.append(RawMaterialBalanceItem(
+            raw_material_id=mat_id,
+            material_name=mat_name,
+            category=cat,
+            unit=unit,
+            opening_stock=float(bal.get("opening_stock", 0.0)),
+            consumed=float(bal.get("consumed", 0.0)),
+            received=float(bal.get("received", 0.0)),
+            available_stock=float(bal.get("available", 0.0)),
+            latest_landed_rate=float(latest_rate) if latest_rate is not None else None,
+            rate_status=rate_status,
+        ))
+
+    return results
+
+
+get_raw_material_balances = list_raw_materials
+
+
+@router.post("/raw-materials/receive", response_model=RawMaterialReceiveResponse)
+async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depends(get_current_user)):
+    actor, _ = require_production_access(user)
+    require_persistent_store()
+
+    # 1. Input sanitization and basic validations
+    clean_mat_id = (req.raw_material_id or req.material_id or req.material_name or "").strip()
+    if not clean_mat_id:
+        raise HTTPException(422, "Raw material identification is required.")
+
+    inv_raw = (req.invoice_number or req.invoice_reference or "").strip()
+    if not inv_raw:
+        raise HTTPException(422, "Invoice or bill reference number is required.")
+    clean_invoice = inv_raw.upper()
+
+    line_no = int(req.line_number or 1)
+    clean_idemp_key = (req.idempotency_key or f"IDEMP:{clean_invoice}:L:{line_no}").strip()
+    treatment = (req.gst_treatment or "RECOVERABLE_ITC").strip().upper()
+
+    if treatment not in {"RECOVERABLE_ITC", "CAPITALIZED_TO_COST", "EXEMPT_NIL_RATED"}:
+        raise HTTPException(422, "gst_treatment must be RECOVERABLE_ITC, CAPITALIZED_TO_COST, or EXEMPT_NIL_RATED")
+
+    if req.quantity <= 0:
+        raise HTTPException(422, "Quantity must be strictly greater than zero")
+
+    if req.purchase_rate <= 0:
+        raise HTTPException(422, "Purchase rate must be strictly greater than zero")
+
+    freight_val = float(req.freight_amount or 0.0)
+    other_val = float(req.other_expenses if req.other_expenses is not None else (req.other_expenses_amount or 0.0))
+    gst_val = float(req.gst_amount or 0.0)
+
+    if freight_val < 0 or other_val < 0 or gst_val < 0:
+        raise HTTPException(422, "Expenses and GST amounts cannot be negative")
+
+    # Standardize unit
+    try:
+        std_qty, std_unit = normalize_to_canonical_unit(req.quantity, req.unit)
+    except Exception as unit_err:
+        raise HTTPException(422, f"Invalid unit or quantity: {unit_err}")
+
+    # Build canonical fingerprint payload dict for idempotency comparison
+    payload_dict = {
+        "raw_material_id": clean_mat_id,
+        "quantity": round_stock(std_qty),
+        "unit": std_unit,
+        "purchase_rate": round_money(req.purchase_rate),
+        "freight_amount": round_money(freight_val),
+        "other_expenses_amount": round_money(other_val),
+        "gst_amount": round_money(gst_val),
+        "gst_treatment": treatment,
+        "invoice_number": clean_invoice,
+        "line_number": line_no,
+        "supplier_id": (req.supplier_id or "").strip(),
+        "supplier_name": (req.supplier_name or "").strip(),
+    }
+    payload_hash = hashlib.sha256(json.dumps(payload_dict, sort_keys=True).encode("utf-8")).hexdigest()
+    line_key = f"INV:{clean_invoice}:L:{line_no}"
+
+    with _RAW_MATERIAL_MUTEX:
+        # 2. Resolve material in master data
+        raw_master = db.get_records("RawMaterials", fresh=True)
+        mat_row = next(
+            (r for r in raw_master
+             if str(field(r, "raw_material_id", default="")).strip().lower() == clean_mat_id.lower()
+             or str(field(r, "material_name", default="")).strip().lower() == clean_mat_id.lower()),
+            None
+        )
+
+        # Fallback to RAW_MATERIALS_SEED if master has not been seeded with this item yet
+        if not mat_row:
+            seed_row = next(
+                (s for s in RAW_MATERIALS_SEED
+                 if s["raw_material_id"].strip().lower() == clean_mat_id.lower()
+                 or s["material_name"].strip().lower() == clean_mat_id.lower()),
+                None
+            )
+            if seed_row:
+                new_row = {
+                    "raw_material_id": seed_row["raw_material_id"],
+                    "material_name": seed_row["material_name"],
+                    "current_stock": 0.0,
+                    "unit": seed_row["unit"],
+                    "rate_per_unit": seed_row["rate_per_unit"] if seed_row["rate_per_unit"] is not None else "",
+                    "rate_status": seed_row["rate_status"],
+                    "category": seed_row["category"],
+                    "created_at": now(),
+                    "created_by": actor,
+                }
+                db.append_record("RawMaterials", new_row, raise_on_error=True)
+                raw_master = db.get_records("RawMaterials", fresh=True)
+                mat_row = new_row
+            else:
+                raise HTTPException(422, f"Raw material '{clean_mat_id}' not found in RawMaterials master.")
+
+        resolved_mat_id = str(field(mat_row, "raw_material_id", default=clean_mat_id)).strip()
+        canonical_mat_name = str(field(mat_row, "material_name", default=clean_mat_id)).strip()
+
+        # 3. Check IncompleteTransactions for idempotency key
+        incomp_records = db.get_records("IncompleteTransactions", fresh=True)
+        existing_txn = next((t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key), None)
+        if existing_txn:
+            stored_payload_str = str(existing_txn.get("payload_json", "")).strip()
+            stored_hash = None
+            try:
+                stored_data = json.loads(stored_payload_str)
+                stored_hash = stored_data.get("payload_hash")
+            except Exception:
+                pass
+
+            if stored_hash and stored_hash != payload_hash:
+                raise HTTPException(409, "Conflict: Idempotency key reused with conflicting request payload parameters.")
+
+        # 4. Check RawMaterialLedger for existing line
+        raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+        existing_line = next(
+            (r for r in raw_ledger
+             if str(r.get("issue_txn_id", "")).strip() == line_key
+             and (str(r.get("raw_material_id", "")).strip().lower() == resolved_mat_id.lower()
+                  or str(r.get("material_name", "")).strip().lower() == canonical_mat_name.lower())
+             and str(r.get("movement_type", "")).strip().upper() == "PURCHASE_RECEIPT"),
+            None
+        )
+
+        if existing_line:
+            notes_str = str(existing_line.get("notes", ""))
+            stored_hash = None
+            try:
+                meta = json.loads(notes_str)
+                stored_hash = meta.get("payload_hash")
+            except Exception:
+                pass
+
+            if stored_hash and stored_hash != payload_hash:
+                raise HTTPException(409, f"Conflict: Invoice line '{line_key}' already recorded with different details.")
+
+            cur_bal = calculate_raw_material_balance(canonical_mat_name, raw_master, raw_ledger)
+            existing_rate = float(existing_line.get("rate_per_unit", 0) or 0)
+            existing_qty = float(existing_line.get("quantity", 0) or 0)
+            return RawMaterialReceiveResponse(
+                success=True,
+                status="ALREADY_RECORDED",
+                raw_material_txn_id=str(existing_line.get("raw_material_txn_id", "")),
+                transaction_id=str(existing_line.get("raw_material_txn_id", "")),
+                raw_material_id=resolved_mat_id,
+                material_id=resolved_mat_id,
+                material_name=canonical_mat_name,
+                quantity_received=existing_qty,
+                quantity=existing_qty,
+                unit=str(existing_line.get("unit", std_unit)),
+                base_purchase_value=round_money(existing_qty * float(req.purchase_rate)),
+                base_value=round_money(existing_qty * float(req.purchase_rate)),
+                freight_amount=freight_val,
+                other_expenses_amount=other_val,
+                other_expenses=other_val,
+                gst_amount=gst_val,
+                gst_treatment=treatment,
+                total_landed_cost=round_money(existing_qty * existing_rate),
+                effective_unit_cost=existing_rate,
+                landed_rate_per_unit=existing_rate,
+                previous_available_stock=float(cur_bal.get("available", 0.0)),
+                new_available_stock=float(cur_bal.get("available", 0.0)),
+                is_replay=True,
+                message=f"Consignment already recorded in ledger as {existing_line.get('raw_material_txn_id')}. No duplicate stock added.",
+            )
+
+        # 5. Compute Landed Cost Math
+        base_value_dec = to_decimal(round_money(to_decimal(req.quantity) * to_decimal(req.purchase_rate)))
+        freight_dec = to_decimal(freight_val)
+        other_dec = to_decimal(other_val)
+        gst_dec = to_decimal(gst_val)
+
+        if treatment == "CAPITALIZED_TO_COST":
+            total_landed_dec = base_value_dec + freight_dec + other_dec + gst_dec
+        else:
+            total_landed_dec = base_value_dec + freight_dec + other_dec
+
+        effective_unit_rate = round_money(total_landed_dec / to_decimal(std_qty))
+
+        bal_before = calculate_raw_material_balance(canonical_mat_name, raw_master, raw_ledger)
+        prev_avail = float(bal_before.get("available", 0.0))
+
+        # 6. Record in-flight intent in IncompleteTransactions
+        incomp_txn_id = make_id("IncompleteTransactions")
+        intent_payload = {
+            "payload_hash": payload_hash,
+            "raw_material_id": resolved_mat_id,
+            "material_name": canonical_mat_name,
+            "quantity": std_qty,
+            "unit": std_unit,
+            "effective_unit_cost": effective_unit_rate,
+            "invoice_number": clean_invoice,
+            "line_number": line_no,
+            "line_key": line_key,
+        }
+        try:
+            db.append_record("IncompleteTransactions", {
+                "transaction_id": incomp_txn_id,
+                "transaction_type": "RAW_MATERIAL_RECEIPT",
+                "idempotency_key": clean_idemp_key,
+                "status": "IN_PROGRESS",
+                "payload_json": json.dumps(intent_payload),
+                "error_details": "",
+                "created_at": now(),
+                "updated_at": now(),
+                "resolved_by": "",
+                "resolved_at": "",
+            })
+        except Exception as incomp_err:
+            logger.debug("Non-fatal: IncompleteTransactions log bypassed: %s", incomp_err)
+
+        # 7. Append single row to RawMaterialLedger
+        ledger_txn_id = db.generate_id("RawMaterialLedger")
+        notes_metadata = json.dumps({
+            "_v": 1,
+            "kind": "PURCHASE_RECEIPT",
+            "request_id": clean_idemp_key,
+            "payload_hash": payload_hash,
+            "supplier_name": (req.supplier_name or "").strip(),
+            "supplier_id": (req.supplier_id or "").strip(),
+            "invoice_number": clean_invoice,
+            "line_number": line_no,
+            "supplier_unit_rate": float(req.purchase_rate),
+            "base_purchase_value": float(base_value_dec),
+            "freight_amount": float(freight_dec),
+            "other_expenses_amount": float(other_dec),
+            "gst_amount": float(gst_dec),
+            "gst_treatment": treatment,
+            "total_landed_cost": float(total_landed_dec),
+            "effective_unit_cost": float(effective_unit_rate),
+            "operator_remarks": (req.notes or "").strip(),
+        })
+
+        ledger_row = {
+            "raw_material_txn_id": ledger_txn_id,
+            "txn_datetime": req.receipt_date or now(),
+            "material_name": canonical_mat_name,
+            "raw_material_id": resolved_mat_id,
+            "movement_type": "PURCHASE_RECEIPT",
+            "quantity": std_qty,
+            "unit": std_unit,
+            "rate_per_unit": effective_unit_rate,
+            "production_id": "",
+            "issue_txn_id": line_key,
+            "created_by": actor,
+            "notes": notes_metadata,
+        }
+
+        try:
+            if not db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True):
+                raise RuntimeError("Failed to append raw material receiving transaction to ledger.")
+        except Exception as write_err:
+            try:
+                db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
+                    "status": "PARTIAL_FAILED",
+                    "error_details": str(write_err),
+                    "updated_at": now(),
+                })
+            except Exception:
+                pass
+            raise HTTPException(503, f"Storage write error recording raw material receipt: {write_err}. Safe to retry.")
+
+        # 8. Post-write verification
+        raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
+        verified_row = next((r for r in raw_ledger_after if str(r.get("raw_material_txn_id", "")).strip() == ledger_txn_id), None)
+        if not verified_row:
+            raise HTTPException(503, "Verification failed: appended ledger row could not be confirmed. Safe to retry.")
+
+        # 9. Compute new balance
+        bal_after = calculate_raw_material_balance(canonical_mat_name, raw_master, raw_ledger_after)
+        new_avail = float(bal_after.get("available", 0.0))
+
+        # 10. Mark IncompleteTransactions completed
+        try:
+            db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
+                "status": "COMPLETED",
+                "resolved_by": actor,
+                "resolved_at": now(),
+                "updated_at": now(),
+            })
+        except Exception as comp_err:
+            logger.debug("Non-fatal: IncompleteTransactions complete update error: %s", comp_err)
+
+        # 11. Audit log
+        db.log_audit(
+            actor,
+            "RECEIVE_RAW_MATERIAL",
+            "RawMaterialLedger",
+            ledger_txn_id,
+            reason=f"Received {std_qty} {std_unit} of {canonical_mat_name} (Invoice {clean_invoice}, Line {line_no}) at landed rate ₹{effective_unit_rate}/{std_unit}"
+        )
+
+        return RawMaterialReceiveResponse(
+            success=True,
+            status="SUCCESS",
+            raw_material_txn_id=ledger_txn_id,
+            transaction_id=ledger_txn_id,
+            raw_material_id=resolved_mat_id,
+            material_id=resolved_mat_id,
+            material_name=canonical_mat_name,
+            quantity_received=std_qty,
+            quantity=std_qty,
+            unit=std_unit,
+            base_purchase_value=float(base_value_dec),
+            base_value=float(base_value_dec),
+            freight_amount=float(freight_dec),
+            other_expenses_amount=float(other_dec),
+            other_expenses=float(other_dec),
+            gst_amount=float(gst_dec),
+            gst_treatment=treatment,
+            total_landed_cost=float(total_landed_dec),
+            effective_unit_cost=float(effective_unit_rate),
+            landed_rate_per_unit=float(effective_unit_rate),
+            previous_available_stock=prev_avail,
+            new_available_stock=new_avail,
+            is_replay=False,
+            message=f"Successfully received {std_qty} {std_unit} of {canonical_mat_name} at landed rate ₹{effective_unit_rate}/{std_unit}."
+        )
+
 
 @router.get("/summary")
 async def summary(user: dict = Depends(get_current_user)):

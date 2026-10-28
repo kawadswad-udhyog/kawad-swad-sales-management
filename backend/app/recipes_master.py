@@ -136,6 +136,9 @@ STANDARD_RATES = {
     "Amchur (Dry Mango)": 220.0,    # ₹ / kg
     "Tomato Powder": None,          # Rate to confirm (Pending)
     "Sweetener Blend": None,        # Rate to confirm (Pending)
+    "Whole Moong Dal": 110.0,       # ₹ / kg
+    "Whole Urad Dal": 120.0,        # ₹ / kg
+    "Whole Chana Dal": 75.0,        # ₹ / kg
 }
 
 # The 15 Version 2.0 Master Recipes
@@ -581,4 +584,7 @@ RAW_MATERIALS_SEED = [
     {"raw_material_id": "RM-AMCHUR", "material_name": "Amchur (Dry Mango)", "current_stock": 15.0, "unit": "kg", "rate_per_unit": 220.0, "rate_status": "CONFIRMED", "category": "SPICE"},
     {"raw_material_id": "RM-TOMATO-POWDER", "material_name": "Tomato Powder", "current_stock": 10.0, "unit": "kg", "rate_per_unit": None, "rate_status": "PENDING", "category": "FLAVOUR"},
     {"raw_material_id": "RM-SWEETENER", "material_name": "Sweetener Blend", "current_stock": 10.0, "unit": "kg", "rate_per_unit": None, "rate_status": "PENDING", "category": "SWEETENER"},
+    {"raw_material_id": "RM-WHOLE-MOONG-DAL", "material_name": "Whole Moong Dal", "current_stock": 0.0, "unit": "kg", "rate_per_unit": 110.0, "rate_status": "CONFIRMED", "category": "WHOLE_GRAIN"},
+    {"raw_material_id": "RM-WHOLE-URAD-DAL", "material_name": "Whole Urad Dal", "current_stock": 0.0, "unit": "kg", "rate_per_unit": 120.0, "rate_status": "CONFIRMED", "category": "WHOLE_GRAIN"},
+    {"raw_material_id": "RM-WHOLE-CHANA-DAL", "material_name": "Whole Chana Dal", "current_stock": 0.0, "unit": "kg", "rate_per_unit": 75.0, "rate_status": "CONFIRMED", "category": "WHOLE_GRAIN"},
 ]

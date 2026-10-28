@@ -627,3 +627,63 @@ export async function fetchBackendHealth(): Promise<BackendHealthResponse> {
     };
   }
 }
+
+export interface RawMaterialSummary {
+  material_id: string;
+  material_name: string;
+  category: string;
+  unit: string;
+  baseline_stock: number;
+  total_received: number;
+  total_consumed: number;
+  total_adjusted: number;
+  available_stock: number;
+  latest_landed_rate: number;
+}
+
+export interface RawMaterialReceiveInput {
+  material_id: string;
+  material_name?: string;
+  quantity: number;
+  unit: string;
+  purchase_rate: number;
+  receipt_date?: string;
+  supplier_name: string;
+  invoice_reference: string;
+  line_number?: number;
+  freight_amount?: number;
+  other_expenses?: number;
+  gst_amount?: number;
+  gst_treatment?: 'RECOVERABLE_ITC' | 'CAPITALIZED_TO_COST' | 'EXEMPT_NIL_RATED';
+  notes?: string;
+}
+
+export interface RawMaterialReceiveResult {
+  status: string;
+  message: string;
+  transaction_id: string;
+  material_id: string;
+  material_name: string;
+  quantity: number;
+  unit: string;
+  landed_rate_per_unit: number;
+  base_value: number;
+  freight_amount: number;
+  other_expenses: number;
+  gst_amount: number;
+  gst_treatment: string;
+  total_landed_cost: number;
+  new_available_stock: number;
+  is_replay: boolean;
+}
+
+export async function getRawMaterials(): Promise<RawMaterialSummary[]> {
+  return apiRequest<RawMaterialSummary[]>('/api/production/raw-materials');
+}
+
+export async function receiveRawMaterial(data: RawMaterialReceiveInput): Promise<RawMaterialReceiveResult> {
+  return apiRequest<RawMaterialReceiveResult>('/api/production/raw-materials/receive', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}

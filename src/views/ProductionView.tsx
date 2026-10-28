@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { apiRequest } from '../services/api';
+import { apiRequest, getRawMaterials, receiveRawMaterial, RawMaterialSummary, RawMaterialReceiveInput } from '../services/api';
 import { useStore } from '../context/StoreContext';
 import { exportSheetToExcel } from '../utils/exportToExcel';
 import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
@@ -45,6 +45,40 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
 
+  // Raw Materials Inward Receiving & Balance State (Stage 1)
+  const [rawMaterials, setRawMaterials] = useState<RawMaterialSummary[]>([]);
+  const [rmCategoryFilter, setRmCategoryFilter] = useState<string>('ALL');
+  const [rmSearch, setRmSearch] = useState<string>('');
+  const [receiveForm, setReceiveForm] = useState<{
+    material_id: string;
+    quantity: string;
+    unit: string;
+    purchase_rate: string;
+    receipt_date: string;
+    supplier_name: string;
+    invoice_reference: string;
+    line_number: string;
+    freight_amount: string;
+    other_expenses: string;
+    gst_amount: string;
+    gst_treatment: 'RECOVERABLE_ITC' | 'CAPITALIZED_TO_COST' | 'EXEMPT_NIL_RATED';
+    notes: string;
+  }>({
+    material_id: 'RM-WHOLE-MOONG-DAL',
+    quantity: '',
+    unit: 'kg',
+    purchase_rate: '',
+    receipt_date: today,
+    supplier_name: '',
+    invoice_reference: '',
+    line_number: '1',
+    freight_amount: '0',
+    other_expenses: '0',
+    gst_amount: '0',
+    gst_treatment: 'RECOVERABLE_ITC',
+    notes: '',
+  });
+
   useEffect(() => {
     if (initialTab) {
       setTab(initialTab);
@@ -69,6 +103,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     );
   }, [attendance, attendanceForm.worker_id, attendanceForm.attendance_date]);
 
+  const refreshRawMaterials = async () => {
+    try {
+      const data = await getRawMaterials();
+      if (Array.isArray(data)) setRawMaterials(data);
+    } catch (e) {
+      console.warn('Could not refresh raw materials', e);
+    }
+  };
+
   const load = async () => {
     const results = await Promise.allSettled([
       apiRequest<Product[]>('/api/products', { silent: true }),
@@ -81,9 +124,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       apiRequest<Row>('/api/production/summary', { silent: true }),
       apiRequest<Row[]>('/api/production/attendance', { silent: true }),
       apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>('/api/production/finished-goods-register', { silent: true }),
+      getRawMaterials(),
     ]);
 
-    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes] = results;
+    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes, rmRes] = results;
 
     if (pRes.status === 'fulfilled' && Array.isArray(pRes.value)) setProducts(pRes.value);
     if (wRes.status === 'fulfilled' && Array.isArray(wRes.value)) setWorkers(wRes.value);
@@ -106,6 +150,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       if (regRes.value.summary) setRegisterSummary(regRes.value.summary);
     }
     if (aRes.status === 'fulfilled' && Array.isArray(aRes.value)) setAttendance([...aRes.value].reverse());
+    if (rmRes.status === 'fulfilled' && Array.isArray(rmRes.value)) setRawMaterials(rmRes.value);
 
     const anyFailed = results.some(r => r.status === 'rejected');
     if (anyFailed) {
@@ -366,6 +411,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       <div>
         {sectionButton('finished_goods', '📦 Finished Goods Register')}
         {sectionButton('master_recipes', '📜 Papad Formula Master (v2.0)')}
+        {sectionButton('raw_materials', '🌾 Raw Materials Inward')}
         {sectionButton('overview', 'Overview & Stock')}
         {sectionButton('workers', 'Workers')}
         {sectionButton('recipes', 'Custom Recipes')}
@@ -665,6 +711,591 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 </div>
               );
             })}
+          </div>
+        </>
+      )}
+
+      {/* RAW MATERIALS INWARD RECEIVING & INVENTORY TAB (STAGE 1) */}
+      {tab === 'raw_materials' && (
+        <>
+          {/* Header Card */}
+          <div style={{ ...card, background: '#f8fafc', borderColor: '#cbd5e1' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+              <div>
+                <h3 style={{ margin: '0 0 4px', color: '#1e293b' }}>🌾 Raw Material Procurement & Inward Receiving</h3>
+                <p style={{ margin: 0, fontSize: 13, color: '#475569' }}>
+                  Procure whole grain dal (Whole Moong Dal, Whole Urad Dal, Whole Chana Dal), flours, spices & packaging.
+                  Landed cost incorporates supplier purchase rate, freight, and incidental expenses. GST treatment distinguishes recoverable ITC from capitalized material cost.
+                </p>
+              </div>
+              <button
+                type="button"
+                style={{ ...btn, background: '#0284c7' }}
+                disabled={busy}
+                onClick={() => refreshRawMaterials()}
+              >
+                🔄 Refresh Inventory Balances
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Stock KPI Cards */}
+          {(() => {
+            const wholeDalStock = rawMaterials
+              .filter(m => m.category === 'WHOLE_GRAIN' || m.material_id.includes('WHOLE'))
+              .reduce((acc, m) => acc + (m.available_stock || 0), 0);
+            const flourStock = rawMaterials
+              .filter(m => m.category === 'FLOUR' || m.material_name.toLowerCase().includes('flour'))
+              .reduce((acc, m) => acc + (m.available_stock || 0), 0);
+            const spiceCount = rawMaterials.filter(m => m.category === 'SPICE').length;
+            const packagingCount = rawMaterials.filter(m => m.category === 'PACKAGING').length;
+
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 16 }}>
+                <div style={{ ...card, background: '#ecfdf5', borderColor: '#a7f3d0' }}>
+                  <small style={{ color: '#065f46', fontWeight: 600 }}>🌾 Whole Dal Inventory (Factory Godown)</small>
+                  <h2 style={{ margin: '6px 0 0', color: '#047857' }}>{wholeDalStock.toFixed(2)} kg</h2>
+                  <div style={{ fontSize: 12, color: '#065f46', marginTop: 4 }}>
+                    Moong, Urad, and Chana Whole Dal for internal milling
+                  </div>
+                </div>
+                <div style={{ ...card, background: '#f0fdf4', borderColor: '#bbf7d0' }}>
+                  <small style={{ color: '#166534', fontWeight: 600 }}>🥣 Milled Flour Inventory (Production Stock)</small>
+                  <h2 style={{ margin: '6px 0 0', color: '#15803d' }}>{flourStock.toFixed(2)} kg</h2>
+                  <div style={{ fontSize: 12, color: '#166534', marginTop: 4 }}>
+                    Ready for Version 2.0 papad dough batching
+                  </div>
+                </div>
+                <div style={{ ...card, background: '#f8fafc', borderColor: '#e2e8f0' }}>
+                  <small style={{ color: '#475569', fontWeight: 600 }}>🌶️ Spices & Seasoning Materials</small>
+                  <h2 style={{ margin: '6px 0 0', color: '#334155' }}>{spiceCount} Active Items</h2>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+                    Hing, Black Pepper, Jeera, Sajji, Salt, etc.
+                  </div>
+                </div>
+                <div style={{ ...card, background: '#f8fafc', borderColor: '#e2e8f0' }}>
+                  <small style={{ color: '#475569', fontWeight: 600 }}>📦 Packaging Supplies</small>
+                  <h2 style={{ margin: '6px 0 0', color: '#334155' }}>{packagingCount} Active Types</h2>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+                    200g, 500g, 1000g printed pouches & cartons
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Inward Consignment Receiving Form */}
+          <div style={{ ...card, borderColor: '#cbd5e1' }}>
+            <h3 style={{ margin: '0 0 8px', color: '#14532d' }}>📥 Record Inward Consignment / Supplier Goods Receipt</h3>
+            <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>
+              Appends an authoritative <code>PURCHASE_RECEIPT</code> row into <code>RawMaterialLedger</code>. Does not mutate the static opening baseline.
+              Composite line idempotency ensures duplicate clicks or retries never inflate inventory.
+            </p>
+
+            {/* Calculations for live landed cost card */}
+            {(() => {
+              const qty = Math.max(0, parseFloat(receiveForm.quantity || '0'));
+              const rate = Math.max(0, parseFloat(receiveForm.purchase_rate || '0'));
+              const freight = Math.max(0, parseFloat(receiveForm.freight_amount || '0'));
+              const other = Math.max(0, parseFloat(receiveForm.other_expenses || '0'));
+              const gst = Math.max(0, parseFloat(receiveForm.gst_amount || '0'));
+              const isCapitalized = receiveForm.gst_treatment === 'CAPITALIZED_TO_COST';
+              const isRecoverable = receiveForm.gst_treatment === 'RECOVERABLE_ITC';
+
+              const baseVal = Math.round(qty * rate * 100) / 100;
+              const capGst = isCapitalized ? gst : 0;
+              const totalLandedCost = Math.round((baseVal + freight + other + capGst) * 100) / 100;
+              const landedRatePerUnit = qty > 0 ? Math.round((totalLandedCost / qty) * 100) / 100 : 0;
+
+              return (
+                <form
+                  onSubmit={async e => {
+                    e.preventDefault();
+                    if (!receiveForm.material_id) {
+                      setMessage('Please select a raw material.');
+                      return;
+                    }
+                    if (qty <= 0) {
+                      setMessage('Received quantity must be greater than 0.');
+                      return;
+                    }
+                    if (rate <= 0) {
+                      setMessage('Purchase rate must be greater than 0.');
+                      return;
+                    }
+                    if (!receiveForm.supplier_name.trim()) {
+                      setMessage('Supplier name is required.');
+                      return;
+                    }
+                    if (!receiveForm.invoice_reference.trim()) {
+                      setMessage('Invoice reference is required.');
+                      return;
+                    }
+
+                    const selectedMat = rawMaterials.find(m => m.material_id === receiveForm.material_id);
+                    const matName = selectedMat ? selectedMat.material_name : undefined;
+
+                    await runAction(
+                      async () => {
+                        const payload: RawMaterialReceiveInput = {
+                          material_id: receiveForm.material_id,
+                          material_name: matName,
+                          quantity: qty,
+                          unit: receiveForm.unit || 'kg',
+                          purchase_rate: rate,
+                          receipt_date: receiveForm.receipt_date || today,
+                          supplier_name: receiveForm.supplier_name.trim(),
+                          invoice_reference: receiveForm.invoice_reference.trim(),
+                          line_number: parseInt(receiveForm.line_number || '1', 10) || 1,
+                          freight_amount: freight,
+                          other_expenses: other,
+                          gst_amount: gst,
+                          gst_treatment: receiveForm.gst_treatment,
+                          notes: receiveForm.notes.trim() || undefined,
+                        };
+                        const res = await receiveRawMaterial(payload);
+                        if (res.is_replay) {
+                          setMessage(`[Idempotent Replay] Receipt already recorded (${res.transaction_id}). Stock balance intact.`);
+                        } else {
+                          setMessage(
+                            `✓ Received ${res.quantity} ${res.unit} of ${res.material_name} (Tx: ${res.transaction_id}). Landed rate: ₹${res.landed_rate_per_unit}/${res.unit}. New Stock: ${res.new_available_stock} ${res.unit}.`
+                          );
+                        }
+                      },
+                      'Raw material receipt recorded successfully.',
+                      refreshRawMaterials
+                    );
+                  }}
+                >
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14, marginBottom: 14 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Raw Material *
+                      </label>
+                      <select
+                        style={input}
+                        value={receiveForm.material_id}
+                        onChange={e => {
+                          const matId = e.target.value;
+                          const mat = rawMaterials.find(m => m.material_id === matId);
+                          setReceiveForm(prev => ({
+                            ...prev,
+                            material_id: matId,
+                            unit: mat ? mat.unit : prev.unit,
+                          }));
+                        }}
+                        required
+                      >
+                        <option value="">Select Raw Material</option>
+                        <optgroup label="🌾 Whole Grain Dal (Factory Milling)">
+                          {rawMaterials
+                            .filter(m => m.category === 'WHOLE_GRAIN' || m.material_id.includes('WHOLE'))
+                            .map(m => (
+                              <option key={m.material_id} value={m.material_id}>
+                                {m.material_name} ({m.material_id}) — Avail: {m.available_stock} {m.unit}
+                              </option>
+                            ))}
+                        </optgroup>
+                        <optgroup label="🥣 Milled Flours">
+                          {rawMaterials
+                            .filter(m => m.category === 'FLOUR')
+                            .map(m => (
+                              <option key={m.material_id} value={m.material_id}>
+                                {m.material_name} ({m.material_id}) — Avail: {m.available_stock} {m.unit}
+                              </option>
+                            ))}
+                        </optgroup>
+                        <optgroup label="🌶️ Spices & Seasonings">
+                          {rawMaterials
+                            .filter(m => m.category === 'SPICE')
+                            .map(m => (
+                              <option key={m.material_id} value={m.material_id}>
+                                {m.material_name} ({m.material_id})
+                              </option>
+                            ))}
+                        </optgroup>
+                        <optgroup label="📦 Packaging & Other">
+                          {rawMaterials
+                            .filter(m => m.category !== 'WHOLE_GRAIN' && m.category !== 'FLOUR' && m.category !== 'SPICE' && !m.material_id.includes('WHOLE'))
+                            .map(m => (
+                              <option key={m.material_id} value={m.material_id}>
+                                {m.material_name} ({m.material_id})
+                              </option>
+                            ))}
+                        </optgroup>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Received Quantity *
+                      </label>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          style={{ ...input, flex: 1 }}
+                          placeholder="e.g. 100.00"
+                          value={receiveForm.quantity}
+                          onChange={e => setReceiveForm(prev => ({ ...prev, quantity: e.target.value }))}
+                          required
+                        />
+                        <select
+                          style={{ ...input, width: 90 }}
+                          value={receiveForm.unit}
+                          onChange={e => setReceiveForm(prev => ({ ...prev, unit: e.target.value }))}
+                        >
+                          <option value="kg">kg</option>
+                          <option value="litre">litre</option>
+                          <option value="g">g</option>
+                          <option value="pcs">pcs</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Purchase Rate (₹ per unit) *
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        style={input}
+                        placeholder="e.g. 110.00"
+                        value={receiveForm.purchase_rate}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, purchase_rate: e.target.value }))}
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Receipt Date *
+                      </label>
+                      <input
+                        type="date"
+                        style={input}
+                        value={receiveForm.receipt_date}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, receipt_date: e.target.value }))}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14, marginBottom: 14 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Supplier / Mandi Trader *
+                      </label>
+                      <input
+                        type="text"
+                        style={input}
+                        placeholder="e.g. Nimar Krishi Upaj Mandi, Barwani"
+                        value={receiveForm.supplier_name}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, supplier_name: e.target.value }))}
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Invoice / Bilty Reference *
+                      </label>
+                      <input
+                        type="text"
+                        style={input}
+                        placeholder="e.g. INV-2025-884"
+                        value={receiveForm.invoice_reference}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, invoice_reference: e.target.value }))}
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Line Item No. on Invoice
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        style={input}
+                        placeholder="1"
+                        value={receiveForm.line_number}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, line_number: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14, marginBottom: 14 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Freight / Transport (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        style={input}
+                        placeholder="0.00"
+                        value={receiveForm.freight_amount}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, freight_amount: e.target.value }))}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        Loading / Unloading / Other (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        style={input}
+                        placeholder="0.00"
+                        value={receiveForm.other_expenses}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, other_expenses: e.target.value }))}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        GST Treatment *
+                      </label>
+                      <select
+                        style={input}
+                        value={receiveForm.gst_treatment}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, gst_treatment: e.target.value as any }))}
+                      >
+                        <option value="RECOVERABLE_ITC">Recoverable ITC (Excluded from cost)</option>
+                        <option value="CAPITALIZED_TO_COST">Capitalized to Cost (Ineligible / Unreg)</option>
+                        <option value="EXEMPT_NIL_RATED">Exempt / Nil Rated (No GST)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                        GST Tax Amount (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        style={input}
+                        placeholder="0.00"
+                        value={receiveForm.gst_amount}
+                        onChange={e => setReceiveForm(prev => ({ ...prev, gst_amount: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: '#334155' }}>
+                      Consignment Notes / Quality Check
+                    </label>
+                    <input
+                      type="text"
+                      style={input}
+                      placeholder="e.g. Moisture 11%, Premium Nimar harvest, gunny bags intact"
+                      value={receiveForm.notes}
+                      onChange={e => setReceiveForm(prev => ({ ...prev, notes: e.target.value }))}
+                    />
+                  </div>
+
+                  {/* Landed Cost Preview Card */}
+                  <div
+                    style={{
+                      background: '#f8fafc',
+                      border: '1px solid #cbd5e1',
+                      borderRadius: 8,
+                      padding: 14,
+                      marginBottom: 16,
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                      gap: 12,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <div>
+                      <span style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        Base Value
+                      </span>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: '#1e293b' }}>₹{baseVal.toFixed(2)}</div>
+                      <small style={{ color: '#64748b' }}>({qty} × ₹{rate})</small>
+                    </div>
+
+                    <div>
+                      <span style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        Additional Expenses
+                      </span>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: '#1e293b' }}>
+                        ₹{(freight + other).toFixed(2)}
+                      </div>
+                      <small style={{ color: '#64748b' }}>Freight + Handling</small>
+                    </div>
+
+                    <div>
+                      <span style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        GST Cost Treatment
+                      </span>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: isCapitalized ? '#b45309' : '#047857' }}>
+                        {isCapitalized ? `+₹${capGst.toFixed(2)} (Capitalized)` : `₹0 in Cost (ITC Claimed)`}
+                      </div>
+                      <small style={{ color: isRecoverable ? '#047857' : '#64748b' }}>
+                        {isRecoverable ? `₹${gst.toFixed(2)} Recoverable via GSTR-2B` : receiveForm.gst_treatment}
+                      </small>
+                    </div>
+
+                    <div style={{ borderLeft: '2px solid #cbd5e1', paddingLeft: 12 }}>
+                      <span style={{ fontSize: 11, color: '#14532d', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700 }}>
+                        Effective Landed Cost / Rate
+                      </span>
+                      <div style={{ fontSize: 20, fontWeight: 800, color: '#14532d' }}>
+                        ₹{landedRatePerUnit.toFixed(2)} <span style={{ fontSize: 12, fontWeight: 500 }}>/ {receiveForm.unit}</span>
+                      </div>
+                      <small style={{ color: '#475569' }}>Total Batch: ₹{totalLandedCost.toFixed(2)}</small>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    style={{ ...btn, background: '#166534', width: '100%', padding: '12px 16px', fontSize: 15 }}
+                    disabled={busy || !receiveForm.material_id || qty <= 0 || rate <= 0}
+                  >
+                    📥 {busy ? 'Saving Receipt to Inventory...' : 'Confirm & Record Inward Consignment Receipt'}
+                  </button>
+                </form>
+              );
+            })()}
+          </div>
+
+          {/* Raw Material Inventory Table */}
+          <div style={card}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
+              <div>
+                <h3 style={{ margin: '0 0 4px', color: '#1e293b' }}>📊 Factory Raw Material Balances & Valuation</h3>
+                <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
+                  Computed dynamically from opening baseline + inward receipts (RawMaterialLedger) - production issuances.
+                </p>
+              </div>
+
+              {/* Filters */}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <input
+                  type="text"
+                  placeholder="🔍 Search material..."
+                  style={{ ...input, width: 180, padding: '6px 10px', fontSize: 12 }}
+                  value={rmSearch}
+                  onChange={e => setRmSearch(e.target.value)}
+                />
+                <select
+                  style={{ ...input, width: 160, padding: '6px 10px', fontSize: 12 }}
+                  value={rmCategoryFilter}
+                  onChange={e => setRmCategoryFilter(e.target.value)}
+                >
+                  <option value="ALL">All Categories</option>
+                  <option value="WHOLE_GRAIN">🌾 Whole Grain Dal</option>
+                  <option value="FLOUR">🥣 Flours</option>
+                  <option value="SPICE">🌶️ Spices</option>
+                  <option value="PACKAGING">📦 Packaging</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: '#f1f5f9', color: '#475569' }}>
+                    <th style={{ textAlign: 'left', padding: '8px 10px' }}>Material ID</th>
+                    <th style={{ textAlign: 'left', padding: '8px 10px' }}>Material Name</th>
+                    <th style={{ textAlign: 'left', padding: '8px 10px' }}>Category</th>
+                    <th style={{ textAlign: 'right', padding: '8px 10px' }}>Baseline Opening</th>
+                    <th style={{ textAlign: 'right', padding: '8px 10px' }}>Inward Received</th>
+                    <th style={{ textAlign: 'right', padding: '8px 10px' }}>Issued / Consumed</th>
+                    <th style={{ textAlign: 'right', padding: '8px 10px' }}>Available Stock</th>
+                    <th style={{ textAlign: 'right', padding: '8px 10px' }}>Latest Landed Rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rawMaterials
+                    .filter(m => {
+                      if (rmCategoryFilter !== 'ALL' && m.category !== rmCategoryFilter) {
+                        if (rmCategoryFilter === 'WHOLE_GRAIN' && !m.material_id.includes('WHOLE')) return false;
+                        if (rmCategoryFilter !== 'WHOLE_GRAIN') return false;
+                      }
+                      if (rmSearch.trim()) {
+                        const q = rmSearch.toLowerCase();
+                        return (
+                          m.material_id.toLowerCase().includes(q) ||
+                          m.material_name.toLowerCase().includes(q) ||
+                          m.category.toLowerCase().includes(q)
+                        );
+                      }
+                      return true;
+                    })
+                    .map(m => {
+                      const isWhole = m.category === 'WHOLE_GRAIN' || m.material_id.includes('WHOLE');
+                      return (
+                        <tr
+                          key={m.material_id}
+                          style={{
+                            borderBottom: '1px solid #e2e8f0',
+                            background: isWhole ? '#f0fdf4' : 'transparent',
+                          }}
+                        >
+                          <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontWeight: 600 }}>
+                            {m.material_id}
+                          </td>
+                          <td style={{ padding: '8px 10px', fontWeight: 600, color: '#1e293b' }}>
+                            {isWhole ? '🌾 ' : ''}{m.material_name}
+                          </td>
+                          <td style={{ padding: '8px 10px' }}>
+                            <span
+                              style={{
+                                fontSize: 11,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: isWhole ? '#bbf7d0' : '#e2e8f0',
+                                color: isWhole ? '#14532d' : '#334155',
+                                fontWeight: 600,
+                              }}
+                            >
+                              {m.category}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '8px 10px', color: '#64748b' }}>
+                            {m.baseline_stock} {m.unit}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '8px 10px', color: '#047857', fontWeight: 600 }}>
+                            +{m.total_received} {m.unit}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '8px 10px', color: '#dc2626' }}>
+                            -{m.total_consumed} {m.unit}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '8px 10px' }}>
+                            <span
+                              style={{
+                                padding: '3px 8px',
+                                borderRadius: 6,
+                                fontWeight: 700,
+                                background: (m.available_stock || 0) > 0 ? '#dcfce7' : '#fee2e2',
+                                color: (m.available_stock || 0) > 0 ? '#166534' : '#991b1b',
+                              }}
+                            >
+                              {m.available_stock} {m.unit}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '8px 10px', fontWeight: 600, color: '#1e293b' }}>
+                            {m.latest_landed_rate > 0 ? `₹${m.latest_landed_rate.toFixed(2)} / ${m.unit}` : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+              {!rawMaterials.length && <p style={{ color: '#64748b', padding: 12 }}>No raw materials found.</p>}
+            </div>
           </div>
         </>
       )}
