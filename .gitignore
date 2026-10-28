@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build artifacts
+dist/
+build/
+*.tsbuildinfo
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment and Secret credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+sales-service-account*.json
+credentials*.json
+/etc/secrets/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary & Upload archives
+*.zip
+*.tar.gz
+*.tgz
+*.log

@@ -486,84 +486,101 @@ async def list_incomplete_sales(current_user: dict = Depends(get_current_user)):
 @router.post("/{sale_id}/cancel", dependencies=[Depends(require_sheets_connection)])
 async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id", ""))
-    sales = db.get_records("Sales", fresh=True)
-    match = next((s for s in sales if str(s.get("sale_id")) == sale_id), None)
-    if not match:
-        raise HTTPException(status_code=404, detail="Sale record not found.")
-    if str(match.get("bill_status", "")).upper() == "CANCELLED":
-        raise HTTPException(status_code=409, detail="This bill has already been cancelled.")
+    async with _sales_lock:
+        sales = db.get_records("Sales", fresh=True)
+        match = next((s for s in sales if str(s.get("sale_id")) == sale_id), None)
+        if not match:
+            raise HTTPException(status_code=404, detail="Sale record not found.")
+        if str(match.get("bill_status", "")).upper() == "CANCELLED":
+            return {"ok": True, "message": f"Bill {match.get('bill_number')} has already been cancelled.", "already_cancelled": True}
 
-    salesman_id = str(match.get("salesman_user_id", ""))
-    if not is_manager(current_user) and salesman_id != user_id:
-        raise HTTPException(status_code=403, detail="Only an Owner/PA or the issuing salesman can cancel a bill.")
+        salesman_id = str(match.get("salesman_user_id", ""))
+        if not is_manager(current_user) and salesman_id != user_id:
+            raise HTTPException(status_code=403, detail="Only an Owner/PA or the issuing salesman can cancel a bill.")
 
-    now = now_iso()
-    bill_number = str(match.get("bill_number", ""))
-    reason_text = req.reason.strip() or "Customer cancellation / authorized reversal"
+        now = now_iso()
+        bill_number = str(match.get("bill_number", ""))
+        reason_text = req.reason.strip() or "Customer cancellation / authorized reversal"
 
-    # 1. Reverse stock in SalesmanStockLedger
-    items = _items_for(sale_id)
-    for itm in items:
-        qty = int(float(itm.get("quantity", 0) or 0))
-        if qty > 0:
-            db.append_record("SalesmanStockLedger", {
-                "stock_txn_id": db.generate_id("SalesmanStockLedger"),
-                "txn_datetime": now,
-                "salesman_user_id": salesman_id,
-                "product_id": str(itm.get("product_id")),
-                "sku_snapshot": str(itm.get("sku_snapshot", "")),
-                "txn_type": "RETURN_FROM_SALESMAN",
-                "quantity": qty,
-                "unit": str(itm.get("unit", "PACKET")),
-                "pack_weight_g": int(float(itm.get("pack_weight_g", 500) or 500)),
-                "related_sale_id": sale_id,
-                "issued_by_user_id": user_id,
+        # 1. Reverse stock in SalesmanStockLedger (check if reversal line already appended)
+        existing_stock_reversals = [
+            r for r in db.get_records("SalesmanStockLedger", fresh=True)
+            if str(r.get("related_sale_id")) == sale_id and str(r.get("txn_type", "")).upper() == "RETURN_FROM_SALESMAN"
+        ]
+        items = _items_for(sale_id)
+        for itm in items:
+            p_id = str(itm.get("product_id"))
+            qty = int(float(itm.get("quantity", 0) or 0))
+            if qty > 0 and not any(str(r.get("product_id")) == p_id and int(float(r.get("quantity", 0) or 0)) == qty for r in existing_stock_reversals):
+                db.append_record("SalesmanStockLedger", {
+                    "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+                    "txn_datetime": now,
+                    "salesman_user_id": salesman_id,
+                    "product_id": p_id,
+                    "sku_snapshot": str(itm.get("sku_snapshot", "")),
+                    "txn_type": "RETURN_FROM_SALESMAN",
+                    "quantity": qty,
+                    "unit": str(itm.get("unit", "PACKET")),
+                    "pack_weight_g": int(float(itm.get("pack_weight_g", 500) or 500)),
+                    "related_sale_id": sale_id,
+                    "issued_by_user_id": user_id,
+                    "received_by_user_id": salesman_id,
+                    "confirmed_by_user_id": user_id,
+                    "reference_id": f"CANCEL-{bill_number}",
+                    "notes": f"Stock reversal for cancelled bill {bill_number}: {reason_text}",
+                }, raise_on_error=True)
+
+        # 2. Reverse payments in Payments / CashLedger (check if refund line already appended)
+        bill_total = float(match.get("bill_total", 0) or 0)
+        method = str(match.get("payment_method", "CASH")).upper()
+        existing_payments = [
+            p for p in db.get_records("Payments", fresh=True)
+            if str(p.get("sale_id")) == sale_id and str(p.get("payment_status", "")).upper() == "REFUNDED"
+        ]
+        if not existing_payments:
+            db.append_record("Payments", {
+                "payment_id": db.generate_id("Payments"),
+                "sale_id": sale_id,
+                "payment_datetime": now,
+                "payment_method": method,
+                "amount": -bill_total,
+                "reference_number": f"REFUND-{bill_number}",
                 "received_by_user_id": salesman_id,
-                "confirmed_by_user_id": user_id,
-                "reference_id": f"CANCEL-{bill_number}",
-                "notes": f"Stock reversal for cancelled bill {bill_number}: {reason_text}",
+                "payment_status": "REFUNDED",
+                "notes": f"Payment reversal for cancelled bill {bill_number}: {reason_text}",
             }, raise_on_error=True)
 
-    # 2. Reverse payments in Payments / CashLedger
-    bill_total = float(match.get("bill_total", 0) or 0)
-    method = str(match.get("payment_method", "CASH")).upper()
-    db.append_record("Payments", {
-        "payment_id": db.generate_id("Payments"),
-        "sale_id": sale_id,
-        "payment_datetime": now,
-        "payment_method": method,
-        "amount": -bill_total,
-        "reference_number": f"REFUND-{bill_number}",
-        "received_by_user_id": salesman_id,
-        "payment_status": "REFUNDED",
-        "notes": f"Payment reversal for cancelled bill {bill_number}: {reason_text}",
-    }, raise_on_error=True)
+        if method == "CASH":
+            existing_cash_refunds = [
+                c for c in db.get_records("CashLedger", fresh=True)
+                if str(c.get("related_sale_id")) == sale_id and str(c.get("txn_type", "")).upper() == "SALE_REFUND"
+            ]
+            if not existing_cash_refunds:
+                db.append_record("CashLedger", {
+                    "cash_txn_id": db.generate_id("CashLedger"),
+                    "txn_datetime": now,
+                    "salesman_user_id": salesman_id,
+                    "txn_type": "SALE_REFUND",
+                    "amount": -bill_total,
+                    "payment_method": "CASH",
+                    "related_sale_id": sale_id,
+                    "related_expense_id": "",
+                    "issued_by_user_id": salesman_id,
+                    "received_by_user_id": str(match.get("customer_id", "")),
+                    "confirmed_by_user_id": user_id,
+                    "reference_id": f"CANCEL-{bill_number}",
+                    "notes": f"Cash refund reversal for cancelled bill {bill_number}",
+                }, raise_on_error=True)
 
-    if method == "CASH":
-        db.append_record("CashLedger", {
-            "cash_txn_id": db.generate_id("CashLedger"),
-            "txn_datetime": now,
-            "salesman_user_id": salesman_id,
-            "txn_type": "SALE_REFUND",
-            "amount": -bill_total,
-            "payment_method": "CASH",
-            "related_sale_id": sale_id,
-            "related_expense_id": "",
-            "issued_by_user_id": salesman_id,
-            "received_by_user_id": str(match.get("customer_id", "")),
-            "confirmed_by_user_id": user_id,
-            "reference_id": f"CANCEL-{bill_number}",
-            "notes": f"Cash refund reversal for cancelled bill {bill_number}",
+        # 3. Update Sales record status
+        updated = db.update_record("Sales", "sale_id", sale_id, {
+            "bill_status": "CANCELLED",
+            "notes": f"{match.get('notes', '')} [CANCELLED:{now}:{user_id}:{reason_text}]".strip(),
         }, raise_on_error=True)
+        if not updated:
+            raise HTTPException(status_code=503, detail="Could not update bill status to CANCELLED.")
 
-    # 3. Update Sales record status
-    updated = db.update_record("Sales", "sale_id", sale_id, {
-        "bill_status": "CANCELLED",
-        "notes": f"{match.get('notes', '')} [CANCELLED:{now}:{user_id}:{reason_text}]".strip(),
-    }, raise_on_error=True)
-    if not updated:
-        raise HTTPException(status_code=503, detail="Could not update bill status to CANCELLED.")
+        db.log_audit(user_id, "CANCEL_BILL", "Sales", sale_id, reason=f"Cancelled bill {bill_number} for ₹{bill_total:.2f}. Reason: {reason_text}")
+        return {"ok": True, "message": f"Bill {bill_number} cancelled and stock/payment reversed successfully."}
 
-    db.log_audit(user_id, "CANCEL_BILL", "Sales", sale_id, reason=f"Cancelled bill {bill_number} for ₹{bill_total:.2f}. Reason: {reason_text}")
-    return {"ok": True, "message": f"Bill {bill_number} cancelled and stock/payment reversed successfully."}
 

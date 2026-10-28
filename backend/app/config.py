@@ -51,8 +51,22 @@ def jwt_secret() -> str:
 def assert_runtime_config() -> None:
     _ = jwt_secret()
     origins = [o.strip() for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
-    if SALES_ENV == "production" and (not origins or "*" in origins):
-        raise RuntimeError(
-            "SALES_CORS_ORIGINS must list the real frontend origins when SALES_ENV=production. "
-            "Wildcard CORS is not allowed."
-        )
+    if SALES_ENV == "production":
+        if not origins or "*" in origins:
+            raise RuntimeError(
+                "SALES_CORS_ORIGINS must list the real frontend origins when SALES_ENV=production. "
+                "Wildcard CORS is not allowed."
+            )
+        if not SALES_GOOGLE_SPREADSHEET_ID:
+            raise RuntimeError(
+                "SALES_GOOGLE_SPREADSHEET_ID is missing from environment in production. "
+                "Production deployment must fail-closed to prevent data loss."
+            )
+        has_sa_file = bool(SALES_GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE))
+        has_sa_json = bool(SALES_GOOGLE_SERVICE_ACCOUNT_JSON and len(SALES_GOOGLE_SERVICE_ACCOUNT_JSON.strip()) > 10)
+        if not (has_sa_file or has_sa_json):
+            raise RuntimeError(
+                "Neither SALES_GOOGLE_SERVICE_ACCOUNT_FILE nor SALES_GOOGLE_SERVICE_ACCOUNT_JSON is configured or accessible in production. "
+                "Production deployment must fail-closed to prevent data loss."
+            )
+

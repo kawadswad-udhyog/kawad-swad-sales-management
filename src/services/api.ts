@@ -611,7 +611,7 @@ export async function fetchBackendHealth(): Promise<BackendHealthResponse> {
       allow_in_memory_fallback: true,
       backend: {
         status: 'STANDBY',
-        service: 'kawad-swad-sales-backend',
+        service: 'kawad-swad-sales-dev',
         version: '1.0.0',
       },
       google_sheets: {

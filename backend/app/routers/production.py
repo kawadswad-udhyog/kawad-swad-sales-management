@@ -850,15 +850,15 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
     return rec
 
 
-_BATCH_LOCKS: Dict[str, threading.Lock] = {}
+_BATCH_LOCKS: Dict[str, threading.RLock] = {}
 _BATCH_LOCKS_GUARD = threading.Lock()
 
 
-def get_batch_lock(production_id: str) -> threading.Lock:
+def get_batch_lock(production_id: str) -> threading.RLock:
     with _BATCH_LOCKS_GUARD:
         clean_id = str(production_id).strip()
         if clean_id not in _BATCH_LOCKS:
-            _BATCH_LOCKS[clean_id] = threading.Lock()
+            _BATCH_LOCKS[clean_id] = threading.RLock()
         return _BATCH_LOCKS[clean_id]
 
 
@@ -1290,99 +1290,100 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
     actor, _ = require_owner(user)
     require_persistent_store()
 
-    batches = db.get_records("ProductionBatches")
     prod_id_clean = str(production_id or "").strip()
-    rec = next(
-        (b for b in batches if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
-        None
-    )
-    if not rec:
-        raise HTTPException(404, f"Production batch '{production_id}' not found")
+    with get_batch_lock(prod_id_clean):
+        batches = db.get_records("ProductionBatches", fresh=True)
+        rec = next(
+            (b for b in batches if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
+            None
+        )
+        if not rec:
+            raise HTTPException(404, f"Production batch '{production_id}' not found")
 
-    current_status = str(field(rec, "status", default="PENDING")).upper()
-    if current_status != "PENDING":
-        raise HTTPException(409, "This batch has already been reviewed")
+        current_status = str(field(rec, "status", default="PENDING")).upper()
+        if current_status != "PENDING":
+            raise HTTPException(409, "This batch has already been reviewed")
 
-    if not req.approved:
-        updates = {"status": "REJECTED", "approved_by": actor, "approved_at": now(), "approval_notes": req.notes}
+        if not req.approved:
+            updates = {"status": "REJECTED", "approved_by": actor, "approved_at": now(), "approval_notes": req.notes}
+            saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
+            if not saved:
+                saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
+            if not saved:
+                raise HTTPException(503, "Rejection was not saved.")
+            
+            # Also sync corresponding ApprovalRequests
+            try:
+                for app_req in db.get_records("ApprovalRequests"):
+                    if str(app_req.get("target_user_id", "")).strip() == prod_id_clean and str(app_req.get("status", "")).upper() == "PENDING":
+                        db.update_record("ApprovalRequests", "request_id", str(app_req.get("request_id")), {
+                            "status": "REJECTED",
+                            "decided_by": actor,
+                            "decided_at": now(),
+                            "decision_notes": req.notes or "Rejected by Owner",
+                        })
+            except Exception as sync_err:
+                logger.warning(f"Could not sync ApprovalRequest rejection for batch {prod_id_clean}: {sync_err}")
+
+            db.log_audit(actor, "REJECT_PRODUCTION", "ProductionBatches", prod_id_clean, reason=req.notes)
+            return {**rec, **updates}
+
+        # Ensure materials are issued idempotently and recoverably
+        is_issued = truthy(field(rec, "materials_issued"))
+        if not is_issued:
+            execute_material_issue(prod_id_clean, actor)
+
+        production_kg = float(field(rec, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0)
+
+        # Post bulk output to inventory exactly once
+        existing_bulk = next((x for x in db.get_records("ProductionStockLedger", fresh=True) if str(field(x, "reference_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "BULK_PRODUCED"), None)
+        if not existing_bulk:
+            stock = {
+                "movement_id": make_id("ProductionStockLedger"),
+                "txn_datetime": now(),
+                "movement_type": "BULK_PRODUCED",
+                "product_id": field(rec, "product_id"),
+                "bulk_product_key": str(field(rec, "product_name_snapshot")).strip().lower(),
+                "product_name_snapshot": field(rec, "product_name_snapshot"),
+                "quantity_kg": production_kg,
+                "quantity_packets": 0,
+                "channel": "FACTORY_BULK",
+                "reference_id": prod_id_clean,
+                "created_by": actor,
+                "notes": req.notes,
+            }
+            if not db.append_record("ProductionStockLedger", stock, raise_on_error=True):
+                raise HTTPException(503, "Could not record bulk stock.")
+
+        updates = {
+            "status": "APPROVED",
+            "approved_by": actor,
+            "approved_at": now(),
+            "approval_notes": req.notes,
+            "materials_issued": "true",
+        }
         saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
         if not saved:
             saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
         if not saved:
-            raise HTTPException(503, "Rejection was not saved.")
-        
+            raise HTTPException(503, "Batch status could not be saved. Existing ledger entries remain safe.")
+
         # Also sync corresponding ApprovalRequests
         try:
             for app_req in db.get_records("ApprovalRequests"):
                 if str(app_req.get("target_user_id", "")).strip() == prod_id_clean and str(app_req.get("status", "")).upper() == "PENDING":
                     db.update_record("ApprovalRequests", "request_id", str(app_req.get("request_id")), {
-                        "status": "REJECTED",
+                        "status": "EXECUTED",
                         "decided_by": actor,
                         "decided_at": now(),
-                        "decision_notes": req.notes or "Rejected by Owner",
+                        "executed_at": now(),
+                        "decision_notes": req.notes or "Approved by Owner",
                     })
         except Exception as sync_err:
-            logger.warning(f"Could not sync ApprovalRequest rejection for batch {prod_id_clean}: {sync_err}")
+            logger.warning(f"Could not sync ApprovalRequest for batch {prod_id_clean}: {sync_err}")
 
-        db.log_audit(actor, "REJECT_PRODUCTION", "ProductionBatches", prod_id_clean, reason=req.notes)
+        db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
         return {**rec, **updates}
-
-    # Ensure materials are issued idempotently and recoverably
-    is_issued = truthy(field(rec, "materials_issued"))
-    if not is_issued:
-        execute_material_issue(prod_id_clean, actor)
-
-    production_kg = float(field(rec, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0)
-
-    # Post bulk output to inventory exactly once
-    existing_bulk = next((x for x in db.get_records("ProductionStockLedger", fresh=True) if str(field(x, "reference_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "BULK_PRODUCED"), None)
-    if not existing_bulk:
-        stock = {
-            "movement_id": make_id("ProductionStockLedger"),
-            "txn_datetime": now(),
-            "movement_type": "BULK_PRODUCED",
-            "product_id": field(rec, "product_id"),
-            "bulk_product_key": str(field(rec, "product_name_snapshot")).strip().lower(),
-            "product_name_snapshot": field(rec, "product_name_snapshot"),
-            "quantity_kg": production_kg,
-            "quantity_packets": 0,
-            "channel": "FACTORY_BULK",
-            "reference_id": prod_id_clean,
-            "created_by": actor,
-            "notes": req.notes,
-        }
-        if not db.append_record("ProductionStockLedger", stock, raise_on_error=True):
-            raise HTTPException(503, "Could not record bulk stock.")
-
-    updates = {
-        "status": "APPROVED",
-        "approved_by": actor,
-        "approved_at": now(),
-        "approval_notes": req.notes,
-        "materials_issued": "true",
-    }
-    saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
-    if not saved:
-        saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
-    if not saved:
-        raise HTTPException(503, "Batch status could not be saved. Existing ledger entries remain safe.")
-
-    # Also sync corresponding ApprovalRequests
-    try:
-        for app_req in db.get_records("ApprovalRequests"):
-            if str(app_req.get("target_user_id", "")).strip() == prod_id_clean and str(app_req.get("status", "")).upper() == "PENDING":
-                db.update_record("ApprovalRequests", "request_id", str(app_req.get("request_id")), {
-                    "status": "EXECUTED",
-                    "decided_by": actor,
-                    "decided_at": now(),
-                    "executed_at": now(),
-                    "decision_notes": req.notes or "Approved by Owner",
-                })
-    except Exception as sync_err:
-        logger.warning(f"Could not sync ApprovalRequest for batch {prod_id_clean}: {sync_err}")
-
-    db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
-    return {**rec, **updates}
 
 
 # -------------------------------------------------------------

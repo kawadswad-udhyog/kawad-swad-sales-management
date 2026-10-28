@@ -32,11 +32,11 @@ function createProxyRule(prefix: string) {
             res.end(
               JSON.stringify({
                 status: 'standby',
-                service: 'kawad-swad-sales-backend',
+                service: 'kawad-swad-sales-dev',
                 google_sheets_connected: false,
                 persistent_writes_enabled: false,
                 last_connection_error: `Backend at ${backendTarget} is currently offline or sleeping. Operating in Standby Mode.`,
-                backend: { status: 'STANDBY', service: 'kawad-swad-sales-backend', version: '1.0.0' },
+                backend: { status: 'STANDBY', service: 'kawad-swad-sales-dev', version: '1.0.0' },
                 google_sheets: { status: 'STANDBY', connected: false, message: 'Standby Mode active.' },
                 required_sheets: { status: 'STANDBY', total_managed_tabs: 28 },
               })

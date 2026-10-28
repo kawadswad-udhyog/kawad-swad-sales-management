@@ -55,11 +55,14 @@ if hasattr(app, "exception_handler"):
 configured_origins = [o.strip().rstrip("/") for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
 default_origins = {
     "https://kawad-swad-sales-frontend.onrender.com",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
 }
+if SALES_ENV != "production":
+    default_origins.update({
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    })
 origins = list(default_origins.union(configured_origins))
 
 cors_kwargs = {
@@ -70,7 +73,8 @@ cors_kwargs = {
     "expose_headers": ["*"],
 }
 
-cors_kwargs["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1|.*\.run\.app|.*\.onrender\.com)(:\d+)?"
+if SALES_ENV != "production":
+    cors_kwargs["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 
 app.add_middleware(
     CORSMiddleware,
@@ -103,6 +107,9 @@ def _check_configuration():
     try:
         assert_runtime_config()
     except Exception as exc:
+        if SALES_ENV == "production":
+            logger.critical("FATAL: Invalid production configuration: %s", exc)
+            raise exc
         logger.error("Configuration warning on startup: %s", exc)
 
 @app.get("/health", tags=["System"])
@@ -134,7 +141,7 @@ def health_check():
 
     return {
         "status": status_str,
-        "service": "kawad-swad-sales-backend",
+        "service": "kawad-swad-sales-dev",
         "google_sheets_connected": db.is_connected,
         "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
         "spreadsheet_id_configured": bool(SALES_GOOGLE_SPREADSHEET_ID),
@@ -143,7 +150,7 @@ def health_check():
         "allow_in_memory_fallback": db.allow_in_memory_fallback,
         "backend": {
             "status": "CONNECTED",
-            "service": "kawad-swad-sales-backend",
+            "service": "kawad-swad-sales-dev",
             "version": "1.0.0",
         },
         "google_sheets": {
