@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { apiRequest, getRawMaterials, receiveRawMaterial, RawMaterialSummary, RawMaterialReceiveInput } from '../services/api';
 import { useStore } from '../context/StoreContext';
 import { exportSheetToExcel } from '../utils/exportToExcel';
@@ -44,6 +44,43 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [batchDateFilter, setBatchDateFilter] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState<'success' | 'error' | null>(null);
+  const actionMessageRef = useRef<string | null>(null);
+
+  const showSuccess = (text: string) => {
+    setMessageType('success');
+    actionMessageRef.current = text;
+    setMessage(text);
+  };
+
+  const showError = (text: string) => {
+    setMessageType('error');
+    actionMessageRef.current = null;
+    setMessage(text);
+  };
+
+  const isError = useMemo(() => {
+    if (!message) return false;
+    if (messageType === 'error') return true;
+    if (messageType === 'success') return false;
+    const lower = message.toLowerCase();
+    return (
+      lower.includes('conflict') ||
+      lower.includes('error') ||
+      lower.includes('fail') ||
+      lower.includes('could not') ||
+      lower.includes('insufficient') ||
+      lower.includes('cannot') ||
+      lower.includes('invalid') ||
+      lower.includes('required') ||
+      lower.includes('must be') ||
+      lower.includes('already recorded for this worker') ||
+      lower.includes('no linked product') ||
+      lower.includes('enter at least') ||
+      lower.includes('rejected') ||
+      lower.includes('blocked')
+    );
+  }, [message, messageType]);
 
   // Raw Materials Inward Receiving & Balance State (Stage 1)
   const [rawMaterials, setRawMaterials] = useState<RawMaterialSummary[]>([]);
@@ -272,17 +309,25 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
   useEffect(() => {
     if (canManage) {
-      load().catch(e => setMessage(e.message || 'Could not load production data.'));
+      load().catch(e => showError(e.message || 'Could not load production data.'));
     }
   }, [canManage]);
 
-  const runAction = async (fn: () => Promise<unknown>, success: string, targetedRefresh?: () => Promise<void>): Promise<boolean> => {
+  const runAction = async (
+    fn: () => Promise<unknown>,
+    defaultSuccess: string,
+    targetedRefresh?: () => Promise<void>
+  ): Promise<boolean> => {
     if (busy) return false;
     setBusy(true);
     setMessage('');
+    setMessageType(null);
+    actionMessageRef.current = null;
     try {
-      await fn();
-      setMessage(success);
+      const result = await fn();
+      const customMsg = typeof result === 'string' && result.trim() ? result.trim() : null;
+      const finalMsg = customMsg || actionMessageRef.current || defaultSuccess;
+      showSuccess(finalMsg);
       try {
         if (targetedRefresh) {
           await targetedRefresh();
@@ -291,11 +336,11 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
         }
       } catch (refreshErr: any) {
         console.warn('Post-action screen refresh warning:', refreshErr);
-        setMessage(`${success} (Data saved, refreshing screen...)`);
+        showSuccess(`${finalMsg} (Data saved, refreshing screen...)`);
       }
       return true;
     } catch (e: any) {
-      setMessage(e?.message || 'Action failed.');
+      showError(e?.message || 'Action failed.');
       return false;
     } finally {
       setBusy(false);
@@ -395,16 +440,41 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           role="status"
           style={{
             ...card,
-            background:
-              message.toLowerCase().includes('could not') ||
-              message.toLowerCase().includes('insufficient') ||
-              message.toLowerCase().includes('error')
-                ? '#fef2f2'
-                : '#f0fdf4',
-            color: '#166534',
+            background: isError ? '#fef2f2' : '#f0fdf4',
+            borderColor: isError ? '#fca5a5' : '#86efac',
+            color: isError ? '#991b1b' : '#166534',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            boxShadow: isError ? '0 1px 3px rgba(239, 68, 68, 0.1)' : '0 1px 3px rgba(34, 197, 94, 0.1)',
           }}
         >
-          {message}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 18 }}>{isError ? '⚠️' : '✓'}</span>
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setMessage('');
+              setMessageType(null);
+            }}
+            style={{
+              background: 'transparent',
+              border: 0,
+              cursor: 'pointer',
+              color: isError ? '#991b1b' : '#166534',
+              fontSize: 18,
+              fontWeight: 'bold',
+              padding: '0 6px',
+              lineHeight: 1,
+            }}
+            title="Dismiss message"
+            aria-label="Dismiss message"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -670,9 +740,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                             notes: `Using ${r.product_name_snapshot} formula`,
                           }));
                           setTab('production');
-                          setMessage(`Formula for ${r.product_name_snapshot} pre-selected in Daily Production.`);
+                          showSuccess(`Formula for ${r.product_name_snapshot} pre-selected in Daily Production.`);
                         } else {
-                          setMessage(`No linked product found for ${r.product_name_snapshot}. Create product in Products master.`);
+                          showError(`No linked product found for ${r.product_name_snapshot}. Create product in Products master.`);
                         }
                       }}
                     >
@@ -812,23 +882,23 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   onSubmit={async e => {
                     e.preventDefault();
                     if (!receiveForm.material_id) {
-                      setMessage('Please select a raw material.');
+                      showError('Please select a raw material.');
                       return;
                     }
                     if (qty <= 0) {
-                      setMessage('Received quantity must be greater than 0.');
+                      showError('Received quantity must be greater than 0.');
                       return;
                     }
                     if (rate <= 0) {
-                      setMessage('Purchase rate must be greater than 0.');
+                      showError('Purchase rate must be greater than 0.');
                       return;
                     }
                     if (!receiveForm.supplier_name.trim()) {
-                      setMessage('Supplier name is required.');
+                      showError('Supplier name is required.');
                       return;
                     }
                     if (!receiveForm.invoice_reference.trim()) {
-                      setMessage('Invoice reference is required.');
+                      showError('Invoice reference is required.');
                       return;
                     }
 
@@ -854,13 +924,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                           notes: receiveForm.notes.trim() || undefined,
                         };
                         const res = await receiveRawMaterial(payload);
-                        if (res.is_replay) {
-                          setMessage(`[Idempotent Replay] Receipt already recorded (${res.transaction_id}). Stock balance intact.`);
-                        } else {
-                          setMessage(
-                            `✓ Received ${res.quantity} ${res.unit} of ${res.material_name} (Tx: ${res.transaction_id}). Landed rate: ₹${res.landed_rate_per_unit}/${res.unit}. New Stock: ${res.new_available_stock} ${res.unit}.`
-                          );
+                        const txnId = res.transaction_id || (res as any).raw_material_txn_id || '';
+                        if (res.is_replay || (res as any).status === 'ALREADY_RECORDED') {
+                          const replayMsg = `[Idempotent Replay] Receipt already recorded (${txnId}). Stock balance intact.`;
+                          showSuccess(replayMsg);
+                          return replayMsg;
                         }
+                        const successMsg = `✓ Received ${res.quantity} ${res.unit} of ${res.material_name} (Tx: ${txnId}). Landed rate: ₹${res.landed_rate_per_unit}/${res.unit}. New Stock: ${res.new_available_stock} ${res.unit}.`;
+                        showSuccess(successMsg);
+                        return successMsg;
                       },
                       'Raw material receipt recorded successfully.',
                       refreshRawMaterials
@@ -1420,7 +1492,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               onSubmit={e => {
                 e.preventDefault();
                 if (isDuplicateAttendance) {
-                  setMessage('Attendance is already recorded for this worker on this date.');
+                  showError('Attendance is already recorded for this worker on this date.');
                   return;
                 }
                 runAction(
@@ -1686,7 +1758,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   .filter(x => x.length >= 2 && x[0] && Number(x[1]) > 0)
                   .map(x => ({ material_name: x[0], quantity_per_kg: Number(x[1]), unit: x[2] || 'kg' }));
                 if (!items.length) {
-                  setMessage('Enter at least one valid ingredient line.');
+                  showError('Enter at least one valid ingredient line.');
                   return;
                 }
                 runAction(
