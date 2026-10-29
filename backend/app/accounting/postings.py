@@ -324,3 +324,110 @@ def post_daily_closing_cash_remittance_journal(
         posted_by=actor,
         journal_date=str(closing_data.get("closing_date", "")).strip() or None,
     )
+
+
+def post_expense_journal(
+    expense_data: Dict[str, Any],
+    actor: str,
+) -> Dict[str, Any]:
+    """
+    Operating Expense Approval:
+    Debit: 5210 (Salesman Travel & Petrol) or 5230 (General & Administrative)
+    Credit: 1115 (Van Float) if paid out of salesman route cash,
+            or 1110 (Factory Safe) if factory cash,
+            or 2130 (Accrued Operating Expenses Payable) if credit/accrued.
+    """
+    exp_id = str(expense_data.get("expense_id", "")).strip()
+    amount = to_decimal(expense_data.get("amount", 0) or 0)
+    cat = str(expense_data.get("category", "")).lower()
+    desc = str(expense_data.get("description", "")).strip()
+    is_cash_reducing = str(expense_data.get("cash_reducing_expense", "false")).lower() in {"true", "1"}
+    s_user = str(expense_data.get("salesman_user_id", "")).strip()
+
+    if amount <= Decimal("0"):
+        return {"status": "SKIPPED", "message": "Zero expense amount"}
+
+    # Determine expense account
+    if "petrol" in cat or "travel" in cat or "fuel" in cat or "vehicle" in cat:
+        exp_code = "5210"
+    elif "salary" in cat or "incentive" in cat or "wage" in cat:
+        exp_code = "5220"
+    else:
+        exp_code = "5230"
+
+    # Determine credit settlement account
+    if is_cash_reducing and s_user:
+        credit_code = "1115"  # Salesman route cash reduced
+        credit_note = f"Disbursed from {s_user} van float"
+    elif is_cash_reducing:
+        credit_code = "1110"  # Factory cash safe reduced
+        credit_note = "Disbursed from factory cash safe"
+    else:
+        credit_code = "2130"  # Accrued liability pending payout
+        credit_note = "Accrued operating expense payable"
+
+    lines = [
+        {
+            "account_code": exp_code,
+            "debit_amount": round_money(amount),
+            "notes": f"Expense: {desc or expense_data.get('category', 'Expense')}",
+        },
+        {
+            "account_code": credit_code,
+            "credit_amount": round_money(amount),
+            "notes": credit_note,
+        },
+    ]
+
+    return post_journal_voucher(
+        voucher_type="PAYMENT",
+        reference_type="EXPENSE",
+        reference_id=exp_id,
+        narration=f"Approved expense {exp_id} ({expense_data.get('category')}): ₹{amount:.2f}",
+        lines=lines,
+        posted_by=actor,
+        journal_date=str(expense_data.get("expense_datetime", ""))[:10] or None,
+    )
+
+
+def post_payment_collection_journal(
+    payment_data: Dict[str, Any],
+    actor: str,
+) -> Dict[str, Any]:
+    """
+    Debtor Collection Entry:
+    Debit: 1115 (Van Float) if CASH, or 1120 (Bank) if UPI/BANK
+    Credit: 1130 (Accounts Receivable / Sundry Debtors)
+    """
+    pay_id = str(payment_data.get("payment_id", "")).strip()
+    amount = to_decimal(payment_data.get("amount", 0) or 0)
+    method = str(payment_data.get("payment_method", "CASH")).upper()
+    sale_id = str(payment_data.get("sale_id", "")).strip()
+
+    if amount <= Decimal("0"):
+        return {"status": "SKIPPED", "message": "Zero payment amount"}
+
+    debit_code = "1115" if method == "CASH" else "1120"
+    lines = [
+        {
+            "account_code": debit_code,
+            "debit_amount": round_money(amount),
+            "notes": f"Collection via {method} for sale {sale_id}",
+        },
+        {
+            "account_code": "1130",
+            "credit_amount": round_money(amount),
+            "notes": f"Debtor receivable clearance for sale {sale_id}",
+        },
+    ]
+
+    return post_journal_voucher(
+        voucher_type="RECEIPT",
+        reference_type="PAYMENT_COLLECTION",
+        reference_id=pay_id,
+        narration=f"Customer debt collection via {method}: ₹{amount:.2f} (Payment {pay_id})",
+        lines=lines,
+        posted_by=actor,
+        journal_date=str(payment_data.get("payment_datetime", ""))[:10] or None,
+    )
+

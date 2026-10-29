@@ -163,7 +163,29 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
         reason=f"Submitted closing for {today_str}: expected ₹{expected_cash}, returned ₹{req.physical_cash_returned} (diff ₹{diff})"
     )
 
+    # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+    try:
+        from app.accounting.postings import post_daily_closing_cash_remittance_journal
+        post_daily_closing_cash_remittance_journal(record, user_id)
+    except Exception as acct_err:
+        try:
+            db.append_record("IncompleteTransactions", {
+                "transaction_id": db.generate_id("IncompleteTransactions"),
+                "transaction_type": "ACCOUNTING_POSTING_PENDING",
+                "idempotency_key": f"acct-closing-{closing_id}",
+                "status": "POSTING_FAILED",
+                "payload_json": f'{{"closing_id": "{closing_id}", "type": "DAILY_CLOSING"}}',
+                "error_details": str(acct_err),
+                "created_at": stamped,
+                "updated_at": stamped,
+                "resolved_by": "",
+                "resolved_at": "",
+            })
+        except Exception:
+            pass
+
     return _closing_from(record)
+
 
 @router.post("/{closing_id}/review", response_model=DailyClosing, dependencies=[Depends(require_sheets_connection)])
 async def review_daily_closing(closing_id: str, req: ClosingReviewRequest, current_user: dict = Depends(get_current_user)):

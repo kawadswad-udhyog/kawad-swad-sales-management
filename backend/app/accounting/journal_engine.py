@@ -159,11 +159,13 @@ def post_journal_voucher(
 def reverse_journal_voucher(
     journal_id: str,
     reason: str,
-    actor: str,
+    actor: str = "SYSTEM",
+    reversed_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates a compensating reversal voucher for an existing posted journal entry.
     """
+    operator = reversed_by or actor
     clean_jid = str(journal_id or "").strip()
     headers = db.get_records("JournalHeaders", fresh=True)
     original = next((h for h in headers if str(h.get("journal_id")).strip() == clean_jid), None)
@@ -195,7 +197,7 @@ def reverse_journal_voucher(
         reference_id=clean_jid,
         narration=f"Compensating reversal of {clean_jid}. Reason: {reason}",
         lines=reversal_lines,
-        posted_by=actor,
+        posted_by=operator,
     )
 
     # Mark original voucher as REVERSED
@@ -229,8 +231,9 @@ def calculate_trial_balance(as_of_date: Optional[str] = None) -> Dict[str, Any]:
     for line in lines:
         jid = str(line.get("journal_id", ""))
         hdr = headers.get(jid)
-        if not hdr or str(hdr.get("status", "")).upper() not in {"POSTED", "VALID"}:
+        if not hdr or str(hdr.get("status", "")).upper() not in {"POSTED", "VALID", "REVERSED"}:
             continue
+
 
         if as_of_date and str(hdr.get("journal_date", "")) > as_of_date:
             continue
@@ -284,7 +287,9 @@ def calculate_trial_balance(as_of_date: Optional[str] = None) -> Dict[str, Any]:
         "grand_total_credit": round_money(grand_total_credit),
         "difference": round_money(abs(grand_total_debit - grand_total_credit)),
         "rows": rows,
+        "lines": rows,
     }
+
 
 
 def calculate_profit_and_loss(

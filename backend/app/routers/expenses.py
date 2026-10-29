@@ -107,6 +107,15 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
 
     records = db.get_records("Expenses")
     matched = next((r for r in records if str(r.get("expense_id")) == expense_id), {})
+
+    # Double-Entry Accounting Journal Posting on Expense Approval
+    if req.approved:
+        try:
+            from app.accounting.postings import post_expense_journal
+            post_expense_journal(matched, user_id)
+        except Exception:
+            pass
+
     return Expense(
         expense_id=expense_id,
         expense_datetime=str(matched.get("expense_datetime", now_iso)),

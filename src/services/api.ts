@@ -754,3 +754,133 @@ export async function getMillingHistory(): Promise<DalMillingHistoryItem[]> {
   return apiRequest<DalMillingHistoryItem[]>('/api/production/milling/history');
 }
 
+// -------------------------------------------------------------
+// Double-Entry General Ledger Accounting Endpoints
+// -------------------------------------------------------------
+
+export interface AccountMaster {
+  account_code: string;
+  account_name: string;
+  account_type: 'ASSET' | 'LIABILITY' | 'EQUITY' | 'REVENUE' | 'EXPENSE';
+  normal_balance: 'DEBIT' | 'CREDIT';
+  is_reconciled: string;
+  active: string;
+  description: string;
+}
+
+export interface TrialBalanceRow {
+  account_code: string;
+  account_name: string;
+  account_type: string;
+  total_debit: number;
+  total_credit: number;
+  net_debit: number;
+  net_credit: number;
+}
+
+export interface TrialBalanceResult {
+  as_of_date: string;
+  is_balanced: boolean;
+  grand_total_debit: number;
+  grand_total_credit: number;
+  difference: number;
+  rows: TrialBalanceRow[];
+  lines?: TrialBalanceRow[];
+}
+
+export interface ProfitAndLossResult {
+  period_start: string;
+  period_end: string;
+  total_revenue: number;
+  total_cogs: number;
+  gross_profit: number;
+  gross_margin_percentage: number;
+  total_operating_expenses: number;
+  net_operating_profit: number;
+  net_margin_percentage: number;
+  revenue_breakdown: TrialBalanceRow[];
+  cogs_breakdown: TrialBalanceRow[];
+  operating_expenses_breakdown: TrialBalanceRow[];
+}
+
+export interface BalanceSheetResult {
+  as_of_date: string;
+  is_balanced: boolean;
+  total_assets: number;
+  total_liabilities: number;
+  total_equity: number;
+  current_period_net_profit: number;
+  total_liabilities_and_equity: number;
+  balance_difference: number;
+  assets_breakdown: TrialBalanceRow[];
+  liabilities_breakdown: TrialBalanceRow[];
+  equity_breakdown: TrialBalanceRow[];
+}
+
+export interface JournalLineItem {
+  line_id: string;
+  journal_id: string;
+  line_no: number;
+  account_code: string;
+  account_name: string;
+  debit_amount: number;
+  credit_amount: number;
+  entity_type: string;
+  entity_id: string;
+  notes: string;
+}
+
+export interface JournalVoucherItem {
+  journal_id: string;
+  journal_date: string;
+  voucher_type: string;
+  reference_type: string;
+  reference_id: string;
+  narration: string;
+  total_debit: number;
+  total_credit: number;
+  posted_by: string;
+  posted_at: string;
+  status: string;
+  reversal_of_id?: string;
+  lines: JournalLineItem[];
+}
+
+export async function fetchChartOfAccounts(): Promise<AccountMaster[]> {
+  return apiRequest<AccountMaster[]>('/api/accounting/chart-of-accounts');
+}
+
+export async function fetchTrialBalance(asOfDate?: string): Promise<TrialBalanceResult> {
+  const query = asOfDate ? `?as_of_date=${encodeURIComponent(asOfDate)}` : '';
+  return apiRequest<TrialBalanceResult>(`/api/accounting/trial-balance${query}`);
+}
+
+export async function fetchProfitAndLoss(startDate?: string, endDate?: string): Promise<ProfitAndLossResult> {
+  const params = new URLSearchParams();
+  if (startDate) params.set('start_date', startDate);
+  if (endDate) params.set('end_date', endDate);
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiRequest<ProfitAndLossResult>(`/api/accounting/profit-and-loss${qs}`);
+}
+
+export async function fetchBalanceSheet(asOfDate?: string): Promise<BalanceSheetResult> {
+  const query = asOfDate ? `?as_of_date=${encodeURIComponent(asOfDate)}` : '';
+  return apiRequest<BalanceSheetResult>(`/api/accounting/balance-sheet${query}`);
+}
+
+export async function fetchJournalVouchers(voucherType?: string, limit = 50): Promise<JournalVoucherItem[]> {
+  const params = new URLSearchParams();
+  if (voucherType) params.set('voucher_type', voucherType);
+  if (limit) params.set('limit', String(limit));
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiRequest<JournalVoucherItem[]>(`/api/accounting/vouchers${qs}`);
+}
+
+export async function reverseJournalVoucherApi(journalId: string, reason: string): Promise<JournalVoucherItem> {
+  return apiRequest<JournalVoucherItem>(`/api/accounting/vouchers/${encodeURIComponent(journalId)}/reverse`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+

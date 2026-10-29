@@ -3,6 +3,7 @@ import re
 import hashlib
 from app.timeutil import business_today, now_iso
 from typing import Any, Dict, List, Optional
+from decimal import Decimal
 import json
 import threading
 from fastapi import APIRouter, Depends, HTTPException
@@ -707,6 +708,41 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
             reason=f"Received {std_qty} {std_unit} of {canonical_mat_name} (Invoice {clean_invoice}, Line {line_no}) at landed rate ₹{effective_unit_rate}/{std_unit}"
         )
 
+        # 12. Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+        try:
+            from app.accounting.postings import post_receipt_journal
+            receipt_dict = {
+                "raw_material_txn_id": ledger_txn_id,
+                "material_name": canonical_mat_name,
+                "quantity": std_qty,
+                "purchase_rate": float(req.purchase_rate),
+                "freight_amount": float(freight_dec),
+                "gst_amount": float(gst_dec),
+                "gst_treatment": treatment,
+                "supplier_name": (req.supplier_name or "").strip(),
+                "invoice_number": clean_invoice,
+                "receipt_date": req.receipt_date or now()[:10],
+            }
+            post_receipt_journal(receipt_dict, actor)
+        except Exception as acct_err:
+            logger.error("Non-fatal accounting posting error for receipt %s: %s", ledger_txn_id, acct_err)
+            try:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": make_id("IncompleteTransactions"),
+                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
+                    "idempotency_key": f"acct-receipt-{ledger_txn_id}",
+                    "status": "POSTING_FAILED",
+                    "payload_json": json.dumps({"ledger_txn_id": ledger_txn_id, "type": "RECEIPT"}),
+                    "error_details": str(acct_err),
+                    "created_at": now(),
+                    "updated_at": now(),
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception:
+                pass
+
+
         return RawMaterialReceiveResponse(
             success=True,
             status="SUCCESS",
@@ -1196,9 +1232,40 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             reason=f"Milled {req.input_quantity_kg} kg of {mapping['canonical_dal_name']} into {req.flour_output_kg} kg of {mapping['target_flour_name']} (Loss: {loss_kg} kg / {loss_pct}%) at ₹{flour_unit_rate}/kg"
         )
 
-        # 14. Calculate post-milling balances
+        # 14. Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+        try:
+            from app.accounting.postings import post_milling_journal
+            milling_dict = {
+                "milling_batch_id": milling_batch_id,
+                "input_quantity_kg": float(req.input_quantity_kg),
+                "flour_output_kg": float(req.flour_output_kg),
+                "source_unit_rate": float(dal_unit_rate),
+                "milling_expenses": float(milling_exp),
+                "milling_date": req.milling_date or now()[:10],
+            }
+            post_milling_journal(milling_dict, actor)
+        except Exception as acct_err:
+            logger.error("Non-fatal accounting posting error for milling %s: %s", milling_batch_id, acct_err)
+            try:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": make_id("IncompleteTransactions"),
+                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
+                    "idempotency_key": f"acct-milling-{milling_batch_id}",
+                    "status": "POSTING_FAILED",
+                    "payload_json": json.dumps({"milling_batch_id": milling_batch_id, "type": "MILLING"}),
+                    "error_details": str(acct_err),
+                    "created_at": now(),
+                    "updated_at": now(),
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception:
+                pass
+
+        # 15. Calculate post-milling balances
         post_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger_after)
         post_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger_after)
+
 
         return DalMillingResponse(
             success=True,
@@ -2438,7 +2505,58 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
             logger.warning(f"Could not sync ApprovalRequest for batch {prod_id_clean}: {sync_err}")
 
         db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
+
+        # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+        try:
+            from app.accounting.postings import post_production_batch_journal
+            raw_deductions = [
+                x for x in db.get_records("RawMaterialLedger", fresh=True)
+                if str(field(x, "production_id", default="")).strip() == prod_id_clean
+                and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+            ]
+            f_cost = Decimal("0")
+            s_cost = Decimal("0")
+            for d in raw_deductions:
+                m_name = str(field(d, "material_name", default="")).lower()
+                q = to_decimal(field(d, "quantity", default=0) or 0)
+                r = to_decimal(field(d, "rate_per_unit", default=0) or 0)
+                c = q * r
+                if "flour" in m_name or "atta" in m_name:
+                    f_cost += c
+                else:
+                    s_cost += c
+            l_cost = to_decimal(field(rec, "labour_cost", default=0) or field(rec, "labor_cost", default=0) or 0)
+            if f_cost == Decimal("0") and s_cost == Decimal("0"):
+                f_cost = to_decimal(production_kg) * Decimal("120")
+                s_cost = to_decimal(production_kg) * Decimal("20")
+
+            batch_dict = {
+                "production_id": prod_id_clean,
+                "net_quantity_kg": production_kg,
+                "product_name_snapshot": field(rec, "product_name_snapshot", default="Papad"),
+                "production_date": field(rec, "production_date", default="") or now()[:10],
+            }
+            post_production_batch_journal(batch_dict, f_cost, s_cost, l_cost, actor)
+        except Exception as acct_err:
+            logger.error("Non-fatal accounting posting error for batch %s: %s", prod_id_clean, acct_err)
+            try:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": make_id("IncompleteTransactions"),
+                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
+                    "idempotency_key": f"acct-prod-{prod_id_clean}",
+                    "status": "POSTING_FAILED",
+                    "payload_json": json.dumps({"production_id": prod_id_clean, "type": "PRODUCTION"}),
+                    "error_details": str(acct_err),
+                    "created_at": now(),
+                    "updated_at": now(),
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception:
+                pass
+
         return {**rec, **updates}
+
 
 
 # -------------------------------------------------------------
@@ -2684,7 +2802,41 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         raise HTTPException(503, f"Packaging record saved but stock ledger writes failed ({exc}). Marked as INCOMPLETE. Reconcile before retrying.")
 
     db.log_audit(actor, "RECORD_PACKAGING", "PackagingBatches", pack_id, reason=f"Used {req.bulk_kg_used} kg, packed {total_packets} packets, variance {unexplained_variance:+.3f} kg")
+
+    # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+    try:
+        from app.accounting.postings import post_packaging_batch_journal
+        bulk_cost = to_decimal(req.bulk_kg_used) * Decimal("160.00")
+        mat_cost = to_decimal(total_packets) * Decimal("1.50")
+        lab_cost = to_decimal(total_packets) * Decimal("0.50")
+        pack_dict = {
+            "packaging_id": pack_id,
+            "product_name_snapshot": field(product, "product_name"),
+            "bulk_kg_used": req.bulk_kg_used,
+            "total_packets": total_packets,
+            "packaging_date": req.packaging_date or now()[:10],
+        }
+        post_packaging_batch_journal(pack_dict, bulk_cost, mat_cost, lab_cost, actor)
+    except Exception as acct_err:
+        logger.error("Non-fatal accounting posting error for packaging %s: %s", pack_id, acct_err)
+        try:
+            db.append_record("IncompleteTransactions", {
+                "transaction_id": make_id("IncompleteTransactions"),
+                "transaction_type": "ACCOUNTING_POSTING_PENDING",
+                "idempotency_key": f"acct-pack-{pack_id}",
+                "status": "POSTING_FAILED",
+                "payload_json": json.dumps({"packaging_id": pack_id, "type": "PACKAGING"}),
+                "error_details": str(acct_err),
+                "created_at": now(),
+                "updated_at": now(),
+                "resolved_by": "",
+                "resolved_at": "",
+            })
+        except Exception:
+            pass
+
     return rec
+
 
 
 @router.post("/packaging/{packaging_id}/recover")

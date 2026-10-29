@@ -364,6 +364,30 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
             raise HTTPException(status_code=503, detail=f"Sale {sale_id} rows were written but completion could not be marked. Retry the same idempotency key.")
         sale_record["txn_status"] = "COMPLETE"
         db.log_audit(user_id, "ISSUE_BILL", "Sales", sale_id, reason=f"Issued bill {bill_number} for ₹{bill_total:.2f} to {customer_name}")
+
+        # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+        try:
+            from app.accounting.postings import post_sale_journal
+            from app.calculations.units import to_decimal
+            cogs = sum(to_decimal(item.get("qualifying_kg", 0) or 0) * to_decimal("170.00") for item in validated)
+            post_sale_journal(sale_record, cogs, user_id)
+        except Exception as acct_err:
+            try:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": db.generate_id("IncompleteTransactions"),
+                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
+                    "idempotency_key": f"acct-sale-{sale_id}",
+                    "status": "POSTING_FAILED",
+                    "payload_json": f'{{"sale_id": "{sale_id}", "type": "SALE"}}',
+                    "error_details": str(acct_err),
+                    "created_at": now_iso(),
+                    "updated_at": now_iso(),
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception:
+                pass
+
         items = [_to_item(row) for row in _items_for(sale_id)]
         return _to_sale(sale_record, items, clean_key)
 
@@ -382,7 +406,18 @@ async def _resume_sale(existing: dict, validated: list, method: str, reference: 
         raise HTTPException(status_code=503, detail=f"Sale {sale_id} was recovered but completion could not be marked. Retry.")
     existing["txn_status"] = "COMPLETE"
     db.log_audit(user_id, "RECOVER_BILL", "Sales", sale_id, reason="Completed missing sale rows on retry")
+
+    # Double-Entry Accounting Journal Posting on Resumed Sale
+    try:
+        from app.accounting.postings import post_sale_journal
+        from app.calculations.units import to_decimal
+        cogs = sum(to_decimal(item.get("qualifying_kg", 0) or 0) * to_decimal("170.00") for item in validated)
+        post_sale_journal(existing, cogs, user_id)
+    except Exception:
+        pass
+
     return _to_sale(existing, [_to_item(row) for row in _items_for(sale_id)], clean_key)
+
 
 
 def _write_children(sale: dict, validated: list, method: str, reference: str, user_id: str, now: str):
@@ -581,6 +616,21 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
             raise HTTPException(status_code=503, detail="Could not update bill status to CANCELLED.")
 
         db.log_audit(user_id, "CANCEL_BILL", "Sales", sale_id, reason=f"Cancelled bill {bill_number} for ₹{bill_total:.2f}. Reason: {reason_text}")
+
+        # Double-Entry Accounting Compensating Reversal Voucher
+        try:
+            from app.accounting.journal_engine import reverse_journal_voucher
+            reverse_journal_voucher(
+                voucher_type="SALES_REVERSAL",
+                reference_type="SALE_INVOICE",
+                reference_id=sale_id,
+                reason=reason_text,
+                reversed_by=user_id,
+            )
+        except Exception:
+            pass
+
         return {"ok": True, "message": f"Bill {bill_number} cancelled and stock/payment reversed successfully."}
+
 
 

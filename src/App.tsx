@@ -19,7 +19,9 @@ import { UsersView } from './views/UsersView';
 import { ProductionView } from './views/ProductionView';
 import { AttendanceView } from './views/AttendanceView';
 import { ApprovalsView } from './views/ApprovalsView';
+import { AccountingView } from './views/AccountingView';
 import { AlertTriangle, AlertCircle, RefreshCw, X, ShieldAlert } from 'lucide-react';
+
 
 const MainAppContent: React.FC = () => {
   const {
@@ -112,8 +114,11 @@ const MainAppContent: React.FC = () => {
         return <SalaryView />;
       case 'reports':
         return <ReportsView />;
+      case 'accounting':
+        return <AccountingView />;
       case 'audit':
         return <AuditView />;
+
       case 'users':
         return <UsersView />;
       default:

@@ -15,12 +15,14 @@ import {
   Lock,
   Coins,
   FileText,
-  Shield,
   Activity,
+  Shield,
+  Scale,
   X,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
+
 
 export type ViewType =
   | 'dashboard'
@@ -37,8 +39,10 @@ export type ViewType =
   | 'closing'
   | 'salary'
   | 'reports'
+  | 'accounting'
   | 'users'
   | 'audit';
+
 
 interface NavigationProps {
   currentView: ViewType;
@@ -204,7 +208,14 @@ export const Navigation: React.FC<NavigationProps> = ({
           roles: ['OWNER', 'PA'],
         },
         {
+          view: 'accounting',
+          label: 'General Ledger & Accounts',
+          icon: <Scale size={18} />,
+          roles: ['OWNER', 'PA'],
+        },
+        {
           view: 'users',
+
           label: 'Team & Security',
           icon: <Shield size={18} />,
           roles: ['OWNER', 'PA'],
