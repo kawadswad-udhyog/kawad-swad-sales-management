@@ -31,7 +31,9 @@ from app.routers import (
     production,
     workspace,
     approvals,
+    accounting,
 )
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kawad_swad")
@@ -97,6 +99,7 @@ app.include_router(dashboard.router)
 app.include_router(audit.router)
 app.include_router(production.router)
 app.include_router(workspace.router)
+app.include_router(accounting.router)
 
 
 @app.on_event("startup")

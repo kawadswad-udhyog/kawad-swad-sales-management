@@ -45,9 +45,17 @@ ID_PREFIXES = {
     "RevokedTokens": "RVK",
     "ApprovalRequests": "REQ",
     "CustomRoles": "ROL",
+    "ChartOfAccounts": "ACC",
+    "JournalHeaders": "JRN",
+    "JournalLines": "JLN",
+    "AccountingPeriods": "PER",
 }
 
 REQUIRED_TABS = {
+    "ChartOfAccounts": ["account_code", "account_name", "account_type", "parent_code", "normal_balance", "is_reconciled", "active", "description"],
+    "JournalHeaders": ["journal_id", "journal_date", "voucher_type", "reference_type", "reference_id", "narration", "total_debit", "total_credit", "posted_by", "posted_at", "status", "reversal_of_id"],
+    "JournalLines": ["line_id", "journal_id", "line_no", "account_code", "account_name", "debit_amount", "credit_amount", "entity_type", "entity_id", "notes"],
+    "AccountingPeriods": ["period_id", "period_name", "start_date", "end_date", "is_closed", "closed_by", "closed_at"],
     "CustomRoles": ["role_id", "role_name", "description", "permissions_json", "created_by", "created_at", "updated_at"],
     "IdAllocations": ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
     "RevokedTokens": ["token_id", "jti", "user_id", "revoked_at", "expires_at", "reason"],
