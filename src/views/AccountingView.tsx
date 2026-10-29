@@ -6,11 +6,16 @@ import {
   fetchBalanceSheet,
   fetchJournalVouchers,
   reverseJournalVoucherApi,
+  fetchReconciliationReport,
+  executeReconciliation,
+  fetchOpeningBalanceProposal,
   AccountMaster,
   TrialBalanceResult,
   ProfitAndLossResult,
   BalanceSheetResult,
   JournalVoucherItem,
+  ReconcileResult,
+  OpeningBalanceProposal,
 } from '../services/api';
 import { useStore } from '../context/StoreContext';
 import {
@@ -29,13 +34,11 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 
-type AccountingTab = 'trial-balance' | 'pnl' | 'balance-sheet' | 'vouchers' | 'chart';
+type AccountingTab = 'trial-balance' | 'pnl' | 'balance-sheet' | 'vouchers' | 'chart' | 'reconciliation';
 
 export const AccountingView: React.FC = () => {
   const { currentUser } = useStore();
   const isOwnerOrAdmin = currentUser?.role === 'OWNER';
-
-
 
   const [activeTab, setActiveTab] = useState<AccountingTab>('trial-balance');
   const [asOfDate, setAsOfDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -52,6 +55,8 @@ export const AccountingView: React.FC = () => {
   const [balanceSheet, setBalanceSheet] = useState<BalanceSheetResult | null>(null);
   const [vouchers, setVouchers] = useState<JournalVoucherItem[]>([]);
   const [chartOfAccounts, setChartOfAccounts] = useState<AccountMaster[]>([]);
+  const [reconcileReport, setReconcileReport] = useState<ReconcileResult | null>(null);
+  const [openingProposal, setOpeningProposal] = useState<OpeningBalanceProposal | null>(null);
 
   // UI state
   const [loading, setLoading] = useState(false);
@@ -59,6 +64,8 @@ export const AccountingView: React.FC = () => {
   const [expandedVoucherId, setExpandedVoucherId] = useState<string | null>(null);
   const [voucherSearch, setVoucherSearch] = useState('');
   const [voucherTypeFilter, setVoucherTypeFilter] = useState('');
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileSuccess, setReconcileSuccess] = useState<string | null>(null);
 
   // Reversal modal state
   const [reversalTarget, setReversalTarget] = useState<JournalVoucherItem | null>(null);
@@ -85,6 +92,13 @@ export const AccountingView: React.FC = () => {
       } else if (activeTab === 'chart') {
         const data = await fetchChartOfAccounts();
         setChartOfAccounts(data);
+      } else if (activeTab === 'reconciliation') {
+        const [rec, op] = await Promise.all([
+          fetchReconciliationReport(),
+          fetchOpeningBalanceProposal(),
+        ]);
+        setReconcileReport(rec);
+        setOpeningProposal(op);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to fetch accounting records';
@@ -246,6 +260,17 @@ export const AccountingView: React.FC = () => {
         >
           <FileText size={15} />
           Chart of Accounts
+        </button>
+        <button
+          onClick={() => setActiveTab('reconciliation')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all ${
+            activeTab === 'reconciliation'
+              ? 'bg-emerald-800 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <RotateCcw size={15} />
+          Audit & Reconciliation
         </button>
       </div>
 
@@ -923,6 +948,217 @@ export const AccountingView: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* TAB 6: RECONCILIATION & AUDIT */}
+      {activeTab === 'reconciliation' && (
+        <div className="space-y-6">
+          {/* Top Actions */}
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <RotateCcw className="text-emerald-800" size={18} />
+                Operational vs General Ledger Reconciliation
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Audits raw materials, production batches, packaging, sales invoices, and collections against double-entry journal vouchers.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => {
+                  setReconciling(true);
+                  fetchReconciliationReport()
+                    .then(setReconcileReport)
+                    .catch((err) => setError(err.message))
+                    .finally(() => setReconciling(false));
+                }}
+                disabled={reconciling || loading}
+                className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
+              >
+                {reconciling ? 'Auditing…' : 'Run Dry-Run Audit'}
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    setReconciling(true);
+                    setError(null);
+                    setReconcileSuccess(null);
+                    const res = await executeReconciliation(false);
+                    setReconcileReport(res);
+                    setReconcileSuccess(`Reconciled ${res.reconciled_count} operational events successfully.`);
+                  } catch (err: unknown) {
+                    setError(err instanceof Error ? err.message : 'Reconciliation failed.');
+                  } finally {
+                    setReconciling(false);
+                  }
+                }}
+                disabled={reconciling || loading}
+                className="px-4 py-2 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-xl transition-colors disabled:opacity-50 flex items-center gap-1.5 shadow-sm"
+              >
+                <CheckCircle2 size={14} />
+                {reconciling ? 'Backfilling…' : 'Execute Backfill'}
+              </button>
+            </div>
+          </div>
+
+          {reconcileSuccess && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs rounded-xl flex items-center gap-2">
+              <CheckCircle2 size={16} className="text-emerald-700" />
+              <span>{reconcileSuccess}</span>
+            </div>
+          )}
+
+          {/* Metrics Overview */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                Unposted Operational Events
+              </span>
+              <span className="text-2xl font-black text-slate-900 mt-1 block">
+                {reconcileReport?.missing_count ?? 0}
+              </span>
+              <span className="text-[11px] text-slate-500 mt-0.5 block">
+                Transactions without journal vouchers
+              </span>
+            </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                Reconciled Vouchers
+              </span>
+              <span className="text-2xl font-black text-emerald-800 mt-1 block">
+                {reconcileReport?.reconciled_count ?? 0}
+              </span>
+              <span className="text-[11px] text-slate-500 mt-0.5 block">
+                Successfully posted this session
+              </span>
+            </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                Audit Discrepancies
+              </span>
+              <span className="text-2xl font-black text-rose-700 mt-1 block">
+                {reconcileReport?.error_count ?? 0}
+              </span>
+              <span className="text-[11px] text-slate-500 mt-0.5 block">
+                Processing exceptions / errors
+              </span>
+            </div>
+          </div>
+
+          {/* Unposted Events List */}
+          {reconcileReport?.missing_events && reconcileReport.missing_events.length > 0 && (
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                  Unposted Events Queue ({reconcileReport.missing_events.length})
+                </h3>
+              </div>
+              <div className="divide-y divide-slate-100">
+                {reconcileReport.missing_events.map((evt, idx) => (
+                  <div key={idx} className="p-3.5 flex items-center justify-between text-xs hover:bg-slate-50">
+                    <div>
+                      <div className="font-semibold text-slate-900">{evt.description}</div>
+                      <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                        Table: {evt.source_table} | Ref: {evt.reference_type}:{evt.reference_id} | Date: {evt.date}
+                      </div>
+                    </div>
+                    <span className="px-2 py-0.5 bg-amber-100 text-amber-900 rounded text-[10px] font-bold">
+                      Pending Voucher
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Opening Balance Proposal Section */}
+          {openingProposal && (
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <Landmark className="text-purple-700" size={16} />
+                    Opening Balance Derived Proposal (Assets = Liabilities + Equity)
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {openingProposal.note}
+                  </p>
+                </div>
+                <span
+                  className={`px-3 py-1 rounded-full text-xs font-black ${
+                    openingProposal.balance_check === 'BALANCED'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-rose-100 text-rose-800'
+                  }`}
+                >
+                  {openingProposal.balance_check}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50 p-3 rounded-xl text-xs">
+                <div>
+                  <span className="text-slate-500 block font-semibold">Derived Total Assets</span>
+                  <span className="font-mono font-bold text-slate-900 text-base">
+                    {formatCurrency(openingProposal.total_assets)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block font-semibold">Derived Total Liabilities</span>
+                  <span className="font-mono font-bold text-slate-900 text-base">
+                    {formatCurrency(openingProposal.total_liabilities)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block font-semibold">Balancing Owner Equity</span>
+                  <span className="font-mono font-bold text-emerald-800 text-base">
+                    {formatCurrency(openingProposal.owner_equity)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
+                    <tr>
+                      <th className="px-4 py-2.5">Code</th>
+                      <th className="px-4 py-2.5">Account Name</th>
+                      <th className="px-4 py-2.5 text-right">Debit (₹)</th>
+                      <th className="px-4 py-2.5 text-right">Credit (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                    {openingProposal.proposed_lines.map((line) => (
+                      <tr key={line.account_code}>
+                        <td className="px-4 py-2 font-mono font-bold text-slate-600">{line.account_code}</td>
+                        <td className="px-4 py-2">{line.account_name}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-900">
+                          {line.debit > 0 ? formatCurrency(line.debit) : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-900">
+                          {line.credit > 0 ? formatCurrency(line.credit) : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-slate-50 border-t border-slate-200 font-bold">
+                    <tr>
+                      <td colSpan={2} className="px-4 py-2.5 text-right text-slate-700 uppercase tracking-wider text-[11px]">
+                        Totals
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-slate-900">
+                        {formatCurrency(openingProposal.total_debits)}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-slate-900">
+                        {formatCurrency(openingProposal.total_credits)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

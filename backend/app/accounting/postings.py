@@ -20,13 +20,23 @@ def post_receipt_journal(
     Credit: Accounts Payable (2100)
     """
     txn_id = str(receipt_data.get("raw_material_txn_id") or receipt_data.get("transaction_id") or "").strip()
-    qty = to_decimal(receipt_data.get("quantity", 0) or receipt_data.get("quantity_received", 0) or 0)
-    rate = to_decimal(receipt_data.get("purchase_rate", 0) or receipt_data.get("rate_per_unit", 0) or 0)
+    qty = to_decimal(
+        receipt_data.get("quantity")
+        or receipt_data.get("quantity_kg")
+        or receipt_data.get("quantity_received")
+        or 0
+    )
+    rate = to_decimal(
+        receipt_data.get("purchase_rate")
+        or receipt_data.get("unit_price_inr")
+        or receipt_data.get("rate_per_unit")
+        or 0
+    )
     freight = to_decimal(receipt_data.get("freight_amount", 0) or 0)
-    gst = to_decimal(receipt_data.get("gst_amount", 0) or 0)
+    gst = to_decimal(receipt_data.get("gst_amount") or receipt_data.get("tax_amount") or 0)
     gst_treatment = str(receipt_data.get("gst_treatment", "RECOVERABLE_ITC")).upper()
 
-    mat_name = str(receipt_data.get("material_name", "")).strip()
+    mat_name = str(receipt_data.get("material_name") or receipt_data.get("material_name_snapshot") or "").strip()
     is_dal = "dal" in mat_name.lower() or "moong" in mat_name.lower() or "urad" in mat_name.lower() or "chana" in mat_name.lower()
     inv_code = "1210" if is_dal else "1215"
 
@@ -129,31 +139,34 @@ def post_production_batch_journal(
     qty_kg = to_decimal(batch_data.get("net_quantity_kg") or batch_data.get("quantity_kg", 0) or 0)
     p_name = str(batch_data.get("product_name_snapshot", "Papad"))
 
-    total_cost = flour_cost + spice_cost + labor_cost
+    r_flour = round_money(flour_cost)
+    r_spice = round_money(spice_cost)
+    r_labor = round_money(labor_cost)
+    r_total = r_flour + r_spice + r_labor
     lines = [
         {
             "account_code": "1230",
-            "debit_amount": round_money(total_cost),
+            "debit_amount": r_total,
             "notes": f"Bulk papad produced: {qty_kg} kg {p_name}",
         },
         {
             "account_code": "1220",
-            "credit_amount": round_money(flour_cost),
+            "credit_amount": r_flour,
             "notes": "Flour consumed in batch recipe",
         },
     ]
 
-    if spice_cost > Decimal("0"):
+    if r_spice > Decimal("0"):
         lines.append({
             "account_code": "1215",
-            "credit_amount": round_money(spice_cost),
+            "credit_amount": r_spice,
             "notes": "Spices and condiments consumed",
         })
 
-    if labor_cost > Decimal("0"):
+    if r_labor > Decimal("0"):
         lines.append({
             "account_code": "2120",
-            "credit_amount": round_money(labor_cost),
+            "credit_amount": r_labor,
             "notes": "Accrued rolling & pressing labor",
         })
 
@@ -186,31 +199,35 @@ def post_packaging_batch_journal(
     tot_packets = int(float(pack_data.get("total_packets", 0) or 0))
     p_name = str(pack_data.get("product_name_snapshot", "Papad"))
 
-    total_finished_cost = bulk_cost + packing_material_cost + packing_labor_cost
+    r_bulk = round_money(bulk_cost)
+    r_mat = round_money(packing_material_cost)
+    r_lab = round_money(packing_labor_cost)
+    r_finished = r_bulk + r_mat + r_lab
+
     lines = [
         {
             "account_code": "1240",
-            "debit_amount": round_money(total_finished_cost),
+            "debit_amount": r_finished,
             "notes": f"Finished packet addition: {tot_packets} packets of {p_name}",
         },
         {
             "account_code": "1230",
-            "credit_amount": round_money(bulk_cost),
+            "credit_amount": r_bulk,
             "notes": f"Bulk papad consumed: {pack_data.get('bulk_kg_used')} kg",
         },
     ]
 
-    if packing_material_cost > Decimal("0"):
+    if r_mat > Decimal("0"):
         lines.append({
             "account_code": "1250",
-            "credit_amount": round_money(packing_material_cost),
+            "credit_amount": r_mat,
             "notes": "Printed film pouches & cartons consumed",
         })
 
-    if packing_labor_cost > Decimal("0"):
+    if r_lab > Decimal("0"):
         lines.append({
             "account_code": "2120",
-            "credit_amount": round_money(packing_labor_cost),
+            "credit_amount": r_lab,
             "notes": "Direct packaging and sealing labor",
         })
 
@@ -227,14 +244,15 @@ def post_packaging_batch_journal(
 
 def post_sale_journal(
     sale_data: Dict[str, Any],
-    estimated_cogs: Decimal,
-    actor: str,
+    estimated_cogs: Decimal = Decimal("0"),
+    actor: str = "OPERATOR",
 ) -> Dict[str, Any]:
     """
     Sales Billing & COGS Recognition:
     Leg 1: Revenue Recognition
-      Debit: Field Salesman Van Cash / Cash in Transit (1115) [if CASH] OR Accounts Receivable (1130)
-      Credit: Papad Sales Revenue (4100)
+      Debit: Field Salesman Van Cash / Cash in Transit (1115) [if CASH] OR Bank (1120) OR Accounts Receivable (1130)
+      Credit: Papad Sales Revenue (4100) [Net of GST]
+      Credit: Output CGST Payable (2210) & Output SGST Payable (2220) [if tax applied]
     Leg 2: Inventory Reduction & Cost of Goods Sold
       Debit: Cost of Goods Sold - Papad (5100)
       Credit: Finished Goods Inventory - Packaged SKUs (1240)
@@ -242,6 +260,7 @@ def post_sale_journal(
     sale_id = str(sale_data.get("sale_id", "")).strip()
     bill_no = str(sale_data.get("bill_number", "")).strip()
     bill_total = to_decimal(sale_data.get("bill_total", 0) or 0)
+    tax_amt = to_decimal(sale_data.get("tax_amount", 0) or 0)
     pay_method = str(sale_data.get("payment_method", "CASH")).upper()
 
     # Cash collected on van delivery routes is held as Van Cash (1115) until daily closing
@@ -254,12 +273,35 @@ def post_sale_journal(
             "debit_amount": round_money(bill_total),
             "notes": f"Sale settlement via {pay_method} for bill {bill_no}",
         },
-        {
+    ]
+
+    if tax_amt > Decimal("0"):
+        cgst_dec = tax_amt / Decimal("2")
+        sgst_dec = tax_amt - cgst_dec
+        cgst = round_money(cgst_dec)
+        sgst = round_money(sgst_dec)
+        net_revenue = round_money(bill_total - tax_amt)
+        lines.append({
+            "account_code": "4100",
+            "credit_amount": net_revenue,
+            "notes": f"Net papad revenue from bill {bill_no}",
+        })
+        lines.append({
+            "account_code": "2210",
+            "credit_amount": cgst,
+            "notes": f"Output CGST collected on bill {bill_no}",
+        })
+        lines.append({
+            "account_code": "2220",
+            "credit_amount": sgst,
+            "notes": f"Output SGST collected on bill {bill_no}",
+        })
+    else:
+        lines.append({
             "account_code": "4100",
             "credit_amount": round_money(bill_total),
             "notes": f"Revenue from bill {bill_no} to {sale_data.get('customer_name_snapshot', 'Customer')}",
-        },
-    ]
+        })
 
     # COGS Entry (if unit cost available)
     if estimated_cogs > Decimal("0"):
@@ -283,6 +325,7 @@ def post_sale_journal(
         posted_by=actor,
         journal_date=str(sale_data.get("sale_datetime", "")).strip()[:10] or None,
     )
+
 
 
 def post_daily_closing_cash_remittance_journal(

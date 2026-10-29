@@ -5,7 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 
-from app.models import Sale, SaleCreate, SaleItem
+from app.models import Sale, SaleCreate, SaleItem, SalePaymentCreate
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_manager, is_salesman
@@ -631,6 +631,112 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
             pass
 
         return {"ok": True, "message": f"Bill {bill_number} cancelled and stock/payment reversed successfully."}
+
+
+@router.post("/{sale_id}/payments", dependencies=[Depends(require_sheets_connection)])
+async def record_sale_payment(
+    sale_id: str,
+    payload: SalePaymentCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = str(current_user.get("user_id", "")).strip()
+    username = str(current_user.get("username", "OPERATOR")).strip()
+
+    async with _sales_lock:
+        sales = db.get_records("Sales", fresh=True)
+        sale = next((s for s in sales if str(s.get("sale_id", "")).strip() == sale_id), None)
+        if not sale:
+            raise HTTPException(status_code=404, detail=f"Sale {sale_id} not found.")
+
+        if str(sale.get("bill_status", "")).upper() == "CANCELLED":
+            raise HTTPException(status_code=400, detail="Cannot record payment for a cancelled bill.")
+
+        bill_total = round(float(sale.get("bill_total", 0) or 0), 2)
+        payments = [
+            p for p in db.get_records("Payments", fresh=True)
+            if str(p.get("sale_id", "")).strip() == sale_id and str(p.get("payment_status", "")).upper() != "REFUNDED"
+        ]
+        total_paid_so_far = round(sum(float(p.get("amount", 0) or 0) for p in payments), 2)
+        remaining_balance = round(bill_total - total_paid_so_far, 2)
+
+        if payload.amount <= 0:
+            raise HTTPException(status_code=400, detail="Payment amount must be greater than zero.")
+
+        if payload.amount > remaining_balance + 0.05:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Payment amount ₹{payload.amount:.2f} exceeds remaining balance of ₹{remaining_balance:.2f}."
+            )
+
+        now = now_iso()
+        payment_id = db.generate_id("Payments")
+        pay_method = str(payload.payment_method or "CASH").upper()
+        ref_num = payload.reference_number or str(sale.get("bill_number", ""))
+
+        payment_record = {
+            "payment_id": payment_id,
+            "sale_id": sale_id,
+            "payment_datetime": now,
+            "payment_method": pay_method,
+            "amount": round(payload.amount, 2),
+            "reference_number": ref_num,
+            "received_by_user_id": user_id,
+            "payment_status": "COLLECTED",
+            "notes": payload.notes or f"Customer collection against bill {sale.get('bill_number')}",
+        }
+        db.append_record("Payments", payment_record, raise_on_error=True)
+
+        if pay_method == "CASH":
+            db.append_record("CashLedger", {
+                "cash_txn_id": db.generate_id("CashLedger"),
+                "txn_datetime": now,
+                "salesman_user_id": str(sale.get("salesman_user_id", "")) or user_id,
+                "txn_type": "SALE_COLLECTION",
+                "amount": round(payload.amount, 2),
+                "payment_method": "CASH",
+                "related_sale_id": sale_id,
+                "related_expense_id": "",
+                "issued_by_user_id": str(sale.get("customer_id", "")) or "CUSTOMER",
+                "received_by_user_id": user_id,
+                "confirmed_by_user_id": user_id,
+                "reference_id": ref_num,
+                "notes": f"Cash collection for bill {sale.get('bill_number')}",
+            }, raise_on_error=True)
+
+        new_total_paid = round(total_paid_so_far + payload.amount, 2)
+        new_balance = max(0.0, round(bill_total - new_total_paid, 2))
+        new_status = "PAID" if new_balance <= 0.05 else "PARTIALLY_PAID"
+
+        db.update_record("Sales", "sale_id", sale_id, {
+            "payment_status": new_status,
+        }, raise_on_error=True)
+
+        db.log_audit(
+            user_id,
+            "RECORD_PAYMENT",
+            "Payments",
+            payment_id,
+            reason=f"Recorded {pay_method} collection of ₹{payload.amount:.2f} for bill {sale.get('bill_number')}",
+        )
+
+        journal_res = None
+        try:
+            from app.accounting.postings import post_payment_collection_journal
+            journal_res = post_payment_collection_journal(payment_record, actor=username)
+        except Exception as e:
+            import logging
+            logging.error(f"Non-fatal accounting posting error for payment {payment_id}: {e}")
+
+        return {
+            "ok": True,
+            "payment_id": payment_id,
+            "sale_id": sale_id,
+            "amount_paid": round(payload.amount, 2),
+            "remaining_balance": new_balance,
+            "payment_status": new_status,
+            "journal_result": journal_res,
+        }
+
 
 
 

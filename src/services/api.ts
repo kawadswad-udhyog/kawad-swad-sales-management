@@ -883,4 +883,73 @@ export async function reverseJournalVoucherApi(journalId: string, reason: string
   });
 }
 
+export interface ReconcileResult {
+  status: string;
+  dry_run: boolean;
+  missing_count: number;
+  reconciled_count: number;
+  error_count: number;
+  missing_events: Array<{
+    source_table: string;
+    reference_type: string;
+    reference_id: string;
+    date: string;
+    description: string;
+  }>;
+  reconciled_events: Array<{
+    source_table: string;
+    reference_type: string;
+    reference_id: string;
+    voucher_id?: string;
+  }>;
+  errors: Array<{
+    source_table: string;
+    reference_type: string;
+    reference_id: string;
+    error: string;
+  }>;
+}
+
+export interface OpeningBalanceProposal {
+  status: string;
+  balance_check: string;
+  total_assets: number;
+  total_liabilities: number;
+  owner_equity: number;
+  total_debits: number;
+  total_credits: number;
+  proposed_lines: Array<{
+    account_code: string;
+    account_name: string;
+    debit: number;
+    credit: number;
+  }>;
+  note: string;
+}
+
+export async function fetchReconciliationReport(): Promise<ReconcileResult> {
+  return apiRequest<ReconcileResult>('/api/accounting/reconcile');
+}
+
+export async function executeReconciliation(dryRun = false): Promise<ReconcileResult> {
+  return apiRequest<ReconcileResult>(`/api/accounting/reconcile?dry_run=${dryRun}`, {
+    method: 'POST',
+  });
+}
+
+export async function fetchOpeningBalanceProposal(): Promise<OpeningBalanceProposal> {
+  return apiRequest<OpeningBalanceProposal>('/api/accounting/opening-balances/proposal');
+}
+
+export async function recordSalePaymentApi(
+  saleId: string,
+  payment: { amount: number; payment_method: string; reference_number?: string; notes?: string }
+): Promise<{ ok: boolean; payment_id: string; sale_id: string; amount_paid: number; remaining_balance: number; payment_status: string }> {
+  return apiRequest(`/api/sales/${encodeURIComponent(saleId)}/payments`, {
+    method: 'POST',
+    body: JSON.stringify(payment),
+  });
+}
+
+
 

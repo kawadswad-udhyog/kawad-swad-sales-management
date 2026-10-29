@@ -145,3 +145,32 @@ async def reverse_voucher(
         raise HTTPException(400, detail=str(val_err))
     except Exception as exc:
         raise HTTPException(500, detail=f"Failed to reverse voucher: {exc}")
+
+
+@router.get("/reconcile")
+async def audit_reconcile_get(
+    user: dict = Depends(get_current_user),
+):
+    require_accounting_access(user)
+    from app.accounting.reconciliation import audit_and_reconcile_operational_events
+    return audit_and_reconcile_operational_events(dry_run=True)
+
+
+@router.post("/reconcile")
+async def audit_reconcile_post(
+    dry_run: bool = Query(False),
+    user: dict = Depends(get_current_user),
+):
+    actor, _ = require_accounting_access(user)
+    from app.accounting.reconciliation import audit_and_reconcile_operational_events
+    return audit_and_reconcile_operational_events(dry_run=dry_run, actor=actor)
+
+
+@router.get("/opening-balances/proposal")
+async def get_opening_balance_proposal(
+    user: dict = Depends(get_current_user),
+):
+    require_accounting_access(user)
+    from app.accounting.reconciliation import propose_opening_balances
+    return propose_opening_balances()
+

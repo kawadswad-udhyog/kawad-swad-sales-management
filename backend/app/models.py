@@ -237,6 +237,12 @@ class Sale(BaseModel):
     payment_method: Optional[str] = ""
     payment_reference: Optional[str] = ""
 
+class SalePaymentCreate(BaseModel):
+    amount: float = Field(..., gt=0)
+    payment_method: str = "CASH"
+    reference_number: Optional[str] = ""
+    notes: Optional[str] = ""
+
 # Stock Models
 class CompanyStockItem(BaseModel):
     product_id: str

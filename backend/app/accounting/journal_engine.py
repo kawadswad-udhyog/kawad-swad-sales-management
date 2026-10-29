@@ -74,30 +74,39 @@ def post_journal_voucher(
     idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Idempotent journal voucher posting.
-    If a voucher with the same reference_type and reference_id already exists,
-    returns the existing voucher to prevent duplicate ledger debits/credits.
+    Idempotent, fail-closed journal voucher posting.
+    - Validates debit/credit equality first.
+    - Replay returns existing voucher if identical.
+    - Replaying with conflicting financial amounts is rejected with ValueError.
+    - Partial writes are prevented by writing header in INCOMPLETE state and transitioning to POSTED only upon line verification.
     """
     clean_ref_type = str(reference_type or "").strip().upper()
     clean_ref_id = str(reference_id or "").strip()
 
-    # 1. Idempotency Check
+    # 1. Strict Balance & Schema Validation First
+    total_debit, total_credit = validate_journal_lines(lines)
+
+    # 2. Idempotency & Conflict Check
     existing_headers = db.get_records("JournalHeaders", fresh=True)
     for row in existing_headers:
         if (
             str(row.get("reference_type", "")).strip().upper() == clean_ref_type
             and str(row.get("reference_id", "")).strip() == clean_ref_id
-            and str(row.get("status", "")).strip().upper() == "POSTED"
         ):
-            logger.info("Journal voucher already exists for %s:%s. Replaying.", clean_ref_type, clean_ref_id)
-            existing_lines = [
-                l for l in db.get_records("JournalLines", fresh=True)
-                if str(l.get("journal_id")) == str(row.get("journal_id"))
-            ]
-            return {**row, "lines": existing_lines, "is_replay": True}
-
-    # 2. Strict Balance & Schema Validation
-    total_debit, total_credit = validate_journal_lines(lines)
+            status = str(row.get("status", "")).strip().upper()
+            if status in {"POSTED", "VALID"}:
+                existing_debit = to_decimal(row.get("total_debit", 0) or 0)
+                if abs(total_debit - existing_debit) > _BALANCE_TOLERANCE:
+                    raise ValueError(
+                        f"Conflict: Reference {clean_ref_type}:{clean_ref_id} already exists with total ₹{float(existing_debit):.2f}, "
+                        f"cannot reuse with conflicting payload total ₹{float(total_debit):.2f}."
+                    )
+                logger.info("Journal voucher already exists for %s:%s. Replaying.", clean_ref_type, clean_ref_id)
+                existing_lines = [
+                    l for l in db.get_records("JournalLines", fresh=True)
+                    if str(l.get("journal_id")) == str(row.get("journal_id"))
+                ]
+                return {**row, "lines": existing_lines, "is_replay": True}
 
     # 3. Generate IDs
     journal_id = db.generate_id("JournalHeaders") if hasattr(db, "generate_id") else f"JRN-{clean_ref_id}"
@@ -115,35 +124,52 @@ def post_journal_voucher(
         "total_credit": round_money(total_credit),
         "posted_by": posted_by,
         "posted_at": iso_now,
-        "status": "POSTED",
+        "status": "INCOMPLETE",
         "reversal_of_id": "",
     }
 
-    # 4. Write Header
+    # 4. Write Header in INCOMPLETE state (fail-closed protection against partial writes)
     if not db.append_record("JournalHeaders", header_record, raise_on_error=True):
         raise RuntimeError(f"Could not persist JournalHeader for {clean_ref_type}:{clean_ref_id}")
 
     # 5. Write Lines
     saved_lines = []
-    for idx, line in enumerate(lines):
-        code = str(line["account_code"]).strip()
-        account_meta = ACCOUNT_LOOKUP[code]
-        line_id = f"{journal_id}-L{idx + 1}"
-        line_record = {
-            "line_id": line_id,
-            "journal_id": journal_id,
-            "line_no": idx + 1,
-            "account_code": code,
-            "account_name": account_meta["account_name"],
-            "debit_amount": round_money(to_decimal(line.get("debit_amount", 0) or 0)),
-            "credit_amount": round_money(to_decimal(line.get("credit_amount", 0) or 0)),
-            "entity_type": str(line.get("entity_type", "")).strip(),
-            "entity_id": str(line.get("entity_id", "")).strip(),
-            "notes": str(line.get("notes", "")).strip(),
-        }
-        if not db.append_record("JournalLines", line_record, raise_on_error=True):
-            raise RuntimeError(f"Could not persist JournalLine {line_id} for {journal_id}")
-        saved_lines.append(line_record)
+    try:
+        for idx, line in enumerate(lines):
+            code = str(line["account_code"]).strip()
+            account_meta = ACCOUNT_LOOKUP[code]
+            line_id = f"{journal_id}-L{idx + 1}"
+            line_record = {
+                "line_id": line_id,
+                "journal_id": journal_id,
+                "line_no": idx + 1,
+                "account_code": code,
+                "account_name": account_meta["account_name"],
+                "debit_amount": round_money(to_decimal(line.get("debit_amount", 0) or 0)),
+                "credit_amount": round_money(to_decimal(line.get("credit_amount", 0) or 0)),
+                "entity_type": str(line.get("entity_type", "")).strip(),
+                "entity_id": str(line.get("entity_id", "")).strip(),
+                "notes": str(line.get("notes", "")).strip(),
+            }
+            if not db.append_record("JournalLines", line_record, raise_on_error=True):
+                raise RuntimeError(f"Could not persist JournalLine {line_id} for {journal_id}")
+            saved_lines.append(line_record)
+
+        # 6. Verify and Transition Header to POSTED Status
+        if not db.update_record("JournalHeaders", "journal_id", journal_id, {"status": "POSTED"}):
+            raise RuntimeError(f"Failed to activate JournalHeader {journal_id} to POSTED status.")
+        header_record["status"] = "POSTED"
+
+    except Exception as exc:
+        logger.error("Partial journal write failed for %s:%s: %s. Marking header FAILED.", clean_ref_type, clean_ref_id, exc)
+        try:
+            db.update_record("JournalHeaders", "journal_id", journal_id, {
+                "status": "FAILED",
+                "narration": f"[PARTIAL_WRITE_FAILED: {exc}] {header_record.get('narration', '')}".strip()[:200]
+            })
+        except Exception:
+            pass
+        raise RuntimeError(f"Journal voucher write failed: {exc}. Incomplete header will not affect balances.") from exc
 
     db.log_audit(
         actor=posted_by,
@@ -154,6 +180,7 @@ def post_journal_voucher(
     )
 
     return {**header_record, "lines": saved_lines, "is_replay": False}
+
 
 
 def reverse_journal_voucher(
@@ -206,10 +233,13 @@ def reverse_journal_voucher(
     return rev_voucher
 
 
-def calculate_trial_balance(as_of_date: Optional[str] = None) -> Dict[str, Any]:
+def calculate_trial_balance(
+    start_date: Optional[str] = None,
+    as_of_date: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Authoritative double-entry trial balance generator.
-    Sums all posted journal lines across all active accounts.
+    Sums all posted journal lines across all active accounts within [start_date, as_of_date].
     Guarantees Total Debits == Total Credits.
     """
     headers = {str(h["journal_id"]): h for h in db.get_records("JournalHeaders", fresh=True)}
@@ -234,8 +264,10 @@ def calculate_trial_balance(as_of_date: Optional[str] = None) -> Dict[str, Any]:
         if not hdr or str(hdr.get("status", "")).upper() not in {"POSTED", "VALID", "REVERSED"}:
             continue
 
-
-        if as_of_date and str(hdr.get("journal_date", "")) > as_of_date:
+        j_date = str(hdr.get("journal_date", "")).strip()[:10]
+        if start_date and j_date and j_date < start_date:
+            continue
+        if as_of_date and j_date and j_date > as_of_date:
             continue
 
         code = str(line.get("account_code", "")).strip()
@@ -281,15 +313,17 @@ def calculate_trial_balance(as_of_date: Optional[str] = None) -> Dict[str, Any]:
     is_balanced = abs(grand_total_debit - grand_total_credit) <= _BALANCE_TOLERANCE
 
     return {
+        "start_date": start_date or "OPENING",
         "as_of_date": as_of_date or business_today(),
         "is_balanced": is_balanced,
         "grand_total_debit": round_money(grand_total_debit),
         "grand_total_credit": round_money(grand_total_credit),
+        "total_debits": round_money(grand_total_debit),
+        "total_credits": round_money(grand_total_credit),
         "difference": round_money(abs(grand_total_debit - grand_total_credit)),
         "rows": rows,
         "lines": rows,
     }
-
 
 
 def calculate_profit_and_loss(
@@ -300,8 +334,10 @@ def calculate_profit_and_loss(
     Authoritative Profit & Loss Statement (P&L):
     Operating Revenue - Cost of Goods Sold = Gross Profit
     Gross Profit - Operating Expenses = Net Operating Profit
+    Strictly filters vouchers within [start_date, end_date].
     """
-    tb = calculate_trial_balance(as_of_date=end_date)
+    tb = calculate_trial_balance(start_date=start_date, as_of_date=end_date)
+
     revenue_rows = []
     cogs_rows = []
     operating_expense_rows = []
@@ -340,6 +376,7 @@ def calculate_profit_and_loss(
         "gross_margin_pct": round(float(gross_profit / total_revenue * Decimal("100")), 2) if total_revenue > 0 else 0.0,
         "total_operating_expenses": round_money(total_opex),
         "net_operating_profit": round_money(net_operating_profit),
+        "net_profit": round_money(net_operating_profit),
         "net_margin_pct": round(float(net_operating_profit / total_revenue * Decimal("100")), 2) if total_revenue > 0 else 0.0,
         "revenue_breakdown": revenue_rows,
         "cogs_breakdown": cogs_rows,
