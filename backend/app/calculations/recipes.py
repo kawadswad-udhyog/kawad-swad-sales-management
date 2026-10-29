@@ -53,14 +53,20 @@ def validate_recipe_formulation(
         if not unit:
             raise ValueError(f"Ingredient '{name}' has missing unit")
 
-        # Check formulation constraints
+        # Check formulation constraints: Whole dal is NEVER consumed directly by papad recipes (flour only)
+        name_lower = name.lower()
+        if any(w in name_lower for w in ["whole dal", "whole moong", "whole urad", "whole chana", "whole grain"]) or name.startswith("RM-WHOLE-"):
+            raise ValueError(
+                f"Formulation violation: Papad recipes require milled flour, not whole grain or whole dal ('{name}')."
+            )
+
         if is_moong_master:
-            name_lower = name.lower()
             for forbidden in FORBIDDEN_INGREDIENTS["MOONG_MASTER"]:
                 if forbidden in name_lower:
                     raise ValueError(
                         f"Formulation violation: Moong Master Papad must not contain '{name}' ({forbidden})."
                     )
+
 
 
 def scale_recipe(

@@ -2052,6 +2052,13 @@ def execute_material_issue(
             canonical_name = str(field(mat_row, "material_name", default=item_name)).strip()
             stock_unit = str(field(mat_row, "unit", default="kg")).strip()
 
+            mat_cat = str(field(mat_row, "category", default="")).strip().upper()
+            if mat_cat == "WHOLE_GRAIN" or "whole" in canonical_name.lower() or raw_mat_id.startswith("RM-WHOLE-"):
+                raise HTTPException(
+                    400,
+                    f"Formulation violation: Cannot issue '{canonical_name}' for papad production. Whole dal cannot be consumed directly by papad recipes; it must first be milled into flour."
+                )
+
             if item.get("quantity_per_kg") is not None:
                 item_qty_per_kg = float(item["quantity_per_kg"] or 0)
                 item_unit = str(item.get("unit", stock_unit)).strip()

@@ -39,3 +39,5 @@ services:
         value: production
       - key: SALES_TOKEN_HOURS
         value: "8"
+      - key: WEB_CONCURRENCY
+        value: "1"
