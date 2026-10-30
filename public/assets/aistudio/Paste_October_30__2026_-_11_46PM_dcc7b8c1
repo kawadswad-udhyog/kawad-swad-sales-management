@@ -1,0 +1,1059 @@
+# KAWAD SWAD ERP
+
+## COMPLETE SYSTEM UPGRADE AND IMPLEMENTATION
+
+### All Priorities | Existing System | End-to-End Implementation
+
+Gemini, you are the lead software architect, senior full-stack developer, backend engineer, database and Google Sheets integration engineer, accounting systems engineer, inventory specialist, and UI/UX engineer for Kawad Swad ERP.
+
+Your task is to implement the COMPLETE ERP UPGRADE directly in the existing repository.
+
+This is an implementation assignment, not a planning assignment.
+
+Do not give me another plan.
+Do not stop after auditing the repository.
+Do not merely suggest code changes.
+Do not create documentation in place of implementing functionality.
+Do not spend this task running tests, audits, type checks, builds, or validation commands.
+Do not wait for approval between priorities.
+Do not implement only the first priority and leave the rest unfinished.
+
+Implement all priorities in one continuous task, following the existing architecture and preserving working functionality.
+
+If a command, API, or service is needed to understand how an existing module works, inspect the relevant source code and implement against it. Avoid executing test suites or verification workflows because this task is implementation-only.
+
+---
+
+# 1. EXISTING SYSTEM AND SOURCE OF TRUTH
+
+Work inside the existing Kawad Swad ERP repository.
+
+The repository already contains substantial functionality, including:
+
+* React frontend.
+* FastAPI backend.
+* Google Sheets persistence.
+* Product management.
+* Customer management.
+* Raw-material management.
+* Recipe management.
+* Production management.
+* Milling and material conversion functionality.
+* Packaging management.
+* Finished-stock and inventory calculations.
+* Sales management.
+* Invoices and payments.
+* Dispatch-related functionality.
+* Expenses.
+* Employees and attendance.
+* User authentication and authorization.
+* Approvals.
+* Audit functionality.
+* Accounting and journal engine.
+* Reconciliation and period closing.
+* Dashboard and reports.
+* Automated tests and deployment configuration.
+
+Previously inspected code locations include:
+
+* `backend/app/routers/production.py`
+* `backend/app/routers/sales.py`
+* `backend/app/routers/accounting.py`
+* `backend/app/calculations/inventory.py`
+* `backend/app/calculations/production.py`
+* `backend/app/calculations/packaging.py`
+* `backend/app/accounting/journal_engine.py`
+* `backend/app/sheets.py`
+
+These are starting references, not an exhaustive list.
+
+The existing system is the foundation. Upgrade it rather than replacing it with a new application.
+
+Preserve existing API contracts, working screens, business identifiers, configuration conventions, and data structures wherever possible. When changes are necessary, update every dependent component together.
+
+## Google Sheets baseline
+
+The workbook currently has 62 tabs, including the 16 newly created sheet structures.
+
+The latest spreadsheet audit reported:
+
+* Header issues: 0.
+* Data-quality findings: 44.
+* No business-record modifications by the audit itself.
+
+The 44 findings are not necessarily 44 confirmed errors. Some are informational or require investigation.
+
+Previously reported issues include:
+
+* 19 raw-material stock initialization findings.
+* 2 packaging quantity discrepancies.
+* 4 recipe-related pending-status findings.
+* 3 possible expense category mismatches.
+* 3 expenses awaiting approval.
+* Potential test customer data.
+* Inconsistent Boolean representations.
+* Missing purchase-receipt and milling movement types in the observed raw-material ledger.
+* Empty sales or accounting sheets in the uploaded workbook.
+
+Do not assume these exported findings fully describe current live data. Do not invent missing quantities, approvals, financial entries, or stock balances.
+
+---
+
+# 2. IMPLEMENTATION RULES
+
+Follow these rules throughout the entire implementation.
+
+## 2.1 Implement, do not just describe
+
+For every priority below:
+
+1. Inspect the relevant existing implementation.
+2. Modify or add the required code.
+3. Connect backend services, persistence, APIs, and frontend screens.
+4. Preserve existing functionality.
+5. Continue to the next priority without waiting for approval.
+
+Do not finish after producing an architecture document, checklist, pseudocode, migration plan, or list of recommendations.
+
+## 2.2 No test or verification phase during this task
+
+The user has explicitly requested implementation without running tests or checks.
+
+Therefore:
+
+* Do not run pytest.
+* Do not run unit or integration test suites.
+* Do not run lint commands.
+* Do not run type checking.
+* Do not run production builds for validation.
+* Do not execute deployment verification.
+* Do not run automated data-quality audits.
+* Do not claim that the system passed tests or is production-ready.
+
+Static source inspection needed to implement the changes is allowed. Do not spend the task executing verification commands.
+
+## 2.3 Protect business data
+
+Never:
+
+* Delete operational sheets.
+* Clear existing sheet contents.
+* Replace existing production records with sample records.
+* Automatically approve recipes.
+* Guess physical stock balances.
+* Invent opening accounting balances.
+* Delete customer, payment, invoice, or journal records to make the data appear consistent.
+* Rewrite historical transactions without a traceable correction process.
+* Put production credentials or secrets in source code.
+
+Keep the following existing tabs untouched unless a required integration specifically needs to write valid business transactions to them:
+
+`Products`, `Customers`, `Recipes`, `RawMaterials`, `RawMaterialLedger`, `ProductionBatches`, `PackagingBatches`, `ProductionStockLedger`, `ProductionDispatches`, `Sales`, `SaleItems`, `Payments`, `SalesmanStockLedger`, `CashLedger`, `Expenses`, `Users`, `AuthUsers`, `Settings`, `IdAllocations`, `AuditLog`, `ApprovalRequests`, `ChartOfAccounts`, `JournalHeaders`, `JournalLines`, and `AccountingPeriods`.
+
+Do not delete or archive these documentation or maintenance tabs:
+
+`Upgrade_Roadmap`, `Upgrade_Sheets_Audit`, `Gap_Assessment`, `Implementation_Tracker`, `ERPNext_Reference`, `Acceptance_Criteria`, `Change_Log`, `ID_Audit_Report`, `ID_Exception_Details`, and `RawMaterialLedger_ID_Repair_Pre`.
+
+The user has explicitly deferred their removal.
+
+## 2.4 Respect the actual Google Sheets schemas
+
+Use the existing workbook headers and the latest schema-upgrade script as references.
+
+Do not casually rename columns or create competing schemas.
+
+For every new sheet, use the exact existing header contract defined by the current implementation.
+
+If the code and workbook disagree, make the smallest compatible code change necessary and preserve existing data.
+
+## 2.5 Avoid duplicate implementations
+
+Before adding a feature, inspect the existing modules.
+
+If milling, inventory movements, approvals, or accounting already exist, extend the current implementation instead of creating a second unrelated mechanism.
+
+Every business action must have one authoritative implementation path.
+
+---
+
+# 3. PRIORITY ONE: INVENTORY AND STOCK INTEGRITY
+
+Upgrade the inventory subsystem so that all stock-changing activities are traceable and consistent.
+
+## 3.1 Unified stock movement architecture
+
+Create or strengthen a common stock movement service that supports the existing inventory architecture.
+
+Every applicable movement must record:
+
+* Unique movement ID.
+* Movement type.
+* Transaction date.
+* Product or raw-material ID.
+* Quantity.
+* Unit of measure.
+* Source location and destination location, where applicable.
+* Source transaction type and ID.
+* Production batch or product lot, where applicable.
+* User who performed the action.
+* Creation timestamp.
+* Status.
+* Reversal reference, when applicable.
+* Notes or reason for adjustments.
+
+Support the business movement categories required by existing workflows, including:
+
+* Opening balance.
+* Purchase receipt.
+* Production consumption.
+* Milling input and output.
+* Production output.
+* Bulk-to-packaged conversion.
+* Dispatch.
+* Customer return.
+* Supplier return.
+* Approved stock adjustment.
+* Reversal.
+
+Use existing movement naming conventions where they are already established.
+
+Do not double-count movements already recorded by existing production or packaging processes.
+
+## 3.2 Stock calculation
+
+Implement or consolidate the appropriate stock calculation rules.
+
+Conceptually:
+
+Closing stock = Opening stock + Receipts + Production output + Accepted returns - Consumption - Dispatch - Supplier returns - Other valid issues ± Approved adjustments.
+
+Apply the correct movement signs for each product or material.
+
+Do not assume that every movement category applies to every stock type.
+
+## 3.3 Raw-material receiving
+
+Implement purchasing-related receipt integration.
+
+A purchase order alone must not increase stock.
+
+An accepted goods receipt must create the appropriate stock movement.
+
+Rejected quantities must remain distinguishable from accepted quantities.
+
+Support partial deliveries and multiple receipts against one purchase order.
+
+Prevent over-receipt where business rules prohibit it, or require authorized handling when over-receipt is allowed.
+
+## 3.4 Raw-material consumption
+
+Connect production consumption to the stock movement architecture.
+
+Prevent duplicate consumption when requests are retried.
+
+Preserve production batch references.
+
+Make failed or incomplete operations recoverable without blindly repeating stock deductions.
+
+## 3.5 Opening stock and reconciliation
+
+Implement safe reconciliation facilities.
+
+Never invent opening stock.
+
+Allow authorized users to record a verified opening balance with supporting information.
+
+Preserve the previous value and an audit trail for corrections.
+
+Where stock cannot be reconciled, record an explicit unresolved discrepancy instead of silently changing the quantity.
+
+---
+
+# 4. PRIORITY TWO: PRODUCTION, RECIPES, MILLING, AND PACKAGING
+
+Upgrade the full factory workflow.
+
+Required flow:
+
+Raw Material → Recipe → Production Batch → Approval → Material Consumption → Production Output → Bulk Stock → Packaging → Packaged Stock.
+
+## 4.1 Recipes
+
+Implement:
+
+* Recipe creation and editing.
+* Recipe versions.
+* Ingredient and quantity validation.
+* Effective dates where supported.
+* Draft, pending, approved, and inactive states as appropriate.
+* Approval authorization.
+* Production-to-recipe version linkage.
+* Protection against silently changing the recipe used by an existing batch.
+
+Enforce approval in the backend.
+
+Do not automatically approve the four recipes identified by the previous audit.
+
+## 4.2 Production batches
+
+Ensure that each batch records:
+
+* Batch ID.
+* Product.
+* Recipe and recipe version.
+* Planned quantities.
+* Actual quantities.
+* Ingredient requirements.
+* Actual ingredient consumption.
+* Production date.
+* Responsible user.
+* Status.
+* Yield.
+* Wastage or loss, where applicable.
+* Related stock movements.
+
+Prevent duplicate production posting.
+
+Allow authorized cancellation or correction through explicit reversal or adjustment workflows.
+
+## 4.3 Milling batches
+
+Integrate the existing milling functionality with the new `MillingBatches` sheet.
+
+Track:
+
+* Milling batch ID.
+* Input materials.
+* Input quantities.
+* Output material.
+* Output quantity.
+* Yield and losses.
+* Dates.
+* Status.
+* Responsible user.
+* Source and destination stock movements.
+
+Do not introduce duplicate consumption if the current milling module already records the same event.
+
+## 4.4 Packaging reconciliation
+
+Integrate packaging with inventory and production.
+
+Each packaging batch must reconcile:
+
+* Opening bulk quantity.
+* Bulk quantity consumed.
+* Packaged quantity by SKU and pack size.
+* Remaining bulk quantity.
+* Documented wastage.
+* Measurement or conversion differences.
+* Final reconciliation status.
+
+Use consistent units and appropriate decimal precision.
+
+For the two existing discrepancies, preserve the historical records and create explicit reconciliation information.
+
+Do not change 75 kg to 20 kg or 22 kg to 19.6 kg merely to eliminate the reported difference.
+
+The correct reconciliation must reflect actual business records.
+
+## 4.5 Finished goods
+
+Ensure that packaged output creates the correct stock records and that bulk stock is reduced only once.
+
+Track products by the existing SKU and product identifiers.
+
+Prevent packaging output from creating stock when the packaging transaction has not reached its defined completion state.
+
+---
+
+# 5. PRIORITY THREE: SALES, INVOICES, PAYMENTS, AND DISPATCH
+
+Upgrade the existing sales implementation without replacing its established API contracts unnecessarily.
+
+Required workflow:
+
+Customer → Sales Order → Stock Validation → Confirmation → Invoice → Payment → Dispatch → Stock Reconciliation.
+
+## 5.1 Sales orders
+
+Implement or strengthen:
+
+* Customer selection.
+* Product and variant selection.
+* Quantity and price validation.
+* Applicable discounts and taxes.
+* Order status.
+* Stock availability checks.
+* Order confirmation.
+* Cancellation rules.
+* Unique identifiers.
+* Audit trail.
+
+Do not confuse a quotation, draft order, confirmed sale, invoice, and dispatch.
+
+Represent the applicable stages explicitly.
+
+## 5.2 Invoices
+
+Invoices must use the existing accounting and tax conventions.
+
+Support:
+
+* Unique invoice numbering.
+* Customer and line-item details.
+* Quantity and unit price.
+* Discounts and taxes where applicable.
+* Totals and outstanding balances.
+* Invoice status.
+* Corrections through authorized, traceable processes.
+
+Do not silently rewrite posted invoices.
+
+## 5.3 Payments
+
+Support:
+
+* Full payments.
+* Partial payments.
+* Multiple payments against an invoice where permitted.
+* Payment methods.
+* References.
+* Dates.
+* Outstanding balances.
+* Authorized reversals.
+
+Use idempotency controls to prevent duplicate payment records.
+
+## 5.4 Dispatch
+
+Connect dispatch to confirmed sales and the stock movement architecture.
+
+Prevent dispatch quantities from exceeding the applicable available and authorized quantity.
+
+Prevent repeated dispatch requests from deducting stock twice.
+
+Preserve dispatch history and cancellation or reversal references.
+
+## 5.5 Reconciliation
+
+Ensure that sales, sale items, payments, invoices, dispatches, stock movements, and accounting entries agree.
+
+Do not automatically create sales or payment records to populate currently empty sheets.
+
+---
+
+# 6. PRIORITY FOUR: SUPPLIERS AND PURCHASE MANAGEMENT
+
+Implement the complete purchasing subsystem using the existing 16-tab schema.
+
+## 6.1 Supplier management
+
+Integrate `Suppliers`.
+
+Support:
+
+* Supplier IDs.
+* Business and contact information.
+* Applicable tax details.
+* Active status.
+* Search and lookup.
+* Validation.
+* Audit history.
+
+Follow existing field naming conventions and avoid unnecessary collection of sensitive data.
+
+## 6.2 Purchase orders
+
+Integrate:
+
+* `PurchaseOrders`
+* `PurchaseOrderItems`
+
+Support:
+
+* Draft creation.
+* Approval where required.
+* Supplier selection.
+* Item and quantity validation.
+* Expected delivery dates.
+* Purchase prices.
+* Partial receipts.
+* Remaining quantity.
+* Status transitions.
+* Cancellation.
+
+## 6.3 Goods receipts
+
+Integrate:
+
+* `GoodsReceipts`
+* `GoodsReceiptItems`
+
+Support:
+
+* Purchase order linkage.
+* Actual delivered quantities.
+* Accepted quantities.
+* Rejected quantities.
+* Receipt date.
+* Quality status.
+* Supporting references.
+* Stock movements.
+* Partial deliveries.
+* Duplicate receipt prevention.
+
+## 6.4 Supplier bills
+
+Integrate `SupplierBills`.
+
+Support:
+
+* Supplier invoice references.
+* Supplier linkage.
+* Related purchase and receipt references.
+* Amounts and tax details.
+* Invoice dates.
+* Due dates.
+* Payment status.
+* Duplicate invoice protection where appropriate.
+
+Do not assume that every goods receipt immediately creates a payable without considering the existing accounting rules.
+
+## 6.5 Supplier payments
+
+Integrate `SupplierPayments`.
+
+Support:
+
+* Supplier linkage.
+* Bill references.
+* Payment amount.
+* Date and method.
+* Reference number.
+* Partial payments.
+* Outstanding balances.
+* Reversals.
+* Accounting integration.
+
+## 6.6 Supplier returns
+
+Integrate:
+
+* `SupplierReturns`
+* `SupplierReturnItems`
+
+Track the original receipt, item, quantity, reason, approval, stock reduction, supplier credit or financial adjustment, and status.
+
+Prevent returning more stock than the applicable eligible quantity.
+
+---
+
+# 7. PRIORITY FIVE: CUSTOMER RETURNS, QUALITY, LOTS, AND COMPLAINTS
+
+## 7.1 Customer returns
+
+Integrate:
+
+* `CustomerReturns`
+* `CustomerReturnItems`
+
+Track the original sale, returned item, quantity, reason, inspection status, stock disposition, financial adjustment, and responsible user.
+
+Returned products must not automatically become saleable stock.
+
+## 7.2 Quality checks
+
+Integrate `QualityChecks`.
+
+Support checks related to:
+
+* Raw-material receipts.
+* Milling batches.
+* Production batches.
+* Bulk products.
+* Packaged products.
+* Finished-goods lots.
+
+Record inspection results, decision, inspector, date, and applicable corrective action.
+
+Enforce holds and rejection rules through the backend.
+
+## 7.3 Product lots
+
+Integrate `ProductLots`.
+
+Maintain traceability between raw materials, production batches, packaging batches, SKUs, and finished-product lots.
+
+Follow existing identifiers wherever possible.
+
+Do not create disconnected lot IDs that cannot be linked to real stock.
+
+## 7.4 Lot movements
+
+Integrate `LotMovements` with the authoritative stock movement service.
+
+Every lot movement must refer to a valid source transaction and the appropriate lot.
+
+Avoid double-counting movements already recorded in existing inventory ledgers.
+
+## 7.5 Complaints and recalls
+
+Integrate `ComplaintsRecalls`.
+
+Support:
+
+* Complaint or recall ID.
+* Report date.
+* Customer reference where applicable.
+* Product and lot.
+* Quantity affected.
+* Description.
+* Severity.
+* Status.
+* Investigation.
+* Corrective action.
+* Responsible user.
+* Closure information.
+
+Where a recall is initiated, provide a controlled workflow for identifying and holding affected stock.
+
+Do not automatically issue customer refunds or delete sales records merely because a complaint is created.
+
+---
+
+# 8. PRIORITY SIX: ACCOUNTING AND GST INTEGRATION
+
+Extend the existing accounting engine rather than creating a separate accounting system.
+
+Use the established sheets:
+
+* `ChartOfAccounts`
+* `JournalHeaders`
+* `JournalLines`
+* `AccountingPeriods`
+
+Preserve existing schemas.
+
+## 8.1 Journal posting
+
+Connect eligible transactions to the accounting engine.
+
+Support appropriate accounting for:
+
+* Sales.
+* Customer receipts.
+* Purchase invoices.
+* Supplier payments.
+* Inventory receipts.
+* Production consumption.
+* Production output.
+* Packaging.
+* Expenses.
+* Customer returns.
+* Supplier returns.
+* Authorized adjustments.
+* Reversals.
+
+The exact entries must follow the existing chart of accounts and applicable accounting rules.
+
+## 8.2 Double-entry integrity
+
+Implement or strengthen:
+
+* Debit and credit validation.
+* Journal balancing.
+* Account validation.
+* Reference validation.
+* Posting status.
+* Duplicate-posting prevention.
+* Reversal relationships.
+* Audit history.
+* Period restrictions.
+
+Never mark an accounting transaction as successfully posted if its required journal entry failed.
+
+## 8.3 Partial failure recovery
+
+Where operational records and journal records are stored separately, implement safe recovery.
+
+Use the repository's established persistence mechanisms.
+
+Where atomic transactions are unavailable, use an explicit posting state machine, idempotency keys, and recovery metadata.
+
+Do not assume that multiple Google Sheets writes are atomic.
+
+## 8.4 Financial reports
+
+Integrate or strengthen:
+
+* Trial balance.
+* Profit and loss.
+* Balance sheet.
+* Account ledger.
+* Customer outstanding balances.
+* Supplier outstanding balances.
+* Cash and bank reporting.
+* Inventory valuation where supported.
+* GST summaries and applicable reports.
+
+Reports must derive from the authoritative transactions and accounting entries.
+
+Do not generate artificial opening balances to make the reports appear complete.
+
+## 8.5 Accounting periods
+
+Respect `AccountingPeriods` and existing closing controls.
+
+Prevent unauthorized modifications to closed periods.
+
+Use authorized reversals or adjustment entries for corrections where appropriate.
+
+---
+
+# 9. PRIORITY SEVEN: GOOGLE SHEETS PERSISTENCE AND DATA INTEGRITY
+
+Upgrade the existing `backend/app/sheets.py` and related services.
+
+## 9.1 Reliable writes
+
+Implement robust handling for:
+
+* Google API failures.
+* Quota limits.
+* Temporary network errors.
+* Partial writes.
+* Concurrent updates.
+* Duplicate requests.
+* Timeouts.
+* Missing or malformed data.
+* Stale reads.
+
+Retry only operations that can safely be retried.
+
+Do not blindly repeat non-idempotent writes.
+
+## 9.2 Identifier generation
+
+Use the existing ID allocation mechanism.
+
+Ensure that simultaneous requests cannot receive the same identifier.
+
+Do not replace existing business IDs or regenerate historical identifiers.
+
+## 9.3 Schema compatibility
+
+Use centralized schema definitions or the repository's established equivalent.
+
+Maintain a single source of truth for:
+
+* Sheet names.
+* Column names.
+* Required fields.
+* Identifier fields.
+* Relationships.
+* Status values.
+
+Avoid scattered, inconsistent column definitions.
+
+## 9.4 Audit and change history
+
+Ensure that important business changes preserve:
+
+* Actor.
+* Timestamp.
+* Action.
+* Record identifier.
+* Before and after values where appropriate.
+* Reason.
+* Related transaction.
+* Outcome.
+
+Do not store passwords, tokens, or unnecessary sensitive information in logs.
+
+## 9.5 Business data safety
+
+The upgrade must not clear, replace, or delete existing records.
+
+Add new records only through the appropriate business workflow.
+
+Do not automatically repair the 44 audit findings. Preserve unresolved discrepancies and implement controlled correction workflows.
+
+---
+
+# 10. PRIORITY EIGHT: AUTHENTICATION, AUTHORIZATION, AND APPROVALS
+
+Extend the existing authentication and approval system.
+
+Implement backend enforcement for:
+
+* Login.
+* Session or token validation.
+* User status.
+* Role-based permissions.
+* Restricted actions.
+* Approval authorization.
+* Journal posting permissions.
+* Recipe approvals.
+* Stock adjustments.
+* Supplier payment approvals where applicable.
+* Returns and write-offs.
+* Period closing.
+* Recall actions.
+
+Frontend button visibility is not an authorization boundary.
+
+Every restricted endpoint must enforce the relevant permission on the server.
+
+Preserve the existing authentication architecture and secret-management conventions.
+
+Do not add hard-coded credentials or bypass authentication to make workflows easier to implement.
+
+---
+
+# 11. PRIORITY NINE: DASHBOARD, REPORTS, AND FRONTEND UX
+
+Upgrade the existing React frontend.
+
+Preserve existing routing and visual conventions unless changes are required for a coherent workflow.
+
+## 11.1 Dashboard
+
+Display figures derived from persisted records, including applicable:
+
+* Sales.
+* Production.
+* Inventory.
+* Orders.
+* Dispatches.
+* Customer balances.
+* Supplier balances.
+* Expenses.
+* Pending approvals.
+* Stock alerts.
+* Quality holds.
+* Unresolved discrepancies.
+
+Avoid fabricated metrics and duplicated totals.
+
+## 11.2 Module interfaces
+
+Implement or update screens for:
+
+* Suppliers.
+* Purchase orders.
+* Goods receipts.
+* Supplier bills.
+* Supplier payments.
+* Supplier returns.
+* Customer returns.
+* Quality checks.
+* Product lots.
+* Lot movements.
+* Complaints and recalls.
+* Existing production, packaging, sales, and accounting workflows.
+
+Follow the existing frontend component and API-client architecture.
+
+## 11.3 Usability
+
+Improve:
+
+* Navigation.
+* Search and filters.
+* Forms.
+* Field validation.
+* Loading and error states.
+* Status indicators.
+* Pagination where needed.
+* Transaction details.
+* Related-record navigation.
+* Print-friendly invoices and reports where supported.
+
+Do not build duplicate screens for capabilities that already exist.
+
+## 11.4 API integration
+
+Connect each interface to its actual backend endpoint.
+
+Do not use fake success responses, local-only persistence, or hard-coded business data as a substitute for implementation.
+
+Show success only when the backend confirms the defined transaction outcome.
+
+---
+
+# 12. PRIORITY TEN: FIX KNOWN IMPLEMENTATION ISSUES
+
+Address the previously identified code-level issues as part of implementation.
+
+## 12.1 Negative-quantity validation test mismatch
+
+A previous code review reported a failure in:
+
+`backend/tests/test_raw_material_receiving_stage1.py`
+
+The failing test was:
+
+`test_8_validation_rejects_non_positive_quantity`
+
+The request model rejected a negative quantity during Pydantic model construction, while the test expected rejection later.
+
+Do not weaken the validation.
+
+Implement the intended validation contract consistently across the request schema and endpoint. Update the corresponding test expectation if needed, but do not execute the test suite during this task.
+
+## 12.2 Production routing configuration
+
+The previously inspected `render.yaml` configured the frontend API URL as:
+
+`https://kawad-swad-sales-dev.onrender.com`
+
+This may be appropriate for staging.
+
+Inspect the existing configuration and ensure environment-specific settings are handled correctly:
+
+* Development uses development services.
+* Staging uses staging services.
+* Production uses production services.
+
+Do not hard-code the production URL into every environment.
+
+Do not expose secrets in frontend code.
+
+Preserve the deployment platform's established configuration approach.
+
+## 12.3 Existing accounting and workflow consistency
+
+Improve the implementation of:
+
+* Duplicate payment prevention.
+* Duplicate journal prevention.
+* Stock deduction idempotency.
+* Reversal handling.
+* Partial transaction recovery.
+* Concurrent inventory updates.
+* Reconciliation status.
+* Authorization enforcement.
+
+Use the existing architecture rather than introducing unrelated duplicate services.
+
+---
+
+# 13. PRIORITY ELEVEN: ERROR HANDLING AND OPERATIONAL RECOVERY
+
+Implement clear transaction states and recovery paths.
+
+For applicable operations, distinguish between:
+
+* Draft.
+* Pending approval.
+* Approved.
+* Processing.
+* Completed.
+* Failed.
+* Reversal pending.
+* Reversed.
+* Reconciliation required.
+
+Use only states appropriate to each business workflow.
+
+A failed operation must not be presented as completed.
+
+Where an operation is only partially persisted, record enough information to identify the incomplete work and recover it safely.
+
+Do not automatically retry an operation that could double-deduct stock, duplicate a payment, or post a second journal.
+
+Ensure that error messages are useful to staff without exposing secrets or internal stack traces.
+
+---
+
+# 14. PRIORITY TWELVE: PRESERVE THE EXISTING WORKING SYSTEM
+
+The existing ERP already has significant functionality.
+
+Do not replace the complete application with a newly generated scaffold.
+
+Do not remove existing modules because a new implementation is easier to write.
+
+Do not casually rename APIs, sheets, fields, or IDs.
+
+Do not delete existing operational or documentation tabs.
+
+Do not overwrite existing production records.
+
+Where a new architecture is needed, introduce it incrementally and integrate it with existing functionality.
+
+Every new workflow must reuse the established identifier, persistence, authorization, audit, and accounting mechanisms wherever appropriate.
+
+---
+
+# 15. IMPLEMENTATION EXECUTION REQUIREMENTS
+
+Implement all priorities in this task.
+
+Work in the following logical sequence, but do not stop between phases to ask for approval:
+
+1. Inspect existing relevant source files.
+2. Consolidate shared persistence, identifier, and stock movement mechanisms.
+3. Complete inventory and production integrity.
+4. Complete packaging reconciliation workflows.
+5. Upgrade sales, invoices, payments, and dispatch.
+6. Integrate suppliers, purchase orders, receipts, bills, and supplier payments.
+7. Integrate supplier and customer returns.
+8. Integrate quality checks, product lots, lot movements, and complaints/recalls.
+9. Integrate accounting, GST-related processing, reversals, and period controls.
+10. Strengthen persistence, authorization, approvals, and audit trails.
+11. Upgrade frontend screens and API connections.
+12. Correct the known validation-contract and environment-configuration issues.
+13. Update any existing test expectations affected by intentional interface or validation changes, without executing the tests.
+14. Update relevant documentation only after the implementation has been made.
+
+If the implementation environment imposes time or tool limits, continue with as much of the implementation as possible in the same task. Do not falsely mark unfinished work as complete.
+
+If a component depends on an external service or secret that is not available, implement the code and configuration support without inventing credentials or claiming the integration has been activated.
+
+---
+
+# 16. STRICT DO-NOT-DO LIST
+
+During this task:
+
+* Do not run tests.
+* Do not run test suites.
+* Do not run lint.
+* Do not run type checking.
+* Do not run build verification.
+* Do not execute data audits.
+* Do not deploy to Render.
+* Do not modify the live Google Sheet directly.
+* Do not commit, push, merge, or release changes unless separately authorized.
+* Do not delete or archive existing tabs.
+* Do not invent stock, payments, opening balances, or historical transactions.
+* Do not stop after planning.
+* Do not return only recommendations.
+* Do not claim that unexecuted functionality has been verified.
+
+You may inspect source code, edit files, add new files, update schemas, and update tests without executing them.
+
+---
+
+# 17. REQUIRED FINAL RESPONSE
+
+After implementing the changes, give me a concise implementation report containing:
+
+1. **Implemented:** Features actually added or changed.
+2. **Modified files:** Exact repository paths.
+3. **New API endpoints:** Actual endpoints added, grouped by module.
+4. **Frontend updates:** Actual screens and workflows connected.
+5. **Google Sheets integration:** Actual new sheet schemas and services connected.
+6. **Inventory and accounting:** Implemented transaction and recovery mechanisms.
+7. **Configuration changes:** Environment-specific configuration updates.
+8. **Not implemented:** Anything that remains incomplete.
+9. **External dependencies:** Credentials, Google permissions, or configuration that still requires manual setup.
+10. **Testing status:** Explicitly state that tests and verification commands were not run, as instructed.
+
+Do not claim that an item is implemented merely because a file or empty interface was created.
+
+The deliverable is the modified existing repository, not another plan.
+
+BEGIN IMPLEMENTATION NOW.

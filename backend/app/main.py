@@ -32,6 +32,8 @@ from app.routers import (
     workspace,
     approvals,
     accounting,
+    purchasing,
+    quality,
 )
 
 
@@ -100,6 +102,8 @@ app.include_router(audit.router)
 app.include_router(production.router)
 app.include_router(workspace.router)
 app.include_router(accounting.router)
+app.include_router(purchasing.router)
+app.include_router(quality.router)
 
 
 @app.on_event("startup")

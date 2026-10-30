@@ -4,6 +4,7 @@ from app.sheets import db
 from app.auth import get_current_user
 from app.permissions import is_manager, is_salesman, ui_role
 from app.timeutil import business_today, business_date_of
+from app.calculations.units import parse_currency_amount
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
@@ -45,7 +46,7 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
             continue
 
         sale_date = business_date_of(str(s.get("sale_datetime", "")))
-        amount = float(s.get("bill_total", 0.0) or 0.0)
+        amount = parse_currency_amount(s.get("bill_total", 0.0))
         sale_id = str(s.get("sale_id", ""))
 
         # Calculate kg sold for this bill
@@ -69,17 +70,17 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
             continue
         if business_date_of(str(c.get("txn_datetime", ""))) == today_str:
             if str(c.get("txn_type", "")).upper() == "SALE_COLLECTION":
-                today_cash_total += float(c.get("amount", 0.0) or 0.0)
+                today_cash_total += parse_currency_amount(c.get("amount", 0.0))
 
     for p in payments:
         if business_date_of(str(p.get("payment_datetime", ""))) == today_str:
             method = str(p.get("payment_method", "")).upper()
             if method in {"UPI", "BANK_TRANSFER"}:
-                today_digital_total += float(p.get("amount", 0.0) or 0.0)
+                today_digital_total += parse_currency_amount(p.get("amount", 0.0))
 
     pending_expenses = sum(
         1 for e in expenses
-        if str(e.get("approval_status", "")).upper() == "PENDING"
+        if str(e.get("approval_status", "")).upper() in {"PENDING", "PENDING_APPROVAL", "SUBMITTED"}
         and (manager_view or str(e.get("salesman_user_id", "")) == user_id)
     )
 
@@ -102,10 +103,10 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
         and (manager_view or str(d.get("counted_by_user_id", "")) == user_id)
     )
 
-    # Pending production batches
+    # Pending production batches (match all pending variants)
     pending_prod = sum(
         1 for b in production_batches
-        if str(b.get("status", "")).upper() == "PENDING"
+        if str(b.get("status", "")).upper() in {"PENDING", "PENDING_APPROVAL", "PENDING APPROVAL", "SUBMITTED"}
     ) if manager_view else 0
 
     # Low stock items calculation

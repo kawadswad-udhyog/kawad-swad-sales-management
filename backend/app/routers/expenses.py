@@ -5,6 +5,7 @@ from app.models import Expense, ExpenseCreate, ExpenseApproveRequest
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_manager, is_salesman
+from app.calculations.units import parse_currency_amount
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
 
@@ -26,7 +27,7 @@ async def list_expenses(current_user: dict = Depends(get_current_user)):
             submitted_by_user_id=sub_user,
             salesman_user_id=s_user,
             category=str(r.get("category", "Petrol / Travel")),
-            amount=float(r.get("amount", 0.0) or 0.0),
+            amount=parse_currency_amount(r.get("amount", 0.0)),
             description=str(r.get("description", "")),
             receipt_link_or_file_ref=str(r.get("receipt_link_or_file_ref", "")),
             approval_status=str(r.get("approval_status", "PENDING")),
@@ -122,7 +123,7 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
         submitted_by_user_id=str(matched.get("submitted_by_user_id", "")),
         salesman_user_id=str(matched.get("salesman_user_id", "")),
         category=str(matched.get("category", "")),
-        amount=float(matched.get("amount", 0.0) or 0.0),
+        amount=parse_currency_amount(matched.get("amount", 0.0)),
         description=str(matched.get("description", "")),
         receipt_link_or_file_ref=str(matched.get("receipt_link_or_file_ref", "")),
         approval_status=status_str,

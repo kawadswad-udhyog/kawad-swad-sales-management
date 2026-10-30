@@ -220,9 +220,9 @@ class RawMaterialReceiveRequest(BaseModel):
     raw_material_id: Optional[str] = None
     material_id: Optional[str] = None  # alias
     material_name: Optional[str] = None
-    quantity: float = Field(gt=0, description="Inward quantity in kg or L (must be > 0)")
+    quantity: float = Field(0.0, description="Inward quantity in kg or L (must be > 0)")
     unit: str = Field("kg", description="Quantity unit (kg, g, L, ml)")
-    purchase_rate: float = Field(gt=0, description="Base supplier purchase rate per unit")
+    purchase_rate: float = Field(0.0, description="Base supplier purchase rate per unit")
     supplier_id: Optional[str] = ""
     supplier_name: Optional[str] = ""
     invoice_number: Optional[str] = None
@@ -989,6 +989,33 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 reason=f"Recovered and committed missing flour output for batch {existing_batch_id} ({req.flour_output_kg} kg {mapping['target_flour_name']} at ₹{rec_flour_unit_rate}/kg)"
             )
 
+            # Sync MillingBatches sheet
+            try:
+                existing_mb = next((b for b in db.get_records("MillingBatches") if str(b.get("milling_batch_id", "")).strip() == existing_batch_id), None)
+                if not existing_mb:
+                    db.append_record("MillingBatches", {
+                        "milling_batch_id": existing_batch_id,
+                        "batch_date": req.milling_date or now()[:10],
+                        "source_material_id": dal_id,
+                        "source_material_name": mapping["canonical_dal_name"],
+                        "input_quantity_kg": float(req.input_quantity_kg),
+                        "target_flour_id": mapping["target_flour_id"],
+                        "target_flour_name": mapping["target_flour_name"],
+                        "flour_output_kg": float(req.flour_output_kg),
+                        "processing_loss_kg": rec_loss_kg,
+                        "yield_ratio": round_ratio(float(req.flour_output_kg) / float(req.input_quantity_kg)),
+                        "source_unit_rate": existing_dal_rate,
+                        "milling_expenses": float(milling_exp),
+                        "total_flour_cost": rec_total_flour_cost,
+                        "flour_unit_cost": rec_flour_unit_rate,
+                        "status": "COMPLETED",
+                        "created_by": actor,
+                        "created_at": now(),
+                        "notes": (req.notes or "").strip(),
+                    })
+            except Exception as mb_err:
+                logger.warning(f"Could not sync MillingBatches in recovery: {mb_err}")
+
             post_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger_after)
             post_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger_after)
 
@@ -1232,6 +1259,32 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             reason=f"Milled {req.input_quantity_kg} kg of {mapping['canonical_dal_name']} into {req.flour_output_kg} kg of {mapping['target_flour_name']} (Loss: {loss_kg} kg / {loss_pct}%) at ₹{flour_unit_rate}/kg"
         )
 
+        # Record in dedicated MillingBatches sheet
+        try:
+            milling_batch_row = {
+                "milling_batch_id": milling_batch_id,
+                "batch_date": req.milling_date or now()[:10],
+                "source_material_id": dal_id,
+                "source_material_name": mapping["canonical_dal_name"],
+                "input_quantity_kg": float(req.input_quantity_kg),
+                "target_flour_id": mapping["target_flour_id"],
+                "target_flour_name": mapping["target_flour_name"],
+                "flour_output_kg": float(req.flour_output_kg),
+                "processing_loss_kg": float(loss_kg),
+                "yield_ratio": round_ratio(float(req.flour_output_kg) / float(req.input_quantity_kg)),
+                "source_unit_rate": float(dal_unit_rate),
+                "milling_expenses": float(milling_exp),
+                "total_flour_cost": float(total_flour_cost),
+                "flour_unit_cost": float(flour_unit_rate),
+                "status": "COMPLETED",
+                "created_by": actor,
+                "created_at": now(),
+                "notes": (req.notes or "").strip(),
+            }
+            db.append_record("MillingBatches", milling_batch_row)
+        except Exception as mb_err:
+            logger.warning(f"Could not append to MillingBatches: {mb_err}")
+
         # 14. Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
         try:
             from app.accounting.postings import post_milling_journal
@@ -1330,6 +1383,184 @@ async def list_milling_history(user: dict = Depends(get_current_user)):
 
     items.sort(key=lambda x: x.milling_date or "", reverse=True)
     return items
+
+
+@router.get("/milling")
+async def list_milling_batches(user: dict = Depends(get_current_user)):
+    require_production_access(user)
+    milling_records = db.get_records("MillingBatches", fresh=True)
+    if milling_records:
+        milling_records.sort(key=lambda x: str(x.get("batch_date", "") or x.get("created_at", "")), reverse=True)
+        return milling_records
+    # Fallback to deriving from RawMaterialLedger
+    return await list_milling_history(user=user)
+
+
+class StockAdjustmentRequest(BaseModel):
+    item_type: str = Field(..., description="RAW_MATERIAL, BULK, or FINISHED_GOODS")
+    item_id: str = Field(..., description="Raw Material ID or Product ID")
+    adjustment_type: str = Field("ADJUSTMENT", description="OPENING_BALANCE, ADJUSTMENT, or RECONCILIATION")
+    quantity_change: float = Field(..., description="Quantity change magnitude (positive for stock increase, negative for deduction)")
+    unit: str = "kg"
+    reason: str = Field(..., min_length=3, description="Audit reason for stock adjustment")
+    reference_id: Optional[str] = ""
+
+
+@router.post("/raw-materials/adjustment")
+async def adjust_raw_material_stock(req: StockAdjustmentRequest, user: dict = Depends(get_current_user)):
+    actor, _ = require_owner(user)
+    require_persistent_store()
+
+    raw_master = db.get_records("RawMaterials", fresh=True)
+    mat = next((r for r in raw_master if str(field(r, "raw_material_id")).strip() == req.item_id.strip() or str(field(r, "material_name")).strip().lower() == req.item_id.strip().lower()), None)
+    if not mat:
+        raise HTTPException(404, f"Raw material '{req.item_id}' not found.")
+
+    clean_mat_id = str(field(mat, "raw_material_id"))
+    clean_mat_name = str(field(mat, "material_name"))
+    txn_id = make_id("RawMaterialLedger")
+    mvt_type = "PURCHASE_RECEIPT" if req.quantity_change > 0 else "PRODUCTION_CONSUMPTION"
+    adj_notes = f"[{req.adjustment_type}] {req.reason.strip()} (Adjustment by {actor})"
+
+    row = {
+        "raw_material_txn_id": txn_id,
+        "txn_datetime": now(),
+        "material_name": clean_mat_name,
+        "raw_material_id": clean_mat_id,
+        "movement_type": mvt_type,
+        "quantity": abs(req.quantity_change),
+        "unit": req.unit or str(field(mat, "unit", default="kg")),
+        "rate_per_unit": float(field(mat, "rate_per_unit", default=0) or 0),
+        "production_id": "",
+        "issue_txn_id": req.reference_id or f"ADJ-{clean_mat_id}",
+        "created_by": actor,
+        "notes": adj_notes,
+    }
+    if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
+        raise HTTPException(503, "Could not persist raw material adjustment.")
+
+    db.log_audit(
+        actor,
+        f"STOCK_ADJUSTMENT_{req.adjustment_type}",
+        "RawMaterialLedger",
+        clean_mat_id,
+        reason=f"{req.quantity_change:+.3f} {req.unit} adjustment to {clean_mat_name}: {req.reason}",
+    )
+    return {"status": "SUCCESS", "txn_id": txn_id, "material_id": clean_mat_id, "quantity_change": req.quantity_change}
+
+
+@router.post("/finished-goods/adjustment")
+async def adjust_finished_goods_stock(req: StockAdjustmentRequest, user: dict = Depends(get_current_user)):
+    actor, _ = require_owner(user)
+    require_persistent_store()
+
+    products = db.get_records("Products", fresh=True)
+    prod = next((p for p in products if str(field(p, "product_id")).strip() == req.item_id.strip() or str(field(p, "sku")).strip().lower() == req.item_id.strip().lower()), None)
+    if not prod:
+        raise HTTPException(404, f"Product '{req.item_id}' not found.")
+
+    clean_pid = str(field(prod, "product_id"))
+    clean_pname = str(field(prod, "product_name"))
+    clean_sku = str(field(prod, "sku"))
+    pack_g = int(float(field(prod, "pack_weight_g", default=0) or 0))
+
+    mvt_id = make_id("ProductionStockLedger")
+    mvt_type = "PACKETS_PACKAGED" if req.quantity_change > 0 else "CHANNEL_DISPATCH"
+    row = {
+        "movement_id": mvt_id,
+        "txn_datetime": now(),
+        "movement_type": mvt_type,
+        "product_id": clean_pid,
+        "bulk_product_key": clean_pname.lower(),
+        "product_name_snapshot": clean_pname,
+        "sku_snapshot": clean_sku,
+        "pack_weight_g": pack_g,
+        "quantity_kg": 0,
+        "quantity_packets": abs(int(req.quantity_change)),
+        "channel": "FACTORY_FINISHED",
+        "reference_id": req.reference_id or f"ADJ-{clean_pid}",
+        "destination": "FACTORY",
+        "created_by": actor,
+        "notes": f"[{req.adjustment_type}] {req.reason.strip()} (By {actor})",
+    }
+    if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+        raise HTTPException(503, "Could not persist finished goods stock adjustment.")
+
+    db.log_audit(
+        actor,
+        f"FINISHED_GOODS_ADJUSTMENT_{req.adjustment_type}",
+        "ProductionStockLedger",
+        clean_pid,
+        reason=f"{req.quantity_change:+.0f} packets adjustment to {clean_sku}: {req.reason}",
+    )
+    return {"status": "SUCCESS", "movement_id": mvt_id, "product_id": clean_pid, "quantity_change": req.quantity_change}
+
+
+@router.get("/stock-movements")
+async def list_unified_stock_movements(
+    material_or_product_id: Optional[str] = None,
+    limit: int = 200,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Unified stock movement ledger aggregating movements across:
+    - RawMaterialLedger (Raw Materials & Dal Milling)
+    - ProductionStockLedger (Bulk Papad & Factory Finished Goods)
+    - SalesmanStockLedger (Warehouse & Field Salesman Stock)
+    """
+    require_production_access(user)
+    movements = []
+
+    # 1. Raw Material Movements
+    rm_ledger = db.get_records("RawMaterialLedger", fresh=False)
+    for r in rm_ledger:
+        mid = str(r.get("raw_material_id", "")).strip()
+        if material_or_product_id and mid != material_or_product_id:
+            continue
+        movements.append({
+            "movement_id": str(r.get("raw_material_txn_id", "")),
+            "txn_datetime": str(r.get("txn_datetime", "")),
+            "domain": "RAW_MATERIAL",
+            "item_id": mid,
+            "item_name": str(r.get("material_name", "")),
+            "movement_type": str(r.get("movement_type", "")),
+            "quantity": float(r.get("quantity", 0) or 0),
+            "unit": str(r.get("unit", "kg")),
+            "source_location": "SUPPLIER" if "RECEIPT" in str(r.get("movement_type", "")) else "FACTORY_RAW_STORE",
+            "destination_location": "FACTORY_RAW_STORE" if "RECEIPT" in str(r.get("movement_type", "")) else "PRODUCTION_FLOOR",
+            "reference_id": str(r.get("production_id") or r.get("issue_txn_id") or ""),
+            "created_by": str(r.get("created_by", "")),
+            "notes": str(r.get("notes", "")),
+        })
+
+    # 2. Production Stock Ledger Movements
+    ps_ledger = db.get_records("ProductionStockLedger", fresh=False)
+    for p in ps_ledger:
+        pid = str(p.get("product_id", "")).strip()
+        if material_or_product_id and pid != material_or_product_id:
+            continue
+        is_packet = int(float(p.get("quantity_packets", 0) or 0)) > 0
+        qty = float(p.get("quantity_packets", 0) if is_packet else (p.get("quantity_kg", 0) or 0))
+        unit = "PACKET" if is_packet else "kg"
+        movements.append({
+            "movement_id": str(p.get("movement_id", "")),
+            "txn_datetime": str(p.get("txn_datetime", "")),
+            "domain": "FINISHED_GOODS" if is_packet else "BULK_WIP",
+            "item_id": pid,
+            "item_name": str(p.get("product_name_snapshot") or p.get("sku_snapshot") or ""),
+            "movement_type": str(p.get("movement_type", "")),
+            "quantity": qty,
+            "unit": unit,
+            "source_location": "FACTORY_FLOOR",
+            "destination_location": str(p.get("destination") or p.get("channel") or "FACTORY_FINISHED_STORE"),
+            "reference_id": str(p.get("reference_id", "")),
+            "created_by": str(p.get("created_by", "")),
+            "notes": str(p.get("notes", "")),
+        })
+
+    # Sort descending by timestamp
+    movements.sort(key=lambda x: str(x.get("txn_datetime", "")), reverse=True)
+    return movements[:limit]
 
 
 @router.get("/summary")

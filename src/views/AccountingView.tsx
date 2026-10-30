@@ -9,6 +9,10 @@ import {
   fetchReconciliationReport,
   executeReconciliation,
   fetchOpeningBalanceProposal,
+  getDebtorsBalances,
+  getCreditorsBalances,
+  getCashBankReport,
+  getGstSummaryReport,
   AccountMaster,
   TrialBalanceResult,
   ProfitAndLossResult,
@@ -17,6 +21,12 @@ import {
   ReconcileResult,
   OpeningBalanceProposal,
 } from '../services/api';
+import type {
+  DebtorItem,
+  CreditorItem,
+  CashBankReport,
+  GstSummaryReport,
+} from '../types';
 import { useStore } from '../context/StoreContext';
 import {
   Scale,
@@ -32,9 +42,23 @@ import {
   ChevronDown,
   ChevronRight,
   ShieldAlert,
+  Users,
+  Building,
+  Coins,
+  Receipt,
 } from 'lucide-react';
 
-type AccountingTab = 'trial-balance' | 'pnl' | 'balance-sheet' | 'vouchers' | 'chart' | 'reconciliation';
+type AccountingTab =
+  | 'trial-balance'
+  | 'pnl'
+  | 'balance-sheet'
+  | 'vouchers'
+  | 'chart'
+  | 'debtors'
+  | 'creditors'
+  | 'cash-bank'
+  | 'gst-summary'
+  | 'reconciliation';
 
 export const AccountingView: React.FC = () => {
   const { currentUser } = useStore();
@@ -57,6 +81,10 @@ export const AccountingView: React.FC = () => {
   const [chartOfAccounts, setChartOfAccounts] = useState<AccountMaster[]>([]);
   const [reconcileReport, setReconcileReport] = useState<ReconcileResult | null>(null);
   const [openingProposal, setOpeningProposal] = useState<OpeningBalanceProposal | null>(null);
+  const [debtors, setDebtors] = useState<DebtorItem[]>([]);
+  const [creditors, setCreditors] = useState<CreditorItem[]>([]);
+  const [cashBank, setCashBank] = useState<CashBankReport | null>(null);
+  const [gstSummary, setGstSummary] = useState<GstSummaryReport | null>(null);
 
   // UI state
   const [loading, setLoading] = useState(false);
@@ -92,6 +120,18 @@ export const AccountingView: React.FC = () => {
       } else if (activeTab === 'chart') {
         const data = await fetchChartOfAccounts();
         setChartOfAccounts(data);
+      } else if (activeTab === 'debtors') {
+        const data = await getDebtorsBalances();
+        setDebtors(data.debtors || []);
+      } else if (activeTab === 'creditors') {
+        const data = await getCreditorsBalances();
+        setCreditors(data.creditors || []);
+      } else if (activeTab === 'cash-bank') {
+        const data = await getCashBankReport();
+        setCashBank(data);
+      } else if (activeTab === 'gst-summary') {
+        const data = await getGstSummaryReport(startDate, endDate);
+        setGstSummary(data);
       } else if (activeTab === 'reconciliation') {
         const [rec, op] = await Promise.all([
           fetchReconciliationReport(),
@@ -260,6 +300,50 @@ export const AccountingView: React.FC = () => {
         >
           <FileText size={15} />
           Chart of Accounts
+        </button>
+        <button
+          onClick={() => setActiveTab('debtors')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all ${
+            activeTab === 'debtors'
+              ? 'bg-emerald-800 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Users size={15} />
+          Debtors (AR)
+        </button>
+        <button
+          onClick={() => setActiveTab('creditors')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all ${
+            activeTab === 'creditors'
+              ? 'bg-emerald-800 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Building size={15} />
+          Creditors (AP)
+        </button>
+        <button
+          onClick={() => setActiveTab('cash-bank')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all ${
+            activeTab === 'cash-bank'
+              ? 'bg-emerald-800 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Coins size={15} />
+          Cash & Bank
+        </button>
+        <button
+          onClick={() => setActiveTab('gst-summary')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all ${
+            activeTab === 'gst-summary'
+              ? 'bg-emerald-800 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Receipt size={15} />
+          GST Summary
         </button>
         <button
           onClick={() => setActiveTab('reconciliation')}
@@ -1161,6 +1245,277 @@ export const AccountingView: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* TAB: DEBTORS (ACCOUNTS RECEIVABLE) */}
+      {activeTab === 'debtors' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Accounts Receivable (Debtors Ledger)</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Outstanding balances due from shopkeepers, retailers, and distributors.
+              </p>
+            </div>
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-right">
+              <span className="text-xs text-red-600 font-semibold block">Total Receivables Outstanding</span>
+              <span className="text-xl font-bold font-mono text-red-700">
+                {formatCurrency(debtors.reduce((acc, d) => acc + (d.outstanding_balance || 0), 0))}
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
+                  <tr>
+                    <th className="px-4 py-3">Customer / Shop Name</th>
+                    <th className="px-4 py-3">City</th>
+                    <th className="px-4 py-3 text-right">Total Invoiced</th>
+                    <th className="px-4 py-3 text-right">Total Paid</th>
+                    <th className="px-4 py-3 text-right">Outstanding Balance</th>
+                    <th className="px-4 py-3 text-center">Unpaid Bills</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                  {debtors.map((d) => (
+                    <tr key={d.customer_id} className="hover:bg-slate-50/80">
+                      <td className="px-4 py-3 font-semibold text-slate-900">{d.customer_name}</td>
+                      <td className="px-4 py-3 text-slate-500">{d.city || 'Bikaner'}</td>
+                      <td className="px-4 py-3 text-right font-mono">{formatCurrency(d.total_invoiced)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-emerald-700">{formatCurrency(d.total_collected)}</td>
+                      <td className="px-4 py-3 text-right font-mono font-bold text-red-700">
+                        {formatCurrency(d.outstanding_balance)}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        <span className="inline-block px-2 py-0.5 rounded-full text-2xs font-bold bg-amber-100 text-amber-800">
+                          {d.unpaid_invoices_count} bill(s)
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {debtors.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="text-center py-8 text-slate-400">
+                        No customer accounts receivable found or all balances are cleared.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: CREDITORS (ACCOUNTS PAYABLE) */}
+      {activeTab === 'creditors' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Accounts Payable (Creditors Ledger)</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Outstanding liabilities due to raw material mandi suppliers, grain merchants, and packaging vendors.
+              </p>
+            </div>
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-right">
+              <span className="text-xs text-red-600 font-semibold block">Total Payables Outstanding</span>
+              <span className="text-xl font-bold font-mono text-red-700">
+                {formatCurrency(creditors.reduce((acc, c) => acc + (c.outstanding_payable || 0), 0))}
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
+                  <tr>
+                    <th className="px-4 py-3">Supplier / Mandi Merchant</th>
+                    <th className="px-4 py-3 text-right">Total Invoiced</th>
+                    <th className="px-4 py-3 text-right">Total Disbursed</th>
+                    <th className="px-4 py-3 text-right">Outstanding Payable</th>
+                    <th className="px-4 py-3 text-center">Open Bills</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                  {creditors.map((c) => (
+                    <tr key={c.supplier_id} className="hover:bg-slate-50/80">
+                      <td className="px-4 py-3 font-semibold text-slate-900">{c.supplier_name}</td>
+                      <td className="px-4 py-3 text-right font-mono">{formatCurrency(c.total_billed)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-emerald-700">{formatCurrency(c.total_paid)}</td>
+                      <td className="px-4 py-3 text-right font-mono font-bold text-red-700">
+                        {formatCurrency(c.outstanding_payable)}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        <span className="inline-block px-2 py-0.5 rounded-full text-2xs font-bold bg-amber-100 text-amber-800">
+                          {c.open_bills_count} bill(s)
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {creditors.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="text-center py-8 text-slate-400">
+                        No outstanding supplier creditors found.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: CASH & BANK REPORT */}
+      {activeTab === 'cash-bank' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+            <h2 className="text-base font-bold text-slate-900">Cash & Liquid Bank Funds Position</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Consolidated position of factory safe, salesman van floats, and official bank accounts.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+              <div className="flex items-center justify-between text-slate-500 text-xs font-semibold">
+                <span>Factory Safe Cash</span>
+                <Coins size={18} className="text-emerald-700" />
+              </div>
+              <div className="mt-3 text-2xl font-bold font-mono text-slate-900">
+                {formatCurrency(cashBank?.factory_safe_cash || 0)}
+              </div>
+              <p className="text-2xs text-slate-400 mt-1">Physical cash retained at factory premises</p>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+              <div className="flex items-center justify-between text-slate-500 text-xs font-semibold">
+                <span>Salesman Van Float</span>
+                <Coins size={18} className="text-blue-600" />
+              </div>
+              <div className="mt-3 text-2xl font-bold font-mono text-blue-900">
+                {formatCurrency(cashBank?.salesman_van_float || 0)}
+              </div>
+              <p className="text-2xs text-slate-400 mt-1">Operating route float held by field sales team</p>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+              <div className="flex items-center justify-between text-slate-500 text-xs font-semibold">
+                <span>Bank Accounts (Operating)</span>
+                <Landmark size={18} className="text-indigo-600" />
+              </div>
+              <div className="mt-3 text-2xl font-bold font-mono text-indigo-900">
+                {formatCurrency(cashBank?.bank_account_balance || 0)}
+              </div>
+              <p className="text-2xs text-slate-400 mt-1">Current accounts and verified bank deposits</p>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-emerald-300 shadow-sm bg-emerald-50/40">
+              <div className="flex items-center justify-between text-emerald-800 text-xs font-bold">
+                <span>Total Liquid Funds</span>
+                <Scale size={18} className="text-emerald-800" />
+              </div>
+              <div className="mt-3 text-2xl font-bold font-mono text-emerald-900">
+                {formatCurrency(cashBank?.total_liquid_funds || 0)}
+              </div>
+              <p className="text-2xs text-emerald-700 mt-1">Total immediate liquidity available for operations</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: GST SUMMARY */}
+      {activeTab === 'gst-summary' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">GST Monthly Summary (GSTR-3B Computation)</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Output CGST/SGST collected from sales vs. Input ITC available on purchases & freight.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="text-xs p-2 border border-slate-300 rounded-xl font-medium"
+              />
+              <span className="text-xs text-slate-400">to</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="text-xs p-2 border border-slate-300 rounded-xl font-medium"
+              />
+              <button
+                onClick={() => loadData()}
+                className="px-3 py-2 bg-emerald-800 text-white rounded-xl text-xs font-semibold hover:bg-emerald-900"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                1. Output Tax Liability (Sales)
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-600">Output CGST (Central Tax)</span>
+                <span className="font-mono font-semibold">{formatCurrency(gstSummary?.output_cgst_payable || 0)}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-600">Output SGST (State Tax)</span>
+                <span className="font-mono font-semibold">{formatCurrency(gstSummary?.output_sgst_payable || 0)}</span>
+              </div>
+              <div className="pt-2 border-t flex justify-between items-center font-bold text-xs text-slate-900">
+                <span>Total Output Tax Payable</span>
+                <span className="font-mono text-sm">{formatCurrency(gstSummary?.total_output_gst || 0)}</span>
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                2. Input Tax Credit (ITC)
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-600">Input CGST Available</span>
+                <span className="font-mono font-semibold text-emerald-700">{formatCurrency(gstSummary?.input_cgst_itc || 0)}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-600">Input SGST Available</span>
+                <span className="font-mono font-semibold text-emerald-700">{formatCurrency(gstSummary?.input_sgst_itc || 0)}</span>
+              </div>
+              <div className="pt-2 border-t flex justify-between items-center font-bold text-xs text-slate-900">
+                <span>Total Eligible ITC</span>
+                <span className="font-mono text-sm text-emerald-800">{formatCurrency(gstSummary?.total_input_itc || 0)}</span>
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                3. Net Government Settlement
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-600">Net Cash Payable to Govt</span>
+                <span className="font-mono font-bold text-red-700">{formatCurrency(gstSummary?.net_gst_payable || 0)}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-600">Excess ITC Credit (C/F)</span>
+                <span className="font-mono font-bold text-emerald-700">{formatCurrency(gstSummary?.excess_itc_credit || 0)}</span>
+              </div>
+              <div className="p-2.5 bg-slate-50 rounded-xl text-2xs text-slate-500 mt-2">
+                Eligible ITC automatically offsets output liability under GST Section 49 rules.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* Reversal Confirmation Modal */}
       {reversalTarget && (

@@ -20,6 +20,8 @@ import { ProductionView } from './views/ProductionView';
 import { AttendanceView } from './views/AttendanceView';
 import { ApprovalsView } from './views/ApprovalsView';
 import { AccountingView } from './views/AccountingView';
+import { PurchasingView } from './views/PurchasingView';
+import { QualityView } from './views/QualityView';
 import { AlertTriangle, AlertCircle, RefreshCw, X, ShieldAlert } from 'lucide-react';
 
 
@@ -88,12 +90,16 @@ const MainAppContent: React.FC = () => {
     switch (currentView) {
       case 'dashboard':
         return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
+      case 'purchasing':
+        return <PurchasingView />;
       case 'production':
         return <ProductionView initialTab="production" />;
       case 'attendance':
         return <AttendanceView />;
       case 'packaging':
         return <ProductionView initialTab="packaging" />;
+      case 'quality':
+        return <QualityView />;
       case 'stock':
         return <StockView />;
       case 'sales':

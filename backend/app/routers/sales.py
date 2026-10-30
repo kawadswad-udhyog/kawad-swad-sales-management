@@ -787,5 +787,196 @@ async def record_sale_payment(
         }
 
 
+@router.get("/orders")
+async def list_sales_orders(current_user: dict = Depends(get_current_user)):
+    """List sales orders, distinguishing quotations, drafts, and confirmed orders."""
+    user_id = str(current_user.get("user_id", ""))
+    sales_records = db.get_records("Sales", fresh=True)
+    items_records = db.get_records("SaleItems", fresh=True)
+    items_by_sale: Dict[str, List[SaleItem]] = {}
+    for row in items_records:
+        items_by_sale.setdefault(str(row.get("sale_id", "")), []).append(_to_item(row))
+
+    orders = []
+    for row in sales_records:
+        salesman_id = str(row.get("salesman_user_id", ""))
+        if not is_manager(current_user) and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
+            continue
+        status = str(row.get("bill_status", "")).upper()
+        if status in {"DRAFT", "ORDER_CONFIRMED", "ORDER_DRAFT"}:
+            orders.append(_to_sale(row, items_by_sale.get(str(row.get("sale_id")), [])))
+    return orders
+
+
+@router.post("/orders", response_model=Sale, dependencies=[Depends(require_sheets_connection)])
+async def create_sales_order(req: SaleCreate, current_user: dict = Depends(get_current_user)):
+    """Create a sales order in DRAFT status with stock availability verification without immediate deduction."""
+    user_id = str(current_user.get("user_id") or "")
+    salesman_id = _clean(req.salesman_user_id) or user_id
+    customer_id = _clean(req.customer_id)
+
+    customers = db.get_records("Customers", fresh=True)
+    cust = next((c for c in customers if str(c.get("customer_id")) == customer_id), None)
+    cust_name = str(cust.get("shop_name") or cust.get("shopkeeper_name") or "Direct Customer") if cust else "Direct Customer"
+
+    sale_id = db.generate_id("Sales")
+    order_num = f"SO-{db.generate_id('Sales').replace('SALE-', '')}"
+    now = now_iso()
+
+    # Pre-check product availability
+    products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
+    line_items = []
+    subtotal = 0.0
+    for idx, item in enumerate(req.items):
+        prod = products.get(item.product_id)
+        if not prod:
+            raise HTTPException(400, f"Product {item.product_id} not found.")
+        unit_price = float(item.actual_unit_price or 0.0)
+        line_tot = round(unit_price * item.quantity, 2)
+        subtotal += line_tot
+        line_items.append({
+            "sale_item_id": db.generate_id("SaleItems"),
+            "sale_id": sale_id,
+            "product_id": item.product_id,
+            "product_name_snapshot": str(prod.get("product_name", "")),
+            "sku_snapshot": str(prod.get("sku", "")),
+            "pack_weight_g": int(float(prod.get("pack_weight_g", 500) or 500)),
+            "unit": "PACKET",
+            "quantity": item.quantity,
+            "actual_unit_price": unit_price,
+            "discount_amount": 0.0,
+            "line_total": line_tot,
+            "qualifying_kg": (int(float(prod.get("pack_weight_g", 500) or 500)) * item.quantity) / 1000.0,
+            "created_at": now,
+            "notes": "Sales Order Item",
+        })
+
+    tax_amt = round(subtotal * 0.05, 2)
+    bill_total = subtotal + tax_amt
+
+    order_record = {
+        "sale_id": sale_id,
+        "bill_number": order_num,
+        "idempotency_key": req.idempotency_key or f"SO-{sale_id}",
+        "txn_status": "COMPLETE",
+        "sale_datetime": now,
+        "sales_type": req.sales_type or "Retailer Sale",
+        "customer_id": customer_id,
+        "customer_name_snapshot": cust_name,
+        "customer_mobile": cust.get("mobile", "") if cust else "",
+        "customer_gstin": cust.get("gstin", "") if cust else "",
+        "entered_by_user_id": user_id,
+        "salesman_user_id": salesman_id,
+        "delivery_status": "PENDING_CONFIRMATION",
+        "payment_status": "UNPAID",
+        "payment_method": req.payment_method or "CREDIT",
+        "payment_reference": "",
+        "subtotal": subtotal,
+        "discount_amount": 0.0,
+        "tax_amount": tax_amt,
+        "bill_total": bill_total,
+        "bill_status": "DRAFT",
+        "created_at": now,
+        "notes": f"[SALES_ORDER_DRAFT] {req.notes or ''}".strip(),
+    }
+
+    db.append_record("Sales", order_record, raise_on_error=True)
+    for itm in line_items:
+        db.append_record("SaleItems", itm, raise_on_error=True)
+
+    db.log_audit(user_id, "CREATE_SALES_ORDER", "Sales", sale_id, reason=f"Created sales order {order_num} for ₹{bill_total:.2f}")
+    return _to_sale(order_record, [_to_item(i) for i in line_items])
+
+
+@router.post("/orders/{sale_id}/confirm", dependencies=[Depends(require_sheets_connection)])
+async def confirm_sales_order(sale_id: str, current_user: dict = Depends(get_current_user)):
+    """Confirm a DRAFT sales order, generating an active invoice, deducting stock, and posting accounting voucher."""
+    user_id = str(current_user.get("user_id") or "")
+    async with _sales_lock:
+        sales = db.get_records("Sales", fresh=True)
+        sale = next((s for s in sales if str(s.get("sale_id")) == sale_id), None)
+        if not sale:
+            raise HTTPException(404, f"Sales order {sale_id} not found.")
+        status = str(sale.get("bill_status", "")).upper()
+        if status != "DRAFT":
+            raise HTTPException(400, f"Cannot confirm order with status '{status}'. Must be in DRAFT state.")
+
+        now = now_iso()
+        items = _items_for(sale_id)
+        salesman_id = str(sale.get("salesman_user_id") or user_id)
+
+        # 1. Deduct stock from salesman ledger
+        for itm in items:
+            p_id = str(itm.get("product_id"))
+            qty = int(float(itm.get("quantity", 0) or 0))
+            db.append_record("SalesmanStockLedger", {
+                "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+                "txn_datetime": now,
+                "salesman_user_id": salesman_id,
+                "product_id": p_id,
+                "sku_snapshot": str(itm.get("sku_snapshot", "")),
+                "txn_type": "SOLD_DELIVERY",
+                "quantity": qty,
+                "unit": "PACKET",
+                "pack_weight_g": int(float(itm.get("pack_weight_g", 500) or 500)),
+                "related_sale_id": sale_id,
+                "issued_by_user_id": salesman_id,
+                "received_by_user_id": str(sale.get("customer_id", "")),
+                "confirmed_by_user_id": user_id,
+                "reference_id": str(sale.get("bill_number", "")),
+                "notes": f"Stock deduction for confirmed bill {sale.get('bill_number')}",
+            }, raise_on_error=True)
+
+        # 2. Update status to ISSUED
+        db.update_record("Sales", "sale_id", sale_id, {
+            "bill_status": "ISSUED",
+            "delivery_status": "DELIVERED",
+        }, raise_on_error=True)
+
+        # 3. Post double-entry accounting journal
+        try:
+            from app.accounting.postings import post_sale_journal
+            post_sale_journal(sale, actor=user_id)
+        except Exception as acct_err:
+            logger.error("Non-fatal accounting posting error for confirmed order %s: %s", sale_id, acct_err)
+
+        db.log_audit(user_id, "CONFIRM_SALES_ORDER", "Sales", sale_id, reason=f"Confirmed and issued order {sale.get('bill_number')}")
+        return {"ok": True, "sale_id": sale_id, "bill_status": "ISSUED", "message": f"Order {sale.get('bill_number')} confirmed and stock deducted."}
+
+
+@router.get("/dispatch-summary")
+async def sales_dispatch_summary(current_user: dict = Depends(get_current_user)):
+    """Overview of sales orders, dispatches, and fulfillment status."""
+    sales = db.get_records("Sales", fresh=True)
+    items = db.get_records("SaleItems", fresh=True)
+    items_by_sale = {}
+    for itm in items:
+        items_by_sale.setdefault(str(itm.get("sale_id")), []).append(itm)
+
+    dispatches = db.get_records("ProductionDispatches", fresh=True)
+
+    summary_list = []
+    for s in sales:
+        sid = str(s.get("sale_id"))
+        st = str(s.get("bill_status", "")).upper()
+        if st in {"CANCELLED"}:
+            continue
+        sale_items = items_by_sale.get(sid, [])
+        total_qty = sum(int(float(i.get("quantity", 0) or 0)) for i in sale_items)
+        summary_list.append({
+            "sale_id": sid,
+            "bill_number": str(s.get("bill_number", "")),
+            "customer_name": str(s.get("customer_name_snapshot", "")),
+            "sale_datetime": str(s.get("sale_datetime", "")),
+            "bill_total": float(s.get("bill_total", 0) or 0),
+            "total_packets": total_qty,
+            "bill_status": st,
+            "delivery_status": str(s.get("delivery_status", "PENDING")),
+            "payment_status": str(s.get("payment_status", "UNPAID")),
+        })
+    summary_list.sort(key=lambda x: x["sale_datetime"], reverse=True)
+    return summary_list
+
+
 
 

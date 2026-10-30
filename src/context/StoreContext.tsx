@@ -1324,7 +1324,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     addAuditLog('PAY', 'SalaryIncentive', record_id, `Marked paid with ref: ${reference}`);
   };
 
-  const loadApprovalRequests = useCallback(async () => {
+  const loadApprovalRequests = useCallback(async (): Promise<void> => {
     try {
       const list = await apiRequest<ApprovalRequest[]>('/api/approvals/requests');
       if (Array.isArray(list)) {
@@ -1332,6 +1332,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     } catch (err) {
       console.warn('Failed to load approval requests:', err);
+      throw err;
     }
   }, []);
 

@@ -6,6 +6,7 @@ from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_manager
 from app.stock_math import salesman_available
 from app.timeutil import business_today, business_date_of, now_iso
+from app.calculations.units import parse_currency_amount
 
 router = APIRouter(prefix="/api/closing", tags=["Daily Closing"])
 
@@ -15,12 +16,12 @@ def _closing_from(record: dict) -> DailyClosing:
         closing_id=str(record.get("closing_id", "")),
         closing_date=str(record.get("closing_date", "")),
         salesman_user_id=str(record.get("salesman_user_id", "")),
-        opening_cash=float(record.get("opening_cash", 0) or 0),
-        cash_collected=float(record.get("cash_collected", 0) or 0),
-        approved_cash_expenses=float(record.get("approved_cash_expenses", 0) or 0),
-        expected_cash_return=float(record.get("expected_cash_return", 0) or 0),
-        physical_cash_returned=float(record.get("physical_cash_returned", 0) or 0),
-        cash_difference=float(record.get("cash_difference", 0) or 0),
+        opening_cash=parse_currency_amount(record.get("opening_cash", 0)),
+        cash_collected=parse_currency_amount(record.get("cash_collected", 0)),
+        approved_cash_expenses=parse_currency_amount(record.get("approved_cash_expenses", 0)),
+        expected_cash_return=parse_currency_amount(record.get("expected_cash_return", 0)),
+        physical_cash_returned=parse_currency_amount(record.get("physical_cash_returned", 0)),
+        cash_difference=parse_currency_amount(record.get("cash_difference", 0)),
         opening_stock_reference=str(record.get("opening_stock_reference", "")),
         stock_discrepancy_flag=str(record.get("stock_discrepancy_flag", "false")).lower() == "true",
         closing_status=str(record.get("closing_status", "SUBMITTED")),
@@ -28,9 +29,9 @@ def _closing_from(record: dict) -> DailyClosing:
         reviewed_by_user_id=str(record.get("reviewed_by_user_id", "")),
         reviewed_at=str(record.get("reviewed_at", "")),
         notes=str(record.get("notes", "")),
-        upi_collected=float(record.get("upi_collected", 0) or 0),
-        bank_collected=float(record.get("bank_collected", 0) or 0),
-        other_collected=float(record.get("other_collected", 0) or 0),
+        upi_collected=parse_currency_amount(record.get("upi_collected", 0)),
+        bank_collected=parse_currency_amount(record.get("bank_collected", 0)),
+        other_collected=parse_currency_amount(record.get("other_collected", 0)),
     )
 
 @router.get("", response_model=List[DailyClosing])
@@ -44,24 +45,7 @@ async def list_daily_closings(current_user: dict = Depends(get_current_user)):
         s_user = str(r.get("salesman_user_id", ""))
         if not is_manager(current_user) and s_user != user_id:
             continue
-        closings.append(DailyClosing(
-            closing_id=str(r.get("closing_id", "")),
-            closing_date=str(r.get("closing_date", "")),
-            salesman_user_id=s_user,
-            opening_cash=float(r.get("opening_cash", 0.0) or 0.0),
-            cash_collected=float(r.get("cash_collected", 0.0) or 0.0),
-            approved_cash_expenses=float(r.get("approved_cash_expenses", 0.0) or 0.0),
-            expected_cash_return=float(r.get("expected_cash_return", 0.0) or 0.0),
-            physical_cash_returned=float(r.get("physical_cash_returned", 0.0) or 0.0),
-            cash_difference=float(r.get("cash_difference", 0.0) or 0.0),
-            opening_stock_reference=str(r.get("opening_stock_reference", "")),
-            stock_discrepancy_flag=str(r.get("stock_discrepancy_flag", "false")).lower() == "true",
-            closing_status=str(r.get("closing_status", "SUBMITTED")),
-            submitted_at=str(r.get("submitted_at", "")),
-            reviewed_by_user_id=str(r.get("reviewed_by_user_id", "")),
-            reviewed_at=str(r.get("reviewed_at", "")),
-            notes=str(r.get("notes", "")),
-        ))
+        closings.append(_closing_from(r))
     closings.reverse()
     return closings
 
@@ -110,7 +94,7 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
         if business_date_of(str(expense.get("expense_datetime", ""))) != today_str:
             continue
         if str(expense.get("approval_status", "")).upper() == "APPROVED" and str(expense.get("cash_reducing_expense", "")).lower() == "true":
-            approved_expenses += float(expense.get("amount", 0) or 0)
+            approved_expenses += parse_currency_amount(expense.get("amount", 0))
 
     expected_cash = float(req.opening_cash) + cash_collected - approved_expenses
     diff = float(req.physical_cash_returned) - expected_cash

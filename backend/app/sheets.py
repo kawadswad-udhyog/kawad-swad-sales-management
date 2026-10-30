@@ -49,6 +49,22 @@ ID_PREFIXES = {
     "JournalHeaders": "JRN",
     "JournalLines": "JLN",
     "AccountingPeriods": "PER",
+    "MillingBatches": "MIL",
+    "Suppliers": "SUP",
+    "PurchaseOrders": "PO",
+    "PurchaseOrderItems": "POI",
+    "GoodsReceipts": "GRN",
+    "GoodsReceiptItems": "GRI",
+    "SupplierBills": "BIL",
+    "SupplierPayments": "SPAY",
+    "SupplierReturns": "SRET",
+    "SupplierReturnItems": "SRI",
+    "CustomerReturns": "CRET",
+    "CustomerReturnItems": "CRI",
+    "QualityChecks": "QC",
+    "ProductLots": "LOT",
+    "LotMovements": "LMV",
+    "ComplaintsRecalls": "CMP",
 }
 
 REQUIRED_TABS = {
@@ -59,7 +75,7 @@ REQUIRED_TABS = {
     "CustomRoles": ["role_id", "role_name", "description", "permissions_json", "created_by", "created_at", "updated_at"],
     "IdAllocations": ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
     "RevokedTokens": ["token_id", "jti", "user_id", "revoked_at", "expires_at", "reason"],
-    "ApprovalRequests": ["request_id", "request_type", "target_user_id", "requested_by", "requested_at", "payload_json", "status", "decided_by", "decided_at", "decision_notes", "execution_error", "executed_at"],
+    "ApprovalRequests": ["request_id", "request_type", "target_user_id", "requested_by", "requested_by_name", "requested_at", "payload_json", "status", "decided_by", "decided_at", "decision_notes", "execution_error", "executed_at"],
     "AuthUsers": ["auth_id", "user_id", "username", "password_hash", "role", "active", "created_at", "must_change_password", "sessions_revoked_at"],
     "Users": ["user_id", "full_name", "username", "role", "mobile", "email", "active", "created_at", "notes"],
     "Products": ["product_id", "sku", "product_name", "category", "variant", "pack_weight_g", "selling_unit", "retail_pack_only", "active", "notes"],
@@ -164,6 +180,79 @@ REQUIRED_TABS = {
     "IncompleteTransactions": [
         "transaction_id", "transaction_type", "idempotency_key", "status", "payload_json",
         "error_details", "created_at", "updated_at", "resolved_by", "resolved_at",
+    ],
+    "MillingBatches": [
+        "milling_batch_id", "batch_date", "source_material_id", "source_material_name", "input_quantity_kg",
+        "target_flour_id", "target_flour_name", "flour_output_kg", "processing_loss_kg", "yield_ratio",
+        "source_unit_rate", "milling_expenses", "total_flour_cost", "flour_unit_cost", "status",
+        "created_by", "created_at", "notes",
+    ],
+    "Suppliers": [
+        "supplier_id", "supplier_name", "contact_person", "mobile", "email", "address",
+        "city", "gstin", "active", "created_at", "created_by", "notes",
+    ],
+    "PurchaseOrders": [
+        "po_id", "po_number", "supplier_id", "supplier_name", "order_date", "expected_delivery_date",
+        "total_amount", "status", "created_by", "created_at", "approved_by", "approved_at", "notes",
+    ],
+    "PurchaseOrderItems": [
+        "po_item_id", "po_id", "raw_material_id", "material_name", "ordered_quantity",
+        "received_quantity", "unit", "unit_price", "tax_amount", "line_total", "notes",
+    ],
+    "GoodsReceipts": [
+        "receipt_id", "receipt_number", "po_id", "supplier_id", "supplier_name", "receipt_date",
+        "invoice_reference", "delivery_challan", "total_accepted_qty", "total_rejected_qty",
+        "quality_status", "status", "received_by", "created_at", "notes",
+    ],
+    "GoodsReceiptItems": [
+        "receipt_item_id", "receipt_id", "po_item_id", "raw_material_id", "material_name",
+        "delivered_quantity", "accepted_quantity", "rejected_quantity", "unit", "unit_rate",
+        "rejection_reason", "stock_movement_id", "notes",
+    ],
+    "SupplierBills": [
+        "bill_id", "bill_number", "supplier_id", "supplier_name", "receipt_id", "po_id",
+        "bill_date", "due_date", "subtotal", "tax_amount", "total_amount", "paid_amount",
+        "balance_amount", "payment_status", "status", "created_by", "created_at", "notes",
+    ],
+    "SupplierPayments": [
+        "payment_id", "bill_id", "supplier_id", "supplier_name", "payment_date",
+        "amount", "payment_method", "reference_number", "status", "paid_by", "created_at", "notes",
+    ],
+    "SupplierReturns": [
+        "return_id", "return_number", "receipt_id", "supplier_id", "supplier_name",
+        "return_date", "status", "approved_by", "approved_at", "created_by", "created_at", "notes",
+    ],
+    "SupplierReturnItems": [
+        "return_item_id", "return_id", "raw_material_id", "material_name", "quantity",
+        "unit", "unit_rate", "return_amount", "reason", "stock_movement_id", "notes",
+    ],
+    "CustomerReturns": [
+        "return_id", "return_number", "sale_id", "bill_number", "customer_id", "customer_name",
+        "return_date", "status", "inspection_status", "disposition", "approved_by", "approved_at",
+        "created_by", "created_at", "notes",
+    ],
+    "CustomerReturnItems": [
+        "return_item_id", "return_id", "product_id", "sku", "product_name", "quantity",
+        "unit", "unit_price", "refund_amount", "reason", "inspection_notes", "stock_movement_id", "notes",
+    ],
+    "QualityChecks": [
+        "qc_id", "check_date", "check_type", "reference_type", "reference_id",
+        "product_or_material_id", "item_name", "inspector_user_id", "status", "decision",
+        "parameters_json", "defect_details", "corrective_action", "created_at", "notes",
+    ],
+    "ProductLots": [
+        "lot_id", "lot_number", "product_id", "product_name", "production_id", "packaging_id",
+        "creation_date", "expiry_date", "initial_quantity", "current_quantity", "unit",
+        "quality_status", "hold_reason", "status", "created_at", "created_by", "notes",
+    ],
+    "LotMovements": [
+        "movement_id", "movement_date", "lot_id", "source_type", "source_id",
+        "movement_type", "quantity", "unit", "actor_user_id", "created_at", "notes",
+    ],
+    "ComplaintsRecalls": [
+        "complaint_id", "report_date", "report_type", "customer_id", "customer_name",
+        "product_id", "lot_id", "quantity_affected", "severity", "status", "description",
+        "investigation", "corrective_action", "responsible_user_id", "closure_date", "created_at", "notes",
     ],
 }
 

@@ -21,14 +21,18 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  Truck,
+  ShieldCheck,
 } from 'lucide-react';
 
 
 export type ViewType =
   | 'dashboard'
+  | 'purchasing'
   | 'production'
   | 'attendance'
   | 'packaging'
+  | 'quality'
   | 'stock'
   | 'sales'
   | 'approvals'
@@ -111,6 +115,12 @@ export const Navigation: React.FC<NavigationProps> = ({
           roles: ['OWNER', 'PA', 'SALESMAN'],
         },
         {
+          view: 'purchasing',
+          label: 'Purchasing & Vendors',
+          icon: <Truck size={18} />,
+          roles: ['OWNER', 'PA'],
+        },
+        {
           view: 'production',
           label: 'Production',
           icon: <Factory size={18} />,
@@ -138,6 +148,12 @@ export const Navigation: React.FC<NavigationProps> = ({
           label: 'Inventory Ledgers',
           icon: <Boxes size={18} />,
           roles: ['OWNER', 'PA', 'SALESMAN'],
+        },
+        {
+          view: 'quality',
+          label: 'Quality & Traceability',
+          icon: <ShieldCheck size={18} />,
+          roles: ['OWNER', 'PA'],
         },
         {
           view: 'approvals',

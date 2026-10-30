@@ -4,6 +4,26 @@
  * Includes comprehensive debug logging for URL construction, CORS detection, and backend reachability.
  */
 
+import type {
+  Supplier,
+  PurchaseOrder,
+  GoodsReceipt,
+  SupplierBill,
+  SupplierPayment,
+  SupplierReturn,
+  QualityCheck,
+  ProductLot,
+  LotMovement,
+  CustomerReturn,
+  ComplaintRecall,
+  MillingBatch,
+  DebtorItem,
+  CreditorItem,
+  CashBankReport,
+  GstSummaryReport,
+  AccountingPeriod,
+} from '../types';
+
 export const DEFAULT_API_BASE_URL =
   (typeof window !== 'undefined' && (window as unknown as { KAWAD_API_URL?: string }).KAWAD_API_URL) ||
   (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: { VITE_API_URL?: string } })?.env?.VITE_API_URL) ||
@@ -950,6 +970,432 @@ export async function recordSalePaymentApi(
     body: JSON.stringify(payment),
   });
 }
+
+// -------------------------------------------------------------
+// Purchasing & Procurement API
+// -------------------------------------------------------------
+
+export async function getSuppliers(): Promise<Supplier[]> {
+  return apiRequest<Supplier[]>('/api/purchasing/suppliers');
+}
+
+export async function createSupplier(supplier: Partial<Supplier>): Promise<Supplier> {
+  return apiRequest<Supplier>('/api/purchasing/suppliers', {
+    method: 'POST',
+    body: JSON.stringify(supplier),
+  });
+}
+
+export async function updateSupplier(supplierId: string, supplier: Partial<Supplier>): Promise<Supplier> {
+  return apiRequest<Supplier>(`/api/purchasing/suppliers/${encodeURIComponent(supplierId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(supplier),
+  });
+}
+
+export async function getPurchaseOrders(status?: string): Promise<PurchaseOrder[]> {
+  const url = status ? `/api/purchasing/orders?status=${encodeURIComponent(status)}` : '/api/purchasing/orders';
+  return apiRequest<PurchaseOrder[]>(url);
+}
+
+export async function createPurchaseOrder(payload: {
+  supplier_id: string;
+  order_date: string;
+  expected_delivery_date?: string;
+  notes?: string;
+  items: Array<{
+    material_id: string;
+    material_name: string;
+    ordered_quantity: number;
+    unit: string;
+    unit_price: number;
+    gst_rate?: number;
+    notes?: string;
+  }>;
+}): Promise<PurchaseOrder> {
+  return apiRequest<PurchaseOrder>('/api/purchasing/orders', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function cancelPurchaseOrder(orderId: string, reason?: string): Promise<{ ok: boolean; status: string; order_id: string }> {
+  return apiRequest(`/api/purchasing/orders/${encodeURIComponent(orderId)}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export async function getGoodsReceipts(): Promise<GoodsReceipt[]> {
+  return apiRequest<GoodsReceipt[]>('/api/purchasing/goods-receipts');
+}
+
+export async function createGoodsReceipt(payload: {
+  supplier_id: string;
+  receipt_date: string;
+  po_id?: string;
+  vendor_delivery_challan?: string;
+  vehicle_number?: string;
+  notes?: string;
+  items: Array<{
+    po_item_id?: string;
+    material_id: string;
+    material_name: string;
+    unit: string;
+    received_quantity: number;
+    unit_price: number;
+    tax_rate?: number;
+    gst_treatment?: string;
+    storage_location?: string;
+    batch_reference?: string;
+    qc_status?: string;
+    notes?: string;
+  }>;
+}): Promise<GoodsReceipt> {
+  return apiRequest<GoodsReceipt>('/api/purchasing/goods-receipts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getSupplierBills(status?: string): Promise<SupplierBill[]> {
+  const url = status ? `/api/purchasing/bills?status=${encodeURIComponent(status)}` : '/api/purchasing/bills';
+  return apiRequest<SupplierBill[]>(url);
+}
+
+export async function createSupplierBill(payload: {
+  supplier_id: string;
+  bill_number: string;
+  bill_date: string;
+  due_date?: string;
+  po_id?: string;
+  grn_id?: string;
+  taxable_amount: number;
+  cgst_amount?: number;
+  sgst_amount?: number;
+  igst_amount?: number;
+  freight_amount?: number;
+  other_expenses?: number;
+  total_amount: number;
+  notes?: string;
+}): Promise<SupplierBill> {
+  return apiRequest<SupplierBill>('/api/purchasing/bills', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getSupplierPayments(): Promise<SupplierPayment[]> {
+  return apiRequest<SupplierPayment[]>('/api/purchasing/payments');
+}
+
+export async function recordSupplierPayment(payload: {
+  supplier_id: string;
+  bill_id?: string;
+  payment_date: string;
+  payment_mode: 'CASH' | 'BANK' | 'UPI' | 'NEFT';
+  amount: number;
+  reference_no?: string;
+  notes?: string;
+}): Promise<SupplierPayment> {
+  return apiRequest<SupplierPayment>('/api/purchasing/payments', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getSupplierReturns(): Promise<SupplierReturn[]> {
+  return apiRequest<SupplierReturn[]>('/api/purchasing/returns');
+}
+
+export async function createSupplierReturn(payload: {
+  supplier_id: string;
+  grn_id?: string;
+  return_date: string;
+  reason: string;
+  notes?: string;
+  items: Array<{
+    material_id: string;
+    material_name: string;
+    returned_quantity: number;
+    unit: string;
+    unit_price: number;
+    reason?: string;
+    notes?: string;
+  }>;
+}): Promise<SupplierReturn> {
+  return apiRequest<SupplierReturn>('/api/purchasing/returns', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getPurchasingSummary(): Promise<{
+  total_suppliers: number;
+  open_pos: number;
+  unpaid_bills: number;
+  total_payables: number;
+}> {
+  return apiRequest('/api/purchasing/summary');
+}
+
+// -------------------------------------------------------------
+// Quality, Lots & Returns API
+// -------------------------------------------------------------
+
+export async function getQualityChecks(entityType?: string): Promise<QualityCheck[]> {
+  const url = entityType ? `/api/quality/checks?entity_type=${encodeURIComponent(entityType)}` : '/api/quality/checks';
+  return apiRequest<QualityCheck[]>(url);
+}
+
+export async function createQualityCheck(payload: {
+  check_type: 'RAW_MATERIAL' | 'IN_PROCESS' | 'FINISHED_GOODS';
+  entity_type: string;
+  entity_id: string;
+  item_name: string;
+  decision: 'PASS' | 'FAIL' | 'HOLD';
+  defect_details?: string;
+  corrective_action?: string;
+  notes?: string;
+}): Promise<QualityCheck> {
+  return apiRequest<QualityCheck>('/api/quality/checks', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getProductLots(status?: string): Promise<ProductLot[]> {
+  const url = status ? `/api/quality/lots?status=${encodeURIComponent(status)}` : '/api/quality/lots';
+  return apiRequest<ProductLot[]>(url);
+}
+
+export async function createProductLot(payload: {
+  product_id: string;
+  product_name: string;
+  initial_quantity: number;
+  unit: string;
+  expiry_date?: string;
+  production_id?: string;
+  packaging_id?: string;
+  notes?: string;
+}): Promise<ProductLot> {
+  return apiRequest<ProductLot>('/api/quality/lots', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateLotStatus(
+  lotId: string,
+  qualityStatus: 'RELEASED' | 'QUARANTINE' | 'REJECTED' | 'RECALLED',
+  holdReason?: string
+): Promise<ProductLot> {
+  return apiRequest<ProductLot>(`/api/quality/lots/${encodeURIComponent(lotId)}/status`, {
+    method: 'PUT',
+    body: JSON.stringify({ quality_status: qualityStatus, hold_reason: holdReason }),
+  });
+}
+
+export async function getLotMovements(lotId?: string): Promise<LotMovement[]> {
+  const url = lotId ? `/api/quality/lot-movements?lot_id=${encodeURIComponent(lotId)}` : '/api/quality/lot-movements';
+  return apiRequest<LotMovement[]>(url);
+}
+
+export async function getCustomerReturns(): Promise<CustomerReturn[]> {
+  return apiRequest<CustomerReturn[]>('/api/quality/customer-returns');
+}
+
+export async function createCustomerReturn(payload: {
+  sale_id: string;
+  customer_id: string;
+  customer_name: string;
+  return_date: string;
+  disposition: 'SCRAP' | 'RESTOCK' | 'PENDING_INSPECTION';
+  notes?: string;
+  items: Array<{
+    product_id: string;
+    sku: string;
+    product_name: string;
+    quantity: number;
+    unit: string;
+    unit_price: number;
+    reason: string;
+    notes?: string;
+  }>;
+}): Promise<CustomerReturn> {
+  return apiRequest<CustomerReturn>('/api/quality/customer-returns', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getComplaintsRecalls(status?: string): Promise<ComplaintRecall[]> {
+  const url = status ? `/api/quality/complaints-recalls?status=${encodeURIComponent(status)}` : '/api/quality/complaints-recalls';
+  return apiRequest<ComplaintRecall[]>(url);
+}
+
+export async function createComplaintOrRecall(payload: {
+  report_type: 'COMPLAINT' | 'RECALL';
+  product_id: string;
+  lot_id?: string;
+  customer_id?: string;
+  customer_name?: string;
+  quantity_affected: number;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  description: string;
+  notes?: string;
+}): Promise<ComplaintRecall> {
+  return apiRequest<ComplaintRecall>('/api/quality/complaints-recalls', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function closeComplaint(
+  complaintId: string,
+  data: { investigation?: string; corrective_action?: string; notes?: string }
+): Promise<ComplaintRecall> {
+  return apiRequest<ComplaintRecall>(`/api/quality/complaints-recalls/${encodeURIComponent(complaintId)}/close`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getQualitySummary(): Promise<{
+  total_checks: number;
+  quarantined_lots: number;
+  open_returns: number;
+  open_complaints: number;
+}> {
+  return apiRequest('/api/quality/summary');
+}
+
+// -------------------------------------------------------------
+// Dal Milling & Stock Movements API
+// -------------------------------------------------------------
+
+export async function getMillingBatches(): Promise<MillingBatch[]> {
+  return apiRequest<MillingBatch[]>('/api/production/milling');
+}
+
+export async function executeDalMilling(payload: {
+  source_material_id: string;
+  input_quantity_kg: number;
+  flour_output_kg: number;
+  milling_expenses?: number;
+  batch_reference?: string;
+  idempotency_key?: string;
+  notes?: string;
+}): Promise<DalMillingResult> {
+  return apiRequest<DalMillingResult>('/api/production/dal-milling', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function adjustRawMaterialStock(payload: {
+  material_id: string;
+  adjusted_quantity: number;
+  reason: string;
+  authorized_by?: string;
+}): Promise<{ ok: boolean; status: string; balance: number }> {
+  return apiRequest('/api/production/raw-materials/adjustment', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function adjustFinishedGoodsStock(payload: {
+  product_id: string;
+  adjusted_packets: number;
+  reason: string;
+  location?: string;
+  authorized_by?: string;
+}): Promise<{ ok: boolean; status: string; balance: number }> {
+  return apiRequest('/api/production/finished-goods/adjustment', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export interface StockMovementItem {
+  id: string;
+  date: string;
+  type: string;
+  category: 'RAW_MATERIAL' | 'BULK_WIP' | 'FINISHED_GOODS';
+  item_id: string;
+  quantity: number;
+  unit: string;
+  reference_type: string;
+  reference_id: string;
+  notes?: string;
+}
+
+export async function getUnifiedStockMovements(): Promise<StockMovementItem[]> {
+  return apiRequest<StockMovementItem[]>('/api/production/stock-movements');
+}
+
+// -------------------------------------------------------------
+// Sales Orders (Draft -> Confirm) & Dispatch
+// -------------------------------------------------------------
+
+export async function getSalesOrders(): Promise<any[]> {
+  return apiRequest('/api/sales/orders');
+}
+
+export async function createSalesOrder(payload: any): Promise<any> {
+  return apiRequest('/api/sales/orders', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function confirmSalesOrder(saleId: string): Promise<any> {
+  return apiRequest(`/api/sales/orders/${encodeURIComponent(saleId)}/confirm`, {
+    method: 'POST',
+  });
+}
+
+export async function getDispatchSummary(): Promise<any> {
+  return apiRequest('/api/sales/dispatch-summary');
+}
+
+// -------------------------------------------------------------
+// Extended Accounting & Management Reports
+// -------------------------------------------------------------
+
+export async function getDebtorsBalances(): Promise<{ as_of_date: string; debtors: DebtorItem[]; total_receivables: number }> {
+  return apiRequest('/api/accounting/debtors');
+}
+
+export async function getCreditorsBalances(): Promise<{ as_of_date: string; creditors: CreditorItem[]; total_payables: number }> {
+  return apiRequest('/api/accounting/creditors');
+}
+
+export async function getCashBankReport(): Promise<CashBankReport> {
+  return apiRequest<CashBankReport>('/api/accounting/cash-bank');
+}
+
+export async function getGstSummaryReport(startDate?: string, endDate?: string): Promise<GstSummaryReport> {
+  let url = '/api/accounting/gst-summary';
+  const params = new URLSearchParams();
+  if (startDate) params.set('start_date', startDate);
+  if (endDate) params.set('end_date', endDate);
+  const q = params.toString();
+  if (q) url += `?${q}`;
+  return apiRequest<GstSummaryReport>(url);
+}
+
+export async function getAccountingPeriods(): Promise<AccountingPeriod[]> {
+  return apiRequest<AccountingPeriod[]>('/api/accounting/periods');
+}
+
+export async function closeAccountingPeriod(periodId: string): Promise<{ ok: boolean; status: string; period: AccountingPeriod }> {
+  return apiRequest(`/api/accounting/periods/${encodeURIComponent(periodId)}/close`, {
+    method: 'POST',
+  });
+}
+
 
 
 

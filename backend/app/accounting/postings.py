@@ -485,3 +485,177 @@ def post_payment_collection_journal(
         journal_date=str(payment_data.get("payment_datetime", ""))[:10] or None,
     )
 
+
+def post_supplier_payment_journal(
+    payment_data: Dict[str, Any],
+    actor: str,
+) -> Dict[str, Any]:
+    """
+    Supplier Payment Settlement:
+    Debit: Accounts Payable / Sundry Creditors (2100)
+    Credit: Bank Account (1120) or Cash-in-Hand (1110)
+    """
+    pay_id = str(payment_data.get("payment_id", "")).strip()
+    amount = to_decimal(payment_data.get("amount", 0) or 0)
+    method = str(payment_data.get("payment_method", "BANK_TRANSFER")).upper()
+    supp_name = str(payment_data.get("supplier_name", "Supplier"))
+    bill_id = str(payment_data.get("bill_id", "")).strip()
+
+    if amount <= Decimal("0"):
+        return {"status": "SKIPPED", "message": "Zero payment amount"}
+
+    credit_code = "1110" if method == "CASH" else "1120"
+    lines = [
+        {
+            "account_code": "2100",
+            "debit_amount": round_money(amount),
+            "notes": f"Settlement of payable to {supp_name} for bill {bill_id}",
+        },
+        {
+            "account_code": credit_code,
+            "credit_amount": round_money(amount),
+            "notes": f"Disbursement via {method} (Ref: {payment_data.get('reference_number', 'N/A')})",
+        },
+    ]
+
+    return post_journal_voucher(
+        voucher_type="PAYMENT",
+        reference_type="SUPPLIER_PAYMENT",
+        reference_id=pay_id,
+        narration=f"Supplier payment to {supp_name} via {method}: ₹{amount:.2f}",
+        lines=lines,
+        posted_by=actor,
+        journal_date=str(payment_data.get("payment_date", ""))[:10] or None,
+    )
+
+
+def post_supplier_return_journal(
+    return_data: Dict[str, Any],
+    actor: str,
+) -> Dict[str, Any]:
+    """
+    Supplier Return (Debit Note):
+    Debit: Accounts Payable / Sundry Creditors (2100)
+    Credit: Raw Material Inventory (1210 or 1215)
+    Credit: Input CGST / SGST (1310 / 1320) if tax included
+    """
+    ret_id = str(return_data.get("return_id", "")).strip()
+    amount = to_decimal(return_data.get("return_amount", 0) or 0)
+    supp_name = str(return_data.get("supplier_name", "Supplier"))
+    mat_name = str(return_data.get("material_name", "Material"))
+    tax_amt = to_decimal(return_data.get("tax_amount", 0) or 0)
+
+    if amount <= Decimal("0"):
+        return {"status": "SKIPPED", "message": "Zero return amount"}
+
+    is_dal = "dal" in mat_name.lower() or "moong" in mat_name.lower() or "urad" in mat_name.lower() or "chana" in mat_name.lower()
+    inv_code = "1210" if is_dal else "1215"
+
+    lines = [
+        {
+            "account_code": "2100",
+            "debit_amount": round_money(amount),
+            "notes": f"Debit note against {supp_name} for returned {mat_name}",
+        },
+    ]
+
+    if tax_amt > Decimal("0"):
+        cgst = (tax_amt / Decimal("2")).quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP)
+        sgst = tax_amt - cgst
+        cost_amt = amount - (cgst + sgst)
+        lines.append({
+            "account_code": inv_code,
+            "credit_amount": round_money(cost_amt),
+            "notes": f"Inventory return credit for {mat_name}",
+        })
+        lines.append({
+            "account_code": "1310",
+            "credit_amount": round_money(cgst),
+            "notes": "Reversal of Input CGST",
+        })
+        lines.append({
+            "account_code": "1320",
+            "credit_amount": round_money(sgst),
+            "notes": "Reversal of Input SGST",
+        })
+    else:
+        lines.append({
+            "account_code": inv_code,
+            "credit_amount": round_money(amount),
+            "notes": f"Inventory return credit for {mat_name}",
+        })
+
+    return post_journal_voucher(
+        voucher_type="PURCHASE",
+        reference_type="SUPPLIER_RETURN",
+        reference_id=ret_id,
+        narration=f"Supplier debit note for return of {mat_name} to {supp_name}: ₹{amount:.2f}",
+        lines=lines,
+        posted_by=actor,
+        journal_date=str(return_data.get("return_date", ""))[:10] or None,
+    )
+
+
+def post_customer_return_journal(
+    return_data: Dict[str, Any],
+    actor: str,
+) -> Dict[str, Any]:
+    """
+    Customer Sales Return (Credit Note):
+    Debit: Papad Sales Revenue (4100) [Net of tax]
+    Debit: Output CGST (2210) & Output SGST (2220) [if tax applied]
+    Credit: Accounts Receivable (1130) or Cash/Bank
+    """
+    ret_id = str(return_data.get("return_id", "")).strip()
+    amount = to_decimal(return_data.get("refund_amount", 0) or return_data.get("amount", 0) or 0)
+    tax_amt = to_decimal(return_data.get("tax_amount", 0) or 0)
+    cust_name = str(return_data.get("customer_name", "Customer"))
+    is_cash_refund = str(return_data.get("is_cash_refund", "false")).lower() in {"true", "1"}
+
+    if amount <= Decimal("0"):
+        return {"status": "SKIPPED", "message": "Zero return amount"}
+
+    lines = []
+    if tax_amt > Decimal("0"):
+        cgst = (tax_amt / Decimal("2")).quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP)
+        sgst = tax_amt - cgst
+        net_rev = amount - (cgst + sgst)
+        lines.append({
+            "account_code": "4100",
+            "debit_amount": round_money(net_rev),
+            "notes": f"Sales return debit for {cust_name}",
+        })
+        lines.append({
+            "account_code": "2210",
+            "debit_amount": round_money(cgst),
+            "notes": "Output CGST reversal on return",
+        })
+        lines.append({
+            "account_code": "2220",
+            "debit_amount": round_money(sgst),
+            "notes": "Output SGST reversal on return",
+        })
+    else:
+        lines.append({
+            "account_code": "4100",
+            "debit_amount": round_money(amount),
+            "notes": f"Sales return debit for {cust_name}",
+        })
+
+    credit_code = "1115" if is_cash_refund else "1130"
+    lines.append({
+        "account_code": credit_code,
+        "credit_amount": round_money(amount),
+        "notes": f"Credit note / refund for {cust_name}",
+    })
+
+    return post_journal_voucher(
+        voucher_type="SALES_REVERSAL",
+        reference_type="CUSTOMER_RETURN",
+        reference_id=ret_id,
+        narration=f"Sales credit note for return from {cust_name}: ₹{amount:.2f}",
+        lines=lines,
+        posted_by=actor,
+        journal_date=str(return_data.get("return_date", ""))[:10] or None,
+    )
+
