@@ -3,9 +3,9 @@ Kawad Swad ERP - Double-Entry Accounting Posting Handlers
 Maps operational ERP business events to balanced double-entry journal vouchers.
 """
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Optional
-from app.calculations.units import to_decimal, round_money
+from app.calculations.units import to_decimal, round_money, MONEY_PRECISION
 from app.accounting.journal_engine import post_journal_voucher
 
 
@@ -44,15 +44,15 @@ def post_receipt_journal(
     lines = []
 
     if gst_treatment == "RECOVERABLE_ITC" and gst > Decimal("0"):
-        # Split GST equally into CGST and SGST
-        cgst = gst / Decimal("2")
-        sgst = gst / Decimal("2")
+        # Split GST with penny-accurate rounding so debits equal credits
+        cgst = (gst / Decimal("2")).quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP)
+        sgst = gst - cgst
         inv_amt = base_amt + freight
-        total_payable = base_amt + freight + gst
+        total_payable = inv_amt + cgst + sgst
 
         lines.append({"account_code": inv_code, "debit_amount": round_money(inv_amt), "notes": f"Material {mat_name} + Freight"})
-        lines.append({"account_code": "1310", "debit_amount": round_money(cgst), "notes": "Input CGST 2.5%"})
-        lines.append({"account_code": "1320", "debit_amount": round_money(sgst), "notes": "Input SGST 2.5%"})
+        lines.append({"account_code": "1310", "debit_amount": round_money(cgst), "notes": "Input CGST"})
+        lines.append({"account_code": "1320", "debit_amount": round_money(sgst), "notes": "Input SGST"})
         lines.append({"account_code": "2100", "credit_amount": round_money(total_payable), "notes": f"Payable to {receipt_data.get('supplier_name', 'Supplier')}"})
     else:
         # Capitalize GST into inventory cost or zero-rated
@@ -275,27 +275,38 @@ def post_sale_journal(
         },
     ]
 
+    cgst_input = sale_data.get("cgst_amount")
+    sgst_input = sale_data.get("sgst_amount")
+    if cgst_input is not None and sgst_input is not None:
+        cgst = to_decimal(cgst_input).quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP)
+        sgst = to_decimal(sgst_input).quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP)
+        tax_amt = cgst + sgst
+    elif tax_amt > Decimal("0"):
+        cgst = (tax_amt / Decimal("2")).quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP)
+        sgst = tax_amt - cgst
+    else:
+        cgst = Decimal("0")
+        sgst = Decimal("0")
+
     if tax_amt > Decimal("0"):
-        cgst_dec = tax_amt / Decimal("2")
-        sgst_dec = tax_amt - cgst_dec
-        cgst = round_money(cgst_dec)
-        sgst = round_money(sgst_dec)
-        net_revenue = round_money(bill_total - tax_amt)
+        net_revenue = bill_total - (cgst + sgst)
         lines.append({
             "account_code": "4100",
-            "credit_amount": net_revenue,
+            "credit_amount": round_money(net_revenue),
             "notes": f"Net papad revenue from bill {bill_no}",
         })
-        lines.append({
-            "account_code": "2210",
-            "credit_amount": cgst,
-            "notes": f"Output CGST collected on bill {bill_no}",
-        })
-        lines.append({
-            "account_code": "2220",
-            "credit_amount": sgst,
-            "notes": f"Output SGST collected on bill {bill_no}",
-        })
+        if cgst > Decimal("0"):
+            lines.append({
+                "account_code": "2210",
+                "credit_amount": round_money(cgst),
+                "notes": f"Output CGST collected on bill {bill_no}",
+            })
+        if sgst > Decimal("0"):
+            lines.append({
+                "account_code": "2220",
+                "credit_amount": round_money(sgst),
+                "notes": f"Output SGST collected on bill {bill_no}",
+            })
     else:
         lines.append({
             "account_code": "4100",

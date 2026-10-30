@@ -34,18 +34,90 @@ def audit_and_reconcile_operational_events(
     """
     Performs an authoritative operational vs ledger reconciliation.
     Identifies all historical and operational events lacking general journal postings.
-    When dry_run=False, safely and idempotently posts missing vouchers.
+    Distinguishes MISSING (never posted), FAILED, and INCOMPLETE vouchers.
+    Detects duplicate references in JournalHeaders.
+    When dry_run=False, safely and idempotently posts/repairs vouchers.
     """
     headers = db.get_records("JournalHeaders", fresh=True)
-    existing_posted_refs = {
-        f"{str(h.get('reference_type', '')).strip()}:{str(h.get('reference_id', '')).strip()}": h
-        for h in headers
-        if str(h.get("status", "")).upper() in {"POSTED", "REVERSED"}
-    }
+    posted_refs: Dict[str, Dict[str, Any]] = {}
+    failed_refs: Dict[str, Dict[str, Any]] = {}
+    incomplete_refs: Dict[str, Dict[str, Any]] = {}
+    seen_refs: Dict[str, List[Dict[str, Any]]] = {}
 
+    for h in headers:
+        r_type = str(h.get("reference_type", "")).strip().upper()
+        r_id = str(h.get("reference_id", "")).strip()
+        st = str(h.get("status", "")).strip().upper()
+        if r_type and r_id:
+            k = f"{r_type}:{r_id}"
+            seen_refs.setdefault(k, []).append(h)
+            if st in {"POSTED", "VALID", "REVERSED"}:
+                posted_refs[k] = h
+            elif st == "FAILED":
+                failed_refs[k] = h
+            elif st == "INCOMPLETE":
+                incomplete_refs[k] = h
+
+    duplicate_references: List[Dict[str, Any]] = []
+    for k, v in seen_refs.items():
+        if len(v) > 1:
+            duplicate_references.append({
+                "reference_key": k,
+                "voucher_count": len(v),
+                "journal_ids": [str(x.get("journal_id")) for x in v],
+            })
+
+    unposted_events: List[Dict[str, Any]] = []
+    failed_vouchers: List[Dict[str, Any]] = []
+    incomplete_vouchers: List[Dict[str, Any]] = []
     missing_items: List[Dict[str, Any]] = []
     reconciled_items: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
+
+    def check_and_queue(source_table: str, ref_type: str, ref_id: str, date_str: str, desc: str, post_fn):
+        ref_key = f"{ref_type}:{ref_id}"
+        if ref_key in posted_refs:
+            return  # Already posted and verified
+
+        if ref_key in failed_refs:
+            hdr = failed_refs[ref_key]
+            issue_type = "FAILED"
+            journal_id = str(hdr.get("journal_id"))
+            fail_reason = str(hdr.get("narration", ""))
+        elif ref_key in incomplete_refs:
+            hdr = incomplete_refs[ref_key]
+            issue_type = "INCOMPLETE"
+            journal_id = str(hdr.get("journal_id"))
+            fail_reason = "Voucher lines write was incomplete."
+        else:
+            issue_type = "MISSING"
+            journal_id = ""
+            fail_reason = "Voucher was never posted."
+
+        item_info = {
+            "source_table": source_table,
+            "reference_type": ref_type,
+            "reference_id": ref_id,
+            "date": date_str,
+            "description": desc,
+            "issue_type": issue_type,
+            "journal_id": journal_id,
+            "failure_reason": fail_reason,
+        }
+        missing_items.append(item_info)
+        if issue_type == "FAILED":
+            failed_vouchers.append(item_info)
+        elif issue_type == "INCOMPLETE":
+            incomplete_vouchers.append(item_info)
+        else:
+            unposted_events.append(item_info)
+
+        if not dry_run:
+            try:
+                res = post_fn()
+                reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
+            except Exception as e:
+                errors.append({**item_info, "error": str(e)})
 
     # 1. Audit RawMaterialLedger (RECEIVE & DAL_MILLING)
     rm_records = db.get_records("RawMaterialLedger", fresh=True)
@@ -54,40 +126,23 @@ def audit_and_reconcile_operational_events(
         txn_type = str(row.get("txn_type", "")).upper()
 
         if txn_type == "RECEIVE":
-            ref_key = f"RAW_MATERIAL_RECEIPT:{txn_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "RawMaterialLedger",
-                    "reference_type": "RAW_MATERIAL_RECEIPT",
-                    "reference_id": txn_id,
-                    "date": row.get("txn_datetime", "")[:10],
-                    "description": f"Receipt of {row.get('quantity_kg')}kg {row.get('material_name_snapshot')}",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_receipt_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
-
+            check_and_queue(
+                "RawMaterialLedger",
+                "RAW_MATERIAL_RECEIPT",
+                txn_id,
+                str(row.get("txn_datetime", ""))[:10],
+                f"Receipt of {row.get('quantity_kg') or row.get('quantity')}kg {row.get('material_name_snapshot') or row.get('material_name')}",
+                lambda r=row: post_receipt_journal(r, actor=actor),
+            )
         elif txn_type in {"DAL_MILLING", "MILLING_ISSUE", "MILLING_YIELD"}:
-            ref_key = f"DAL_MILLING:{txn_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "RawMaterialLedger",
-                    "reference_type": "DAL_MILLING",
-                    "reference_id": txn_id,
-                    "date": row.get("txn_datetime", "")[:10],
-                    "description": f"Dal milling conversion {txn_id}",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_milling_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
+            check_and_queue(
+                "RawMaterialLedger",
+                "DAL_MILLING",
+                txn_id,
+                str(row.get("txn_datetime", ""))[:10],
+                f"Dal milling conversion {txn_id}",
+                lambda r=row: post_milling_journal(r, actor=actor),
+            )
 
     # 2. Audit ProductionBatches
     pb_records = db.get_records("ProductionBatches", fresh=True)
@@ -95,22 +150,14 @@ def audit_and_reconcile_operational_events(
         batch_id = str(row.get("batch_id", "")).strip()
         status = str(row.get("status", "")).upper()
         if status == "APPROVED":
-            ref_key = f"PRODUCTION_BATCH:{batch_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "ProductionBatches",
-                    "reference_type": "PRODUCTION_BATCH",
-                    "reference_id": batch_id,
-                    "date": row.get("production_date", "") or row.get("created_at", "")[:10],
-                    "description": f"Approved bulk papad batch {batch_id} ({row.get('actual_output_kg')}kg)",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_production_batch_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
+            check_and_queue(
+                "ProductionBatches",
+                "PRODUCTION_BATCH",
+                batch_id,
+                str(row.get("production_date", "") or row.get("created_at", ""))[:10],
+                f"Approved bulk papad batch {batch_id} ({row.get('actual_output_kg')}kg)",
+                lambda r=row: post_production_batch_journal(r, actor=actor),
+            )
 
     # 3. Audit PackagingBatches
     pkg_records = db.get_records("PackagingBatches", fresh=True)
@@ -118,22 +165,14 @@ def audit_and_reconcile_operational_events(
         pkg_id = str(row.get("packaging_batch_id", "")).strip()
         status = str(row.get("status", "")).upper()
         if status == "APPROVED":
-            ref_key = f"PACKAGING_BATCH:{pkg_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "PackagingBatches",
-                    "reference_type": "PACKAGING_BATCH",
-                    "reference_id": pkg_id,
-                    "date": row.get("packaging_date", "") or row.get("created_at", "")[:10],
-                    "description": f"Approved packaging batch {pkg_id} ({row.get('packet_count')} pkts)",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_packaging_batch_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
+            check_and_queue(
+                "PackagingBatches",
+                "PACKAGING_BATCH",
+                pkg_id,
+                str(row.get("packaging_date", "") or row.get("created_at", ""))[:10],
+                f"Approved packaging batch {pkg_id} ({row.get('packet_count')} pkts)",
+                lambda r=row: post_packaging_batch_journal(r, actor=actor),
+            )
 
     # 4. Audit Sales
     sales_records = db.get_records("Sales", fresh=True)
@@ -141,22 +180,14 @@ def audit_and_reconcile_operational_events(
         sale_id = str(row.get("sale_id", "")).strip()
         status = str(row.get("bill_status", "")).upper()
         if status != "CANCELLED":
-            ref_key = f"SALE_INVOICE:{sale_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "Sales",
-                    "reference_type": "SALE_INVOICE",
-                    "reference_id": sale_id,
-                    "date": str(row.get("sale_datetime", ""))[:10],
-                    "description": f"Sales invoice {row.get('bill_number')} (₹{row.get('bill_total')})",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_sale_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
+            check_and_queue(
+                "Sales",
+                "SALE_INVOICE",
+                sale_id,
+                str(row.get("sale_datetime", ""))[:10],
+                f"Sales invoice {row.get('bill_number')} (₹{row.get('bill_total')})",
+                lambda r=row: post_sale_journal(row, actor=actor),
+            )
 
     # 5. Audit DailyClosing
     closing_records = db.get_records("DailyClosing", fresh=True)
@@ -164,22 +195,14 @@ def audit_and_reconcile_operational_events(
         closing_id = str(row.get("closing_id", "")).strip()
         status = str(row.get("closing_status", "")).upper()
         if status in {"REVIEWED", "CONFIRMED", "APPROVED"}:
-            ref_key = f"DAILY_CLOSING_REMITTANCE:{closing_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "DailyClosing",
-                    "reference_type": "DAILY_CLOSING_REMITTANCE",
-                    "reference_id": closing_id,
-                    "date": str(row.get("closing_date", "")),
-                    "description": f"Daily closing safe remittance {closing_id} (₹{row.get('physical_cash_returned')})",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_daily_closing_cash_remittance_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
+            check_and_queue(
+                "DailyClosing",
+                "DAILY_CLOSING_REMITTANCE",
+                closing_id,
+                str(row.get("closing_date", "")),
+                f"Daily closing safe remittance {closing_id} (₹{row.get('physical_cash_returned')})",
+                lambda r=row: post_daily_closing_cash_remittance_journal(row, actor=actor),
+            )
 
     # 6. Audit Expenses
     expense_records = db.get_records("Expenses", fresh=True)
@@ -187,22 +210,14 @@ def audit_and_reconcile_operational_events(
         exp_id = str(row.get("expense_id", "")).strip()
         status = str(row.get("approval_status", "")).upper()
         if status == "APPROVED":
-            ref_key = f"EXPENSE:{exp_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "Expenses",
-                    "reference_type": "EXPENSE",
-                    "reference_id": exp_id,
-                    "date": str(row.get("expense_datetime", ""))[:10],
-                    "description": f"Expense {exp_id} ({row.get('category')} - ₹{row.get('amount')})",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_expense_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
+            check_and_queue(
+                "Expenses",
+                "EXPENSE",
+                exp_id,
+                str(row.get("expense_datetime", ""))[:10],
+                f"Expense {exp_id} ({row.get('category')} - ₹{row.get('amount')})",
+                lambda r=row: post_expense_journal(row, actor=actor),
+            )
 
     # 7. Audit Credit Customer Collections in Payments
     payment_records = db.get_records("Payments", fresh=True)
@@ -210,30 +225,30 @@ def audit_and_reconcile_operational_events(
         pay_id = str(row.get("payment_id", "")).strip()
         status = str(row.get("payment_status", "")).upper()
         if status == "COLLECTED":
-            ref_key = f"PAYMENT_COLLECTION:{pay_id}"
-            if ref_key not in existing_posted_refs:
-                item_info = {
-                    "source_table": "Payments",
-                    "reference_type": "PAYMENT_COLLECTION",
-                    "reference_id": pay_id,
-                    "date": str(row.get("payment_datetime", ""))[:10],
-                    "description": f"Debt collection {pay_id} for sale {row.get('sale_id')} (₹{row.get('amount')})",
-                }
-                missing_items.append(item_info)
-                if not dry_run:
-                    try:
-                        res = post_payment_collection_journal(row, actor=actor)
-                        reconciled_items.append({**item_info, "voucher_id": res.get("voucher_id")})
-                    except Exception as e:
-                        errors.append({**item_info, "error": str(e)})
+            check_and_queue(
+                "Payments",
+                "PAYMENT_COLLECTION",
+                pay_id,
+                str(row.get("payment_datetime", ""))[:10],
+                f"Debt collection {pay_id} for sale {row.get('sale_id')} (₹{row.get('amount')})",
+                lambda r=row: post_payment_collection_journal(row, actor=actor),
+            )
 
     return {
         "status": "COMPLETED",
         "dry_run": dry_run,
         "missing_count": len(missing_items),
+        "unposted_count": len(unposted_events),
+        "failed_count": len(failed_vouchers),
+        "incomplete_count": len(incomplete_vouchers),
+        "duplicate_reference_count": len(duplicate_references),
         "reconciled_count": len(reconciled_items),
         "error_count": len(errors),
         "missing_events": missing_items,
+        "unposted_events": unposted_events,
+        "failed_vouchers": failed_vouchers,
+        "incomplete_vouchers": incomplete_vouchers,
+        "duplicate_references": duplicate_references,
         "reconciled_events": reconciled_items,
         "errors": errors,
     }

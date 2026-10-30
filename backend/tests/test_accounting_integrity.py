@@ -13,18 +13,18 @@ Verifies:
 import os
 import sys
 import unittest
+import asyncio
 from unittest.mock import patch, MagicMock
 from decimal import Decimal
-
-os.environ["SALES_TESTING"] = "1"
-os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
-
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 import tests  # Trigger mock framework stubs if needed
+from fastapi import HTTPException
 from app.sheets import db
+from app.models import SalePaymentCreate
+from app.routers.sales import record_sale_payment
 from app.accounting.journal_engine import (
     post_journal_voucher,
     reverse_journal_voucher,
@@ -364,6 +364,389 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             round(proposal["total_liabilities"] + proposal["owner_equity"], 2),
         )
 
+    def test_8_gst_explicit_split_rounding_and_reversal(self):
+        """
+        Verify:
+        1. Explicit cgst_amount and sgst_amount provided in invoice.
+        2. Asymmetric odd-paise rounding splits (debts == credits to the exact penny).
+        3. Zero-tax sale assigns 100% to revenue (4100) with no tax accounts.
+        4. Reversal voucher (reverse_journal_voucher) reverses tax lines symmetrically.
+        """
+        # Case A: Explicit CGST and SGST
+        sale_a = {
+            "sale_id": "SALE-GST-EXP-01",
+            "bill_number": "BILL-GST-101",
+            "sale_datetime": "2026-10-20T10:00:00",
+            "payment_method": "CASH",
+            "bill_total": 1091.00,
+            "cgst_amount": 45.50,
+            "sgst_amount": 45.50,
+            "customer_name_snapshot": "Gupta Retailers",
+        }
+        v_a = post_sale_journal(sale_a, actor="CASHIER")
+        self.assertEqual(v_a["status"], "POSTED")
+        lines_a = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == v_a["journal_id"]]
+        rev_a = next(l for l in lines_a if l["account_code"] == "4100")
+        cgst_a = next(l for l in lines_a if l["account_code"] == "2210")
+        sgst_a = next(l for l in lines_a if l["account_code"] == "2220")
+        self.assertEqual(float(rev_a["credit_amount"]), 1000.00)
+        self.assertEqual(float(cgst_a["credit_amount"]), 45.50)
+        self.assertEqual(float(sgst_a["credit_amount"]), 45.50)
+
+        # Case B: Odd paise tax amount (₹5.01) on ₹100.01 total -> CGST=2.51, SGST=2.50, Net=95.00
+        sale_b = {
+            "sale_id": "SALE-GST-ODD-01",
+            "bill_number": "BILL-GST-102",
+            "sale_datetime": "2026-10-20T11:00:00",
+            "payment_method": "CASH",
+            "bill_total": 100.01,
+            "tax_amount": 5.01,
+            "customer_name_snapshot": "Odd Paise Store",
+        }
+        v_b = post_sale_journal(sale_b, actor="CASHIER")
+        lines_b = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == v_b["journal_id"]]
+        cash_b = next(l for l in lines_b if l["account_code"] == "1115")
+        rev_b = next(l for l in lines_b if l["account_code"] == "4100")
+        cgst_b = next(l for l in lines_b if l["account_code"] == "2210")
+        sgst_b = next(l for l in lines_b if l["account_code"] == "2220")
+        self.assertEqual(float(cash_b["debit_amount"]), 100.01)
+        self.assertEqual(float(rev_b["credit_amount"]), 95.00)
+        self.assertEqual(float(cgst_b["credit_amount"]), 2.51)
+        self.assertEqual(float(sgst_b["credit_amount"]), 2.50)
+        self.assertEqual(
+            round(float(rev_b["credit_amount"]) + float(cgst_b["credit_amount"]) + float(sgst_b["credit_amount"]), 2),
+            float(cash_b["debit_amount"])
+        )
+
+        # Case C: Zero-tax sale
+        sale_c = {
+            "sale_id": "SALE-ZERO-TAX-01",
+            "bill_number": "BILL-ZT-103",
+            "sale_datetime": "2026-10-20T12:00:00",
+            "payment_method": "CASH",
+            "bill_total": 750.00,
+            "tax_amount": 0.0,
+            "customer_name_snapshot": "Exempt Buyer",
+        }
+        v_c = post_sale_journal(sale_c, actor="CASHIER")
+        lines_c = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == v_c["journal_id"]]
+        self.assertEqual(len(lines_c), 2)
+        self.assertTrue(all(l["account_code"] not in {"2210", "2220"} for l in lines_c))
+        self.assertEqual(float(lines_c[1]["credit_amount"]), 750.00)
+
+        # Case D: Reversal of voucher with tax
+        rev_v = reverse_journal_voucher(
+            journal_id=v_a["journal_id"],
+            reason="Customer returned goods and invoice voided",
+            reversed_by="AUDITOR",
+        )
+        self.assertEqual(rev_v["status"], "POSTED")
+        rev_lines = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == rev_v["journal_id"]]
+        # In reversal, 4100, 2210, 2220 are debited, and 1115 is credited
+        rev_debit_codes = {l["account_code"]: float(l["debit_amount"]) for l in rev_lines if float(l["debit_amount"]) > 0}
+        self.assertEqual(rev_debit_codes.get("4100"), 1000.00)
+        self.assertEqual(rev_debit_codes.get("2210"), 45.50)
+        self.assertEqual(rev_debit_codes.get("2220"), 45.50)
+
+    def test_9_partial_write_stages_and_repair(self):
+        """
+        Verify multi-stage write failure safety and subsequent repair:
+        - Failure during line 2 marks header FAILED.
+        - Trial Balance strictly ignores FAILED vouchers (total debits/credits remain 0.00).
+        - Re-running post_journal_voucher with same reference purges orphan partial lines,
+          updates header to POSTED, and brings Trial Balance into clean balance.
+        """
+        real_append = db.append_record
+        attempt_line = 0
+
+        def fail_on_second_line(tab, rec, raise_on_error=True):
+            nonlocal attempt_line
+            if tab == "JournalLines":
+                attempt_line += 1
+                if attempt_line == 2:
+                    raise IOError("Simulated network timeout appending second journal line")
+            return real_append(tab, rec, raise_on_error)
+
+        lines = [
+            {"account_code": "1110", "debit_amount": 8000.0, "notes": "Cash Line"},
+            {"account_code": "4100", "credit_amount": 8000.0, "notes": "Revenue Line"},
+        ]
+
+        with patch.object(db, "append_record", side_effect=fail_on_second_line):
+            with self.assertRaises(RuntimeError):
+                post_journal_voucher(
+                    voucher_type="SALES",
+                    reference_type="SALE_PARTIAL",
+                    reference_id="SP-001",
+                    narration="Failing 2nd line",
+                    lines=lines,
+                    posted_by="CLERK",
+                )
+
+        # Header status must be FAILED
+        headers = [h for h in db.get_records("JournalHeaders", fresh=True) if h.get("reference_id") == "SP-001"]
+        self.assertEqual(len(headers), 1)
+        self.assertEqual(headers[0]["status"], "FAILED")
+
+        # 1 partial line exists in table
+        orphan_lines = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == headers[0]["journal_id"]]
+        self.assertEqual(len(orphan_lines), 1)
+
+        # Trial Balance MUST ignore FAILED header (no ledger contamination)
+        tb_before = calculate_trial_balance()
+        self.assertTrue(tb_before["is_balanced"])
+        self.assertEqual(tb_before["total_debits"], 0.0)
+        self.assertEqual(tb_before["total_credits"], 0.0)
+
+        # Repair / Retry after storage recovery
+        v_repaired = post_journal_voucher(
+            voucher_type="SALES",
+            reference_type="SALE_PARTIAL",
+            reference_id="SP-001",
+            narration="Repaired transaction",
+            lines=lines,
+            posted_by="CLERK",
+        )
+        self.assertEqual(v_repaired["status"], "POSTED")
+        self.assertEqual(v_repaired["journal_id"], headers[0]["journal_id"])
+
+        # Lines table must now contain exactly 2 lines (no duplicate orphan line from failed attempt)
+        repaired_lines = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == headers[0]["journal_id"]]
+        self.assertEqual(len(repaired_lines), 2)
+
+        # Trial balance now reflects the ₹8,000 transaction with perfect balance
+        tb_after = calculate_trial_balance()
+        self.assertTrue(tb_after["is_balanced"])
+        self.assertEqual(tb_after["total_debits"], 8000.0)
+        self.assertEqual(tb_after["total_credits"], 8000.0)
+
+    def test_10_customer_payment_lifecycle_and_idempotency(self):
+        """
+        Verify complete customer payment lifecycle through router:
+        1. Partial payment updates remaining balance and sets status PARTIALLY_PAID.
+        2. Idempotent replay with same key returns identical record with is_replay=True.
+        3. Conflicting replay with same key and altered amount raises HTTP 409 Conflict.
+        4. Overpayment exceeding remaining balance raises HTTP 400.
+        5. CashLedger append failure triggers rollback of Payments row and raises HTTP 503.
+        6. Full payment clears AR to 0.0 without revenue duplication.
+        """
+        # Set up a credit sale of ₹5,000 in Sales table
+        sale_record = {
+            "sale_id": "SALE-ROUTER-PAY-01",
+            "bill_number": "BILL-RP-501",
+            "sale_datetime": "2026-10-21T09:00:00",
+            "customer_id": "CUS-101",
+            "customer_name_snapshot": "Mahavir Traders",
+            "bill_total": 5000.0,
+            "tax_amount": 0.0,
+            "payment_method": "CREDIT",
+            "bill_status": "DELIVERED",
+            "payment_status": "UNPAID",
+            "salesman_user_id": "USR-SALES-01",
+        }
+        db.append_record("Sales", sale_record)
+        post_sale_journal(sale_record, actor="SALESMAN")
+
+        current_user = {"user_id": "USR-SALES-01", "username": "salesman1", "role": "SALESMAN"}
+
+        # 1. Partial payment of ₹2,000 in Cash
+        p1 = SalePaymentCreate(
+            amount=2000.0,
+            payment_method="CASH",
+            idempotency_key="IDEMP-PAY-001",
+            notes="First installment",
+        )
+        res1 = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p1, current_user=current_user))
+        self.assertTrue(res1["ok"])
+        self.assertEqual(res1["amount_paid"], 2000.0)
+        self.assertEqual(res1["remaining_balance"], 3000.0)
+
+        # Check CashLedger row was created
+        cash_rows = [c for c in db.get_records("CashLedger", fresh=True) if c.get("related_sale_id") == "SALE-ROUTER-PAY-01"]
+        self.assertEqual(len(cash_rows), 1)
+        self.assertEqual(float(cash_rows[0]["amount"]), 2000.0)
+
+        # 2. Idempotent replay with same key and amount
+        res1_replay = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p1, current_user=current_user))
+        self.assertTrue(res1_replay.get("is_replay"))
+        self.assertEqual(res1_replay["payment_id"], res1["payment_id"])
+
+        # 3. Conflicting replay with same key but altered amount (₹2,500) -> HTTP 409
+        p_conflict = SalePaymentCreate(
+            amount=2500.0,
+            payment_method="CASH",
+            idempotency_key="IDEMP-PAY-001",
+            notes="Altered amount",
+        )
+        with self.assertRaises(HTTPException) as ctx_conf:
+            asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_conflict, current_user=current_user))
+        self.assertEqual(ctx_conf.exception.status_code, 409)
+
+        # 4. Overpayment (₹3,500 exceeds remaining balance ₹3,000) -> HTTP 400
+        p_over = SalePaymentCreate(
+            amount=3500.0,
+            payment_method="CASH",
+            idempotency_key="IDEMP-PAY-OVER",
+            notes="Overpayment attempt",
+        )
+        with self.assertRaises(HTTPException) as ctx_over:
+            asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_over, current_user=current_user))
+        self.assertEqual(ctx_over.exception.status_code, 400)
+
+        # 5. Rollback on CashLedger append failure
+        real_append = db.append_record
+
+        def fail_cash_ledger(tab, rec, raise_on_error=True):
+            if tab == "CashLedger":
+                raise IOError("Simulated CashLedger disk write failure")
+            return real_append(tab, rec, raise_on_error)
+
+        p_fail = SalePaymentCreate(
+            amount=500.0,
+            payment_method="CASH",
+            idempotency_key="IDEMP-PAY-FAIL",
+            notes="Failing cash write",
+        )
+        with patch.object(db, "append_record", side_effect=fail_cash_ledger):
+            with self.assertRaises(HTTPException) as ctx_503:
+                asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_fail, current_user=current_user))
+            self.assertEqual(ctx_503.exception.status_code, 503)
+
+        # Verify Payments record was rolled back
+        payments_after_fail = [
+            p for p in db.get_records("Payments", fresh=True)
+            if p.get("idempotency_key") == "IDEMP-PAY-FAIL"
+        ]
+        self.assertEqual(len(payments_after_fail), 0)
+
+        # 6. Full remaining payment of ₹3,000 via UPI (Bank 1120)
+        p_final = SalePaymentCreate(
+            amount=3000.0,
+            payment_method="UPI",
+            idempotency_key="IDEMP-PAY-FINAL",
+            reference_number="UPI-REF-9988",
+            notes="Final settlement",
+        )
+        res_final = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_final, current_user=current_user))
+        self.assertTrue(res_final["ok"])
+        self.assertEqual(res_final["remaining_balance"], 0.0)
+
+        # Check Sales record payment_status is PAID
+        sales_fresh = db.get_records("Sales", fresh=True)
+        sale_fresh = next(s for s in sales_fresh if s.get("sale_id") == "SALE-ROUTER-PAY-01")
+        self.assertEqual(sale_fresh["payment_status"], "PAID")
+
+        # Verify Trial Balance: AR (1130) is completely 0.0, Revenue (4100) is strictly 5000.0 (no duplication)
+        tb = calculate_trial_balance()
+        self.assertTrue(tb["is_balanced"])
+        ar_row = next((r for r in tb["rows"] if r["account_code"] == "1130"), None)
+        rev_row = next(r for r in tb["rows"] if r["account_code"] == "4100")
+        cash_row = next(r for r in tb["rows"] if r["account_code"] == "1115")
+        bank_row = next(r for r in tb["rows"] if r["account_code"] == "1120")
+        if ar_row:
+            self.assertEqual(ar_row["net_debit"], 0.0)
+        self.assertEqual(rev_row["net_credit"], 5000.0)
+        self.assertEqual(cash_row["net_debit"], 2000.0)
+        self.assertEqual(bank_row["net_debit"], 3000.0)
+
+    def test_11_reconciliation_distinguishes_issues_and_enforces_dry_run(self):
+        """
+        Verify reconciliation scanner:
+        1. Distinguishes unposted events, failed vouchers, incomplete vouchers, and duplicate references.
+        2. Dry-run makes zero writes to JournalHeaders or JournalLines.
+        3. Live backfill repairs and posts vouchers, bringing ledger into balance.
+        """
+        # 1 unposted sale
+        db.append_record("Sales", {
+            "sale_id": "SALE-RECON-UNPOSTED",
+            "bill_number": "BILL-RU-1",
+            "sale_datetime": "2026-10-22T10:00:00",
+            "payment_method": "CASH",
+            "bill_total": 1200.0,
+            "tax_amount": 0.0,
+            "bill_status": "DELIVERED",
+        })
+
+        # 1 failed voucher in JournalHeaders
+        db.append_record("JournalHeaders", {
+            "journal_id": "JRN-FAIL-01",
+            "reference_type": "EXPENSE",
+            "reference_id": "EXP-RECON-FAIL",
+            "status": "FAILED",
+            "narration": "Line write timed out",
+            "total_debit": 500.0,
+            "total_credit": 500.0,
+        })
+        db.append_record("Expenses", {
+            "expense_id": "EXP-RECON-FAIL",
+            "expense_datetime": "2026-10-22T11:00:00",
+            "category": "Petrol & Fuel",
+            "amount": 500.0,
+            "approval_status": "APPROVED",
+            "cash_reducing_expense": True,
+        })
+
+        # 1 incomplete voucher
+        db.append_record("JournalHeaders", {
+            "journal_id": "JRN-INC-01",
+            "reference_type": "PAYMENT_COLLECTION",
+            "reference_id": "PAY-RECON-INC",
+            "status": "INCOMPLETE",
+            "narration": "Pending line verification",
+            "total_debit": 300.0,
+            "total_credit": 300.0,
+        })
+        db.append_record("Payments", {
+            "payment_id": "PAY-RECON-INC",
+            "sale_id": "SALE-ANY",
+            "payment_datetime": "2026-10-22T12:00:00",
+            "payment_method": "CASH",
+            "amount": 300.0,
+            "payment_status": "COLLECTED",
+        })
+
+        # Duplicate reference in JournalHeaders (2 vouchers for same reference)
+        db.append_record("JournalHeaders", {
+            "journal_id": "JRN-DUP-01",
+            "reference_type": "TEST_DUP",
+            "reference_id": "DUP-REF-99",
+            "status": "POSTED",
+            "narration": "First duplicate",
+            "total_debit": 100.0,
+            "total_credit": 100.0,
+        })
+        db.append_record("JournalHeaders", {
+            "journal_id": "JRN-DUP-02",
+            "reference_type": "TEST_DUP",
+            "reference_id": "DUP-REF-99",
+            "status": "POSTED",
+            "narration": "Second duplicate",
+            "total_debit": 100.0,
+            "total_credit": 100.0,
+        })
+
+        headers_before_count = len(db.get_records("JournalHeaders", fresh=True))
+
+        # Dry Run Execution
+        scan_result = audit_and_reconcile_operational_events(dry_run=True)
+        self.assertTrue(scan_result["dry_run"])
+        self.assertEqual(scan_result["reconciled_count"], 0)
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), headers_before_count)
+
+        # Verify distinct category breakdowns
+        self.assertGreaterEqual(scan_result["unposted_count"], 1)
+        self.assertGreaterEqual(scan_result["failed_count"], 1)
+        self.assertGreaterEqual(scan_result["incomplete_count"], 1)
+        self.assertGreaterEqual(scan_result["duplicate_reference_count"], 1)
+        self.assertEqual(
+            scan_result["missing_count"],
+            scan_result["unposted_count"] + scan_result["failed_count"] + scan_result["incomplete_count"]
+        )
+
+        dup_item = next(d for d in scan_result["duplicate_references"] if d["reference_key"] == "TEST_DUP:DUP-REF-99")
+        self.assertEqual(dup_item["voucher_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+

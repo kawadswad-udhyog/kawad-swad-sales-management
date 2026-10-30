@@ -88,6 +88,7 @@ def post_journal_voucher(
 
     # 2. Idempotency & Conflict Check
     existing_headers = db.get_records("JournalHeaders", fresh=True)
+    existing_failed_header = None
     for row in existing_headers:
         if (
             str(row.get("reference_type", "")).strip().upper() == clean_ref_type
@@ -107,30 +108,62 @@ def post_journal_voucher(
                     if str(l.get("journal_id")) == str(row.get("journal_id"))
                 ]
                 return {**row, "lines": existing_lines, "is_replay": True}
+            elif status in {"INCOMPLETE", "FAILED"}:
+                existing_failed_header = row
 
-    # 3. Generate IDs
-    journal_id = db.generate_id("JournalHeaders") if hasattr(db, "generate_id") else f"JRN-{clean_ref_id}"
-    date_val = journal_date or business_today()
-    iso_now = now_iso()
+    if existing_failed_header:
+        # Prior attempt was incomplete or failed. Reuse header and purge partial lines before rewriting.
+        journal_id = str(existing_failed_header.get("journal_id"))
+        date_val = journal_date or business_today()
+        iso_now = now_iso()
+        old_lines = [l for l in db.get_records("JournalLines", fresh=True) if str(l.get("journal_id")) == journal_id]
+        for ol in old_lines:
+            line_id = str(ol.get("line_id", ""))
+            if line_id:
+                try:
+                    db.delete_record("JournalLines", "line_id", line_id)
+                except Exception:
+                    pass
 
-    header_record = {
-        "journal_id": journal_id,
-        "journal_date": date_val,
-        "voucher_type": voucher_type.strip().upper(),
-        "reference_type": clean_ref_type,
-        "reference_id": clean_ref_id,
-        "narration": narration.strip(),
-        "total_debit": round_money(total_debit),
-        "total_credit": round_money(total_credit),
-        "posted_by": posted_by,
-        "posted_at": iso_now,
-        "status": "INCOMPLETE",
-        "reversal_of_id": "",
-    }
+        header_record = {
+            "journal_id": journal_id,
+            "journal_date": date_val,
+            "voucher_type": voucher_type.strip().upper(),
+            "reference_type": clean_ref_type,
+            "reference_id": clean_ref_id,
+            "narration": narration.strip(),
+            "total_debit": round_money(total_debit),
+            "total_credit": round_money(total_credit),
+            "posted_by": posted_by,
+            "posted_at": iso_now,
+            "status": "INCOMPLETE",
+            "reversal_of_id": "",
+        }
+        db.update_record("JournalHeaders", "journal_id", journal_id, header_record)
+    else:
+        # 3. Generate IDs
+        journal_id = db.generate_id("JournalHeaders") if hasattr(db, "generate_id") else f"JRN-{clean_ref_id}"
+        date_val = journal_date or business_today()
+        iso_now = now_iso()
 
-    # 4. Write Header in INCOMPLETE state (fail-closed protection against partial writes)
-    if not db.append_record("JournalHeaders", header_record, raise_on_error=True):
-        raise RuntimeError(f"Could not persist JournalHeader for {clean_ref_type}:{clean_ref_id}")
+        header_record = {
+            "journal_id": journal_id,
+            "journal_date": date_val,
+            "voucher_type": voucher_type.strip().upper(),
+            "reference_type": clean_ref_type,
+            "reference_id": clean_ref_id,
+            "narration": narration.strip(),
+            "total_debit": round_money(total_debit),
+            "total_credit": round_money(total_credit),
+            "posted_by": posted_by,
+            "posted_at": iso_now,
+            "status": "INCOMPLETE",
+            "reversal_of_id": "",
+        }
+
+        # 4. Write Header in INCOMPLETE state (fail-closed protection against partial writes)
+        if not db.append_record("JournalHeaders", header_record, raise_on_error=True):
+            raise RuntimeError(f"Could not persist JournalHeader for {clean_ref_type}:{clean_ref_id}")
 
     # 5. Write Lines
     saved_lines = []

@@ -158,10 +158,17 @@ async def audit_reconcile_get(
 
 @router.post("/reconcile")
 async def audit_reconcile_post(
-    dry_run: bool = Query(False),
+    dry_run: bool = Query(True),
+    confirm_live_backfill: bool = Query(False),
     user: dict = Depends(get_current_user),
 ):
-    actor, _ = require_accounting_access(user)
+    actor, role = require_accounting_access(user)
+    if not dry_run:
+        if role not in {"OWNER", "OWNER_ADMIN", "ADMIN"}:
+            raise HTTPException(403, "Live accounting backfill writes are restricted to Owner or Admin.")
+        if not confirm_live_backfill:
+            raise HTTPException(400, "To execute live journal backfill writes, confirm_live_backfill=true must be explicitly passed.")
+
     from app.accounting.reconciliation import audit_and_reconcile_operational_events
     return audit_and_reconcile_operational_events(dry_run=dry_run, actor=actor)
 

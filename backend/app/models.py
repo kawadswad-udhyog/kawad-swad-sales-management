@@ -242,6 +242,7 @@ class SalePaymentCreate(BaseModel):
     payment_method: str = "CASH"
     reference_number: Optional[str] = ""
     notes: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 # Stock Models
 class CompanyStockItem(BaseModel):

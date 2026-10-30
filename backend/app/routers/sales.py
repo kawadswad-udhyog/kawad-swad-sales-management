@@ -659,6 +659,30 @@ async def record_sale_payment(
         total_paid_so_far = round(sum(float(p.get("amount", 0) or 0) for p in payments), 2)
         remaining_balance = round(bill_total - total_paid_so_far, 2)
 
+        # Idempotency and conflicting replay detection
+        clean_key = _clean(getattr(payload, "idempotency_key", None))
+        if clean_key:
+            for p in payments:
+                p_notes = str(p.get("notes", ""))
+                p_key = _clean(p.get("idempotency_key"))
+                if p_key == clean_key or f"[idemp:{clean_key}]" in p_notes:
+                    existing_amt = round(float(p.get("amount", 0) or 0), 2)
+                    if abs(existing_amt - round(payload.amount, 2)) > 0.05:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Conflict: Idempotency key '{clean_key}' already used with amount ₹{existing_amt:.2f}, conflicting with ₹{payload.amount:.2f}."
+                        )
+                    return {
+                        "ok": True,
+                        "payment_id": str(p.get("payment_id")),
+                        "sale_id": sale_id,
+                        "amount_paid": existing_amt,
+                        "remaining_balance": remaining_balance,
+                        "payment_status": str(sale.get("payment_status", "PAID")),
+                        "journal_result": {"status": "ALREADY_RECORDED"},
+                        "is_replay": True,
+                    }
+
         if payload.amount <= 0:
             raise HTTPException(status_code=400, detail="Payment amount must be greater than zero.")
 
@@ -672,36 +696,47 @@ async def record_sale_payment(
         payment_id = db.generate_id("Payments")
         pay_method = str(payload.payment_method or "CASH").upper()
         ref_num = payload.reference_number or str(sale.get("bill_number", ""))
+        notes_text = payload.notes or f"Customer collection against bill {sale.get('bill_number')}"
+        if clean_key:
+            notes_text = f"[idemp:{clean_key}] {notes_text}".strip()
 
         payment_record = {
             "payment_id": payment_id,
             "sale_id": sale_id,
+            "idempotency_key": clean_key,
             "payment_datetime": now,
             "payment_method": pay_method,
             "amount": round(payload.amount, 2),
             "reference_number": ref_num,
             "received_by_user_id": user_id,
             "payment_status": "COLLECTED",
-            "notes": payload.notes or f"Customer collection against bill {sale.get('bill_number')}",
+            "notes": notes_text,
         }
         db.append_record("Payments", payment_record, raise_on_error=True)
 
         if pay_method == "CASH":
-            db.append_record("CashLedger", {
-                "cash_txn_id": db.generate_id("CashLedger"),
-                "txn_datetime": now,
-                "salesman_user_id": str(sale.get("salesman_user_id", "")) or user_id,
-                "txn_type": "SALE_COLLECTION",
-                "amount": round(payload.amount, 2),
-                "payment_method": "CASH",
-                "related_sale_id": sale_id,
-                "related_expense_id": "",
-                "issued_by_user_id": str(sale.get("customer_id", "")) or "CUSTOMER",
-                "received_by_user_id": user_id,
-                "confirmed_by_user_id": user_id,
-                "reference_id": ref_num,
-                "notes": f"Cash collection for bill {sale.get('bill_number')}",
-            }, raise_on_error=True)
+            try:
+                db.append_record("CashLedger", {
+                    "cash_txn_id": db.generate_id("CashLedger"),
+                    "txn_datetime": now,
+                    "salesman_user_id": str(sale.get("salesman_user_id", "")) or user_id,
+                    "txn_type": "SALE_COLLECTION",
+                    "amount": round(payload.amount, 2),
+                    "payment_method": "CASH",
+                    "related_sale_id": sale_id,
+                    "related_expense_id": "",
+                    "issued_by_user_id": str(sale.get("customer_id", "")) or "CUSTOMER",
+                    "received_by_user_id": user_id,
+                    "confirmed_by_user_id": user_id,
+                    "reference_id": ref_num,
+                    "notes": f"Cash collection for bill {sale.get('bill_number')}",
+                }, raise_on_error=True)
+            except Exception as cash_err:
+                try:
+                    db.delete_record("Payments", "payment_id", payment_id)
+                except Exception:
+                    pass
+                raise HTTPException(503, f"Failed to persist CashLedger entry: {cash_err}. Payment rolled back.")
 
         new_total_paid = round(total_paid_so_far + payload.amount, 2)
         new_balance = max(0.0, round(bill_total - new_total_paid, 2))
@@ -726,6 +761,20 @@ async def record_sale_payment(
         except Exception as e:
             import logging
             logging.error(f"Non-fatal accounting posting error for payment {payment_id}: {e}")
+            try:
+                import json
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": db.generate_id("IncompleteTransactions"),
+                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
+                    "idempotency_key": f"acct-pay-{payment_id}",
+                    "status": "POSTING_FAILED",
+                    "payload_json": json.dumps({"payment_id": payment_id, "type": "CUSTOMER_PAYMENT"}),
+                    "error_details": str(e),
+                    "created_at": now,
+                    "updated_at": now,
+                })
+            except Exception:
+                pass
 
         return {
             "ok": True,
