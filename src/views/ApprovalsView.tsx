@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { apiRequest } from '../services/api';
+import { apiRequest, getApiBaseUrl } from '../services/api';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { StatCard } from '../components/common/StatCard';
@@ -17,6 +17,15 @@ import {
   ChevronDown,
   ChevronRight,
   AlertCircle,
+  Terminal,
+  Database,
+  Search,
+  Filter,
+  Check,
+  Code,
+  Activity,
+  Layers,
+  Copy,
 } from 'lucide-react';
 import { ApprovalRequest } from '../types';
 
@@ -51,6 +60,9 @@ export const ApprovalsView: React.FC = () => {
     decideApprovalRequest,
     isGoogleSheetsConnected,
     persistentWritesEnabled,
+    syncError,
+    isBackendConnected,
+    connectionError,
   } = useStore();
 
   const [activeTab, setActiveTab] = useState<'PENDING' | 'APPROVED' | 'REJECTED' | 'FAILED'>('PENDING');
@@ -64,6 +76,28 @@ export const ApprovalsView: React.FC = () => {
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [expandedPayloadIds, setExpandedPayloadIds] = useState<Set<string>>(new Set());
+
+  // Diagnostics State
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [diagnosticSubTab, setDiagnosticSubTab] = useState<'RECONCILIATION' | 'BATCHES' | 'REQUESTS' | 'WORKSPACE'>('RECONCILIATION');
+  const [diagnosticSearch, setDiagnosticSearch] = useState('');
+  const [copiedToast, setCopiedToast] = useState<string | null>(null);
+
+  const [rawBatches, setRawBatches] = useState<BatchRow[] | null>(null);
+  const [rawBatchesMeta, setRawBatchesMeta] = useState<{ timestamp: string; count: number; error: string | null; durationMs: number }>({
+    timestamp: '',
+    count: 0,
+    error: null,
+    durationMs: 0,
+  });
+
+  const [rawRequests, setRawRequests] = useState<ApprovalRequest[] | null>(null);
+  const [rawRequestsMeta, setRawRequestsMeta] = useState<{ timestamp: string; count: number; error: string | null; durationMs: number }>({
+    timestamp: '',
+    count: 0,
+    error: null,
+    durationMs: 0,
+  });
 
   // Check if current user has authorized approval rights (Owner, Owner Admin, or System Admin)
   const canDecide = ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(currentUser?.role?.toUpperCase() || '');
@@ -80,12 +114,31 @@ export const ApprovalsView: React.FC = () => {
     });
   };
 
+  const copyToClipboard = (text: string, label: string) => {
+    try {
+      navigator.clipboard.writeText(text);
+      setCopiedToast(`Copied ${label} to clipboard!`);
+      setTimeout(() => setCopiedToast(null), 2500);
+    } catch {
+      // fallback
+    }
+  };
+
   const fetchBatches = async () => {
     setIsLoadingBatches(true);
     setBatchesError(null);
+    const start = performance.now();
     try {
       const res = await apiRequest<BatchRow[]>('/api/production/batches');
+      const dur = Math.round(performance.now() - start);
       if (Array.isArray(res)) {
+        setRawBatches(res);
+        setRawBatchesMeta({
+          timestamp: new Date().toLocaleTimeString(),
+          count: res.length,
+          error: null,
+          durationMs: dur,
+        });
         const normalized = res.map((b) => {
           const id = String(b.production_id || b.batch_id || '').trim();
           return {
@@ -96,11 +149,24 @@ export const ApprovalsView: React.FC = () => {
         });
         setBatches([...normalized].reverse());
       } else {
+        setRawBatches([]);
+        setRawBatchesMeta({
+          timestamp: new Date().toLocaleTimeString(),
+          count: 0,
+          error: 'API returned non-array payload',
+          durationMs: dur,
+        });
         setBatches([]);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not retrieve production batches.';
       console.warn('Could not load production batches for approvals:', err);
+      setRawBatchesMeta({
+        timestamp: new Date().toLocaleTimeString(),
+        count: 0,
+        error: msg,
+        durationMs: Math.round(performance.now() - start),
+      });
       setBatchesError(msg);
     } finally {
       setIsLoadingBatches(false);
@@ -110,11 +176,37 @@ export const ApprovalsView: React.FC = () => {
   const fetchRequests = async () => {
     setIsLoadingRequests(true);
     setRequestsError(null);
+    const start = performance.now();
     try {
+      const res = await apiRequest<ApprovalRequest[]>('/api/approvals/requests');
+      const dur = Math.round(performance.now() - start);
+      if (Array.isArray(res)) {
+        setRawRequests(res);
+        setRawRequestsMeta({
+          timestamp: new Date().toLocaleTimeString(),
+          count: res.length,
+          error: null,
+          durationMs: dur,
+        });
+      } else {
+        setRawRequests([]);
+        setRawRequestsMeta({
+          timestamp: new Date().toLocaleTimeString(),
+          count: 0,
+          error: 'API returned non-array payload',
+          durationMs: dur,
+        });
+      }
       await loadApprovalRequests();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not retrieve approval requests.';
       console.warn('Could not load approval requests:', err);
+      setRawRequestsMeta({
+        timestamp: new Date().toLocaleTimeString(),
+        count: 0,
+        error: msg,
+        durationMs: Math.round(performance.now() - start),
+      });
       setRequestsError(msg);
     } finally {
       setIsLoadingRequests(false);
@@ -277,6 +369,144 @@ export const ApprovalsView: React.FC = () => {
     }
   };
 
+  // Diagnostics breakdown metrics
+  const diagnosticsBreakdown = useMemo(() => {
+    const rawBatchesList = rawBatches || [];
+    const rawRequestsList = rawRequests || [];
+
+    const rawBatchPending = rawBatchesList.filter((b) => isPending(b.status));
+    const rawBatchApproved = rawBatchesList.filter((b) => isApproved(b.status));
+    const rawBatchRejected = rawBatchesList.filter((b) => isRejected(b.status));
+    const rawBatchFailed = rawBatchesList.filter((b) => isFailed(b.status));
+    const rawBatchUnmatched = rawBatchesList.filter(
+      (b) => !isPending(b.status) && !isApproved(b.status) && !isRejected(b.status) && !isFailed(b.status)
+    );
+
+    const rawProdRequests = rawRequestsList.filter((r) => r.request_type === 'PRODUCTION_BATCH');
+    const rawUserRequests = rawRequestsList.filter((r) => r.request_type !== 'PRODUCTION_BATCH');
+
+    const rawUserPending = rawUserRequests.filter((r) => isPending(r.status));
+    const rawUserApproved = rawUserRequests.filter((r) => isApproved(r.status));
+    const rawUserRejected = rawUserRequests.filter((r) => isRejected(r.status));
+    const rawUserFailed = rawUserRequests.filter((r) => isFailed(r.status));
+    const rawUserUnmatched = rawUserRequests.filter(
+      (r) => !isPending(r.status) && !isApproved(r.status) && !isRejected(r.status) && !isFailed(r.status)
+    );
+
+    return {
+      rawBatchesCount: rawBatchesList.length,
+      rawBatchPendingCount: rawBatchPending.length,
+      rawBatchApprovedCount: rawBatchApproved.length,
+      rawBatchRejectedCount: rawBatchRejected.length,
+      rawBatchFailedCount: rawBatchFailed.length,
+      rawBatchUnmatchedCount: rawBatchUnmatched.length,
+      rawBatchUnmatched,
+
+      rawRequestsCount: rawRequestsList.length,
+      rawProdRequestsCount: rawProdRequests.length,
+      rawUserRequestsCount: rawUserRequests.length,
+      rawUserPendingCount: rawUserPending.length,
+      rawUserApprovedCount: rawUserApproved.length,
+      rawUserRejectedCount: rawUserRejected.length,
+      rawUserFailedCount: rawUserFailed.length,
+      rawUserUnmatchedCount: rawUserUnmatched.length,
+      rawUserUnmatched,
+    };
+  }, [rawBatches, rawRequests]);
+
+  // Unified list of diagnostic entries for the reconciliation filter audit table
+  const diagnosticAuditRecords = useMemo(() => {
+    const list: Array<{
+      source: 'BATCH' | 'REQUEST';
+      id: string;
+      title: string;
+      rawStatus: string;
+      normalizedCategory: 'PENDING' | 'APPROVED' | 'REJECTED' | 'FAILED' | 'UNMATCHED';
+      isVisibleInActiveTab: boolean;
+      filterExplanation: string;
+      rawJson: any;
+    }> = [];
+
+    (rawBatches || []).forEach((b) => {
+      const id = String(b.production_id || b.batch_id || 'UNKNOWN').trim();
+      const rawStatus = String(b.status || '');
+      let category: 'PENDING' | 'APPROVED' | 'REJECTED' | 'FAILED' | 'UNMATCHED' = 'UNMATCHED';
+      if (isPending(rawStatus)) category = 'PENDING';
+      else if (isApproved(rawStatus)) category = 'APPROVED';
+      else if (isRejected(rawStatus)) category = 'REJECTED';
+      else if (isFailed(rawStatus)) category = 'FAILED';
+
+      const isVisibleInActiveTab =
+        (activeTab === 'PENDING' && (category === 'PENDING' || category === 'FAILED')) ||
+        (activeTab === 'APPROVED' && category === 'APPROVED') ||
+        (activeTab === 'REJECTED' && category === 'REJECTED') ||
+        (activeTab === 'FAILED' && category === 'FAILED');
+
+      const filterExplanation = isVisibleInActiveTab
+        ? `Visible in active tab (${activeTab})`
+        : `Filtered out: status "${rawStatus}" maps to ${category}, which does not match active tab (${activeTab})`;
+
+      list.push({
+        source: 'BATCH',
+        id,
+        title: String(b.product_name_snapshot || b.product_id || 'Production Batch'),
+        rawStatus,
+        normalizedCategory: category,
+        isVisibleInActiveTab,
+        filterExplanation,
+        rawJson: b,
+      });
+    });
+
+    (rawRequests || []).forEach((r) => {
+      const id = String(r.request_id || 'UNKNOWN').trim();
+      const rawStatus = String(r.status || '');
+      let category: 'PENDING' | 'APPROVED' | 'REJECTED' | 'FAILED' | 'UNMATCHED' = 'UNMATCHED';
+      if (isPending(rawStatus)) category = 'PENDING';
+      else if (isApproved(rawStatus)) category = 'APPROVED';
+      else if (isRejected(rawStatus)) category = 'REJECTED';
+      else if (isFailed(rawStatus)) category = 'FAILED';
+
+      const isProd = r.request_type === 'PRODUCTION_BATCH';
+      const isVisibleInActiveTab =
+        (activeTab === 'PENDING' && (category === 'PENDING' || category === 'FAILED')) ||
+        (activeTab === 'APPROVED' && category === 'APPROVED') ||
+        (activeTab === 'REJECTED' && category === 'REJECTED') ||
+        (activeTab === 'FAILED' && category === 'FAILED');
+
+      const filterExplanation = isProd
+        ? `Synthesized into Production Batches section; deduplicated with existing batch IDs (${category})`
+        : isVisibleInActiveTab
+        ? `Visible in active tab (${activeTab}) under User Account Requests`
+        : `Filtered out: status "${rawStatus}" maps to ${category}, which does not match active tab (${activeTab})`;
+
+      list.push({
+        source: 'REQUEST',
+        id,
+        title: `${r.request_type}: ${r.target_user_id || 'Target User'}`,
+        rawStatus,
+        normalizedCategory: category,
+        isVisibleInActiveTab: !isProd && isVisibleInActiveTab,
+        filterExplanation,
+        rawJson: r,
+      });
+    });
+
+    return list;
+  }, [rawBatches, rawRequests, activeTab]);
+
+  const filteredDiagnosticRecords = useMemo(() => {
+    if (!diagnosticSearch.trim()) return diagnosticAuditRecords;
+    const q = diagnosticSearch.toLowerCase();
+    return diagnosticAuditRecords.filter((item) =>
+      item.id.toLowerCase().includes(q) ||
+      item.title.toLowerCase().includes(q) ||
+      item.rawStatus.toLowerCase().includes(q) ||
+      item.normalizedCategory.toLowerCase().includes(q) ||
+      JSON.stringify(item.rawJson).toLowerCase().includes(q)
+    );
+  }, [diagnosticAuditRecords, diagnosticSearch]);
+
   return (
     <div>
       <PageHeader
@@ -284,28 +514,609 @@ export const ApprovalsView: React.FC = () => {
         subtitle="Review, approve, or reject pending production batches and user account requests."
         icon={<CheckSquare size={22} />}
         actions={
-          <button
-            onClick={refreshAll}
-            disabled={isLoadingBatches || isLoadingRequests}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              onClick={() => setShowDiagnostics((prev) => !prev)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '8px 14px',
+                borderRadius: '8px',
+                background: showDiagnostics ? '#0f172a' : '#f8fafc',
+                border: '1px solid',
+                borderColor: showDiagnostics ? '#0f172a' : '#cbd5e1',
+                color: showDiagnostics ? '#ffffff' : '#334155',
+                fontWeight: 600,
+                fontSize: '0.84rem',
+                cursor: 'pointer',
+                boxShadow: showDiagnostics ? '0 2px 4px rgba(0,0,0,0.1)' : 'none',
+                transition: 'all 0.15s ease',
+              }}
+              title="Inspect raw responses from /api/production/batches and /api/approvals/requests"
+            >
+              <Terminal size={14} />
+              Diagnostics & Raw API Inspector
+              {showDiagnostics ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
+
+            <button
+              onClick={refreshAll}
+              disabled={isLoadingBatches || isLoadingRequests}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '8px 14px',
+                borderRadius: '8px',
+                background: '#f8fafc',
+                border: '1px solid #cbd5e1',
+                color: '#475569',
+                fontWeight: 600,
+                fontSize: '0.84rem',
+                cursor: isLoadingBatches || isLoadingRequests ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <RefreshCw size={14} className={isLoadingBatches || isLoadingRequests ? 'spin-icon' : ''} />
+              Refresh
+            </button>
+          </div>
+        }
+      />
+
+      {/* Copy Toast Notification */}
+      {copiedToast && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: '24px',
+            right: '24px',
+            background: '#0f172a',
+            color: '#ffffff',
+            padding: '10px 18px',
+            borderRadius: '8px',
+            fontSize: '0.86rem',
+            fontWeight: 600,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}
+        >
+          <Check size={16} color="#4ade80" />
+          {copiedToast}
+        </div>
+      )}
+
+      {/* Interactive Diagnostics Panel */}
+      {showDiagnostics && (
+        <div
+          style={{
+            marginBottom: '24px',
+            borderRadius: '10px',
+            border: '1px solid #cbd5e1',
+            background: '#ffffff',
+            boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -2px rgba(0,0,0,0.05)',
+            overflow: 'hidden',
+          }}
+        >
+          {/* Diagnostics Header & Environment Indicators */}
+          <div
+            style={{
+              padding: '14px 18px',
+              background: '#0f172a',
+              color: '#f8fafc',
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <Activity size={18} color="#38bdf8" />
+              <div>
+                <h3 style={{ fontSize: '0.96rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+                  Raw API & Frontend Filter Inspector
+                </h3>
+                <p style={{ fontSize: '0.78rem', color: '#94a3b8', margin: '2px 0 0 0' }}>
+                  Verifies raw records from /api/production/batches and /api/approvals/requests against frontend filter criteria
+                </p>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+              {/* API Base URL Badge */}
+              <span
+                style={{
+                  fontSize: '0.74rem',
+                  padding: '3px 8px',
+                  borderRadius: '6px',
+                  background: '#1e293b',
+                  color: '#93c5fd',
+                  border: '1px solid #334155',
+                  fontFamily: 'monospace',
+                }}
+                title="Active backend base URL"
+              >
+                API: {getApiBaseUrl() || '(Direct Vite Proxy)'}
+              </span>
+
+              {/* Google Sheets Status */}
+              <span
+                style={{
+                  fontSize: '0.74rem',
+                  padding: '3px 8px',
+                  borderRadius: '6px',
+                  background: isGoogleSheetsConnected ? '#14532d' : '#78350f',
+                  color: isGoogleSheetsConnected ? '#86efac' : '#fde047',
+                  border: '1px solid',
+                  borderColor: isGoogleSheetsConnected ? '#166534' : '#b45309',
+                  fontWeight: 600,
+                }}
+              >
+                Sheets: {isGoogleSheetsConnected ? 'CONNECTED' : 'IN-MEMORY FALLBACK'}
+              </span>
+
+              {/* Operator Role */}
+              <span
+                style={{
+                  fontSize: '0.74rem',
+                  padding: '3px 8px',
+                  borderRadius: '6px',
+                  background: canDecide ? '#1e1b4b' : '#334155',
+                  color: canDecide ? '#c7d2fe' : '#cbd5e1',
+                  border: '1px solid #4338ca',
+                  fontWeight: 600,
+                }}
+              >
+                User: {currentUser?.username || 'ANON'} ({currentUser?.role || 'NONE'})
+              </span>
+            </div>
+          </div>
+
+          {/* Zero-Count Explanation & Audit Verdict Banner */}
+          <div
+            style={{
+              padding: '12px 18px',
+              background: totalPending === 0 ? '#f0fdf4' : '#fffbeb',
+              borderBottom: '1px solid',
+              borderColor: totalPending === 0 ? '#bbf7d0' : '#fef08a',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '10px',
+            }}
+          >
+            <Info size={18} color={totalPending === 0 ? '#16a34a' : '#d97706'} style={{ marginTop: '2px', flexShrink: 0 }} />
+            <div style={{ fontSize: '0.84rem', color: totalPending === 0 ? '#166534' : '#92400e', lineHeight: 1.5 }}>
+              <strong>Zero-Count & Filter Verdict:</strong>{' '}
+              {batchesError || requestsError ? (
+                <span style={{ color: '#b91c1c' }}>
+                  An API error was encountered during fetch: Batches Error: {batchesError || 'None'}; Requests Error: {requestsError || 'None'}.
+                  The Approvals UI handles this safely with prominent error banners rather than treating failures as valid zero counts.
+                </span>
+              ) : diagnosticsBreakdown.rawBatchesCount === 0 && diagnosticsBreakdown.rawRequestsCount === 0 ? (
+                <span>
+                  The backend database currently has <strong>0 total production batches</strong> and <strong>0 total approval requests</strong>.
+                  Zero pending records is mathematically exact because no records exist in the backend persistence layer.
+                </span>
+              ) : diagnosticsBreakdown.rawBatchPendingCount === 0 && diagnosticsBreakdown.rawUserPendingCount === 0 ? (
+                <span>
+                  Records exist in storage ({diagnosticsBreakdown.rawBatchesCount} batches, {diagnosticsBreakdown.rawRequestsCount} requests),
+                  but <strong>0 records have status PENDING</strong>. All existing batches are in [{diagnosticsBreakdown.rawBatchApprovedCount} Approved,{' '}
+                  {diagnosticsBreakdown.rawBatchRejectedCount} Rejected] and user requests are in [{diagnosticsBreakdown.rawUserApprovedCount} Approved,{' '}
+                  {diagnosticsBreakdown.rawUserRejectedCount} Rejected]. The 0 pending count accurately reflects the current business state.
+                </span>
+              ) : (
+                <span>
+                  Active pending records detected: {diagnosticsBreakdown.rawBatchPendingCount} pending batches and{' '}
+                  {diagnosticsBreakdown.rawUserPendingCount} pending user account requests.
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Quick Metrics Comparison Grid */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gap: '1px',
+              background: '#e2e8f0',
+              borderBottom: '1px solid #e2e8f0',
+            }}
+          >
+            <div style={{ background: '#ffffff', padding: '10px 14px' }}>
+              <div style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: 600 }}>RAW BATCHES RETURNED</div>
+              <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#0f172a' }}>{diagnosticsBreakdown.rawBatchesCount}</div>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{rawBatchesMeta.durationMs}ms via /api/production/batches</div>
+            </div>
+
+            <div style={{ background: '#ffffff', padding: '10px 14px' }}>
+              <div style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: 600 }}>PENDING BATCHES</div>
+              <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#d97706' }}>{diagnosticsBreakdown.rawBatchPendingCount}</div>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                {diagnosticsBreakdown.rawBatchApprovedCount} approved, {diagnosticsBreakdown.rawBatchRejectedCount} rejected
+              </div>
+            </div>
+
+            <div style={{ background: '#ffffff', padding: '10px 14px' }}>
+              <div style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: 600 }}>RAW REQUESTS RETURNED</div>
+              <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#0f172a' }}>{diagnosticsBreakdown.rawRequestsCount}</div>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{rawRequestsMeta.durationMs}ms via /api/approvals/requests</div>
+            </div>
+
+            <div style={{ background: '#ffffff', padding: '10px 14px' }}>
+              <div style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: 600 }}>IDENTITY REQUESTS</div>
+              <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#7c3aed' }}>{diagnosticsBreakdown.rawUserRequestsCount}</div>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                {diagnosticsBreakdown.rawUserPendingCount} pending, {diagnosticsBreakdown.rawProdRequestsCount} prod batches
+              </div>
+            </div>
+
+            <div style={{ background: '#ffffff', padding: '10px 14px' }}>
+              <div style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: 600 }}>DEDUPLICATED BATCHES</div>
+              <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#059669' }}>{synthesizedBatches.length}</div>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                {batches.length} primary + {synthesizedBatches.length - batches.length} synthesized
+              </div>
+            </div>
+          </div>
+
+          {/* Diagnostic Sub-Tabs Navigation */}
+          <div
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: '6px',
-              padding: '8px 14px',
-              borderRadius: '8px',
+              justifyContent: 'space-between',
+              padding: '10px 16px',
               background: '#f8fafc',
-              border: '1px solid #cbd5e1',
-              color: '#475569',
-              fontWeight: 600,
-              fontSize: '0.84rem',
-              cursor: isLoadingBatches || isLoadingRequests ? 'not-allowed' : 'pointer',
+              borderBottom: '1px solid #e2e8f0',
+              flexWrap: 'wrap',
+              gap: '10px',
             }}
           >
-            <RefreshCw size={14} className={isLoadingBatches || isLoadingRequests ? 'spin-icon' : ''} />
-            Refresh
-          </button>
-        }
-      />
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button
+                onClick={() => setDiagnosticSubTab('RECONCILIATION')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '0.80rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid',
+                  background: diagnosticSubTab === 'RECONCILIATION' ? '#0f172a' : '#ffffff',
+                  borderColor: diagnosticSubTab === 'RECONCILIATION' ? '#0f172a' : '#cbd5e1',
+                  color: diagnosticSubTab === 'RECONCILIATION' ? '#ffffff' : '#475569',
+                }}
+              >
+                Reconciliation & Filter Audit
+              </button>
+
+              <button
+                onClick={() => setDiagnosticSubTab('BATCHES')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '0.80rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid',
+                  background: diagnosticSubTab === 'BATCHES' ? '#0f172a' : '#ffffff',
+                  borderColor: diagnosticSubTab === 'BATCHES' ? '#0f172a' : '#cbd5e1',
+                  color: diagnosticSubTab === 'BATCHES' ? '#ffffff' : '#475569',
+                }}
+              >
+                Raw Batches JSON ({diagnosticsBreakdown.rawBatchesCount})
+              </button>
+
+              <button
+                onClick={() => setDiagnosticSubTab('REQUESTS')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '0.80rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid',
+                  background: diagnosticSubTab === 'REQUESTS' ? '#0f172a' : '#ffffff',
+                  borderColor: diagnosticSubTab === 'REQUESTS' ? '#0f172a' : '#cbd5e1',
+                  color: diagnosticSubTab === 'REQUESTS' ? '#ffffff' : '#475569',
+                }}
+              >
+                Raw Requests JSON ({diagnosticsBreakdown.rawRequestsCount})
+              </button>
+
+              <button
+                onClick={() => setDiagnosticSubTab('WORKSPACE')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '0.80rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid',
+                  background: diagnosticSubTab === 'WORKSPACE' ? '#0f172a' : '#ffffff',
+                  borderColor: diagnosticSubTab === 'WORKSPACE' ? '#0f172a' : '#cbd5e1',
+                  color: diagnosticSubTab === 'WORKSPACE' ? '#ffffff' : '#475569',
+                }}
+              >
+                Storage & Sync Health
+              </button>
+            </div>
+
+            {/* Diagnostic Search Input */}
+            <div style={{ position: 'relative', minWidth: '220px' }}>
+              <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+              <input
+                type="text"
+                value={diagnosticSearch}
+                onChange={(e) => setDiagnosticSearch(e.target.value)}
+                placeholder="Search raw IDs, status, payload…"
+                style={{
+                  width: '100%',
+                  padding: '5px 10px 5px 30px',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '0.80rem',
+                  outline: 'none',
+                  background: '#ffffff',
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Sub-Tab 1: Filter Reconciliation & Filter Audit Table */}
+          {diagnosticSubTab === 'RECONCILIATION' && (
+            <div style={{ padding: '16px' }}>
+              <div style={{ marginBottom: '12px', fontSize: '0.80rem', color: '#64748b' }}>
+                This table itemizes every raw record received from the backend, shows its exact unmanipulated status, and verifies whether frontend logic displays it on the active tab (<strong>{activeTab}</strong>) or filters it out.
+              </div>
+
+              {filteredDiagnosticRecords.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '30px', color: '#94a3b8', fontStyle: 'italic', fontSize: '0.84rem' }}>
+                  {diagnosticSearch ? 'No records matched your search query.' : 'No records exist in the backend response arrays.'}
+                </div>
+              ) : (
+                <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.80rem' }}>
+                    <thead>
+                      <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569', fontWeight: 600 }}>
+                        <th style={{ padding: '8px 12px' }}>Source API</th>
+                        <th style={{ padding: '8px 12px' }}>Record ID</th>
+                        <th style={{ padding: '8px 12px' }}>Description / Type</th>
+                        <th style={{ padding: '8px 12px' }}>Raw Status from API</th>
+                        <th style={{ padding: '8px 12px' }}>Normalized Bucket</th>
+                        <th style={{ padding: '8px 12px' }}>Active Tab Filter Outcome</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredDiagnosticRecords.map((item, idx) => (
+                        <tr
+                          key={`${item.source}-${item.id}-${idx}`}
+                          style={{
+                            borderBottom: '1px solid #f1f5f9',
+                            background: item.isVisibleInActiveTab ? '#f0fdf4' : idx % 2 === 0 ? '#ffffff' : '#fafafa',
+                          }}
+                        >
+                          <td style={{ padding: '8px 12px', fontFamily: 'monospace', fontSize: '0.74rem' }}>
+                            <span
+                              style={{
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                background: item.source === 'BATCH' ? '#dbeafe' : '#f3e8ff',
+                                color: item.source === 'BATCH' ? '#1e40af' : '#6b21a8',
+                                fontWeight: 700,
+                              }}
+                            >
+                              {item.source === 'BATCH' ? 'Batches API' : 'Requests API'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '8px 12px', fontWeight: 700, fontFamily: 'monospace' }}>{item.id}</td>
+                          <td style={{ padding: '8px 12px', color: '#334155' }}>{item.title}</td>
+                          <td style={{ padding: '8px 12px', fontFamily: 'monospace', fontWeight: 600 }}>
+                            <span style={{ padding: '2px 6px', borderRadius: '4px', background: '#e2e8f0', color: '#1e293b' }}>
+                              "{item.rawStatus || 'EMPTY'}"
+                            </span>
+                          </td>
+                          <td style={{ padding: '8px 12px' }}>
+                            <span
+                              style={{
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontSize: '0.72rem',
+                                fontWeight: 700,
+                                background:
+                                  item.normalizedCategory === 'PENDING'
+                                    ? '#fef3c7'
+                                    : item.normalizedCategory === 'APPROVED'
+                                    ? '#dcfce7'
+                                    : item.normalizedCategory === 'REJECTED'
+                                    ? '#fee2e2'
+                                    : '#f1f5f9',
+                                color:
+                                  item.normalizedCategory === 'PENDING'
+                                    ? '#92400e'
+                                    : item.normalizedCategory === 'APPROVED'
+                                    ? '#166534'
+                                    : item.normalizedCategory === 'REJECTED'
+                                    ? '#991b1b'
+                                    : '#475569',
+                              }}
+                            >
+                              {item.normalizedCategory}
+                            </span>
+                          </td>
+                          <td style={{ padding: '8px 12px', fontSize: '0.76rem', color: item.isVisibleInActiveTab ? '#166534' : '#64748b' }}>
+                            {item.isVisibleInActiveTab ? (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                                <CheckCircle2 size={13} color="#16a34a" /> Visible in {activeTab}
+                              </span>
+                            ) : (
+                              <span>{item.filterExplanation}</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Sub-Tab 2: Raw Batches API Inspector */}
+          {diagnosticSubTab === 'BATCHES' && (
+            <div style={{ padding: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <span style={{ fontSize: '0.80rem', color: '#475569', fontFamily: 'monospace' }}>
+                  GET /api/production/batches &bull; {rawBatchesMeta.count} records &bull; {rawBatchesMeta.durationMs}ms
+                </span>
+                <button
+                  onClick={() => copyToClipboard(JSON.stringify(rawBatches, null, 2), 'Raw Batches JSON')}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    background: '#f1f5f9',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '0.76rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    color: '#334155',
+                  }}
+                >
+                  <Copy size={12} /> Copy JSON
+                </button>
+              </div>
+
+              <pre
+                style={{
+                  background: '#0f172a',
+                  color: '#e2e8f0',
+                  padding: '14px',
+                  borderRadius: '8px',
+                  fontSize: '0.76rem',
+                  fontFamily: 'monospace',
+                  maxHeight: '340px',
+                  overflowY: 'auto',
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                }}
+              >
+                {JSON.stringify(rawBatches, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {/* Sub-Tab 3: Raw ApprovalRequests API Inspector */}
+          {diagnosticSubTab === 'REQUESTS' && (
+            <div style={{ padding: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <span style={{ fontSize: '0.80rem', color: '#475569', fontFamily: 'monospace' }}>
+                  GET /api/approvals/requests &bull; {rawRequestsMeta.count} records &bull; {rawRequestsMeta.durationMs}ms
+                </span>
+                <button
+                  onClick={() => copyToClipboard(JSON.stringify(rawRequests, null, 2), 'Raw Requests JSON')}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    background: '#f1f5f9',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '0.76rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    color: '#334155',
+                  }}
+                >
+                  <Copy size={12} /> Copy JSON
+                </button>
+              </div>
+
+              <pre
+                style={{
+                  background: '#0f172a',
+                  color: '#e2e8f0',
+                  padding: '14px',
+                  borderRadius: '8px',
+                  fontSize: '0.76rem',
+                  fontFamily: 'monospace',
+                  maxHeight: '340px',
+                  overflowY: 'auto',
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                }}
+              >
+                {JSON.stringify(rawRequests, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {/* Sub-Tab 4: Storage & Sync Health */}
+          {diagnosticSubTab === 'WORKSPACE' && (
+            <div style={{ padding: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
+                <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px', background: '#fafafa' }}>
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '0.84rem', fontWeight: 700, color: '#0f172a' }}>
+                    Google Sheets Persistence
+                  </h4>
+                  <div style={{ fontSize: '0.78rem', color: '#475569', lineHeight: 1.6 }}>
+                    <div>
+                      <strong>Connection Status:</strong>{' '}
+                      <span style={{ color: isGoogleSheetsConnected ? '#16a34a' : '#d97706', fontWeight: 600 }}>
+                        {isGoogleSheetsConnected ? 'Connected to configured spreadsheet' : 'In-memory test mode'}
+                      </span>
+                    </div>
+                    <div>
+                      <strong>Persistent Writes:</strong>{' '}
+                      <span style={{ color: persistentWritesEnabled ? '#16a34a' : '#dc2626', fontWeight: 600 }}>
+                        {persistentWritesEnabled ? 'Enabled (Changes save to Sheets)' : 'Disabled / Read-Only Fallback'}
+                      </span>
+                    </div>
+                    {connectionError && (
+                      <div style={{ color: '#b91c1c', marginTop: '4px' }}>
+                        <strong>Error:</strong> {connectionError}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px', background: '#fafafa' }}>
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '0.84rem', fontWeight: 700, color: '#0f172a' }}>
+                    Workspace Synchronization Health
+                  </h4>
+                  <div style={{ fontSize: '0.78rem', color: '#475569', lineHeight: 1.6 }}>
+                    <div>
+                      <strong>Synchronization Status:</strong>{' '}
+                      {syncError ? (
+                        <span style={{ color: '#dc2626', fontWeight: 600 }}>Partial Sync / Warning Detected</span>
+                      ) : (
+                        <span style={{ color: '#16a34a', fontWeight: 600 }}>All workspace resources in sync</span>
+                      )}
+                    </div>
+                    {syncError ? (
+                      <div style={{ color: '#b91c1c', marginTop: '4px', fontSize: '0.74rem' }}>{syncError}</div>
+                    ) : (
+                      <div style={{ color: '#64748b', marginTop: '4px', fontSize: '0.74rem' }}>
+                        No serialization or currency parse failures reported.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Top Metric Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px', marginBottom: '20px' }}>
