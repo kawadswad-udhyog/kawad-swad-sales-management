@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import get_current_user
 from app.sheets import db
-from app.permissions import is_manager
+from app.permissions import is_manager, is_owner
 from app.accounting.chart_of_accounts import CHART_OF_ACCOUNTS
 from app.accounting.journal_engine import (
     calculate_trial_balance,
@@ -355,7 +355,6 @@ async def close_accounting_period(
     period_id: str,
     user: dict = Depends(get_current_user),
 ):
-    from app.auth import is_owner
     if not is_owner(user):
         raise HTTPException(403, "Only the business Owner can close an accounting period.")
 

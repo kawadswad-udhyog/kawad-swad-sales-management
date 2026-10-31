@@ -14,7 +14,8 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.auth import get_current_user, is_manager, is_owner
+from app.auth import get_current_user
+from app.permissions import is_manager, is_owner, require_manager, require_owner
 from app.sheets import db
 from app.timeutil import now_iso, business_today
 from app.calculations.units import to_decimal, round_money, round_stock
@@ -30,17 +31,15 @@ PURCHASING_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN", "PA"}
 
 
 def require_purchasing_access(user: dict):
-    role = str(user.get("role", "")).upper()
-    if role not in PURCHASING_ROLES:
+    if not is_manager(user):
         raise HTTPException(403, "Access denied. Purchasing management requires Manager or PA privileges.")
-    return str(user.get("user_id", "")), role
+    return str(user.get("user_id", "")), str(user.get("role", "")).upper()
 
 
 def require_owner_access(user: dict):
-    role = str(user.get("role", "")).upper()
-    if role not in {"OWNER", "OWNER_ADMIN", "ADMIN"}:
+    if not is_owner(user):
         raise HTTPException(403, "Access denied. Action requires Owner privileges.")
-    return str(user.get("user_id", "")), role
+    return str(user.get("user_id", "")), str(user.get("role", "")).upper()
 
 
 # ============================================================================

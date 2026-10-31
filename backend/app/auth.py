@@ -10,6 +10,14 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.config import jwt_secret, SALES_TOKEN_HOURS
+from app.permissions import (
+    is_owner,
+    is_manager,
+    is_salesman,
+    is_factory_worker,
+    require_owner,
+    require_manager,
+)
 
 import uuid
 import time
