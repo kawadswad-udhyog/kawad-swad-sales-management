@@ -24,10 +24,15 @@ import type {
   AccountingPeriod,
 } from '../types';
 
-export const DEFAULT_API_BASE_URL =
+const rawDefaultUrl =
   (typeof window !== 'undefined' && (window as unknown as { KAWAD_API_URL?: string }).KAWAD_API_URL) ||
   (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: { VITE_API_URL?: string } })?.env?.VITE_API_URL) ||
   '';
+
+export const DEFAULT_API_BASE_URL =
+  rawDefaultUrl.includes('example.com') || rawDefaultUrl.includes('your-backend')
+    ? ''
+    : rawDefaultUrl;
 
 const STORAGE_API_KEY = 'ks_backend_api_url';
 const STORAGE_TOKEN_KEY = 'ks_token';
@@ -94,14 +99,26 @@ export function getApiBaseUrl(): string {
 
     const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
     if (saved) {
-      if (saved.includes('kawad-swad-sales-backend.onrender.com')) {
+      if (
+        saved.includes('kawad-swad-sales-backend.onrender.com') ||
+        saved.includes('your-backend') ||
+        saved.includes('example.com')
+      ) {
         localStorage.removeItem(STORAGE_API_KEY);
       } else {
         return saved;
       }
     }
 
-    if (DEFAULT_API_BASE_URL) return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
+    if (DEFAULT_API_BASE_URL) {
+      if (
+        DEFAULT_API_BASE_URL.includes('your-backend') ||
+        DEFAULT_API_BASE_URL.includes('example.com')
+      ) {
+        return '';
+      }
+      return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
+    }
     return '';
   }
 
@@ -111,7 +128,11 @@ export function getApiBaseUrl(): string {
 export function setApiBaseUrl(url: string): void {
   if (typeof window !== 'undefined') {
     const clean = url.trim().replace(/\/+$/, '');
-    if (clean) {
+    if (
+      clean &&
+      !clean.includes('example.com') &&
+      !clean.includes('your-backend')
+    ) {
       localStorage.setItem(STORAGE_API_KEY, clean);
     } else {
       localStorage.removeItem(STORAGE_API_KEY);

@@ -315,6 +315,7 @@ async def cancel_purchase_order(po_id: str, reason: str = Query(...), user: dict
 # ============================================================================
 
 @router.get("/receipts")
+@router.get("/goods-receipts")
 async def list_goods_receipts(user: dict = Depends(get_current_user)):
     require_purchasing_access(user)
     receipts = db.get_records("GoodsReceipts", fresh=True)
@@ -335,6 +336,7 @@ async def list_goods_receipts(user: dict = Depends(get_current_user)):
 
 
 @router.post("/receipts")
+@router.post("/goods-receipts")
 async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get_current_user)):
     """
     Records an authorized Goods Receipt Note (GRN):

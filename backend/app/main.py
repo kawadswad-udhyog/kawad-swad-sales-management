@@ -128,6 +128,7 @@ def health_check():
         SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
         SALES_GOOGLE_SERVICE_ACCOUNT_JSON,
     )
+    from app.sheets import REQUIRED_TABS
     status_str = "ok" if db.is_connected else "storage_disconnected"
     has_sa_file = bool(SALES_GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE))
     has_sa_json = bool(SALES_GOOGLE_SERVICE_ACCOUNT_JSON and len(SALES_GOOGLE_SERVICE_ACCOUNT_JSON.strip()) > 10)
@@ -168,7 +169,7 @@ def health_check():
         },
         "required_sheets": {
             "status": "AVAILABLE" if db.is_connected else "NOT_VERIFIED",
-            "total_managed_tabs": 28,
+            "total_managed_tabs": len(REQUIRED_TABS),
         },
     }
 

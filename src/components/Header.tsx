@@ -328,7 +328,7 @@ export const Header: React.FC<HeaderProps> = ({
                         type="url"
                         value={urlInput}
                         onChange={(e) => setUrlInput(e.target.value)}
-                        placeholder="https://your-backend.onrender.com"
+                        placeholder="https://kawad-swad-sales-dev.onrender.com"
                         className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-mono"
                       />
                       <button
