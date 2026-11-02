@@ -907,6 +907,10 @@ export interface ReconcileResult {
   status: string;
   dry_run: boolean;
   missing_count: number;
+  unposted_count?: number;
+  failed_count?: number;
+  incomplete_count?: number;
+  duplicate_reference_count?: number;
   reconciled_count: number;
   error_count: number;
   missing_events: Array<{
@@ -915,6 +919,34 @@ export interface ReconcileResult {
     reference_id: string;
     date: string;
     description: string;
+    issue_type?: string;
+    journal_id?: string;
+    failure_reason?: string;
+  }>;
+  unposted_events?: Array<{
+    source_table: string;
+    reference_type: string;
+    reference_id: string;
+    date: string;
+    description: string;
+    issue_type?: string;
+    journal_id?: string;
+    failure_reason?: string;
+  }>;
+  failed_vouchers?: Array<{
+    source_table: string;
+    reference_type: string;
+    reference_id: string;
+    date: string;
+    description: string;
+    issue_type?: string;
+    journal_id?: string;
+    failure_reason?: string;
+  }>;
+  duplicate_references?: Array<{
+    reference_key: string;
+    voucher_count: number;
+    journal_ids: string[];
   }>;
   reconciled_events: Array<{
     source_table: string;
@@ -951,8 +983,8 @@ export async function fetchReconciliationReport(): Promise<ReconcileResult> {
   return apiRequest<ReconcileResult>('/api/accounting/reconcile');
 }
 
-export async function executeReconciliation(dryRun = false): Promise<ReconcileResult> {
-  return apiRequest<ReconcileResult>(`/api/accounting/reconcile?dry_run=${dryRun}`, {
+export async function executeReconciliation(dryRun = false, confirmLiveBackfill = true): Promise<ReconcileResult> {
+  return apiRequest<ReconcileResult>(`/api/accounting/reconcile?dry_run=${dryRun}&confirm_live_backfill=${confirmLiveBackfill}`, {
     method: 'POST',
   });
 }

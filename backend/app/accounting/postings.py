@@ -123,10 +123,10 @@ def post_milling_journal(
 
 def post_production_batch_journal(
     batch_data: Dict[str, Any],
-    flour_cost: Decimal,
-    spice_cost: Decimal,
-    labor_cost: Decimal,
-    actor: str,
+    flour_cost: Optional[Decimal] = None,
+    spice_cost: Optional[Decimal] = None,
+    labor_cost: Optional[Decimal] = None,
+    actor: str = "SYSTEM",
 ) -> Dict[str, Any]:
     """
     Papad Dough & Bulk Production:
@@ -139,10 +139,76 @@ def post_production_batch_journal(
     qty_kg = to_decimal(batch_data.get("net_quantity_kg") or batch_data.get("quantity_kg", 0) or 0)
     p_name = str(batch_data.get("product_name_snapshot", "Papad"))
 
+    # Dynamically extract or resolve costs if not explicitly passed
+    if flour_cost is None or spice_cost is None:
+        f_cost_val = batch_data.get("flour_cost")
+        s_cost_val = batch_data.get("ingredient_cost")
+        if f_cost_val is not None and s_cost_val is not None:
+            flour_cost = to_decimal(f_cost_val)
+            spice_cost = to_decimal(s_cost_val)
+        else:
+            # Query RawMaterialLedger deductions for this batch
+            from app.sheets import db
+            from app.calculations.costing import get_latest_purchase_rate
+            from app.calculations.recipes import calculate_recipe_cost_estimate
+            raw_deductions = [
+                x for x in db.get_records("RawMaterialLedger", fresh=True)
+                if str(x.get("production_id", "")).strip() == prod_id
+                and str(x.get("movement_type", "")).strip().upper() == "PRODUCTION_CONSUMPTION"
+            ]
+            rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+            pur_ledger = db.get_records("RawMaterialLedger", fresh=True)
+            f_calc = Decimal("0")
+            s_calc = Decimal("0")
+            for d in raw_deductions:
+                m_name = str(d.get("material_name", "")).lower()
+                m_id = str(d.get("raw_material_id", ""))
+                q = to_decimal(d.get("quantity", 0) or 0)
+                r_val = d.get("rate_per_unit")
+                if r_val is not None and str(r_val).strip() not in {"", "0", "none", "null", "pending"}:
+                    r = to_decimal(r_val)
+                else:
+                    rate_lookup = get_latest_purchase_rate(m_name or m_id, rm_master, pur_ledger)
+                    r = to_decimal(rate_lookup.get("rate_per_canonical_unit") or 0)
+                c = q * r
+                if "flour" in m_name or "atta" in m_name:
+                    f_calc += c
+                else:
+                    s_calc += c
+
+            # If deduction rates are completely absent, evaluate approved recipe formula cost
+            if f_calc == Decimal("0") and s_calc == Decimal("0"):
+                recipes = db.get_records("Recipes", fresh=True)
+                m_rec = next((r for r in recipes if str(r.get("product_name_snapshot", "")).strip().lower() == p_name.lower() and str(r.get("approved", "")).lower() in {"true", "1"}), None)
+                if m_rec:
+                    import json
+                    items_raw = m_rec.get("items") or m_rec.get("items_json")
+                    if isinstance(items_raw, str):
+                        try:
+                            items_raw = json.loads(items_raw)
+                        except Exception:
+                            items_raw = []
+                    yield_kg = float(m_rec.get("expected_yield_kg", 1.2) or 1.2)
+                    rec_cost = calculate_recipe_cost_estimate(items_raw, yield_kg)
+                    if rec_cost.get("cost_per_kg"):
+                        tot_c = to_decimal(rec_cost["cost_per_kg"]) * qty_kg
+                        f_calc = tot_c * Decimal("0.85")
+                        s_calc = tot_c * Decimal("0.15")
+
+            flour_cost = f_calc
+            spice_cost = s_calc
+
+    if labor_cost is None:
+        labor_cost = to_decimal(batch_data.get("labor_cost") or batch_data.get("labour_cost") or 0)
+
     r_flour = round_money(flour_cost)
     r_spice = round_money(spice_cost)
     r_labor = round_money(labor_cost)
     r_total = r_flour + r_spice + r_labor
+
+    if r_total <= Decimal("0"):
+        raise ValueError(f"Cannot post production batch journal for {prod_id}: Total production cost is ₹0.00. Rates must be confirmed.")
+
     lines = [
         {
             "account_code": "1230",
@@ -183,10 +249,10 @@ def post_production_batch_journal(
 
 def post_packaging_batch_journal(
     pack_data: Dict[str, Any],
-    bulk_cost: Decimal,
-    packing_material_cost: Decimal,
-    packing_labor_cost: Decimal,
-    actor: str,
+    bulk_cost: Optional[Decimal] = None,
+    packing_material_cost: Optional[Decimal] = None,
+    packing_labor_cost: Optional[Decimal] = None,
+    actor: str = "SYSTEM",
 ) -> Dict[str, Any]:
     """
     Packaging Conversion:
@@ -195,14 +261,34 @@ def post_packaging_batch_journal(
     Credit: Packaging Materials Inventory (1250)
     Credit: Wages Payable (2120)
     """
-    pack_id = str(pack_data.get("packaging_id", "")).strip()
-    tot_packets = int(float(pack_data.get("total_packets", 0) or 0))
+    pack_id = str(pack_data.get("packaging_id", "") or pack_data.get("packaging_batch_id", "")).strip()
+    tot_packets = int(float(pack_data.get("total_packets", 0) or pack_data.get("packet_count", 0) or 0))
     p_name = str(pack_data.get("product_name_snapshot", "Papad"))
+    bulk_kg = to_decimal(pack_data.get("bulk_kg_used", 0) or 0)
+
+    # Dynamically resolve bulk cost if omitted
+    if bulk_cost is None:
+        from app.sheets import db
+        from app.calculations.costing import get_authoritative_bulk_cost_per_kg
+        batches = db.get_records("ProductionBatches", fresh=True)
+        recipes = db.get_records("Recipes", fresh=True)
+        stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
+        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+        bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(p_name, batches, recipes, stock_ledger, rm_master)
+        bulk_cost = bulk_kg * bulk_cost_per_kg
+
+    if packing_material_cost is None:
+        packing_material_cost = to_decimal(pack_data.get("packing_material_cost") or 0)
+    if packing_labor_cost is None:
+        packing_labor_cost = to_decimal(pack_data.get("packing_labor_cost") or 0)
 
     r_bulk = round_money(bulk_cost)
     r_mat = round_money(packing_material_cost)
     r_lab = round_money(packing_labor_cost)
     r_finished = r_bulk + r_mat + r_lab
+
+    if r_finished <= Decimal("0"):
+        raise ValueError(f"Cannot post packaging batch journal for {pack_id}: Total finished valuation is ₹0.00.")
 
     lines = [
         {
@@ -213,7 +299,7 @@ def post_packaging_batch_journal(
         {
             "account_code": "1230",
             "credit_amount": r_bulk,
-            "notes": f"Bulk papad consumed: {pack_data.get('bulk_kg_used')} kg",
+            "notes": f"Bulk papad consumed: {bulk_kg} kg",
         },
     ]
 
@@ -235,7 +321,7 @@ def post_packaging_batch_journal(
         voucher_type="MANUFACTURING",
         reference_type="PACKAGING_BATCH",
         reference_id=pack_id,
-        narration=f"Packaging conversion: {pack_data.get('bulk_kg_used')} kg Bulk -> {tot_packets} Packets {p_name}",
+        narration=f"Packaging conversion: {bulk_kg} kg Bulk -> {tot_packets} Packets {p_name}",
         lines=lines,
         posted_by=actor,
         journal_date=str(pack_data.get("packaging_date", "")).strip() or None,

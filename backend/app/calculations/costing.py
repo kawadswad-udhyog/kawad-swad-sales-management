@@ -4,7 +4,7 @@ Implements Part 2 and Part 6 of the specification.
 """
 
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from .units import (
     normalize_to_canonical_unit,
     round_money,
@@ -241,3 +241,214 @@ def calculate_finished_sku_cost(
         "total_packing_cost": round_money(packing_addon_dec),
         "finished_packet_cost": round_money(total_packet_cost_dec),
     }
+
+
+def get_sku_packing_costs(
+    product_record: Optional[Dict[str, Any]],
+    raw_materials_master: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[Decimal, Decimal]:
+    """
+    Determine packing material and packing labour costs for a specific product SKU.
+    Rules:
+    - Never silently invent or assume fixed ₹1.50 or ₹0.50 fallback costs.
+    - Inspects product_record configuration (packaging_material_cost_per_packet, packing_labour_per_packet).
+    - If not explicitly set on SKU, checks RawMaterialsMaster for matching pouch rate.
+    - If no cost is defined in master data, returns Decimal('0.00') rather than a fictional value.
+    """
+    if not product_record:
+        return Decimal("0.00"), Decimal("0.00")
+
+    mat_cost = Decimal("0.00")
+    lab_cost = Decimal("0.00")
+
+    # 1. Check SKU product fields
+    for field_name in ["packaging_material_cost_per_packet", "pouch_cost", "packaging_material_cost"]:
+        val = product_record.get(field_name)
+        if val is not None and str(val).strip() not in {"", "none", "null"}:
+            try:
+                dec = to_decimal(val)
+                if dec >= 0:
+                    mat_cost = dec
+                    break
+            except Exception:
+                pass
+
+    for field_name in ["packing_labour_per_packet", "packing_labor_per_packet", "packing_labour_cost", "packaging_labor_cost"]:
+        val = product_record.get(field_name)
+        if val is not None and str(val).strip() not in {"", "none", "null"}:
+            try:
+                dec = to_decimal(val)
+                if dec >= 0:
+                    lab_cost = dec
+                    break
+            except Exception:
+                pass
+
+    # 2. Check RawMaterialsMaster if pouch cost was not set on the product
+    if mat_cost == Decimal("0.00") and raw_materials_master:
+        pack_weight = int(float(product_record.get("pack_weight_g", 0) or 0))
+        for rm in raw_materials_master:
+            name = str(rm.get("material_name", "")).lower()
+            if "pouch" in name or "printed bag" in name or "packaging" in name:
+                if str(pack_weight) in name:
+                    r = rm.get("rate_per_unit") or rm.get("rate")
+                    if r is not None and str(r).strip() not in {"", "none", "null", "pending"}:
+                        try:
+                            mat_cost = to_decimal(r)
+                            break
+                        except Exception:
+                            pass
+
+    return round_money(mat_cost), round_money(lab_cost)
+
+
+def get_authoritative_bulk_cost_per_kg(
+    bulk_key_or_product_id: str,
+    production_batches: Optional[List[Dict[str, Any]]] = None,
+    recipes: Optional[List[Dict[str, Any]]] = None,
+    production_stock_ledger: Optional[List[Dict[str, Any]]] = None,
+    raw_materials_master: Optional[List[Dict[str, Any]]] = None,
+) -> Decimal:
+    """
+    Authoritative resolution of bulk papad unit cost per kg.
+    Follows established inventory valuation hierarchy:
+    1. Checks approved ProductionBatches for this product with actual_cost_per_kg > 0.
+       Uses latest approved batch actual cost or batch weighted average.
+    2. Checks ProductionStockLedger BULK_PRODUCED entries with unit_cost_per_kg > 0.
+    3. Checks approved Recipes for this product and evaluates standard formula cost
+       via calculate_recipe_cost_estimate.
+    4. If no authoritative cost can be established, raises ValueError.
+       NEVER falls back to a silent arbitrary hardcoded constant (such as ₹160/kg).
+    """
+    from .recipes import calculate_recipe_cost_estimate
+
+    target = str(bulk_key_or_product_id or "").strip().lower()
+    if not target:
+        raise ValueError("Cannot resolve bulk cost for empty product key")
+
+    # 1. Search approved ProductionBatches
+    if production_batches:
+        matching_batches = []
+        for b in production_batches:
+            st = str(b.get("status", "")).strip().upper()
+            if st != "APPROVED":
+                continue
+            b_name = str(b.get("product_name_snapshot", "")).strip().lower()
+            b_pid = str(b.get("product_id", "")).strip().lower()
+            b_key = str(b.get("bulk_product_key", "")).strip().lower()
+            if target == b_name or target == b_pid or target == b_key or (len(target) >= 4 and target in b_name):
+                cost_val = b.get("actual_cost_per_kg") or b.get("cost_per_kg")
+                if cost_val is not None and str(cost_val).strip() not in {"", "0", "null", "none"}:
+                    try:
+                        dec = to_decimal(cost_val)
+                        if dec > Decimal("0"):
+                            dt = str(b.get("approved_at") or b.get("production_date") or b.get("created_at") or "")
+                            matching_batches.append((dt, dec))
+                    except Exception:
+                        pass
+
+        if matching_batches:
+            # Sort by datetime descending to get the most recent batch cost
+            matching_batches.sort(key=lambda x: x[0], reverse=True)
+            return round_money(matching_batches[0][1])
+
+    # 2. Search ProductionStockLedger
+    if production_stock_ledger:
+        for m in reversed(production_stock_ledger):
+            typ = str(m.get("movement_type", "")).strip().upper()
+            if typ != "BULK_PRODUCED":
+                continue
+            m_key = str(m.get("bulk_product_key") or m.get("product_name_snapshot") or m.get("product_id") or "").strip().lower()
+            if target == m_key or (len(target) >= 4 and target in m_key):
+                unit_cost = m.get("unit_cost_per_kg") or m.get("unit_cost")
+                if unit_cost is not None and str(unit_cost).strip() not in {"", "0", "null", "none"}:
+                    try:
+                        dec = to_decimal(unit_cost)
+                        if dec > Decimal("0"):
+                            return round_money(dec)
+                    except Exception:
+                        pass
+
+    # 3. Search approved Recipes
+    if recipes:
+        import json
+        for r in recipes:
+            r_name = str(r.get("product_name_snapshot") or r.get("product_name") or "").strip().lower()
+            r_pid = str(r.get("product_id", "")).strip().lower()
+            is_approved = str(r.get("approved", "")).strip().lower() in {"true", "1", "yes"}
+            if not is_approved:
+                continue
+            if target == r_name or target == r_pid or (len(target) >= 4 and target in r_name):
+                # Calculate recipe formula cost
+                items_raw = r.get("items") or r.get("items_json")
+                if isinstance(items_raw, str):
+                    try:
+                        items_raw = json.loads(items_raw)
+                    except Exception:
+                        items_raw = []
+                if items_raw:
+                    expected_yield = float(r.get("expected_yield_kg", 1.2) or 1.2)
+                    recipe_cost = calculate_recipe_cost_estimate(items_raw, expected_yield)
+                    if recipe_cost.get("cost_per_kg") is not None:
+                        dec = to_decimal(recipe_cost["cost_per_kg"])
+                        if dec > Decimal("0"):
+                            return round_money(dec)
+
+    raise ValueError(
+        f"Authoritative bulk cost cannot be established for '{bulk_key_or_product_id}'. "
+        "No approved batch actual cost or formula recipe cost is available. "
+        "System refuses to invent or assume an arbitrary fallback cost."
+    )
+
+
+def get_sku_finished_cost(
+    product_record: Dict[str, Any],
+    production_batches: Optional[List[Dict[str, Any]]] = None,
+    recipes: Optional[List[Dict[str, Any]]] = None,
+    production_stock_ledger: Optional[List[Dict[str, Any]]] = None,
+    raw_materials_master: Optional[List[Dict[str, Any]]] = None,
+) -> Decimal:
+    """
+    Calculate the authoritative finished packet cost for a given product SKU.
+    Combines:
+    - Net weight proportion of authoritative bulk papad cost
+    - Direct packaging material cost for this SKU
+    - Direct packaging labour cost for this SKU
+    """
+    # 1. Direct standard_cost or unit_cost on Product record
+    for field_name in ["standard_cost", "finished_packet_cost", "unit_cost"]:
+        val = product_record.get(field_name)
+        if val is not None and str(val).strip() not in {"", "0", "null", "none"}:
+            try:
+                dec = to_decimal(val)
+                if dec > Decimal("0"):
+                    return round_money(dec)
+            except Exception:
+                pass
+
+    # 2. Derive dynamically from authoritative bulk cost and packaging addons
+    p_name = str(product_record.get("product_name", "")).strip()
+    p_id = str(product_record.get("product_id", "")).strip()
+    pack_g = int(float(product_record.get("pack_weight_g", 500) or 500))
+
+    bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(
+        bulk_key_or_product_id=p_name or p_id,
+        production_batches=production_batches,
+        recipes=recipes,
+        production_stock_ledger=production_stock_ledger,
+        raw_materials_master=raw_materials_master,
+    )
+
+    mat_cost, lab_cost = get_sku_packing_costs(product_record, raw_materials_master)
+    sku_val = calculate_finished_sku_cost(
+        pack_weight_grams=pack_g,
+        production_cost_per_saleable_kg=float(bulk_cost_per_kg),
+        packaging_material_cost_per_packet=float(mat_cost),
+        packing_labour_per_packet=float(lab_cost),
+    )
+
+    if sku_val.get("finished_packet_cost") is not None:
+        return to_decimal(sku_val["finished_packet_cost"])
+
+    raise ValueError(f"Could not calculate finished SKU cost for product {p_id}")
+

@@ -71,6 +71,8 @@ def calculate_packing_variance(
         raise ValueError(f"Total packed kg cannot be negative, got {total_packed_kg} kg")
     if packing_loss_kg < 0:
         raise ValueError(f"Packing loss cannot be negative, got {packing_loss_kg} kg")
+    if tolerance_kg is not None and to_decimal(tolerance_kg) < Decimal("0"):
+        raise ValueError(f"Packing tolerance cannot be negative, got {tolerance_kg} kg")
 
     bulk_dec = to_decimal(bulk_consumed_kg)
     packed_dec = to_decimal(total_packed_kg)

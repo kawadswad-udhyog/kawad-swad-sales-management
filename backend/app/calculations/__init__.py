@@ -40,6 +40,9 @@ from .costing import (
     get_latest_purchase_rate,
     calculate_batch_actual_cost,
     calculate_finished_sku_cost,
+    get_authoritative_bulk_cost_per_kg,
+    get_sku_packing_costs,
+    get_sku_finished_cost,
 )
 from .inventory import (
     calculate_bulk_stock_balance,
@@ -73,6 +76,9 @@ __all__ = [
     "get_latest_purchase_rate",
     "calculate_batch_actual_cost",
     "calculate_finished_sku_cost",
+    "get_authoritative_bulk_cost_per_kg",
+    "get_sku_packing_costs",
+    "get_sku_finished_cost",
     "calculate_bulk_stock_balance",
     "calculate_finished_stock_balance",
     "calculate_warehouse_stock_balance",

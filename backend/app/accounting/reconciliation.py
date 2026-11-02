@@ -144,33 +144,58 @@ def audit_and_reconcile_operational_events(
                 lambda r=row: post_milling_journal(r, actor=actor),
             )
 
+    def _cogs_for_sale_record(sale_row: dict) -> Decimal:
+        sale_id = str(sale_row.get("sale_id", "")).strip()
+        items = [i for i in db.get_records("SaleItems", fresh=True) if str(i.get("sale_id", "")).strip() == sale_id]
+        from app.calculations.costing import get_sku_finished_cost
+        from app.calculations.units import to_decimal, round_money
+        products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
+        batches = db.get_records("ProductionBatches", fresh=True)
+        recipes = db.get_records("Recipes", fresh=True)
+        stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
+        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+
+        cogs_tot = Decimal("0")
+        for itm in items:
+            pid = str(itm.get("product_id", "")).strip()
+            prod = products.get(pid, {})
+            qty = to_decimal(itm.get("quantity", 0) or 0)
+            try:
+                cost_pkt = get_sku_finished_cost(prod, batches, recipes, stock_ledger, rm_master)
+                cogs_tot += qty * cost_pkt
+            except Exception:
+                std = prod.get("standard_cost") or prod.get("unit_cost")
+                if std:
+                    cogs_tot += qty * to_decimal(std)
+        return round_money(cogs_tot)
+
     # 2. Audit ProductionBatches
     pb_records = db.get_records("ProductionBatches", fresh=True)
     for row in pb_records:
-        batch_id = str(row.get("batch_id", "")).strip()
+        batch_id = str(row.get("production_id") or row.get("batch_id") or "").strip()
         status = str(row.get("status", "")).upper()
-        if status == "APPROVED":
+        if status == "APPROVED" and batch_id:
             check_and_queue(
                 "ProductionBatches",
                 "PRODUCTION_BATCH",
                 batch_id,
                 str(row.get("production_date", "") or row.get("created_at", ""))[:10],
-                f"Approved bulk papad batch {batch_id} ({row.get('actual_output_kg')}kg)",
+                f"Approved bulk papad batch {batch_id} ({row.get('net_quantity_kg') or row.get('actual_output_kg')}kg)",
                 lambda r=row: post_production_batch_journal(r, actor=actor),
             )
 
     # 3. Audit PackagingBatches
     pkg_records = db.get_records("PackagingBatches", fresh=True)
     for row in pkg_records:
-        pkg_id = str(row.get("packaging_batch_id", "")).strip()
+        pkg_id = str(row.get("packaging_id") or row.get("packaging_batch_id") or "").strip()
         status = str(row.get("status", "")).upper()
-        if status == "APPROVED":
+        if status in {"APPROVED", "RECORDED", "COMPLETE"} and pkg_id:
             check_and_queue(
                 "PackagingBatches",
                 "PACKAGING_BATCH",
                 pkg_id,
                 str(row.get("packaging_date", "") or row.get("created_at", ""))[:10],
-                f"Approved packaging batch {pkg_id} ({row.get('packet_count')} pkts)",
+                f"Packaging batch {pkg_id} ({row.get('total_packets') or row.get('packet_count')} pkts)",
                 lambda r=row: post_packaging_batch_journal(r, actor=actor),
             )
 
@@ -179,14 +204,14 @@ def audit_and_reconcile_operational_events(
     for row in sales_records:
         sale_id = str(row.get("sale_id", "")).strip()
         status = str(row.get("bill_status", "")).upper()
-        if status != "CANCELLED":
+        if status != "CANCELLED" and sale_id:
             check_and_queue(
                 "Sales",
                 "SALE_INVOICE",
                 sale_id,
                 str(row.get("sale_datetime", ""))[:10],
                 f"Sales invoice {row.get('bill_number')} (₹{row.get('bill_total')})",
-                lambda r=row: post_sale_journal(row, actor=actor),
+                lambda r=row: post_sale_journal(r, estimated_cogs=_cogs_for_sale_record(r), actor=actor),
             )
 
     # 5. Audit DailyClosing

@@ -201,6 +201,7 @@ class PackagingCreate(BaseModel):
     packets_1000g: int = Field(ge=0, default=0)
     packing_loss_kg: float = Field(ge=0, default=0.0)
     loss_reason: str = ""
+    tolerance_kg: Optional[float] = Field(None, ge=0, description="Packing tolerance in kg (must be >= 0)")
     discrepancy_explanation: str = ""
     discrepancy_approved: bool = False
     reference: str = ""
@@ -2740,6 +2741,9 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
         # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
         try:
             from app.accounting.postings import post_production_batch_journal
+            from app.calculations.costing import get_latest_purchase_rate
+            from app.calculations.recipes import calculate_recipe_cost_estimate
+
             raw_deductions = [
                 x for x in db.get_records("RawMaterialLedger", fresh=True)
                 if str(field(x, "production_id", default="")).strip() == prod_id_clean
@@ -2747,19 +2751,71 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
             ]
             f_cost = Decimal("0")
             s_cost = Decimal("0")
+            rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+            pur_ledger = db.get_records("RawMaterialLedger", fresh=True)
+
             for d in raw_deductions:
                 m_name = str(field(d, "material_name", default="")).lower()
+                m_id = str(field(d, "raw_material_id", default=""))
                 q = to_decimal(field(d, "quantity", default=0) or 0)
-                r = to_decimal(field(d, "rate_per_unit", default=0) or 0)
+                r_val = field(d, "rate_per_unit", default=None)
+                if r_val is not None and str(r_val).strip() not in {"", "0", "none", "null", "pending"}:
+                    r = to_decimal(r_val)
+                else:
+                    # Look up confirmed rate from master / purchase ledger
+                    rate_lookup = get_latest_purchase_rate(m_name or m_id, rm_master, pur_ledger)
+                    if rate_lookup.get("rate_per_canonical_unit") is not None:
+                        r = to_decimal(rate_lookup["rate_per_canonical_unit"])
+                    else:
+                        r = Decimal("0")
                 c = q * r
                 if "flour" in m_name or "atta" in m_name:
                     f_cost += c
                 else:
                     s_cost += c
+
             l_cost = to_decimal(field(rec, "labour_cost", default=0) or field(rec, "labor_cost", default=0) or 0)
+
+            # If deduction rates were unrecorded, check recipe standard formulation instead of fixed numbers
             if f_cost == Decimal("0") and s_cost == Decimal("0"):
-                f_cost = to_decimal(production_kg) * Decimal("120")
-                s_cost = to_decimal(production_kg) * Decimal("20")
+                p_name = str(field(rec, "product_name_snapshot", default="")).strip().lower()
+                recipes_list = db.get_records("Recipes", fresh=True)
+                matching_recipe = next((r for r in recipes_list if str(field(r, "product_name_snapshot", default="")).strip().lower() == p_name and truthy(field(r, "approved"))), None)
+                if matching_recipe:
+                    items_raw = matching_recipe.get("items") or matching_recipe.get("items_json")
+                    if isinstance(items_raw, str):
+                        try:
+                            items_raw = json.loads(items_raw)
+                        except Exception:
+                            items_raw = []
+                    yield_kg = float(field(matching_recipe, "expected_yield_kg", default=1.2) or 1.2)
+                    recipe_cost = calculate_recipe_cost_estimate(items_raw, yield_kg)
+                    if recipe_cost.get("cost_per_kg"):
+                        tot_rec_cost = to_decimal(recipe_cost["cost_per_kg"]) * to_decimal(production_kg)
+                        f_cost = tot_rec_cost * Decimal("0.85")
+                        s_cost = tot_rec_cost * Decimal("0.15")
+
+            total_batch_cost = f_cost + s_cost + l_cost
+            actual_cost_per_kg = (total_batch_cost / to_decimal(production_kg)) if production_kg > 0 else Decimal("0")
+
+            # Persist batch actual cost on record for downstream packaging and accounting
+            cost_updates = {
+                "actual_cost_per_kg": float(round_money(actual_cost_per_kg)),
+                "total_batch_cost": float(round_money(total_batch_cost)),
+                "flour_cost": float(round_money(f_cost)),
+                "ingredient_cost": float(round_money(s_cost)),
+                "labor_cost": float(round_money(l_cost)),
+            }
+            db.update_record("ProductionBatches", "production_id", prod_id_clean, cost_updates)
+            updates.update(cost_updates)
+
+            # Update bulk stock ledger movement with unit_cost_per_kg
+            bulk_mvts = [m for m in db.get_records("ProductionStockLedger", fresh=True) if str(field(m, "reference_id")) == prod_id_clean and str(field(m, "movement_type")).upper() == "BULK_PRODUCED"]
+            for bm in bulk_mvts:
+                db.update_record("ProductionStockLedger", "movement_id", str(field(bm, "movement_id")), {
+                    "unit_cost_per_kg": float(round_money(actual_cost_per_kg)),
+                    "total_cost": float(round_money(total_batch_cost)),
+                })
 
             batch_dict = {
                 "production_id": prod_id_clean,
@@ -2824,11 +2880,12 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         raise HTTPException(400, "Enter at least one packet quantity to package.")
 
     # Calculate variance and discrepancy check
+    active_tol = req.tolerance_kg if req.tolerance_kg is not None else DEFAULT_PACKING_TOLERANCE_KG
     variance_info = calculate_packing_variance(
         bulk_consumed_kg=req.bulk_kg_used,
         total_packed_kg=total_packed_kg,
         packing_loss_kg=req.packing_loss_kg,
-        tolerance_kg=DEFAULT_PACKING_TOLERANCE_KG,
+        tolerance_kg=active_tol,
     )
 
     unexplained_variance = variance_info["unexplained_variance_kg"]
@@ -3037,9 +3094,52 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
     # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
     try:
         from app.accounting.postings import post_packaging_batch_journal
-        bulk_cost = to_decimal(req.bulk_kg_used) * Decimal("160.00")
-        mat_cost = to_decimal(total_packets) * Decimal("1.50")
-        lab_cost = to_decimal(total_packets) * Decimal("0.50")
+        from app.calculations.costing import (
+            get_authoritative_bulk_cost_per_kg,
+            get_sku_packing_costs,
+            calculate_finished_sku_cost,
+        )
+
+        batches_data = db.get_records("ProductionBatches", fresh=True)
+        recipes_data = db.get_records("Recipes", fresh=True)
+        stock_ledger_data = db.get_records("ProductionStockLedger", fresh=True)
+        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+
+        bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(
+            bulk_key_or_product_id=bulk_key,
+            production_batches=batches_data,
+            recipes=recipes_data,
+            production_stock_ledger=stock_ledger_data,
+            raw_materials_master=rm_master,
+        )
+
+        bulk_cost = to_decimal(req.bulk_kg_used) * bulk_cost_per_kg
+        mat_cost = Decimal("0.00")
+        lab_cost = Decimal("0.00")
+
+        for sm in sku_movements:
+            sm_pid = str(sm.get("product_id"))
+            sm_prod = next((p for p in all_products if str(field(p, "product_id")) == sm_pid), None)
+            sm_qty = to_decimal(sm.get("quantity_packets", 0) or 0)
+            sm_weight = sm.get("pack_weight_g", 500)
+            p_mat, p_lab = get_sku_packing_costs(sm_prod, rm_master)
+            mat_cost += p_mat * sm_qty
+            lab_cost += p_lab * sm_qty
+
+            # Update SKU finished goods standard cost in Products for accurate downstream sales COGS
+            sku_calc = calculate_finished_sku_cost(
+                pack_weight_grams=sm_weight,
+                production_cost_per_saleable_kg=float(bulk_cost_per_kg),
+                packaging_material_cost_per_packet=float(p_mat),
+                packing_labour_per_packet=float(p_lab),
+            )
+            unit_packet_cost = sku_calc.get("finished_packet_cost")
+            if unit_packet_cost is not None and sm_prod:
+                db.update_record("Products", "product_id", sm_pid, {
+                    "standard_cost": float(unit_packet_cost),
+                    "unit_cost": float(unit_packet_cost),
+                })
+
         pack_dict = {
             "packaging_id": pack_id,
             "product_name_snapshot": field(product, "product_name"),
@@ -3483,25 +3583,32 @@ async def get_sku_costing(product_id: str, user: dict = Depends(get_current_user
 
     pack_weight = int(float(field(product, "pack_weight_g", default=0) or 0))
 
-    # Standard production cost estimation or benchmark
-    # Use 128.03/kg from Moong Master or calculate from approved recipe
+    # Authoritative production cost estimation
     prod_name = str(field(product, "product_name")).strip().lower()
-    recipe = next((r for r in db.get_records("Recipes") if str(field(r, "product_name_snapshot")).strip().lower() == prod_name and truthy(field(r, "approved"))), None)
+    batches_data = db.get_records("ProductionBatches", fresh=True)
+    recipes_data = db.get_records("Recipes", fresh=True)
+    stock_ledger_data = db.get_records("ProductionStockLedger", fresh=True)
+    rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
 
-    cost_per_kg = 128.03
-    if recipe:
-        items = json.loads(str(field(recipe, "items_json", default="[]")))
-        yield_kg = float(field(recipe, "expected_yield_kg", default=1.2) or 1.2)
-        cost_calc = calculate_recipe_cost(items, yield_kg)
-        if cost_calc.get("cost_per_kg"):
-            cost_per_kg = float(cost_calc["cost_per_kg"])
+    try:
+        from app.calculations.costing import get_authoritative_bulk_cost_per_kg, get_sku_packing_costs
+        bulk_cost_per_kg = float(get_authoritative_bulk_cost_per_kg(
+            bulk_key_or_product_id=prod_name,
+            production_batches=batches_data,
+            recipes=recipes_data,
+            production_stock_ledger=stock_ledger_data,
+            raw_materials_master=rm_master,
+        ))
+    except Exception:
+        bulk_cost_per_kg = None
 
-    # Packaging material cost estimates: ~₹1.50 per pouch
+    p_mat, p_lab = get_sku_packing_costs(product, rm_master)
+
     sku_cost = calculate_finished_sku_cost(
         pack_weight_grams=pack_weight,
-        production_cost_per_saleable_kg=cost_per_kg,
-        packaging_material_cost_per_packet=1.50,
-        packing_labour_per_packet=0.50,
+        production_cost_per_saleable_kg=bulk_cost_per_kg,
+        packaging_material_cost_per_packet=float(p_mat),
+        packing_labour_per_packet=float(p_lab),
     )
 
     return {

@@ -94,6 +94,8 @@ export const AccountingView: React.FC = () => {
   const [voucherTypeFilter, setVoucherTypeFilter] = useState('');
   const [reconciling, setReconciling] = useState(false);
   const [reconcileSuccess, setReconcileSuccess] = useState<string | null>(null);
+  const [confirmLiveExecution, setConfirmLiveExecution] = useState(false);
+  const [reconciliationFilter, setReconciliationFilter] = useState('ALL');
 
   // Reversal modal state
   const [reversalTarget, setReversalTarget] = useState<JournalVoucherItem | null>(null);
@@ -1049,53 +1051,100 @@ export const AccountingView: React.FC = () => {
                 Audits raw materials, production batches, packaging, sales invoices, and collections against double-entry journal vouchers.
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
               <button
                 onClick={() => {
                   setReconciling(true);
+                  setError(null);
+                  setReconcileSuccess(null);
                   fetchReconciliationReport()
-                    .then(setReconcileReport)
+                    .then((res) => {
+                      setReconcileReport(res);
+                      setReconcileSuccess(`Dry-run audit completed: ${res.missing_count} unposted events discovered across operational ledgers.`);
+                    })
                     .catch((err) => setError(err.message))
                     .finally(() => setReconciling(false));
                 }}
                 disabled={reconciling || loading}
-                className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
+                className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50 flex items-center gap-1.5"
               >
+                <Search size={14} />
                 {reconciling ? 'Auditing…' : 'Run Dry-Run Audit'}
-              </button>
-              <button
-                onClick={async () => {
-                  try {
-                    setReconciling(true);
-                    setError(null);
-                    setReconcileSuccess(null);
-                    const res = await executeReconciliation(false);
-                    setReconcileReport(res);
-                    setReconcileSuccess(`Reconciled ${res.reconciled_count} operational events successfully.`);
-                  } catch (err: unknown) {
-                    setError(err instanceof Error ? err.message : 'Reconciliation failed.');
-                  } finally {
-                    setReconciling(false);
-                  }
-                }}
-                disabled={reconciling || loading}
-                className="px-4 py-2 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-xl transition-colors disabled:opacity-50 flex items-center gap-1.5 shadow-sm"
-              >
-                <CheckCircle2 size={14} />
-                {reconciling ? 'Backfilling…' : 'Execute Backfill'}
               </button>
             </div>
           </div>
 
           {reconcileSuccess && (
-            <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs rounded-xl flex items-center gap-2">
-              <CheckCircle2 size={16} className="text-emerald-700" />
+            <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs rounded-xl flex items-center gap-2">
+              <CheckCircle2 size={16} className="text-emerald-700 shrink-0" />
               <span>{reconcileSuccess}</span>
             </div>
           )}
 
+          {/* Authorization & Live Reconciliation Confirmation Card */}
+          {reconcileReport && reconcileReport.missing_count > 0 && (
+            <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <ShieldAlert className="text-amber-800 shrink-0 mt-0.5" size={20} />
+                <div>
+                  <h3 className="text-xs font-bold text-amber-950 uppercase tracking-wider">
+                    Authorized Live Reconciliation Posting
+                  </h3>
+                  <p className="text-xs text-amber-900 mt-1">
+                    Live reconciliation creates immutable double-entry journal vouchers in the General Ledger for all unposted events shown below.
+                    {!isOwnerOrAdmin && (
+                      <span className="block mt-1 font-semibold text-rose-700">
+                        Notice: You are logged in with role '{currentUser?.role || 'USER'}'. Live posting requires Owner authorization.
+                      </span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-amber-200/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <label className="flex items-start gap-2.5 cursor-pointer text-xs text-slate-800 select-none">
+                  <input
+                    type="checkbox"
+                    checked={confirmLiveExecution}
+                    onChange={(e) => setConfirmLiveExecution(e.target.checked)}
+                    disabled={!isOwnerOrAdmin || reconciling}
+                    className="mt-0.5 rounded border-amber-400 text-emerald-800 focus:ring-emerald-700 h-4 w-4"
+                  />
+                  <span>
+                    <strong>Explicit Confirmation:</strong> I authorize live double-entry journal vouchers to be posted for these {reconcileReport.missing_count} operational events.
+                  </span>
+                </label>
+
+                <button
+                  onClick={async () => {
+                    if (!confirmLiveExecution || !isOwnerOrAdmin) return;
+                    try {
+                      setReconciling(true);
+                      setError(null);
+                      setReconcileSuccess(null);
+                      const res = await executeReconciliation(false, true);
+                      setReconcileReport(res);
+                      setConfirmLiveExecution(false);
+                      setReconcileSuccess(`Live reconciliation complete: ${res.reconciled_count} journal vouchers posted successfully.`);
+                      loadData();
+                    } catch (err: unknown) {
+                      setError(err instanceof Error ? err.message : 'Reconciliation posting failed.');
+                    } finally {
+                      setReconciling(false);
+                    }
+                  }}
+                  disabled={!confirmLiveExecution || !isOwnerOrAdmin || reconciling || loading}
+                  className="px-5 py-2.5 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 disabled:bg-slate-300 disabled:text-slate-500 rounded-xl transition-all shadow-sm flex items-center gap-2 shrink-0"
+                >
+                  <CheckCircle2 size={16} />
+                  {reconciling ? 'Posting Vouchers…' : `Execute Live Backfill (${reconcileReport.missing_count})`}
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Metrics Overview */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
             <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
               <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
                 Unposted Operational Events
@@ -1104,55 +1153,87 @@ export const AccountingView: React.FC = () => {
                 {reconcileReport?.missing_count ?? 0}
               </span>
               <span className="text-[11px] text-slate-500 mt-0.5 block">
-                Transactions without journal vouchers
+                Transactions awaiting ledger vouchers
               </span>
             </div>
             <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
               <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Reconciled Vouchers
+                Failed Vouchers
+              </span>
+              <span className="text-2xl font-black text-rose-700 mt-1 block">
+                {reconcileReport?.failed_count ?? 0}
+              </span>
+              <span className="text-[11px] text-slate-500 mt-0.5 block">
+                Prior attempts that failed write
+              </span>
+            </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                Duplicate Reference Flags
+              </span>
+              <span className="text-2xl font-black text-amber-700 mt-1 block">
+                {reconcileReport?.duplicate_reference_count ?? 0}
+              </span>
+              <span className="text-[11px] text-slate-500 mt-0.5 block">
+                Replayed or duplicate reference IDs
+              </span>
+            </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                Reconciled This Session
               </span>
               <span className="text-2xl font-black text-emerald-800 mt-1 block">
                 {reconcileReport?.reconciled_count ?? 0}
               </span>
               <span className="text-[11px] text-slate-500 mt-0.5 block">
-                Successfully posted this session
-              </span>
-            </div>
-            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Audit Discrepancies
-              </span>
-              <span className="text-2xl font-black text-rose-700 mt-1 block">
-                {reconcileReport?.error_count ?? 0}
-              </span>
-              <span className="text-[11px] text-slate-500 mt-0.5 block">
-                Processing exceptions / errors
+                Successfully posted / confirmed
               </span>
             </div>
           </div>
 
-          {/* Unposted Events List */}
+          {/* Unposted Events List with Source Table Filter */}
           {reconcileReport?.missing_events && reconcileReport.missing_events.length > 0 && (
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+              <div className="p-4 border-b border-slate-200 bg-slate-50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
                   Unposted Events Queue ({reconcileReport.missing_events.length})
                 </h3>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {['ALL', 'RawMaterialLedger', 'ProductionBatches', 'PackagingBatches', 'Sales', 'Payments', 'Expenses', 'DailyClosing'].map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() => setReconciliationFilter(cat)}
+                      className={`px-2.5 py-1 text-2xs font-bold rounded-lg transition-colors ${
+                        reconciliationFilter === cat
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {cat === 'ALL' ? 'All' : cat}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="divide-y divide-slate-100">
-                {reconcileReport.missing_events.map((evt, idx) => (
-                  <div key={idx} className="p-3.5 flex items-center justify-between text-xs hover:bg-slate-50">
-                    <div>
-                      <div className="font-semibold text-slate-900">{evt.description}</div>
-                      <div className="text-[11px] text-slate-500 font-mono mt-0.5">
-                        Table: {evt.source_table} | Ref: {evt.reference_type}:{evt.reference_id} | Date: {evt.date}
+              <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                {reconcileReport.missing_events
+                  .filter((evt) => reconciliationFilter === 'ALL' || evt.source_table === reconciliationFilter)
+                  .map((evt, idx) => (
+                    <div key={idx} className="p-3.5 flex items-center justify-between text-xs hover:bg-slate-50">
+                      <div>
+                        <div className="font-semibold text-slate-900">{evt.description}</div>
+                        <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                          Table: <span className="font-bold text-slate-700">{evt.source_table}</span> | Ref: <span className="text-slate-700">{evt.reference_type}:{evt.reference_id}</span> | Date: {evt.date}
+                        </div>
                       </div>
+                      <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold ${
+                        evt.issue_type === 'FAILED' ? 'bg-rose-100 text-rose-800' :
+                        evt.issue_type === 'INCOMPLETE' ? 'bg-amber-100 text-amber-800' :
+                        'bg-slate-100 text-slate-700'
+                      }`}>
+                        {evt.issue_type || 'PENDING'}
+                      </span>
                     </div>
-                    <span className="px-2 py-0.5 bg-amber-100 text-amber-900 rounded text-[10px] font-bold">
-                      Pending Voucher
-                    </span>
-                  </div>
-                ))}
+                  ))}
               </div>
             </div>
           )}

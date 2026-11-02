@@ -134,6 +134,46 @@ def _sale_is_complete(sale_id: str, line_count: int, payment_method: str) -> boo
     return True
 
 
+def _compute_authoritative_cogs(validated: list):
+    from decimal import Decimal
+    from app.calculations.costing import get_sku_finished_cost
+    from app.calculations.units import to_decimal, round_money
+
+    products = {}
+    for p in db.get_records("Products", fresh=True):
+        if p.get("product_id"):
+            products[str(p.get("product_id")).strip()] = p
+        if p.get("sku"):
+            products[str(p.get("sku")).strip()] = p
+
+    batches = db.get_records("ProductionBatches", fresh=True)
+    recipes = db.get_records("Recipes", fresh=True)
+    stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
+    rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+
+    cogs_total = Decimal("0")
+    for item in validated:
+        key = str(item.get("product_id") or item.get("sku") or "").strip()
+        prod = products.get(key, {})
+        qty = to_decimal(item.get("quantity", 0) or 0)
+        try:
+            sku_cost = get_sku_finished_cost(
+                prod,
+                production_batches=batches,
+                recipes=recipes,
+                production_stock_ledger=stock_ledger,
+                raw_materials_master=rm_master,
+            )
+            cogs_total += qty * sku_cost
+        except Exception:
+            std_cost = prod.get("standard_cost") or prod.get("unit_cost")
+            if std_cost:
+                cogs_total += qty * to_decimal(std_cost)
+            else:
+                cogs_total += Decimal("0")
+    return round_money(cogs_total)
+
+
 @router.get("", response_model=List[Sale])
 async def list_sales(current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id", ""))
@@ -368,8 +408,7 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
         # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
         try:
             from app.accounting.postings import post_sale_journal
-            from app.calculations.units import to_decimal
-            cogs = sum(to_decimal(item.get("qualifying_kg", 0) or 0) * to_decimal("170.00") for item in validated)
+            cogs = _compute_authoritative_cogs(validated)
             post_sale_journal(sale_record, cogs, user_id)
         except Exception as acct_err:
             try:
@@ -410,8 +449,7 @@ async def _resume_sale(existing: dict, validated: list, method: str, reference: 
     # Double-Entry Accounting Journal Posting on Resumed Sale
     try:
         from app.accounting.postings import post_sale_journal
-        from app.calculations.units import to_decimal
-        cogs = sum(to_decimal(item.get("qualifying_kg", 0) or 0) * to_decimal("170.00") for item in validated)
+        cogs = _compute_authoritative_cogs(validated)
         post_sale_journal(existing, cogs, user_id)
     except Exception:
         pass
@@ -936,7 +974,8 @@ async def confirm_sales_order(sale_id: str, current_user: dict = Depends(get_cur
         # 3. Post double-entry accounting journal
         try:
             from app.accounting.postings import post_sale_journal
-            post_sale_journal(sale, actor=user_id)
+            cogs = _compute_authoritative_cogs(items)
+            post_sale_journal(sale, estimated_cogs=cogs, actor=user_id)
         except Exception as acct_err:
             logger.error("Non-fatal accounting posting error for confirmed order %s: %s", sale_id, acct_err)
 
