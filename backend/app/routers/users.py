@@ -69,8 +69,7 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
         # Owner executes directly
         if not req.password or len(req.password) < 8:
             raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
-        user_data = req.model_dump() if hasattr(req, "model_dump") else req.dict()
-        created = execute_create_user(user_data, actor_id)
+        created = execute_create_user(req.dict(), actor_id)
         return UserProfile(**created)
     else:
         # PA submits approval request WITHOUT PASSWORD
@@ -114,16 +113,10 @@ async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depend
     actor_id = str(current_user.get("user_id") or "")
     actor_name = str(current_user.get("full_name") or actor_id)
 
-    if hasattr(req, "model_dump"):
-        try:
-            update_data = req.model_dump(exclude_unset=True)
-        except TypeError:
-            update_data = {k: v for k, v in req.model_dump().items() if v is not None}
-    else:
-        try:
-            update_data = req.dict(exclude_unset=True)
-        except TypeError:
-            update_data = {k: v for k, v in req.dict().items() if v is not None}
+    try:
+        update_data = req.dict(exclude_unset=True)
+    except TypeError:
+        update_data = {k: v for k, v in req.dict().items() if v is not None}
 
     if is_owner(current_user):
         # Owner executes directly

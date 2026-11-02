@@ -8,7 +8,7 @@ Version 2.0 Papad Formula Master into the configured Google Sheets database.
 import os
 import sys
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, Any, List
 
 # Ensure backend directory is in path
@@ -83,7 +83,7 @@ def run_update():
 
     # STEP 3 & 4: UPDATE RECIPE MASTER & PRESERVE APPROVAL STATUS
     print("\n--- STEP 3 & 4: PREPARE AND WRITE VERSION 2.0 RECIPE MASTER ---")
-    now_ts = datetime.now(timezone.utc).isoformat()
+    now_ts = datetime.utcnow().isoformat()
     updated_recipes_count = 0
     added_recipes_count = 0
     proposed_recipes_count = 0

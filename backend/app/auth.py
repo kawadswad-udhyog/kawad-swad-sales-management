@@ -2,15 +2,12 @@ import os
 import base64
 import hashlib
 import hmac
-import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, Set, Tuple
+from typing import Optional, Dict, Any
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-logger = logging.getLogger("kawad_swad.auth")
 
 from app.config import jwt_secret, SALES_TOKEN_HOURS
 from app.permissions import (
@@ -144,10 +141,8 @@ def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation", 
         return False
 
 
-def is_token_revoked(token: str, payload: Optional[Dict[str, Any]] = None) -> bool:
+def is_token_revoked(token: str, payload: Dict[str, Any]) -> bool:
     """Check if token was revoked explicitly or via user-wide revocation."""
-    if payload is None:
-        payload = decode_access_token(token) or {}
     jti = payload.get("jti")
     token_id = _token_identifier(token, payload)
     if token_id in _REVOKED_TOKENS or (jti and jti in _REVOKED_TOKENS) or token in _REVOKED_TOKENS:

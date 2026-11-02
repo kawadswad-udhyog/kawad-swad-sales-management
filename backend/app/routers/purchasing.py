@@ -71,7 +71,7 @@ class PurchaseOrderCreate(BaseModel):
     supplier_id: str
     supplier_name: Optional[str] = None
     expected_delivery_date: Optional[str] = ""
-    items: List[PurchaseOrderItemInput] = Field(..., min_length=1)
+    items: List[PurchaseOrderItemInput] = Field(..., min_items=1)
     notes: Optional[str] = ""
 
 
@@ -96,7 +96,7 @@ class GoodsReceiptCreate(BaseModel):
     invoice_reference: str = Field(..., min_length=2)
     delivery_challan: Optional[str] = ""
     quality_status: str = "ACCEPTED"
-    items: List[GoodsReceiptItemInput] = Field(..., min_length=1)
+    items: List[GoodsReceiptItemInput] = Field(..., min_items=1)
     notes: Optional[str] = ""
 
 
@@ -140,7 +140,7 @@ class SupplierReturnCreate(BaseModel):
     supplier_id: str
     supplier_name: Optional[str] = None
     return_date: Optional[str] = ""
-    items: List[SupplierReturnItemInput] = Field(..., min_length=1)
+    items: List[SupplierReturnItemInput] = Field(..., min_items=1)
     notes: Optional[str] = ""
 
 
@@ -315,7 +315,6 @@ async def cancel_purchase_order(po_id: str, reason: str = Query(...), user: dict
 # ============================================================================
 
 @router.get("/receipts")
-@router.get("/goods-receipts")
 async def list_goods_receipts(user: dict = Depends(get_current_user)):
     require_purchasing_access(user)
     receipts = db.get_records("GoodsReceipts", fresh=True)
@@ -336,7 +335,6 @@ async def list_goods_receipts(user: dict = Depends(get_current_user)):
 
 
 @router.post("/receipts")
-@router.post("/goods-receipts")
 async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get_current_user)):
     """
     Records an authorized Goods Receipt Note (GRN):

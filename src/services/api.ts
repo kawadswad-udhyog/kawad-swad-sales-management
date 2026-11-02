@@ -24,15 +24,10 @@ import type {
   AccountingPeriod,
 } from '../types';
 
-const rawDefaultUrl =
+export const DEFAULT_API_BASE_URL =
   (typeof window !== 'undefined' && (window as unknown as { KAWAD_API_URL?: string }).KAWAD_API_URL) ||
   (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: { VITE_API_URL?: string } })?.env?.VITE_API_URL) ||
   '';
-
-export const DEFAULT_API_BASE_URL =
-  rawDefaultUrl.includes('example.com') || rawDefaultUrl.includes('your-backend')
-    ? ''
-    : rawDefaultUrl;
 
 const STORAGE_API_KEY = 'ks_backend_api_url';
 const STORAGE_TOKEN_KEY = 'ks_token';
@@ -99,26 +94,14 @@ export function getApiBaseUrl(): string {
 
     const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
     if (saved) {
-      if (
-        saved.includes('kawad-swad-sales-backend.onrender.com') ||
-        saved.includes('your-backend') ||
-        saved.includes('example.com')
-      ) {
+      if (saved.includes('kawad-swad-sales-backend.onrender.com')) {
         localStorage.removeItem(STORAGE_API_KEY);
       } else {
         return saved;
       }
     }
 
-    if (DEFAULT_API_BASE_URL) {
-      if (
-        DEFAULT_API_BASE_URL.includes('your-backend') ||
-        DEFAULT_API_BASE_URL.includes('example.com')
-      ) {
-        return '';
-      }
-      return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
-    }
+    if (DEFAULT_API_BASE_URL) return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
     return '';
   }
 
@@ -128,11 +111,7 @@ export function getApiBaseUrl(): string {
 export function setApiBaseUrl(url: string): void {
   if (typeof window !== 'undefined') {
     const clean = url.trim().replace(/\/+$/, '');
-    if (
-      clean &&
-      !clean.includes('example.com') &&
-      !clean.includes('your-backend')
-    ) {
+    if (clean) {
       localStorage.setItem(STORAGE_API_KEY, clean);
     } else {
       localStorage.removeItem(STORAGE_API_KEY);
@@ -140,49 +119,19 @@ export function setApiBaseUrl(url: string): void {
   }
 }
 
-let _inMemoryAuthToken: string = '';
-
 export function getAuthToken(): string {
-  if (_inMemoryAuthToken) {
-    return _inMemoryAuthToken;
-  }
   if (typeof window !== 'undefined') {
-    // 1. Check sessionStorage (preferred: tab-scoped, cleared on tab close)
-    const sessionToken = sessionStorage.getItem(STORAGE_TOKEN_KEY);
-    if (sessionToken) {
-      _inMemoryAuthToken = sessionToken;
-      return sessionToken;
-    }
-    // 2. Migration fallback: migrate existing token from persistent localStorage to sessionStorage
-    const localToken = localStorage.getItem(STORAGE_TOKEN_KEY);
-    if (localToken) {
-      _inMemoryAuthToken = localToken;
-      try {
-        sessionStorage.setItem(STORAGE_TOKEN_KEY, localToken);
-        localStorage.removeItem(STORAGE_TOKEN_KEY);
-      } catch {
-        // ignore storage quota/security restrictions
-      }
-      return localToken;
-    }
+    return localStorage.getItem(STORAGE_TOKEN_KEY) || '';
   }
   return '';
 }
 
 export function setAuthToken(token: string): void {
-  _inMemoryAuthToken = token || '';
   if (typeof window !== 'undefined') {
-    try {
-      if (token) {
-        sessionStorage.setItem(STORAGE_TOKEN_KEY, token);
-        // Eliminate persistent token from localStorage to minimize XSS extraction window
-        localStorage.removeItem(STORAGE_TOKEN_KEY);
-      } else {
-        sessionStorage.removeItem(STORAGE_TOKEN_KEY);
-        localStorage.removeItem(STORAGE_TOKEN_KEY);
-      }
-    } catch {
-      // ignore
+    if (token) {
+      localStorage.setItem(STORAGE_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(STORAGE_TOKEN_KEY);
     }
   }
 }

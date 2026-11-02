@@ -772,7 +772,6 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
 
 
 @router.post("/milling/record", response_model=DalMillingResponse)
-@router.post("/dal-milling", response_model=DalMillingResponse)
 async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(get_current_user)):
     actor, _ = require_production_access(user)
     require_persistent_store()

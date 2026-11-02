@@ -518,21 +518,6 @@ async def list_incomplete_sales(current_user: dict = Depends(get_current_user)):
     return incomplete
 
 
-@router.get("/{sale_id}", response_model=Sale)
-async def get_sale_by_id(sale_id: str, current_user: dict = Depends(get_current_user)):
-    user_id = str(current_user.get("user_id", ""))
-    sales_records = db.get_records("Sales", fresh=True)
-    match = next((s for s in sales_records if str(s.get("sale_id")) == sale_id or str(s.get("bill_number")) == sale_id), None)
-    if not match:
-        raise HTTPException(status_code=404, detail="Sale not found.")
-    salesman_id = str(match.get("salesman_user_id", ""))
-    if not is_manager(current_user) and salesman_id != user_id and str(match.get("entered_by_user_id", "")) != user_id:
-        raise HTTPException(status_code=403, detail="Permission denied to view this sale.")
-    items_records = db.get_records("SaleItems", fresh=True)
-    matched_items = [_to_item(row) for row in items_records if str(row.get("sale_id", "")) == str(match.get("sale_id"))]
-    return _to_sale(match, matched_items)
-
-
 @router.post("/{sale_id}/cancel", dependencies=[Depends(require_sheets_connection)])
 async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id", ""))

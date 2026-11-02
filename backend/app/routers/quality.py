@@ -93,7 +93,7 @@ class CustomerReturnCreate(BaseModel):
     return_date: Optional[str] = ""
     disposition: str = Field("SCRAP", description="SCRAP, RESTOCK, PENDING_INSPECTION")
     is_cash_refund: bool = False
-    items: List[CustomerReturnItemInput] = Field(..., min_length=1)
+    items: List[CustomerReturnItemInput] = Field(..., min_items=1)
     notes: Optional[str] = ""
 
 
@@ -276,16 +276,6 @@ async def list_lot_movements(lot_id: str, user: dict = Depends(get_current_user)
     return movements
 
 
-@router.get("/lot-movements")
-async def list_all_lot_movements(lot_id: Optional[str] = None, user: dict = Depends(get_current_user)):
-    require_quality_access(user)
-    movements = db.get_records("LotMovements", fresh=True)
-    if lot_id:
-        movements = [m for m in movements if str(m.get("lot_id")) == lot_id]
-    movements.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
-    return movements
-
-
 # ============================================================================
 # Customer Returns Endpoints
 # ============================================================================
@@ -419,14 +409,7 @@ async def create_customer_return(req: CustomerReturnCreate, user: dict = Depends
 # Complaints and Recalls Endpoints
 # ============================================================================
 
-class CloseComplaintRequest(BaseModel):
-    corrective_action: Optional[str] = None
-    investigation: Optional[str] = None
-    notes: Optional[str] = None
-
-
 @router.get("/complaints")
-@router.get("/complaints-recalls")
 async def list_complaints_recalls(user: dict = Depends(get_current_user)):
     require_quality_access(user)
     records = db.get_records("ComplaintsRecalls", fresh=True)
@@ -435,7 +418,6 @@ async def list_complaints_recalls(user: dict = Depends(get_current_user)):
 
 
 @router.post("/complaints")
-@router.post("/complaints-recalls")
 async def create_complaint_or_recall(req: ComplaintRecallCreate, user: dict = Depends(get_current_user)):
     actor, _ = require_quality_access(user)
     cmp_id = db.generate_id("ComplaintsRecalls")
@@ -478,13 +460,9 @@ async def create_complaint_or_recall(req: ComplaintRecallCreate, user: dict = De
 
 
 @router.post("/complaints/{complaint_id}/close")
-@router.put("/complaints/{complaint_id}/close")
-@router.post("/complaints-recalls/{complaint_id}/close")
-@router.put("/complaints-recalls/{complaint_id}/close")
 async def close_complaint(
     complaint_id: str,
-    corrective_action: Optional[str] = Query(None),
-    body: Optional[CloseComplaintRequest] = None,
+    corrective_action: str = Query(..., min_length=5),
     user: dict = Depends(get_current_user),
 ):
     actor, _ = require_owner_access(user)
@@ -493,24 +471,13 @@ async def close_complaint(
     if not rec:
         raise HTTPException(404, f"Complaint {complaint_id} not found.")
 
-    action_text = (
-        (body.corrective_action if body and body.corrective_action else None)
-        or corrective_action
-        or "Corrective action verified and complaint closed."
-    ).strip()
-
     updates = {
         "status": "CLOSED",
         "closure_date": business_today(),
-        "corrective_action": action_text,
+        "corrective_action": corrective_action.strip(),
     }
-    if body and body.investigation:
-        updates["investigation"] = body.investigation.strip()
-    if body and body.notes:
-        updates["notes"] = body.notes.strip()
-
     db.update_record("ComplaintsRecalls", "complaint_id", complaint_id, updates, raise_on_error=True)
-    db.log_audit(actor, "CLOSE_COMPLAINT", "ComplaintsRecalls", complaint_id, reason=action_text)
+    db.log_audit(actor, "CLOSE_COMPLAINT", "ComplaintsRecalls", complaint_id, reason=corrective_action)
     return {"ok": True, "complaint_id": complaint_id, "status": "CLOSED"}
 
 

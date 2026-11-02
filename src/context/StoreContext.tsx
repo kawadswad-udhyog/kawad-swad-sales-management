@@ -239,18 +239,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const sessionUser = sessionStorage.getItem('ks_user');
-        if (sessionUser) return JSON.parse(sessionUser);
         const saved = localStorage.getItem('ks_user');
-        if (saved) {
-          try {
-            sessionStorage.setItem('ks_user', saved);
-            localStorage.removeItem('ks_user');
-          } catch {
-            // ignore
-          }
-          return JSON.parse(saved);
-        }
+        if (saved) return JSON.parse(saved);
       } catch {
         // ignore
       }
@@ -259,9 +249,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   });
   const [isLoading, setIsLoading] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      const hasUser = !!sessionStorage.getItem('ks_user') || !!localStorage.getItem('ks_user');
-      const hasToken = !!getAuthToken();
-      return !hasUser && hasToken;
+      return !localStorage.getItem('ks_user') && !!localStorage.getItem('ks_token');
     }
     return false;
   });
@@ -391,8 +379,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     setAuthToken('');
     if (typeof window !== 'undefined') {
-      sessionStorage.removeItem('ks_user');
-      sessionStorage.removeItem('ks_token');
       localStorage.removeItem('ks_user');
       localStorage.removeItem('ks_token');
     }
@@ -541,12 +527,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     setCurrentUser(newUser);
     if (typeof window !== 'undefined') {
-      try {
-        sessionStorage.setItem('ks_user', JSON.stringify(newUser));
-        localStorage.removeItem('ks_user');
-      } catch {
-        // ignore
-      }
+      localStorage.setItem('ks_user', JSON.stringify(newUser));
     }
     setIsBackendConnected(true);
     setSyncError('Signed in. Loading your latest workspace data…');
