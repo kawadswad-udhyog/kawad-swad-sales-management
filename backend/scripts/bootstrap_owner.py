@@ -6,7 +6,7 @@ Usage:
 """
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add backend directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -30,7 +30,7 @@ def bootstrap_owner():
 
     user_id = db.generate_id("Users")
     auth_id = db.generate_id("AuthUsers")
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     # 1. Append Users record
     user_record = {

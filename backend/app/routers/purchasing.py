@@ -71,7 +71,7 @@ class PurchaseOrderCreate(BaseModel):
     supplier_id: str
     supplier_name: Optional[str] = None
     expected_delivery_date: Optional[str] = ""
-    items: List[PurchaseOrderItemInput] = Field(..., min_items=1)
+    items: List[PurchaseOrderItemInput] = Field(..., min_length=1)
     notes: Optional[str] = ""
 
 
@@ -96,7 +96,7 @@ class GoodsReceiptCreate(BaseModel):
     invoice_reference: str = Field(..., min_length=2)
     delivery_challan: Optional[str] = ""
     quality_status: str = "ACCEPTED"
-    items: List[GoodsReceiptItemInput] = Field(..., min_items=1)
+    items: List[GoodsReceiptItemInput] = Field(..., min_length=1)
     notes: Optional[str] = ""
 
 
@@ -140,7 +140,7 @@ class SupplierReturnCreate(BaseModel):
     supplier_id: str
     supplier_name: Optional[str] = None
     return_date: Optional[str] = ""
-    items: List[SupplierReturnItemInput] = Field(..., min_items=1)
+    items: List[SupplierReturnItemInput] = Field(..., min_length=1)
     notes: Optional[str] = ""
 
 

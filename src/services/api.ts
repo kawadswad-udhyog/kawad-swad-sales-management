@@ -140,19 +140,49 @@ export function setApiBaseUrl(url: string): void {
   }
 }
 
+let _inMemoryAuthToken: string = '';
+
 export function getAuthToken(): string {
+  if (_inMemoryAuthToken) {
+    return _inMemoryAuthToken;
+  }
   if (typeof window !== 'undefined') {
-    return localStorage.getItem(STORAGE_TOKEN_KEY) || '';
+    // 1. Check sessionStorage (preferred: tab-scoped, cleared on tab close)
+    const sessionToken = sessionStorage.getItem(STORAGE_TOKEN_KEY);
+    if (sessionToken) {
+      _inMemoryAuthToken = sessionToken;
+      return sessionToken;
+    }
+    // 2. Migration fallback: migrate existing token from persistent localStorage to sessionStorage
+    const localToken = localStorage.getItem(STORAGE_TOKEN_KEY);
+    if (localToken) {
+      _inMemoryAuthToken = localToken;
+      try {
+        sessionStorage.setItem(STORAGE_TOKEN_KEY, localToken);
+        localStorage.removeItem(STORAGE_TOKEN_KEY);
+      } catch {
+        // ignore storage quota/security restrictions
+      }
+      return localToken;
+    }
   }
   return '';
 }
 
 export function setAuthToken(token: string): void {
+  _inMemoryAuthToken = token || '';
   if (typeof window !== 'undefined') {
-    if (token) {
-      localStorage.setItem(STORAGE_TOKEN_KEY, token);
-    } else {
-      localStorage.removeItem(STORAGE_TOKEN_KEY);
+    try {
+      if (token) {
+        sessionStorage.setItem(STORAGE_TOKEN_KEY, token);
+        // Eliminate persistent token from localStorage to minimize XSS extraction window
+        localStorage.removeItem(STORAGE_TOKEN_KEY);
+      } else {
+        sessionStorage.removeItem(STORAGE_TOKEN_KEY);
+        localStorage.removeItem(STORAGE_TOKEN_KEY);
+      }
+    } catch {
+      // ignore
     }
   }
 }

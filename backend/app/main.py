@@ -119,6 +119,34 @@ def _check_configuration():
             raise exc
         logger.error("Configuration warning on startup: %s", exc)
 
+from app.permissions import require_manager, require_owner
+
+@app.get("/health/live", tags=["System"])
+def health_liveness():
+    """Lightweight Kubernetes / Render liveness probe."""
+    return {"status": "live", "service": "kawad-swad-sales-dev"}
+
+
+@app.get("/health/ready", tags=["System"])
+def health_readiness():
+    """Readiness probe: validates application readiness and persistent storage capability."""
+    is_ready = db.is_connected or db.allow_in_memory_fallback
+    if not is_ready:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "service": "kawad-swad-sales-dev",
+                "detail": db.last_connection_error or "Storage disconnected - writes paused",
+            },
+        )
+    return {
+        "status": "ready",
+        "service": "kawad-swad-sales-dev",
+        "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
+    }
+
+
 @app.get("/health", tags=["System"])
 @app.get("/api/health", tags=["System"])
 def health_check():
@@ -129,53 +157,87 @@ def health_check():
         SALES_GOOGLE_SERVICE_ACCOUNT_JSON,
     )
     from app.sheets import REQUIRED_TABS
-    status_str = "ok" if db.is_connected else "storage_disconnected"
+
+    is_persistent_ready = db.is_connected and db.spreadsheet is not None
+    is_app_operational = is_persistent_ready or db.allow_in_memory_fallback
+
+    status_str = "ok" if is_app_operational else "storage_disconnected"
     has_sa_file = bool(SALES_GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE))
     has_sa_json = bool(SALES_GOOGLE_SERVICE_ACCOUNT_JSON and len(SALES_GOOGLE_SERVICE_ACCOUNT_JSON.strip()) > 10)
 
-    # Granular status classification conforming to Phase 4 connectivity standards
+    # Subsystem: Google Auth
     if not SALES_GOOGLE_SPREADSHEET_ID:
-        gs_status = "NOT_CONFIGURED"
-        gs_message = "SALES_GOOGLE_SPREADSHEET_ID is missing from environment"
+        google_auth_state = "NOT_CONFIGURED"
     elif not (has_sa_file or has_sa_json):
-        gs_status = "CREDENTIALS_MISSING"
-        gs_message = "Service account credentials file or JSON not found"
-    elif db.is_connected and db.spreadsheet is not None:
+        google_auth_state = "CREDENTIALS_MISSING"
+    elif db.is_connected:
+        google_auth_state = "AUTHENTICATED"
+    else:
+        google_auth_state = "AUTHENTICATION_FAILED"
+
+    # Subsystem: Google Sheets & Storage
+    if is_persistent_ready:
         gs_status = "CONNECTED"
         gs_message = "Google Sheets connected and accessible"
+        write_capability = "ENABLED"
+        persistent_storage = "ENABLED"
+        backend_status = "CONNECTED"
+        app_readiness = "READY"
+    elif db.allow_in_memory_fallback:
+        gs_status = "IN_MEMORY_FALLBACK"
+        gs_message = "Operating in isolated in-memory test mode"
+        write_capability = "ENABLED"
+        persistent_storage = "TEST_ISOLATED"
+        backend_status = "CONNECTED"
+        app_readiness = "READY"
     else:
-        gs_status = "ERROR"
+        gs_status = "DISCONNECTED"
         gs_message = db.last_connection_error or "Google Sheets connection failed"
+        write_capability = "PAUSED"
+        persistent_storage = "DISABLED"
+        backend_status = "DEGRADED"
+        app_readiness = "DEGRADED"
 
     return {
         "status": status_str,
         "service": "kawad-swad-sales-dev",
         "google_sheets_connected": db.is_connected,
-        "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
+        "persistent_writes_enabled": is_persistent_ready,
         "spreadsheet_id_configured": bool(SALES_GOOGLE_SPREADSHEET_ID),
         "service_account_configured": has_sa_file or has_sa_json,
         "last_connection_error": db.last_connection_error,
         "allow_in_memory_fallback": db.allow_in_memory_fallback,
+        "subsystems": {
+            "http_availability": "ONLINE",
+            "application_readiness": app_readiness,
+            "google_authentication": google_auth_state,
+            "google_sheets_connectivity": "CONNECTED" if db.is_connected else "DISCONNECTED",
+            "persistent_storage": persistent_storage,
+            "write_capability": write_capability,
+        },
         "backend": {
-            "status": "CONNECTED",
+            "status": backend_status,
             "service": "kawad-swad-sales-dev",
             "version": "1.0.0",
+            "readiness": app_readiness,
         },
         "google_sheets": {
             "status": gs_status,
             "connected": db.is_connected,
-            "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
+            "persistent_writes_enabled": is_persistent_ready,
             "message": gs_message,
         },
         "required_sheets": {
-            "status": "AVAILABLE" if db.is_connected else "NOT_VERIFIED",
+            "status": "AVAILABLE" if db.is_connected else ("STANDBY" if db.allow_in_memory_fallback else "NOT_VERIFIED"),
             "total_managed_tabs": len(REQUIRED_TABS),
         },
     }
 
+
 @app.post("/health/reconnect", tags=["System"])
 @app.post("/api/health/reconnect", tags=["System"])
-def health_reconnect():
+def health_reconnect(current_user: dict = Depends(auth.get_current_user)):
+    require_manager(current_user)
     success = db.reconnect()
     return {
         "success": success,
@@ -185,9 +247,11 @@ def health_reconnect():
         "error": db.last_connection_error,
     }
 
+
 @app.get("/health/verify-tabs", tags=["System"])
 @app.get("/api/health/verify-tabs", tags=["System"])
-def health_verify_tabs():
+def health_verify_tabs(current_user: dict = Depends(auth.get_current_user)):
+    require_manager(current_user)
     return db.verify_tabs_accessibility()
 
 @app.get("/health/backup", tags=["System"])

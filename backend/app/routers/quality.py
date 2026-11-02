@@ -93,7 +93,7 @@ class CustomerReturnCreate(BaseModel):
     return_date: Optional[str] = ""
     disposition: str = Field("SCRAP", description="SCRAP, RESTOCK, PENDING_INSPECTION")
     is_cash_refund: bool = False
-    items: List[CustomerReturnItemInput] = Field(..., min_items=1)
+    items: List[CustomerReturnItemInput] = Field(..., min_length=1)
     notes: Optional[str] = ""
 
 
