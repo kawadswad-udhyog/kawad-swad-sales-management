@@ -368,7 +368,7 @@ th {
 }
 
 tr:hover td {
-  background-color: #f8fafc/80;
+  background-color: rgba(248, 250, 252, 0.8);
 }
 
 .table-wrap {

@@ -2,8 +2,11 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
-const rawBackendTarget = process.env.VITE_API_URL || 'https://kawad-swad-sales-dev.onrender.com';
-const backendTarget = rawBackendTarget.trim().replace(/\/$/, '');
+const envTarget = (process.env.VITE_API_URL || '').trim();
+const backendTarget =
+  envTarget && !envTarget.includes('example.com') && !envTarget.includes('your-backend')
+    ? envTarget.replace(/\/$/, '')
+    : 'https://kawad-swad-sales-dev.onrender.com';
 
 function createProxyRule(prefix: string) {
   return {
@@ -38,7 +41,7 @@ function createProxyRule(prefix: string) {
                 last_connection_error: `Backend at ${backendTarget} is currently offline or sleeping. Operating in Standby Mode.`,
                 backend: { status: 'STANDBY', service: 'kawad-swad-sales-dev', version: '1.0.0' },
                 google_sheets: { status: 'STANDBY', connected: false, message: 'Standby Mode active.' },
-                required_sheets: { status: 'STANDBY', total_managed_tabs: 28 },
+                required_sheets: { status: 'STANDBY', total_managed_tabs: 49 },
               })
             );
           } else {
@@ -60,6 +63,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 3000,
+    allowedHosts: true,
     proxy: {
       '/api': createProxyRule('/api'),
       '/health': createProxyRule('/health'),
