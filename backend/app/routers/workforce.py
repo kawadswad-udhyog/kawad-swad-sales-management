@@ -1236,6 +1236,19 @@ async def update_payroll_item(item_id: str, req: PayrollItemUpdate, current_user
         updates["notes"] = req.notes
 
     db.update_record("PayrollItems", "item_id", item_id, updates)
+
+    # Recalculate and sync parent PayrollRuns totals
+    all_items = db.get_records("PayrollItems", fresh=True) or []
+    run_items = [i for i in all_items if str(i.get("payroll_run_id") or "").strip() == run_id]
+    tot_gross = sum(float(i.get("gross_amount") or 0.0) for i in run_items)
+    tot_ded = sum(float(i.get("deductions") or 0.0) for i in run_items)
+    tot_net = sum(float(i.get("net_amount") or 0.0) for i in run_items)
+    db.update_record("PayrollRuns", "payroll_run_id", run_id, {
+        "total_gross": round(tot_gross, 2),
+        "total_deductions": round(tot_ded, 2),
+        "total_net": round(tot_net, 2),
+    })
+
     _log_workforce_audit("UPDATE_PAYROLL_ITEM", "PayrollItems", item_id, actor_id, f"Adjusted payroll item {item_id}")
     return {"ok": True, "message": f"Payroll item {item_id} updated.", "net_amount": net}
 
@@ -1254,8 +1267,18 @@ async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(
     if str(target.get("status") or "").upper() == "APPROVED":
         return {"ok": True, "message": "Payroll run is already approved."}
 
+    # Ensure totals are verified and synced with all items
+    all_items = db.get_records("PayrollItems", fresh=True) or []
+    run_items = [i for i in all_items if str(i.get("payroll_run_id") or "").strip() == payroll_run_id.strip()]
+    tot_gross = sum(float(i.get("gross_amount") or 0.0) for i in run_items)
+    tot_ded = sum(float(i.get("deductions") or 0.0) for i in run_items)
+    tot_net = sum(float(i.get("net_amount") or 0.0) for i in run_items)
+
     updates = {
         "status": "APPROVED",
+        "total_gross": round(tot_gross, 2),
+        "total_deductions": round(tot_ded, 2),
+        "total_net": round(tot_net, 2),
         "approved_by": actor_id,
         "approved_at": _now_iso(),
     }
@@ -1274,6 +1297,7 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
     - Labour Wage (LABOUR_WAGE)
     - Freelancer Milestone (FREELANCER_MILESTONE)
     Generates an Accounting Journal posting, a SalaryReceipts record, and marks the source item as PAID (Owner only).
+    Enforces idempotency: replays of existing payments return existing record without duplicate journal posting.
     """
     require_owner(current_user)
     actor_id = str(current_user.get("user_id") or "")
@@ -1284,11 +1308,36 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
     if pay_amount <= 0:
         raise HTTPException(status_code=422, detail="Payment amount must be greater than zero.")
 
+    clean_ref = str(req.reference_id or "").strip()
+
+    # Idempotency Check: check if payment for this reference_id and payment_type was already processed
+    existing_payments = db.get_records("WorkforcePayments", fresh=True) or []
+    dup_pay = next(
+        (p for p in existing_payments if str(p.get("reference_id") or "").strip() == clean_ref and str(p.get("payment_type") or "").upper() == pay_type),
+        None,
+    )
+    if dup_pay:
+        existing_amount = float(dup_pay.get("amount") or 0.0)
+        if abs(existing_amount - pay_amount) > 0.01:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Conflict: Payment for reference {clean_ref} already recorded with amount ₹{existing_amount:.2f}, conflicting with ₹{pay_amount:.2f}."
+            )
+        receipts = db.get_records("SalaryReceipts", fresh=True) or []
+        existing_receipt = next((r for r in receipts if str(r.get("payment_id") or "").strip() == str(dup_pay.get("payment_id") or "").strip()), {})
+        return {
+            "ok": True,
+            "message": f"Payment for {clean_ref} already recorded (idempotent replay).",
+            "payment": dup_pay,
+            "receipt": existing_receipt,
+            "already_recorded": True,
+        }
+
     # 1. Create Payment record in WorkforcePayments
     pay_id = db.get_next_id("WorkforcePayments")
     payment_record = {
         "payment_id": pay_id,
-        "reference_id": req.reference_id,
+        "reference_id": clean_ref,
         "payment_type": pay_type,
         "recipient_id": req.recipient_id,
         "recipient_name": req.recipient_name,
@@ -1311,9 +1360,9 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
 
     if pay_type == "SALARY":
         payroll_items = db.get_records("PayrollItems", fresh=True) or []
-        target_item = next((i for i in payroll_items if str(i.get("item_id") or "").strip() == req.reference_id.strip()), None)
+        target_item = next((i for i in payroll_items if str(i.get("item_id") or "").strip() == clean_ref), None)
         if target_item:
-            db.update_record("PayrollItems", "item_id", req.reference_id, {"payment_status": "PAID", "payment_id": pay_id})
+            db.update_record("PayrollItems", "item_id", clean_ref, {"payment_status": "PAID", "payment_id": pay_id})
             role_or_category = str(target_item.get("role") or "SALARIED")
             gross = float(target_item.get("gross_amount") or pay_amount)
             deductions = float(target_item.get("deductions") or 0.0)
@@ -1331,12 +1380,24 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
                     role_or_category = str(a_rec.get("role")).upper()
     elif pay_type == "FREELANCER_MILESTONE":
         milestones = db.get_records("FreelancerMilestones", fresh=True) or []
-        target_ms = next((m for m in milestones if str(m.get("milestone_id") or "").strip() == req.reference_id.strip()), None)
+        target_ms = next((m for m in milestones if str(m.get("milestone_id") or "").strip() == clean_ref), None)
         if target_ms:
-            db.update_record("FreelancerMilestones", "milestone_id", req.reference_id, {"status": "PAID", "payment_id": pay_id})
+            db.update_record("FreelancerMilestones", "milestone_id", clean_ref, {"status": "PAID", "payment_id": pay_id})
             role_or_category = "FREELANCER"
     elif pay_type == "LABOUR_WAGE":
         role_or_category = "LABOUR"
+        wage_records = db.get_records("LabourWageRecords", fresh=True) or []
+        target_wr = next((w for w in wage_records if str(w.get("wage_record_id") or "").strip() == clean_ref), None)
+        if target_wr:
+            db.update_record("LabourWageRecords", "wage_record_id", clean_ref, {
+                "payment_status": "PAID",
+                "paid_amount": pay_amount,
+                "paid_at": pay_date,
+                "payment_reference": req.payment_reference or "",
+                "receipt_id": pay_id,
+            })
+            gross = float(target_wr.get("gross_wage") or pay_amount)
+            deductions = float(target_wr.get("advances_deducted") or 0.0)
 
     # 3. Post balanced double-entry accounting journal
     journal_ref = ""

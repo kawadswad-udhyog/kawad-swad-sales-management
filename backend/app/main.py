@@ -170,7 +170,7 @@ def health_check():
         },
         "required_sheets": {
             "status": "AVAILABLE" if db.is_connected else "NOT_VERIFIED",
-            "total_managed_tabs": 28,
+            "total_managed_tabs": len(db.memory_store) if hasattr(db, "memory_store") and db.memory_store else 60,
         },
     }
 

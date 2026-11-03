@@ -712,6 +712,87 @@ class TestWorkforceManagement(unittest.TestCase):
         self.assertIn("accounting_journal_ref", REQUIRED_TABS["WorkforcePayments"])
         self.assertIn("receipt_number", REQUIRED_TABS["SalaryReceipts"])
 
+    def test_workforce_payment_idempotency_and_conflict(self):
+        """Replaying identical workforce payment returns existing record without duplicate journal; conflicting amount raises 409."""
+        req1 = WorkforcePaymentCreate(
+            reference_id="PI-TEST-IDEMP-01",
+            payment_type="SALARY",
+            recipient_id="USR-000003",
+            recipient_name="Ramesh Salesman",
+            amount=15000.0,
+            payment_method="BANK_TRANSFER",
+        )
+        res1 = asyncio.run(workforce.record_workforce_payment(req=req1, current_user=self.owner_user))
+        self.assertTrue(res1["ok"])
+        pay1 = res1["payment"]
+        pay_id = pay1["payment_id"]
+        jv_id = pay1.get("accounting_journal_ref")
+
+        # Initial journals count for this payment
+        journals_1 = [j for j in db.get_records("JournalHeaders") if j.get("reference_id") == pay_id]
+        self.assertEqual(len(journals_1), 1)
+
+        # Replay identical payment
+        res2 = asyncio.run(workforce.record_workforce_payment(req=req1, current_user=self.owner_user))
+        self.assertTrue(res2["ok"])
+        self.assertTrue(res2.get("already_recorded"))
+        self.assertEqual(res2["payment"]["payment_id"], pay_id)
+
+        # Verify no duplicate journal was posted
+        journals_2 = [j for j in db.get_records("JournalHeaders") if j.get("reference_id") == pay_id]
+        self.assertEqual(len(journals_2), 1)
+
+        # Conflicting amount on same reference_id raises 409 Conflict
+        req_conflict = WorkforcePaymentCreate(
+            reference_id="PI-TEST-IDEMP-01",
+            payment_type="SALARY",
+            recipient_id="USR-000003",
+            recipient_name="Ramesh Salesman",
+            amount=18000.0,
+            payment_method="BANK_TRANSFER",
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(workforce.record_workforce_payment(req=req_conflict, current_user=self.owner_user))
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_payroll_item_update_syncs_parent_run_totals(self):
+        """Updating a line item in draft payroll automatically recalculates and syncs parent PayrollRuns totals."""
+        res_calc = asyncio.run(
+            workforce.calculate_payroll_run(
+                req=PayrollRunCreate(month="2026-11"),
+                current_user=self.owner_user,
+            )
+        )
+        run_id = res_calc["payroll_run"]["payroll_run_id"]
+        items = res_calc["items"]
+        self.assertTrue(len(items) >= 1)
+        target_item = items[0]
+        item_id = target_item["item_id"]
+        orig_net = float(res_calc["payroll_run"]["total_net"])
+
+        # Update item with a bonus of Rs 2500 and extra deduction of Rs 500 (net +2000)
+        res_update = asyncio.run(
+            workforce.update_payroll_item(
+                item_id=item_id,
+                req=PayrollItemUpdate(
+                    bonus_amount=2500.0,
+                    deductions=500.0,
+                    notes="Festival bonus added",
+                ),
+                current_user=self.owner_user,
+            )
+        )
+        self.assertTrue(res_update["ok"])
+
+        # Verify parent PayrollRuns totals were updated
+        runs = db.get_records("PayrollRuns", fresh=True)
+        updated_run = next(r for r in runs if r.get("payroll_run_id") == run_id)
+        # Expected new net is orig_net - orig_item_net + new_item_net
+        all_items = [i for i in db.get_records("PayrollItems", fresh=True) if i.get("payroll_run_id") == run_id]
+        expected_tot_net = round(sum(float(i.get("net_amount", 0)) for i in all_items), 2)
+        self.assertEqual(float(updated_run["total_net"]), expected_tot_net)
+
 
 if __name__ == "__main__":
     unittest.main()
+
