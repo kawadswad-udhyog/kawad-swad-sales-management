@@ -137,6 +137,26 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [production, setProduction] = useState({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });
   const [pack, setPack] = useState({ product_id: '', packaging_date: today, bulk_kg_used: '', packets_200g: '0', packets_500g: '0', packets_1000g: '0', notes: '' });
   const [dispatch, setDispatch] = useState({ product_id: '', channel: 'ECOMMERCE', destination: '', quantity_packets: '', reference: '', notes: '' });
+  const [availableBulkBatches, setAvailableBulkBatches] = useState<any[]>([]);
+  const [batchAllocations, setBatchAllocations] = useState<{ [batchId: string]: string }>({});
+  const [allocationMode, setAllocationMode] = useState<'FIFO' | 'MANUAL'>('FIFO');
+
+  useEffect(() => {
+    if (!pack.product_id) {
+      setAvailableBulkBatches([]);
+      setBatchAllocations({});
+      return;
+    }
+    apiRequest<any[]>(`/api/production/batches/available-bulk?product_id=${encodeURIComponent(pack.product_id)}`)
+      .then(res => {
+        if (Array.isArray(res)) {
+          setAvailableBulkBatches(res);
+        } else {
+          setAvailableBulkBatches([]);
+        }
+      })
+      .catch(() => setAvailableBulkBatches([]));
+  }, [pack.product_id]);
   
   const role = String(currentUser?.role || '').toUpperCase();
   const isOwner = role === 'OWNER';
@@ -2570,13 +2590,101 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           <div style={card}>
             <h3>Convert Unpackaged Bulk Papad into Packets</h3>
             <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 12px' }}>
-              Recording packaging credits finished packets directly to the <b>ProductionStockLedger</b>. Product availability is pre-validated
-              before creating the batch record to prevent orphaned rows.
+              Recording packaging credits finished packets directly to the <b>ProductionStockLedger</b> and performs batch-level inventory costing.
+              Material is allocated from approved production batches to preserve exact cost carryover.
             </p>
+
+            {availableBulkBatches.length > 0 && (
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 12, marginBottom: 14 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#334155' }}>
+                    📦 Available Bulk Batches for Selected Product
+                  </div>
+                  <div style={{ display: 'flex', gap: 10, fontSize: 12 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                      <input
+                        type="radio"
+                        name="allocMode"
+                        checked={allocationMode === 'FIFO'}
+                        onChange={() => {
+                          setAllocationMode('FIFO');
+                          setBatchAllocations({});
+                        }}
+                      />
+                      <b>Auto-FIFO (Recommended)</b>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                      <input
+                        type="radio"
+                        name="allocMode"
+                        checked={allocationMode === 'MANUAL'}
+                        onChange={() => setAllocationMode('MANUAL')}
+                      />
+                      <b>Manual Batch Split</b>
+                    </label>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 }}>
+                  {availableBulkBatches.map(b => {
+                    const isManual = allocationMode === 'MANUAL';
+                    const currentAlloc = batchAllocations[b.batch_id] || '';
+                    return (
+                      <div
+                        key={b.batch_id}
+                        style={{
+                          background: '#fff',
+                          border: '1px solid #cbd5e1',
+                          borderRadius: 6,
+                          padding: 8,
+                          fontSize: 12,
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
+                          <span>{b.batch_id}</span>
+                          <span style={{ color: '#166534' }}>₹{b.actual_cost_per_kg?.toFixed(2)}/kg</span>
+                        </div>
+                        <div style={{ color: '#64748b', fontSize: 11, margin: '2px 0 6px' }}>
+                          Date: {b.production_date} | Avail: <b>{b.available_kg} kg</b>
+                        </div>
+                        {isManual && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span style={{ fontSize: 11 }}>Use:</span>
+                            <input
+                              style={{ ...input, padding: '3px 6px', fontSize: 12, width: '90px' }}
+                              type="number"
+                              min="0"
+                              max={b.available_kg}
+                              step="0.001"
+                              placeholder="kg"
+                              value={currentAlloc}
+                              onChange={e => {
+                                const newAlloc = { ...batchAllocations, [b.batch_id]: e.target.value };
+                                setBatchAllocations(newAlloc);
+                                const total: number = Object.values(newAlloc).reduce((sum: number, v) => sum + (Number(v) || 0), 0);
+                                setPack({ ...pack, bulk_kg_used: total > 0 ? String(total) : '' });
+                              }}
+                            />
+                            <span style={{ fontSize: 11 }}>kg</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <form
               onSubmit={async e => {
                 e.preventDefault();
                 const ref = 'PKG-' + Date.now();
+                const manualList = allocationMode === 'MANUAL'
+                  ? Object.entries(batchAllocations)
+                      .filter(([_, q]) => Number(q) > 0)
+                      .map(([bid, q]) => ({ batch_id: bid, quantity_kg: Number(q) }))
+                  : undefined;
+
                 const ok = await runAction(
                   () =>
                     apiRequest('/api/production/packaging', {
@@ -2587,6 +2695,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         packets_200g: Number(pack.packets_200g),
                         packets_500g: Number(pack.packets_500g),
                         packets_1000g: Number(pack.packets_1000g),
+                        batch_allocations: manualList && manualList.length > 0 ? manualList : undefined,
                         reference: ref,
                       }),
                     }),
@@ -2594,6 +2703,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   async () => {
                     await refreshPackaging();
                     await refreshRegister();
+                    if (pack.product_id) {
+                      const updatedBatches = await apiRequest<any[]>(`/api/production/batches/available-bulk?product_id=${encodeURIComponent(pack.product_id)}`);
+                      setAvailableBulkBatches(Array.isArray(updatedBatches) ? updatedBatches : []);
+                    }
                   }
                 );
                 if (ok) {
@@ -2606,6 +2719,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     packets_1000g: '0',
                     notes: '',
                   });
+                  setBatchAllocations({});
                 }
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))', gap: 10 }}
@@ -2678,6 +2792,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     <th style={{ textAlign: 'left', padding: 9 }}>Date</th>
                     <th style={{ textAlign: 'left', padding: 9 }}>Product</th>
                     <th style={{ textAlign: 'right', padding: 9 }}>Bulk kg</th>
+                    <th style={{ textAlign: 'left', padding: 9 }}>Batch Allocations</th>
+                    <th style={{ textAlign: 'right', padding: 9 }}>Bulk Cost (₹)</th>
                     <th style={{ textAlign: 'right', padding: 9 }}>Packets</th>
                     <th style={{ textAlign: 'right', padding: 9 }}>Expected kg</th>
                     <th style={{ textAlign: 'right', padding: 9 }}>Diff kg</th>
@@ -2690,11 +2806,25 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     const pId = String(p.packaging_id || idx);
                     const isIncomplete = String(p.status).toUpperCase() === 'INCOMPLETE';
                     const diff = Number(p.difference_kg || 0);
+                    let allocsSummary = '-';
+                    if (p.batch_allocations_json) {
+                      try {
+                        const parsed = JSON.parse(p.batch_allocations_json);
+                        if (Array.isArray(parsed) && parsed.length > 0) {
+                          allocsSummary = parsed.map((a: any) => `${a.batch_id} (${a.quantity_kg}kg @ ₹${Number(a.unit_cost_per_kg || 0).toFixed(2)})`).join(', ');
+                        }
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    const bulkCostVal = p.bulk_cost != null ? `₹${Number(p.bulk_cost).toFixed(2)}` : '-';
                     return (
                       <tr key={pId} style={{ borderBottom: '1px solid #e2e8f0' }}>
                         <td style={{ padding: 9 }}>{String(p.packaging_date || '-')}</td>
                         <td style={{ padding: 9 }}><b>{String(p.product_name_snapshot || p.product_id || '-')}</b></td>
                         <td style={{ textAlign: 'right', padding: 9 }}>{String(p.bulk_kg_used ?? '-')}</td>
+                        <td style={{ padding: 9, fontSize: 11, color: '#334155' }}>{allocsSummary}</td>
+                        <td style={{ textAlign: 'right', padding: 9, fontWeight: 600, color: '#0f766e' }}>{bulkCostVal}</td>
                         <td style={{ textAlign: 'right', padding: 9 }}>{String(p.total_packets ?? '-')}</td>
                         <td style={{ textAlign: 'right', padding: 9 }}>{String(p.expected_kg ?? '-')}</td>
                         <td style={{ textAlign: 'right', padding: 9, fontWeight: 600, color: diff !== 0 ? '#b91c1c' : '#166534' }}>
@@ -2733,7 +2863,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   })}
                   {packaging.length === 0 && (
                     <tr>
-                      <td colSpan={8} style={{ padding: 14, textAlign: 'center', color: '#64748b' }}>
+                      <td colSpan={10} style={{ padding: 14, textAlign: 'center', color: '#64748b' }}>
                         No packaging batches recorded yet.
                       </td>
                     </tr>

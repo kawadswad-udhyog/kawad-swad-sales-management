@@ -268,19 +268,52 @@ def post_packaging_batch_journal(
 
     # Dynamically resolve bulk cost if omitted
     if bulk_cost is None:
-        from app.sheets import db
-        from app.calculations.costing import get_authoritative_bulk_cost_per_kg
-        batches = db.get_records("ProductionBatches", fresh=True)
-        recipes = db.get_records("Recipes", fresh=True)
-        stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
-        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
-        bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(p_name, batches, recipes, stock_ledger, rm_master)
-        bulk_cost = bulk_kg * bulk_cost_per_kg
+        rec_bulk_cost = pack_data.get("bulk_cost") or pack_data.get("total_bulk_cost")
+        if rec_bulk_cost is not None and str(rec_bulk_cost).strip() not in {"", "0", "null", "none"}:
+            try:
+                bulk_cost = to_decimal(rec_bulk_cost)
+            except Exception:
+                pass
+
+        if bulk_cost is None and pack_data.get("batch_allocations_json"):
+            try:
+                import json
+                allocs = json.loads(str(pack_data["batch_allocations_json"]))
+                if isinstance(allocs, list) and allocs:
+                    sum_c = sum(to_decimal(a.get("total_cost", 0) or 0) for a in allocs)
+                    if sum_c > Decimal("0"):
+                        bulk_cost = sum_c
+            except Exception:
+                pass
+
+        if bulk_cost is None:
+            from app.sheets import db
+            # Check ledger movements for recorded total_cost on BULK_PACKAGED rows
+            ledger = db.get_records("ProductionStockLedger", fresh=True)
+            pack_mvts = [
+                m for m in ledger
+                if str(m.get("reference_id", "")).strip() == pack_id
+                and str(m.get("movement_type", "")).strip().upper() == "BULK_PACKAGED"
+            ]
+            if pack_mvts:
+                sum_ledger_cost = sum(to_decimal(m.get("total_cost", 0) or 0) for m in pack_mvts)
+                if sum_ledger_cost > Decimal("0"):
+                    bulk_cost = sum_ledger_cost
+
+        if bulk_cost is None:
+            from app.sheets import db
+            from app.calculations.costing import get_authoritative_bulk_cost_per_kg
+            batches = db.get_records("ProductionBatches", fresh=True)
+            recipes = db.get_records("Recipes", fresh=True)
+            stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
+            rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+            bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(p_name, batches, recipes, stock_ledger, rm_master)
+            bulk_cost = bulk_kg * bulk_cost_per_kg
 
     if packing_material_cost is None:
-        packing_material_cost = to_decimal(pack_data.get("packing_material_cost") or 0)
+        packing_material_cost = to_decimal(pack_data.get("packaging_material_cost") or pack_data.get("packing_material_cost") or 0)
     if packing_labor_cost is None:
-        packing_labor_cost = to_decimal(pack_data.get("packing_labor_cost") or 0)
+        packing_labor_cost = to_decimal(pack_data.get("packaging_labor_cost") or pack_data.get("packing_labor_cost") or 0)
 
     r_bulk = round_money(bulk_cost)
     r_mat = round_money(packing_material_cost)

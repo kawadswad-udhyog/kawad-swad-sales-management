@@ -38,6 +38,8 @@ from app.calculations import (
     calculate_batch_actual_cost,
     calculate_finished_sku_cost,
     calculate_bulk_stock_balance,
+    calculate_batch_bulk_balances,
+    resolve_packaging_batch_allocations,
     calculate_finished_stock_balance,
     calculate_raw_material_balance,
     calculate_consolidated_finished_goods_register,
@@ -192,10 +194,16 @@ class ApprovalRequest(BaseModel):
     notes: str = ""
 
 
+class BatchAllocationItem(BaseModel):
+    batch_id: str = Field(min_length=1, description="Production batch ID (e.g. PRB-000001)")
+    quantity_kg: float = Field(gt=0, description="Quantity in kg consumed from this batch")
+
+
 class PackagingCreate(BaseModel):
     product_id: str
     packaging_date: str
     bulk_kg_used: float = Field(gt=0)
+    batch_allocations: Optional[List[BatchAllocationItem]] = Field(None, description="Optional multi-batch allocation list")
     packets_200g: int = Field(ge=0, default=0)
     packets_500g: int = Field(ge=0, default=0)
     packets_1000g: int = Field(ge=0, default=0)
@@ -2850,6 +2858,17 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
 # Packaging Batches with Discrepancy Blocking
 # -------------------------------------------------------------
 
+@router.get("/batches/available-bulk")
+async def available_bulk_batches(product_id: Optional[str] = None, user: dict = Depends(get_current_user)):
+    """
+    Get all approved production batches with unpackaged bulk stock balance and actual cost per kg.
+    """
+    require_production_access(user)
+    ledger = db.get_records("ProductionStockLedger", fresh=True)
+    batches_data = db.get_records("ProductionBatches", fresh=True)
+    return calculate_batch_bulk_balances(ledger, batches_data, product_id)
+
+
 @router.get("/packaging")
 async def packaging(user: dict = Depends(get_current_user)):
     require_production_access(user)
@@ -2924,12 +2943,41 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
                    f"The Owner must either correct the entry or submit an authorized explanation to approve the discrepancy."
         )
 
-    # Check available bulk stock
-    ledger = db.get_records("ProductionStockLedger")
-    bulk_balances = calculate_bulk_stock_balance(ledger, bulk_key)
-    available_bulk = bulk_balances.get(bulk_key, 0.0)
-    if req.bulk_kg_used > available_bulk + 0.0001:
-        raise HTTPException(400, f"Insufficient unpackaged bulk stock. Available: {available_bulk:.3f} kg; Requested: {req.bulk_kg_used:.3f} kg.")
+    # Pre-validate all requested SKU products and assemble movements BEFORE writing to PackagingBatches
+    all_products = db.get_records("Products")
+    sku_movements = []
+    for weight_g, packet_count in [(200, req.packets_200g), (500, req.packets_500g), (1000, req.packets_1000g)]:
+        if packet_count <= 0:
+            continue
+        sku_product = next((p for p in all_products if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
+        if not sku_product:
+            raise HTTPException(400, f"No active {weight_g} g SKU product found for '{field(product, 'product_name')}'. Please create/activate that pack-size product in Products before packaging.")
+        sku_movements.append({
+            "movement_type": "PACKETS_PACKAGED",
+            "quantity_kg": 0,
+            "quantity_packets": packet_count,
+            "channel": "FACTORY_FINISHED",
+            "product_id": str(field(sku_product, "product_id")),
+            "bulk_product_key": bulk_key,
+            "product_name_snapshot": field(sku_product, "product_name"),
+            "sku_snapshot": field(sku_product, "sku"),
+            "pack_weight_g": weight_g,
+        })
+
+    # Resolve batch allocations and validate per-batch stock balances
+    ledger = db.get_records("ProductionStockLedger", fresh=True)
+    batches_data = db.get_records("ProductionBatches", fresh=True)
+    req_allocations = [a.dict() for a in req.batch_allocations] if req.batch_allocations else None
+    try:
+        allocation_res = resolve_packaging_batch_allocations(
+            bulk_kg_required=req.bulk_kg_used,
+            product_id_or_name=field(product, "product_name") or req.product_id,
+            ledger_records=ledger,
+            production_batches=batches_data,
+            batch_allocations_requested=req_allocations,
+        )
+    except ValueError as val_err:
+        raise HTTPException(400, detail=str(val_err))
 
     # Idempotency / Retry reconciliation
     if req.reference and req.reference.strip():
@@ -2961,22 +3009,26 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             # Reconcile incomplete packaging batch without double-writing
             existing_bulk_mvt = next((m for m in ledger if str(field(m, "reference_id")) == pack_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
             if not existing_bulk_mvt:
-                row = {
-                    "movement_id": make_id("ProductionStockLedger"),
-                    "txn_datetime": now(),
-                    "movement_type": "BULK_PACKAGED",
-                    "quantity_kg": req.bulk_kg_used,
-                    "quantity_packets": 0,
-                    "channel": "FACTORY_BULK",
-                    "product_id": req.product_id,
-                    "bulk_product_key": bulk_key,
-                    "product_name_snapshot": field(product, "product_name"),
-                    "reference_id": pack_id,
-                    "created_by": actor,
-                    "notes": f"Reconciled retry: {req.notes}",
-                }
-                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                    raise HTTPException(503, "Could not record bulk stock deduction during recovery.")
+                for alloc in allocation_res["allocations"]:
+                    row = {
+                        "movement_id": make_id("ProductionStockLedger"),
+                        "txn_datetime": now(),
+                        "movement_type": "BULK_PACKAGED",
+                        "quantity_kg": alloc["quantity_kg"],
+                        "quantity_packets": 0,
+                        "channel": "FACTORY_BULK",
+                        "product_id": req.product_id,
+                        "bulk_product_key": bulk_key,
+                        "product_name_snapshot": field(product, "product_name"),
+                        "reference_id": pack_id,
+                        "production_batch_id": alloc["batch_id"],
+                        "unit_cost_per_kg": alloc["unit_cost_per_kg"],
+                        "total_cost": alloc["total_cost"],
+                        "created_by": actor,
+                        "notes": f"Reconciled retry allocation from batch {alloc['batch_id']}: {req.notes}",
+                    }
+                    if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                        raise HTTPException(503, "Could not record bulk stock deduction during recovery.")
 
             for weight_g, packet_count in [(200, req.packets_200g), (500, req.packets_500g), (1000, req.packets_1000g)]:
                 if packet_count <= 0:
@@ -3010,36 +3062,24 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             db.log_audit(actor, "RECONCILE_PACKAGING", "PackagingBatches", pack_id, reason=f"Reconciled packaging batch {pack_id}")
             return existing_pack
 
-    # Pre-validate all requested SKU products and assemble movements BEFORE writing to PackagingBatches
-    all_products = db.get_records("Products")
-    sku_movements = []
-    for weight_g, packet_count in [(200, req.packets_200g), (500, req.packets_500g), (1000, req.packets_1000g)]:
-        if packet_count <= 0:
-            continue
-        sku_product = next((p for p in all_products if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
-        if not sku_product:
-            raise HTTPException(400, f"No active {weight_g} g SKU product found for '{field(product, 'product_name')}'. Please create/activate that pack-size product in Products before packaging.")
-        sku_movements.append({
-            "movement_type": "PACKETS_PACKAGED",
-            "quantity_kg": 0,
-            "quantity_packets": packet_count,
-            "channel": "FACTORY_FINISHED",
-            "product_id": str(field(sku_product, "product_id")),
+
+    bulk_movements = []
+    for alloc in allocation_res["allocations"]:
+        bulk_movements.append({
+            "movement_type": "BULK_PACKAGED",
+            "quantity_kg": alloc["quantity_kg"],
+            "quantity_packets": 0,
+            "channel": "FACTORY_BULK",
+            "product_id": req.product_id,
             "bulk_product_key": bulk_key,
-            "product_name_snapshot": field(sku_product, "product_name"),
-            "sku_snapshot": field(sku_product, "sku"),
-            "pack_weight_g": weight_g,
+            "product_name_snapshot": field(product, "product_name"),
+            "production_batch_id": alloc["batch_id"],
+            "unit_cost_per_kg": alloc["unit_cost_per_kg"],
+            "total_cost": alloc["total_cost"],
+            "notes": f"Packaging from batch {alloc['batch_id']}",
         })
 
-    movements = [{
-        "movement_type": "BULK_PACKAGED",
-        "quantity_kg": req.bulk_kg_used,
-        "quantity_packets": 0,
-        "channel": "FACTORY_BULK",
-        "product_id": req.product_id,
-        "bulk_product_key": bulk_key,
-        "product_name_snapshot": field(product, "product_name"),
-    }] + sku_movements
+    movements = bulk_movements + sku_movements
 
     # New Packaging Record
     pack_id = make_id("PackagingBatches")
@@ -3065,6 +3105,9 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         "notes": req.notes,
         "created_at": now(),
         "created_by": actor,
+        "batch_allocations_json": json.dumps(allocation_res["allocations"]),
+        "bulk_cost": float(allocation_res["total_bulk_cost"]),
+        "bulk_cost_per_kg": float(allocation_res["effective_bulk_cost_per_kg"]),
     }
     if not db.append_record("PackagingBatches", rec, raise_on_error=True):
         raise HTTPException(503, "Could not save packaging record")
@@ -3095,27 +3138,15 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
     try:
         from app.accounting.postings import post_packaging_batch_journal
         from app.calculations.costing import (
-            get_authoritative_bulk_cost_per_kg,
             get_sku_packing_costs,
             calculate_finished_sku_cost,
         )
 
-        batches_data = db.get_records("ProductionBatches", fresh=True)
-        recipes_data = db.get_records("Recipes", fresh=True)
-        stock_ledger_data = db.get_records("ProductionStockLedger", fresh=True)
-        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
-
-        bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(
-            bulk_key_or_product_id=bulk_key,
-            production_batches=batches_data,
-            recipes=recipes_data,
-            production_stock_ledger=stock_ledger_data,
-            raw_materials_master=rm_master,
-        )
-
-        bulk_cost = to_decimal(req.bulk_kg_used) * bulk_cost_per_kg
+        bulk_cost = to_decimal(allocation_res["total_bulk_cost"])
+        effective_bulk_cost_per_kg = to_decimal(allocation_res["effective_bulk_cost_per_kg"])
         mat_cost = Decimal("0.00")
         lab_cost = Decimal("0.00")
+        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
 
         for sm in sku_movements:
             sm_pid = str(sm.get("product_id"))
@@ -3129,7 +3160,7 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             # Update SKU finished goods standard cost in Products for accurate downstream sales COGS
             sku_calc = calculate_finished_sku_cost(
                 pack_weight_grams=sm_weight,
-                production_cost_per_saleable_kg=float(bulk_cost_per_kg),
+                production_cost_per_saleable_kg=float(effective_bulk_cost_per_kg),
                 packaging_material_cost_per_packet=float(p_mat),
                 packing_labour_per_packet=float(p_lab),
             )
@@ -3140,14 +3171,27 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
                     "unit_cost": float(unit_packet_cost),
                 })
 
+        total_fin_cost = bulk_cost + mat_cost + lab_cost
+        db.update_record("PackagingBatches", "packaging_id", pack_id, {
+            "packaging_material_cost": float(round_money(mat_cost)),
+            "packaging_labor_cost": float(round_money(lab_cost)),
+            "total_finished_cost": float(round_money(total_fin_cost)),
+        })
+        rec["packaging_material_cost"] = float(round_money(mat_cost))
+        rec["packaging_labor_cost"] = float(round_money(lab_cost))
+        rec["total_finished_cost"] = float(round_money(total_fin_cost))
+
         pack_dict = {
             "packaging_id": pack_id,
             "product_name_snapshot": field(product, "product_name"),
             "bulk_kg_used": req.bulk_kg_used,
             "total_packets": total_packets,
             "packaging_date": req.packaging_date or now()[:10],
+            "bulk_cost": float(round_money(bulk_cost)),
+            "packaging_material_cost": float(round_money(mat_cost)),
+            "packaging_labor_cost": float(round_money(lab_cost)),
         }
-        post_packaging_batch_journal(pack_dict, bulk_cost, mat_cost, lab_cost, actor)
+        post_packaging_batch_journal(pack_dict, bulk_cost=bulk_cost, packing_material_cost=mat_cost, packing_labor_cost=lab_cost, actor=actor)
     except Exception as acct_err:
         logger.error("Non-fatal accounting posting error for packaging %s: %s", pack_id, acct_err)
         try:

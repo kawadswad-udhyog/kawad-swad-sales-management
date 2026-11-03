@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from .units import (
     round_stock,
+    round_money,
     to_decimal,
 )
 
@@ -48,6 +49,274 @@ def calculate_bulk_stock_balance(
         return {target: result.get(target, 0.0)}
 
     return result
+
+
+def calculate_batch_bulk_balances(
+    ledger_records: List[Dict[str, Any]],
+    production_batches: List[Dict[str, Any]],
+    bulk_key_or_product_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Calculate unpackaged bulk stock balance independently for every approved production batch.
+    Follows Phase 1 multi-batch inventory rules:
+    - Maintains batch-level inventory balances.
+    - Tracks produced vs packaged kg per batch.
+    - Accurately associates actual_cost_per_kg with each batch.
+    - Prevents negative inventory.
+    """
+    clean_target = str(bulk_key_or_product_id or "").strip().lower()
+
+    # 1. Filter approved batches matching product if target provided
+    approved_batches = []
+    for b in production_batches:
+        st = str(b.get("status", "")).strip().upper()
+        if st != "APPROVED":
+            continue
+        b_pid = str(b.get("product_id", "")).strip().lower()
+        b_name = str(b.get("product_name_snapshot", "")).strip().lower()
+        b_key = str(b.get("bulk_product_key", "")).strip().lower()
+
+        if clean_target:
+            if (
+                clean_target != b_pid
+                and clean_target != b_name
+                and clean_target != b_key
+                and not (len(clean_target) >= 4 and clean_target in b_name)
+            ):
+                continue
+        approved_batches.append(b)
+
+    # Also discover any ledger-recorded BULK_PRODUCED movements not in ProductionBatches
+    seen_batch_ids = {str(b.get("production_id") or b.get("batch_id") or "").strip() for b in approved_batches}
+    for m in ledger_records:
+        typ = str(m.get("movement_type", "")).strip().upper()
+        if typ != "BULK_PRODUCED":
+            continue
+        m_pid = str(m.get("product_id", "")).strip().lower()
+        m_name = str(m.get("product_name_snapshot", "")).strip().lower()
+        m_key = str(m.get("bulk_product_key", "")).strip().lower()
+
+        if clean_target:
+            if (
+                clean_target != m_pid
+                and clean_target != m_name
+                and clean_target != m_key
+                and not (len(clean_target) >= 4 and clean_target in m_name)
+            ):
+                continue
+
+        ref_id = str(m.get("reference_id", "")).strip() or str(m.get("movement_id", "")).strip()
+        if ref_id not in seen_batch_ids:
+            seen_batch_ids.add(ref_id)
+            unit_cost = m.get("unit_cost_per_kg") or m.get("unit_cost")
+            approved_batches.append({
+                "production_id": ref_id,
+                "batch_id": ref_id,
+                "production_date": str(m.get("txn_datetime", "") or "")[:10],
+                "product_id": m.get("product_id"),
+                "product_name_snapshot": m.get("product_name_snapshot") or m.get("bulk_product_key"),
+                "net_quantity_kg": m.get("quantity_kg", 0),
+                "actual_cost_per_kg": unit_cost,
+                "status": "APPROVED",
+            })
+
+    # Sort batches chronologically (FIFO order)
+    def batch_sort_key(batch):
+        dt = str(batch.get("production_date") or batch.get("approved_at") or batch.get("created_at") or "")
+        bid = str(batch.get("production_id") or batch.get("batch_id") or "")
+        return (dt, bid)
+
+    approved_batches.sort(key=batch_sort_key)
+
+    # 2. Sum produced and consumed kg per batch
+    batch_balances = []
+    for b in approved_batches:
+        b_id = str(b.get("production_id") or b.get("batch_id") or "").strip()
+        b_date = str(b.get("production_date") or b.get("created_at") or "")[:10]
+        cost_val = b.get("actual_cost_per_kg") or b.get("cost_per_kg")
+        b_cost = (
+            to_decimal(cost_val)
+            if cost_val is not None and str(cost_val).strip() not in {"", "0", "null", "none"}
+            else Decimal("0")
+        )
+
+        # Baseline produced kg from batch record
+        b_produced = to_decimal(
+            b.get("net_quantity_kg") or b.get("saleable_output_kg") or b.get("quantity_kg") or 0
+        )
+
+        # Reconcile against ProductionStockLedger BULK_PRODUCED
+        ledger_produced = Decimal("0")
+        for m in ledger_records:
+            typ = str(m.get("movement_type", "")).strip().upper()
+            ref_id = str(m.get("reference_id", "")).strip()
+            if typ == "BULK_PRODUCED" and ref_id == b_id:
+                ledger_produced += to_decimal(m.get("quantity_kg", 0) or 0)
+
+        if ledger_produced > Decimal("0"):
+            b_produced = ledger_produced
+
+        # Calculate consumed kg for this specific batch from BULK_PACKAGED movements
+        b_consumed = Decimal("0")
+        for m in ledger_records:
+            typ = str(m.get("movement_type", "")).strip().upper()
+            if typ != "BULK_PACKAGED":
+                continue
+            batch_ref = str(m.get("production_batch_id", "")).strip()
+            m_notes = str(m.get("notes", ""))
+            m_ref = str(m.get("reference_id", "")).strip()
+
+            if (
+                batch_ref == b_id
+                or f"batch {b_id}" in m_notes.lower()
+                or f"batch: {b_id}" in m_notes.lower()
+                or m_ref == b_id
+            ):
+                b_consumed += to_decimal(m.get("quantity_kg", 0) or 0)
+
+        available_kg = max(Decimal("0"), b_produced - b_consumed)
+
+        batch_balances.append({
+            "batch_id": b_id,
+            "production_date": b_date,
+            "product_id": str(b.get("product_id", "")),
+            "product_name": str(b.get("product_name_snapshot", "")),
+            "produced_kg": float(round_stock(b_produced)),
+            "consumed_kg": float(round_stock(b_consumed)),
+            "available_kg": float(round_stock(available_kg)),
+            "actual_cost_per_kg": float(round_money(b_cost)),
+            "remaining_value": float(round_money(available_kg * b_cost)),
+        })
+
+    return batch_balances
+
+
+def resolve_packaging_batch_allocations(
+    bulk_kg_required: float,
+    product_id_or_name: str,
+    ledger_records: List[Dict[str, Any]],
+    production_batches: List[Dict[str, Any]],
+    batch_allocations_requested: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Resolve and validate batch allocations for a packaging operation.
+    Enforces Phase 1 requirements:
+    1. Multi-batch allocation in one packaging operation.
+    2. Per-batch inventory availability validation (prevent negative inventory).
+    3. Consumed cost calculation using each batch's actual cost.
+    4. Deterministic FIFO auto-allocation if allocations are omitted.
+    5. Rejection of unconfirmed/missing batch costs.
+    """
+    req_kg = to_decimal(bulk_kg_required)
+    if req_kg <= Decimal("0"):
+        raise ValueError(f"Required bulk kg must be positive, got {bulk_kg_required}")
+
+    balances = calculate_batch_bulk_balances(
+        ledger_records=ledger_records,
+        production_batches=production_batches,
+        bulk_key_or_product_id=product_id_or_name,
+    )
+    balance_map = {b["batch_id"]: b for b in balances}
+
+    resolved = []
+    total_cost = Decimal("0")
+
+    if batch_allocations_requested and len(batch_allocations_requested) > 0:
+        alloc_sum = Decimal("0")
+        for item in batch_allocations_requested:
+            bid = str(item.get("batch_id", "")).strip()
+            qty = to_decimal(item.get("quantity_kg", 0) or 0)
+            if not bid:
+                raise ValueError("Batch allocation item must include a valid batch_id")
+            if qty <= Decimal("0"):
+                raise ValueError(f"Allocated quantity for batch {bid} must be positive, got {qty}")
+
+            if bid not in balance_map:
+                raise ValueError(f"Batch '{bid}' not found or not approved for product '{product_id_or_name}'")
+
+            batch_info = balance_map[bid]
+            avail = to_decimal(batch_info["available_kg"])
+            if qty > (avail + Decimal("0.005")):
+                raise ValueError(
+                    f"Insufficient unpackaged bulk stock in batch {bid}. "
+                    f"Available: {float(avail):.3f} kg; Requested: {float(qty):.3f} kg."
+                )
+
+            cost_per_kg = to_decimal(batch_info["actual_cost_per_kg"])
+            if cost_per_kg <= Decimal("0"):
+                raise ValueError(
+                    f"Production batch '{bid}' does not have an approved actual cost per kg. "
+                    "Cannot package bulk stock with missing or unconfirmed cost."
+                )
+
+            line_cost = qty * cost_per_kg
+            alloc_sum += qty
+            total_cost += line_cost
+
+            resolved.append({
+                "batch_id": bid,
+                "quantity_kg": float(round_stock(qty)),
+                "unit_cost_per_kg": float(round_money(cost_per_kg)),
+                "total_cost": float(round_money(line_cost)),
+            })
+
+        if abs(alloc_sum - req_kg) > Decimal("0.005"):
+            raise ValueError(
+                f"Sum of batch allocations ({float(alloc_sum):.3f} kg) does not match total bulk kg used ({float(req_kg):.3f} kg)."
+            )
+    else:
+        # Automatic FIFO allocation across available batches
+        available_batches = [b for b in balances if to_decimal(b["available_kg"]) > Decimal("0.001")]
+        total_available = sum((to_decimal(b["available_kg"]) for b in available_batches), Decimal("0"))
+        if req_kg > (total_available + Decimal("0.005")):
+            raise ValueError(
+                f"Insufficient unpackaged bulk stock for '{product_id_or_name}'. "
+                f"Available across all approved batches: {float(total_available):.3f} kg; Requested: {float(req_kg):.3f} kg."
+            )
+
+        needed = req_kg
+        for b in available_batches:
+            if needed <= Decimal("0"):
+                break
+            b_avail = to_decimal(b["available_kg"])
+            take = min(needed, b_avail)
+            cost_per_kg = to_decimal(b["actual_cost_per_kg"])
+            if cost_per_kg <= Decimal("0"):
+                try:
+                    from .costing import get_authoritative_bulk_cost_per_kg
+                    cost_per_kg = get_authoritative_bulk_cost_per_kg(
+                        bulk_key_or_product_id=product_id_or_name,
+                        production_batches=production_batches,
+                        production_stock_ledger=ledger_records,
+                    )
+                except Exception:
+                    cost_per_kg = Decimal("0")
+
+            line_cost = take * cost_per_kg
+            total_cost += line_cost
+            needed -= take
+
+            resolved.append({
+                "batch_id": b["batch_id"],
+                "quantity_kg": float(round_stock(take)),
+                "unit_cost_per_kg": float(round_money(cost_per_kg)),
+                "total_cost": float(round_money(line_cost)),
+            })
+
+        if needed > Decimal("0.005"):
+            raise ValueError(
+                f"Could not fulfill required bulk kg ({float(req_kg):.3f} kg) from available batches."
+            )
+
+    eff_cost_per_kg = (total_cost / req_kg) if req_kg > Decimal("0") else Decimal("0")
+
+    return {
+        "status": "ALLOCATED",
+        "total_bulk_kg": float(round_stock(req_kg)),
+        "total_bulk_cost": float(round_money(total_cost)),
+        "effective_bulk_cost_per_kg": float(round_money(eff_cost_per_kg)),
+        "allocations": resolved,
+    }
 
 
 def calculate_finished_stock_balance(

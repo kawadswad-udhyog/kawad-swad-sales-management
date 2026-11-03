@@ -150,11 +150,13 @@ REQUIRED_TABS = {
         "bulk_kg_used", "packets_200g", "packets_500g", "packets_1000g", "total_packets",
         "expected_kg", "difference_kg", "difference_status", "status", "notes",
         "created_at", "created_by",
+        "batch_allocations_json", "bulk_cost", "bulk_cost_per_kg", "packaging_material_cost", "packaging_labor_cost", "total_finished_cost",
     ],
     "ProductionStockLedger": [
         "movement_id", "txn_datetime", "movement_type", "product_id", "bulk_product_key",
         "product_name_snapshot", "sku_snapshot", "pack_weight_g", "quantity_kg",
         "quantity_packets", "channel", "reference_id", "destination", "created_by", "notes",
+        "production_batch_id", "unit_cost_per_kg", "total_cost",
     ],
     "ProductionDispatches": [
         "dispatch_id", "dispatch_datetime", "product_id", "product_name_snapshot",

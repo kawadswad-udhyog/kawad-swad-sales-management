@@ -46,6 +46,8 @@ from .costing import (
 )
 from .inventory import (
     calculate_bulk_stock_balance,
+    calculate_batch_bulk_balances,
+    resolve_packaging_batch_allocations,
     calculate_finished_stock_balance,
     calculate_warehouse_stock_balance,
     calculate_salesman_stock_balance,
@@ -80,6 +82,8 @@ __all__ = [
     "get_sku_packing_costs",
     "get_sku_finished_cost",
     "calculate_bulk_stock_balance",
+    "calculate_batch_bulk_balances",
+    "resolve_packaging_batch_allocations",
     "calculate_finished_stock_balance",
     "calculate_warehouse_stock_balance",
     "calculate_salesman_stock_balance",
