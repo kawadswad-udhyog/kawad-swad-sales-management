@@ -55,6 +55,75 @@ export const StockView: React.FC = () => {
   const [discPhysical, setDiscPhysical] = useState<number>(0);
   const [discReason, setDiscReason] = useState('');
 
+  // Bulk Batch Tracking State
+  const [showBatchTracking, setShowBatchTracking] = useState(false);
+  const [bulkBatches, setBulkBatches] = useState<{
+    batch_id: string;
+    production_date: string;
+    product_name: string;
+    bulk_product_key: string;
+    produced_kg: number;
+    consumed_kg: number;
+    available_kg: number;
+    unit_cost_per_kg: number | null;
+    cost_status: string;
+    cost_source?: string;
+    cost_date?: string;
+    cost_notes?: string;
+    valuation?: number;
+  }[]>([]);
+  const [loadingBatches, setLoadingBatches] = useState(false);
+  const [batchFilterText, setBatchFilterText] = useState('');
+  const [batchNotice, setBatchNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+
+  // Legacy batch cost resolution
+  const [resolvingBatchId, setResolvingBatchId] = useState<string | null>(null);
+  const [resolveRate, setResolveRate] = useState<number>(0);
+  const [resolveStatus, setResolveStatus] = useState<'ACTUAL' | 'ESTIMATED'>('ACTUAL');
+  const [resolveNotes, setResolveNotes] = useState('');
+  const [resolvingLoading, setResolvingLoading] = useState(false);
+
+  const loadBulkBatches = async () => {
+    try {
+      setLoadingBatches(true);
+      setBatchNotice(null);
+      const res = await apiRequest<any[]>('/api/stock/bulk-batches');
+      if (Array.isArray(res)) {
+        setBulkBatches(res);
+      }
+    } catch (err: any) {
+      setBatchNotice({ msg: err?.message || 'Failed to load bulk batch tracking data.', error: true });
+    } finally {
+      setLoadingBatches(false);
+    }
+  };
+
+  const handleResolveLegacyCost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resolvingBatchId) return;
+    try {
+      setResolvingLoading(true);
+      await apiRequest(`/api/production/batches/${resolvingBatchId}/resolve-legacy-cost`, {
+        method: 'POST',
+        body: JSON.stringify({
+          cost_per_kg: Number(resolveRate),
+          cost_status: resolveStatus,
+          source: 'OWNER_STOCK_AUDIT',
+          notes: resolveNotes || 'Resolved from StockView Batch Tracking modal',
+        }),
+      });
+      setBatchNotice({ msg: `Successfully updated cost for batch ${resolvingBatchId} to ₹${resolveRate}/kg (${resolveStatus}).` });
+      setResolvingBatchId(null);
+      setResolveRate(0);
+      setResolveNotes('');
+      await loadBulkBatches();
+    } catch (err: any) {
+      setBatchNotice({ msg: err?.message || 'Failed to resolve batch cost.', error: true });
+    } finally {
+      setResolvingLoading(false);
+    }
+  };
+
   const loadRegister = async () => {
     try {
       setRegisterLoading(true);
@@ -331,6 +400,16 @@ export const StockView: React.FC = () => {
                 </p>
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowBatchTracking(true);
+                    loadBulkBatches();
+                  }}
+                  style={{ fontSize: '0.85rem', background: '#0284c7' }}
+                >
+                  🔍 Bulk Batch Tracking
+                </button>
                 <button
                   type="button"
                   className="secondary"
@@ -925,6 +1004,290 @@ export const StockView: React.FC = () => {
         )}
       </div>
         </>
+      )}
+      {/* BATCH TRACKING MODAL */}
+      {showBatchTracking && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.65)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 16,
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              maxWidth: 960,
+              width: '100%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              background: '#ffffff',
+              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
+              borderRadius: 8,
+              position: 'relative',
+              padding: 24,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: '1.25rem', color: '#0f172a' }}>
+                  📦 Bulk Batch Tracking &amp; Cost Valuation
+                </h2>
+                <p className="muted" style={{ margin: '4px 0 0', fontSize: '0.85rem' }}>
+                  Traceable per-batch bulk inventory balance with actual production cost carryover and legacy resolution audit.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  setShowBatchTracking(false);
+                  setResolvingBatchId(null);
+                }}
+                style={{ padding: '4px 12px', fontSize: '0.9rem' }}
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {batchNotice && (
+              <div
+                className={batchNotice.error ? 'notice-error' : 'notice-success'}
+                style={{ marginBottom: 14 }}
+              >
+                {batchNotice.msg}
+              </div>
+            )}
+
+            {/* KPI Summary Header */}
+            {(() => {
+              const totalAvail = bulkBatches.reduce((sum, b) => sum + (b.available_kg || 0), 0);
+              const totalVal = bulkBatches.reduce((sum, b) => sum + ((b.available_kg || 0) * (b.unit_cost_per_kg || 0)), 0);
+              const missingCount = bulkBatches.filter((b) => b.cost_status === 'MISSING').length;
+              const estimatedCount = bulkBatches.filter((b) => b.cost_status === 'ESTIMATED').length;
+              return (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginBottom: 16 }}>
+                  <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                    <small className="muted">Total Available Bulk</small>
+                    <h3 style={{ margin: '2px 0 0', color: '#0f172a' }}>{totalAvail.toFixed(2)} kg</h3>
+                  </div>
+                  <div style={{ background: '#f0fdf4', padding: '10px 14px', borderRadius: 6, border: '1px solid #bbf7d0' }}>
+                    <small style={{ color: '#166534' }}>Estimated Bulk Valuation</small>
+                    <h3 style={{ margin: '2px 0 0', color: '#15803d' }}>₹{totalVal.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</h3>
+                  </div>
+                  <div style={{ background: '#eff6ff', padding: '10px 14px', borderRadius: 6, border: '1px solid #bfdbfe' }}>
+                    <small style={{ color: '#1e40af' }}>Active Production Batches</small>
+                    <h3 style={{ margin: '2px 0 0', color: '#1d4ed8' }}>{bulkBatches.length}</h3>
+                  </div>
+                  {(missingCount > 0 || estimatedCount > 0) && (
+                    <div style={{ background: '#fffbeb', padding: '10px 14px', borderRadius: 6, border: '1px solid #fde68a' }}>
+                      <small style={{ color: '#b45309' }}>Cost Status Warnings</small>
+                      <h4 style={{ margin: '2px 0 0', color: '#b45309', fontSize: '0.9rem' }}>
+                        {missingCount > 0 ? `⚠️ ${missingCount} Missing` : ''}
+                        {missingCount > 0 && estimatedCount > 0 ? ' · ' : ''}
+                        {estimatedCount > 0 ? `ℹ️ ${estimatedCount} Estimated` : ''}
+                      </h4>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Filter and Refresh */}
+            <div style={{ display: 'flex', gap: 10, marginBottom: 14, alignItems: 'center' }}>
+              <input
+                placeholder="🔍 Search Batch ID, Product or Status..."
+                value={batchFilterText}
+                onChange={(e) => setBatchFilterText(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <button
+                type="button"
+                className="secondary"
+                onClick={loadBulkBatches}
+                disabled={loadingBatches}
+                style={{ fontSize: '0.85rem' }}
+              >
+                🔄 {loadingBatches ? 'Loading...' : 'Refresh'}
+              </button>
+            </div>
+
+            {/* Legacy Cost Resolution Form (Owner Only) */}
+            {resolvingBatchId && isManager && (
+              <div
+                style={{
+                  background: '#fefce8',
+                  border: '1px solid #fde047',
+                  borderRadius: 6,
+                  padding: 14,
+                  marginBottom: 16,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <strong style={{ color: '#854d0e' }}>
+                    ⚖️ Resolve Legacy Cost for Batch: {resolvingBatchId}
+                  </strong>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setResolvingBatchId(null)}
+                    style={{ padding: '2px 8px', fontSize: '0.75rem' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <form onSubmit={handleResolveLegacyCost} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, alignItems: 'end' }}>
+                  <label style={{ fontSize: '0.85rem' }}>
+                    Unit Cost (₹/kg)
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      required
+                      value={resolveRate || ''}
+                      onChange={(e) => setResolveRate(Number(e.target.value))}
+                      placeholder="e.g. 145.50"
+                    />
+                  </label>
+                  <label style={{ fontSize: '0.85rem' }}>
+                    Cost Classification
+                    <select
+                      value={resolveStatus}
+                      onChange={(e) => setResolveStatus(e.target.value as 'ACTUAL' | 'ESTIMATED')}
+                    >
+                      <option value="ACTUAL">ACTUAL (Verified Historical Invoices)</option>
+                      <option value="ESTIMATED">ESTIMATED (Provisional / Benchmark)</option>
+                    </select>
+                  </label>
+                  <label style={{ fontSize: '0.85rem', gridColumn: 'span 2' }}>
+                    Audit Explanation / Source
+                    <input
+                      required
+                      value={resolveNotes}
+                      onChange={(e) => setResolveNotes(e.target.value)}
+                      placeholder="e.g. Audit based on RawMaterialLedger invoice RM-INV-042 and milling yield"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={resolvingLoading || resolveRate <= 0 || !resolveNotes.trim()}
+                    style={{ background: '#15803d', color: '#fff', padding: '8px 16px', fontSize: '0.85rem' }}
+                  >
+                    {resolvingLoading ? 'Saving...' : '✓ Save Batch Cost'}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* Batches Table */}
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Batch ID</th>
+                    <th>Date</th>
+                    <th>Product</th>
+                    <th style={{ textAlign: 'right' }}>Produced</th>
+                    <th style={{ textAlign: 'right' }}>Consumed</th>
+                    <th style={{ textAlign: 'right', fontWeight: 700 }}>Available</th>
+                    <th style={{ textAlign: 'right' }}>Unit Cost</th>
+                    <th style={{ textAlign: 'center' }}>Cost Status</th>
+                    <th style={{ textAlign: 'right' }}>Valuation</th>
+                    {isManager && <th style={{ textAlign: 'center' }}>Action</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {bulkBatches
+                    .filter((b) => {
+                      if (!batchFilterText.trim()) return true;
+                      const q = batchFilterText.toLowerCase();
+                      return (
+                        b.batch_id?.toLowerCase().includes(q) ||
+                        b.product_name?.toLowerCase().includes(q) ||
+                        b.cost_status?.toLowerCase().includes(q) ||
+                        b.cost_source?.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((b) => {
+                      const avail = b.available_kg || 0;
+                      const cost = b.unit_cost_per_kg;
+                      const val = (avail * (cost || 0));
+                      const isActual = b.cost_status === 'ACTUAL';
+                      const isEstimated = b.cost_status === 'ESTIMATED';
+                      const isMissing = b.cost_status === 'MISSING';
+                      return (
+                        <tr key={b.batch_id}>
+                          <td><strong>{b.batch_id}</strong></td>
+                          <td>{b.production_date || '—'}</td>
+                          <td>{b.product_name}</td>
+                          <td style={{ textAlign: 'right' }}>{b.produced_kg.toFixed(2)} kg</td>
+                          <td style={{ textAlign: 'right', color: '#64748b' }}>{b.consumed_kg.toFixed(2)} kg</td>
+                          <td style={{ textAlign: 'right', fontWeight: 700, color: avail > 0 ? '#15803d' : '#94a3b8' }}>
+                            {avail.toFixed(2)} kg
+                          </td>
+                          <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                            {cost !== null && cost !== undefined ? `₹${Number(cost).toFixed(2)}` : '—'}
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <span
+                              style={{
+                                fontSize: '0.75rem',
+                                padding: '2px 8px',
+                                borderRadius: 4,
+                                fontWeight: 700,
+                                background: isActual ? '#dcfce7' : isEstimated ? '#fef3c7' : '#fee2e2',
+                                color: isActual ? '#15803d' : isEstimated ? '#b45309' : '#b91c1c',
+                              }}
+                              title={b.cost_source ? `Source: ${b.cost_source}` : undefined}
+                            >
+                              {b.cost_status || 'ACTUAL'}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                            {cost !== null && cost !== undefined ? `₹${val.toFixed(2)}` : '—'}
+                          </td>
+                          {isManager && (
+                            <td style={{ textAlign: 'center' }}>
+                              {(isMissing || isEstimated) && (
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => {
+                                    setResolvingBatchId(b.batch_id);
+                                    setResolveRate(cost || 0);
+                                    setResolveStatus(isEstimated ? 'ESTIMATED' : 'ACTUAL');
+                                    setResolveNotes(b.cost_notes || '');
+                                  }}
+                                  style={{ fontSize: '0.75rem', padding: '2px 8px' }}
+                                >
+                                  ⚖️ Resolve
+                                </button>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  {bulkBatches.length === 0 && (
+                    <tr>
+                      <td colSpan={isManager ? 10 : 9} style={{ textAlign: 'center', padding: 16 }} className="muted">
+                        {loadingBatches ? 'Loading bulk batch inventory...' : 'No approved bulk production batches found.'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

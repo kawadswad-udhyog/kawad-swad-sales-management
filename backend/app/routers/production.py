@@ -1589,12 +1589,14 @@ async def summary(user: dict = Depends(get_current_user)):
     sale_items = db.get_records("SaleItems")
 
     bulk_balances = calculate_bulk_stock_balance(ledger)
+    packaging_batches = db.get_records("PackagingBatches")
     reg_data = calculate_consolidated_finished_goods_register(
         products_master=products_records,
         production_stock_ledger=ledger,
         salesman_stock_ledger=salesman_ledger,
         users_master=users_records,
         sale_items_records=sale_items,
+        packaging_batches=packaging_batches,
     )
 
     bulk_stock_list = []
@@ -1641,6 +1643,7 @@ async def get_finished_goods_register(user: dict = Depends(get_current_user)):
     salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
     users_records = db.get_records("Users", fresh=True)
     sale_items = db.get_records("SaleItems", fresh=True)
+    packaging_batches = db.get_records("PackagingBatches", fresh=True)
 
     return calculate_consolidated_finished_goods_register(
         products_master=products_records,
@@ -1648,6 +1651,7 @@ async def get_finished_goods_register(user: dict = Depends(get_current_user)):
         salesman_stock_ledger=salesman_ledger,
         users_master=users_records,
         sale_items_records=sale_items,
+        packaging_batches=packaging_batches,
     )
 
 
@@ -3226,47 +3230,157 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
 
 
 
+@router.post("/batches/{production_id}/resolve-legacy-cost")
+async def resolve_legacy_cost(
+    production_id: str,
+    req: ResolveLegacyCostRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Owner-controlled resolution of legacy production batch cost.
+    Updates the batch actual/estimated cost per kg, records the audit trail,
+    and updates any associated bulk production stock movements.
+    """
+    actor, _ = require_owner(user)
+    require_persistent_store()
+
+    prod_id_clean = str(production_id or "").strip()
+    with get_batch_lock(prod_id_clean):
+        batches = db.get_records("ProductionBatches", fresh=True)
+        rec = next(
+            (b for b in batches if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
+            None
+        )
+        if not rec:
+            raise HTTPException(404, f"Production batch '{production_id}' not found")
+
+        prod_kg = float(field(rec, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0)
+        tot_cost = round(float(req.cost_per_kg) * prod_kg, 2)
+        valid_status = "ESTIMATED" if req.cost_status.upper() == "ESTIMATED" else "ACTUAL"
+
+        updates = {
+            "actual_cost_per_kg": float(req.cost_per_kg),
+            "total_batch_cost": tot_cost,
+            "cost_status": valid_status,
+            "cost_source": req.source,
+            "cost_date": now()[:10],
+            "cost_notes": req.notes,
+            "cost_resolved_by": actor,
+            "cost_resolved_at": now(),
+        }
+
+        saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
+        if not saved:
+            saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
+        if not saved:
+            raise HTTPException(503, "Failed to update legacy batch cost.")
+
+        # Also update ProductionStockLedger BULK_PRODUCED entries for this batch
+        bulk_mvts = [
+            m for m in db.get_records("ProductionStockLedger", fresh=True)
+            if str(field(m, "reference_id")) == prod_id_clean
+            and str(field(m, "movement_type")).upper() == "BULK_PRODUCED"
+        ]
+        for bm in bulk_mvts:
+            db.update_record("ProductionStockLedger", "movement_id", str(field(bm, "movement_id")), {
+                "unit_cost_per_kg": float(req.cost_per_kg),
+                "total_cost": tot_cost,
+            })
+
+        db.log_audit(actor, "RESOLVE_LEGACY_BATCH_COST", "ProductionBatches", prod_id_clean, reason=f"Resolved cost to ₹{req.cost_per_kg}/kg ({valid_status}) - {req.notes}")
+
+        return {
+            "status": "SUCCESS",
+            "production_id": prod_id_clean,
+            "cost_per_kg": float(req.cost_per_kg),
+            "cost_status": valid_status,
+            "cost_source": req.source,
+            "total_batch_cost": tot_cost,
+            "message": f"Batch {prod_id_clean} cost resolved to ₹{req.cost_per_kg}/kg ({valid_status}).",
+        }
+
+
 @router.post("/packaging/{packaging_id}/recover")
 async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_user)):
     """
-    Recover an INCOMPLETE packaging batch by idempotently posting any missing stock movements.
+    Recover an INCOMPLETE packaging batch by idempotently posting any missing stock movements and accounting vouchers.
     """
     actor, _ = require_production_access(user)
     require_persistent_store()
 
-    batch = next((p for p in db.get_records("PackagingBatches") if str(field(p, "packaging_id")) == packaging_id), None)
+    batch = next((p for p in db.get_records("PackagingBatches", fresh=True) if str(field(p, "packaging_id")) == packaging_id), None)
     if not batch:
         raise HTTPException(404, "Packaging batch not found")
 
-    ledger = db.get_records("ProductionStockLedger")
+    ledger = db.get_records("ProductionStockLedger", fresh=True)
     bulk_key = str(field(batch, "product_name_snapshot")).strip().lower()
     bulk_kg = float(field(batch, "bulk_kg_used", default=0) or 0)
     p200 = int(float(field(batch, "packets_200g", default=0) or 0))
     p500 = int(float(field(batch, "packets_500g", default=0) or 0))
     p1000 = int(float(field(batch, "packets_1000g", default=0) or 0))
 
-    # Check existing bulk deduction
-    existing_bulk = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
-    if not existing_bulk and bulk_kg > 0:
-        row = {
-            "movement_id": make_id("ProductionStockLedger"),
-            "txn_datetime": now(),
-            "movement_type": "BULK_PACKAGED",
-            "quantity_kg": bulk_kg,
-            "quantity_packets": 0,
-            "channel": "FACTORY_BULK",
-            "product_id": str(field(batch, "product_id")),
-            "bulk_product_key": bulk_key,
-            "product_name_snapshot": field(batch, "product_name_snapshot"),
-            "reference_id": packaging_id,
-            "created_by": actor,
-            "notes": "Recovered bulk deduction for incomplete batch",
-        }
-        if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-            raise HTTPException(503, "Could not append recovered bulk movement.")
+    # Multi-batch aware bulk movements check
+    allocations_raw = field(batch, "batch_allocations_json", default=None)
+    allocations = []
+    if allocations_raw:
+        try:
+            allocations = json.loads(allocations_raw) if isinstance(allocations_raw, str) else allocations_raw
+        except Exception:
+            allocations = []
+
+    if allocations and isinstance(allocations, list):
+        for alloc in allocations:
+            b_id = str(alloc.get("batch_id", "")).strip()
+            alloc_qty = float(alloc.get("quantity_kg", 0) or 0)
+            existing_alloc_mvt = next(
+                (m for m in ledger if str(field(m, "reference_id")) == packaging_id
+                 and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"
+                 and str(field(m, "production_batch_id", default="")).strip() == b_id),
+                None
+            )
+            if not existing_alloc_mvt and alloc_qty > 0:
+                row = {
+                    "movement_id": make_id("ProductionStockLedger"),
+                    "txn_datetime": now(),
+                    "movement_type": "BULK_PACKAGED",
+                    "quantity_kg": alloc_qty,
+                    "quantity_packets": 0,
+                    "channel": "FACTORY_BULK",
+                    "product_id": str(field(batch, "product_id")),
+                    "bulk_product_key": bulk_key,
+                    "product_name_snapshot": field(batch, "product_name_snapshot"),
+                    "reference_id": packaging_id,
+                    "production_batch_id": b_id,
+                    "unit_cost_per_kg": float(alloc.get("unit_cost_per_kg", 0) or 0),
+                    "total_cost": float(alloc.get("total_cost", 0) or 0),
+                    "created_by": actor,
+                    "notes": f"Recovered multi-batch bulk deduction from {b_id}",
+                }
+                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                    raise HTTPException(503, f"Could not append recovered bulk movement for batch {b_id}.")
+    else:
+        # Check existing bulk deduction
+        existing_bulk = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
+        if not existing_bulk and bulk_kg > 0:
+            row = {
+                "movement_id": make_id("ProductionStockLedger"),
+                "txn_datetime": now(),
+                "movement_type": "BULK_PACKAGED",
+                "quantity_kg": bulk_kg,
+                "quantity_packets": 0,
+                "channel": "FACTORY_BULK",
+                "product_id": str(field(batch, "product_id")),
+                "bulk_product_key": bulk_key,
+                "product_name_snapshot": field(batch, "product_name_snapshot"),
+                "reference_id": packaging_id,
+                "created_by": actor,
+                "notes": "Recovered bulk deduction for incomplete batch",
+            }
+            if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                raise HTTPException(503, "Could not append recovered bulk movement.")
 
     # Check packet movements
-    all_prods = db.get_records("Products")
+    all_prods = db.get_records("Products", fresh=True)
     for weight_g, count in [(200, p200), (500, p500), (1000, p1000)]:
         if count <= 0:
             continue
@@ -3294,9 +3408,52 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
                 if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
                     raise HTTPException(503, f"Could not append recovered {weight_g}g packet movement.")
 
+    # Recover accounting vouchers if missing
+    try:
+        from app.accounting.postings import post_packaging_batch_journal
+        vouchers = db.get_records("JournalVouchers", fresh=True)
+        has_voucher = any(str(field(v, "reference_id", default="")).strip() == packaging_id for v in vouchers)
+        if not has_voucher:
+            b_cost = to_decimal(field(batch, "bulk_cost", default=0) or 0)
+            m_cost = to_decimal(field(batch, "packaging_material_cost", default=0) or 0)
+            l_cost = to_decimal(field(batch, "packaging_labor_cost", default=0) or 0)
+            c_status = str(field(batch, "cost_status", default="ACTUAL"))
+            pack_dict = {
+                "packaging_id": packaging_id,
+                "product_name_snapshot": field(batch, "product_name_snapshot"),
+                "bulk_kg_used": bulk_kg,
+                "total_packets": int(float(field(batch, "total_packets", default=0) or 0)),
+                "packaging_date": field(batch, "packaging_date", default="") or now()[:10],
+                "bulk_cost": float(b_cost),
+                "packaging_material_cost": float(m_cost),
+                "packaging_labor_cost": float(l_cost),
+                "cost_status": c_status,
+                "has_estimated_cost": c_status == "ESTIMATED",
+                "batch_allocations_json": field(batch, "batch_allocations_json", default=""),
+            }
+            post_packaging_batch_journal(pack_dict, bulk_cost=b_cost, packing_material_cost=m_cost, packing_labor_cost=l_cost, actor=actor)
+    except Exception as acct_err:
+        logger.warning(f"Accounting recovery note for packaging {packaging_id}: {acct_err}")
+
+    # Mark any pending IncompleteTransactions for this packaging batch as COMPLETED
+    try:
+        for it in db.get_records("IncompleteTransactions", fresh=True):
+            it_key = str(it.get("idempotency_key", ""))
+            it_payload = str(it.get("payload_json", ""))
+            if packaging_id in it_key or packaging_id in it_payload:
+                if str(it.get("status", "")).upper() != "COMPLETED":
+                    db.update_record("IncompleteTransactions", "transaction_id", str(it.get("transaction_id")), {
+                        "status": "COMPLETED",
+                        "resolved_by": actor,
+                        "resolved_at": now(),
+                        "notes": f"Recovered by {actor}",
+                    })
+    except Exception:
+        pass
+
     db.update_record("PackagingBatches", "packaging_id", packaging_id, {"status": "RECORDED", "notes": f"{field(batch, 'notes')} [RECOVERED]"})
-    db.log_audit(actor, "RECOVER_PACKAGING", "PackagingBatches", packaging_id, reason="Recovered missing ledger movements for packaging batch")
-    return {"status": "RECORDED", "packaging_id": packaging_id, "message": "Incomplete packaging movements recovered."}
+    db.log_audit(actor, "RECOVER_PACKAGING", "PackagingBatches", packaging_id, reason="Recovered missing ledger movements and accounting vouchers for packaging batch")
+    return {"status": "RECORDED", "packaging_id": packaging_id, "message": "Incomplete packaging movements and vouchers recovered."}
 
 
 @router.post("/packaging/{packaging_id}/approve-discrepancy")
@@ -3397,7 +3554,8 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
         raise HTTPException(400, "Unsupported distribution channel")
 
     ledger = db.get_records("ProductionStockLedger")
-    available_packets = calculate_finished_stock_balance(ledger, req.product_id).get(req.product_id, 0)
+    packages = db.get_records("PackagingBatches", fresh=True)
+    available_packets = calculate_finished_stock_balance(ledger, req.product_id, packaging_batches=packages).get(req.product_id, 0)
     if req.quantity_packets > available_packets:
         raise HTTPException(400, f"Insufficient factory finished stock. Available: {available_packets} packets; Requested: {req.quantity_packets} packets.")
 

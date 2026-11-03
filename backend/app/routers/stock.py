@@ -551,3 +551,16 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
     }
 
 
+@router.get("/bulk-batches")
+async def get_bulk_batch_tracking(product_id: str = None, current_user: dict = Depends(get_current_user)):
+    """
+    Get detailed breakdown of available bulk stock by production batch ID,
+    including original production date, remaining quantity, unit cost, and cost status.
+    """
+    from app.calculations.inventory import calculate_batch_bulk_balances
+    ledger = db.get_records("ProductionStockLedger", fresh=True)
+    batches_data = db.get_records("ProductionBatches", fresh=True)
+    return calculate_batch_bulk_balances(ledger, batches_data, product_id)
+
+
+

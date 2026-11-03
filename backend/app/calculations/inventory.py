@@ -229,11 +229,13 @@ def calculate_batch_bulk_balances(
             "available_kg": float(round_stock(available_kg)),
             "actual_cost_per_kg": float(round_money(b_actual if cost_status == "ACTUAL" else Decimal("0"))),
             "unit_cost": float(round_money(unit_cost)),
+            "unit_cost_per_kg": float(round_money(unit_cost)),
             "cost_status": cost_status,
             "cost_source": cost_source,
             "cost_date": cost_date,
             "cost_notes": cost_notes,
             "remaining_value": float(round_money(available_kg * unit_cost)),
+            "valuation": float(round_money(available_kg * unit_cost)),
         })
 
     return batch_balances
