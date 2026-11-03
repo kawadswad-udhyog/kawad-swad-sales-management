@@ -216,6 +216,13 @@ class PackagingCreate(BaseModel):
     notes: str = ""
 
 
+class ResolveLegacyCostRequest(BaseModel):
+    cost_per_kg: float = Field(gt=0, description="Cost per kg (must be strictly positive)")
+    cost_status: str = Field("ACTUAL", description="'ACTUAL' or 'ESTIMATED'")
+    source: str = Field("OWNER_AUDIT", description="Source of rate")
+    notes: str = Field(min_length=1, description="Reason and audit explanation")
+
+
 class DispatchCreate(BaseModel):
     product_id: str
     channel: str
@@ -3108,6 +3115,7 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         "batch_allocations_json": json.dumps(allocation_res["allocations"]),
         "bulk_cost": float(allocation_res["total_bulk_cost"]),
         "bulk_cost_per_kg": float(allocation_res["effective_bulk_cost_per_kg"]),
+        "cost_status": allocation_res.get("cost_status", "ACTUAL"),
     }
     if not db.append_record("PackagingBatches", rec, raise_on_error=True):
         raise HTTPException(503, "Could not save packaging record")
@@ -3176,6 +3184,7 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             "packaging_material_cost": float(round_money(mat_cost)),
             "packaging_labor_cost": float(round_money(lab_cost)),
             "total_finished_cost": float(round_money(total_fin_cost)),
+            "cost_status": allocation_res.get("cost_status", "ACTUAL"),
         })
         rec["packaging_material_cost"] = float(round_money(mat_cost))
         rec["packaging_labor_cost"] = float(round_money(lab_cost))
@@ -3190,6 +3199,9 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             "bulk_cost": float(round_money(bulk_cost)),
             "packaging_material_cost": float(round_money(mat_cost)),
             "packaging_labor_cost": float(round_money(lab_cost)),
+            "cost_status": allocation_res.get("cost_status", "ACTUAL"),
+            "has_estimated_cost": allocation_res.get("has_estimated_cost", False),
+            "batch_allocations_json": json.dumps(allocation_res["allocations"]),
         }
         post_packaging_batch_journal(pack_dict, bulk_cost=bulk_cost, packing_material_cost=mat_cost, packing_labor_cost=lab_cost, actor=actor)
     except Exception as acct_err:

@@ -134,7 +134,7 @@ def calculate_batch_bulk_balances(
         b_id = str(b.get("production_id") or b.get("batch_id") or "").strip()
         b_date = str(b.get("production_date") or b.get("created_at") or "")[:10]
         cost_val = b.get("actual_cost_per_kg") or b.get("cost_per_kg")
-        b_cost = (
+        b_actual = (
             to_decimal(cost_val)
             if cost_val is not None and str(cost_val).strip() not in {"", "0", "null", "none"}
             else Decimal("0")
@@ -176,6 +176,49 @@ def calculate_batch_bulk_balances(
 
         available_kg = max(Decimal("0"), b_produced - b_consumed)
 
+        # Distinguish ACTUAL, ESTIMATED, and MISSING cost statuses
+        raw_status = str(b.get("cost_status", "")).strip().upper()
+        cost_source = str(b.get("cost_source", "")).strip()
+        cost_notes = str(b.get("cost_notes", "")).strip()
+        cost_date = str(b.get("cost_estimated_at") or b.get("cost_resolved_at") or b_date)[:10]
+
+        if b_actual > Decimal("0") and raw_status != "ESTIMATED":
+            cost_status = "ACTUAL"
+            cost_source = cost_source or "PRODUCTION_BATCH"
+            cost_notes = cost_notes or "Verified actual production batch cost"
+            unit_cost = b_actual
+        else:
+            # Check for owner-approved or recorded estimated rate
+            est_val = b.get("estimated_cost_per_kg") or b.get("estimated_cost")
+            if est_val is not None and str(est_val).strip() not in {"", "0", "null", "none"}:
+                try:
+                    dec_est = to_decimal(est_val)
+                    if dec_est > Decimal("0"):
+                        cost_status = "ESTIMATED"
+                        cost_source = cost_source or "OWNER_ESTIMATE"
+                        cost_notes = cost_notes or "Owner-approved estimated rate"
+                        unit_cost = dec_est
+                    else:
+                        cost_status = "MISSING"
+                        cost_source = "NONE"
+                        cost_notes = "Missing actual cost - requires Owner resolution"
+                        unit_cost = Decimal("0")
+                except Exception:
+                    cost_status = "MISSING"
+                    cost_source = "NONE"
+                    cost_notes = "Missing actual cost - requires Owner resolution"
+                    unit_cost = Decimal("0")
+            elif b_actual > Decimal("0") and raw_status == "ESTIMATED":
+                cost_status = "ESTIMATED"
+                cost_source = cost_source or "ESTIMATED_RATE"
+                cost_notes = cost_notes or "Recorded estimated rate"
+                unit_cost = b_actual
+            else:
+                cost_status = "MISSING"
+                cost_source = "NONE"
+                cost_notes = "Missing actual cost - requires Owner resolution"
+                unit_cost = Decimal("0")
+
         batch_balances.append({
             "batch_id": b_id,
             "production_date": b_date,
@@ -184,8 +227,13 @@ def calculate_batch_bulk_balances(
             "produced_kg": float(round_stock(b_produced)),
             "consumed_kg": float(round_stock(b_consumed)),
             "available_kg": float(round_stock(available_kg)),
-            "actual_cost_per_kg": float(round_money(b_cost)),
-            "remaining_value": float(round_money(available_kg * b_cost)),
+            "actual_cost_per_kg": float(round_money(b_actual if cost_status == "ACTUAL" else Decimal("0"))),
+            "unit_cost": float(round_money(unit_cost)),
+            "cost_status": cost_status,
+            "cost_source": cost_source,
+            "cost_date": cost_date,
+            "cost_notes": cost_notes,
+            "remaining_value": float(round_money(available_kg * unit_cost)),
         })
 
     return batch_balances
@@ -242,22 +290,29 @@ def resolve_packaging_batch_allocations(
                     f"Available: {float(avail):.3f} kg; Requested: {float(qty):.3f} kg."
                 )
 
-            cost_per_kg = to_decimal(batch_info["actual_cost_per_kg"])
-            if cost_per_kg <= Decimal("0"):
+            cost_status = batch_info.get("cost_status", "ACTUAL")
+            cost_source = batch_info.get("cost_source", "PRODUCTION_BATCH")
+            cost_date = batch_info.get("cost_date", "")
+            unit_cost = to_decimal(batch_info.get("unit_cost", 0) or batch_info.get("actual_cost_per_kg", 0))
+
+            if cost_status == "MISSING" or unit_cost <= Decimal("0"):
                 raise ValueError(
                     f"Production batch '{bid}' does not have an approved actual cost per kg. "
                     "Cannot package bulk stock with missing or unconfirmed cost."
                 )
 
-            line_cost = qty * cost_per_kg
+            line_cost = qty * unit_cost
             alloc_sum += qty
             total_cost += line_cost
 
             resolved.append({
                 "batch_id": bid,
                 "quantity_kg": float(round_stock(qty)),
-                "unit_cost_per_kg": float(round_money(cost_per_kg)),
+                "unit_cost_per_kg": float(round_money(unit_cost)),
                 "total_cost": float(round_money(line_cost)),
+                "cost_status": cost_status,
+                "cost_source": cost_source,
+                "cost_date": cost_date,
             })
 
         if abs(alloc_sum - req_kg) > Decimal("0.005"):
@@ -280,27 +335,40 @@ def resolve_packaging_batch_allocations(
                 break
             b_avail = to_decimal(b["available_kg"])
             take = min(needed, b_avail)
-            cost_per_kg = to_decimal(b["actual_cost_per_kg"])
-            if cost_per_kg <= Decimal("0"):
+            cost_status = b.get("cost_status", "ACTUAL")
+            cost_source = b.get("cost_source", "PRODUCTION_BATCH")
+            cost_date = b.get("cost_date", "")
+            unit_cost = to_decimal(b.get("unit_cost", 0) or b.get("actual_cost_per_kg", 0))
+
+            if cost_status == "MISSING" or unit_cost <= Decimal("0"):
                 try:
                     from .costing import get_authoritative_bulk_cost_per_kg
-                    cost_per_kg = get_authoritative_bulk_cost_per_kg(
+                    unit_cost = get_authoritative_bulk_cost_per_kg(
                         bulk_key_or_product_id=product_id_or_name,
                         production_batches=production_batches,
                         production_stock_ledger=ledger_records,
                     )
+                    cost_status = "ESTIMATED"
+                    cost_source = "RECIPE_FORMULA_ESTIMATE"
+                    from datetime import datetime, timezone
+                    cost_date = datetime.now(timezone.utc).isoformat()[:10]
                 except Exception:
-                    cost_per_kg = Decimal("0")
+                    unit_cost = Decimal("0")
+                    cost_status = "MISSING"
+                    cost_source = "NONE"
 
-            line_cost = take * cost_per_kg
+            line_cost = take * unit_cost
             total_cost += line_cost
             needed -= take
 
             resolved.append({
                 "batch_id": b["batch_id"],
                 "quantity_kg": float(round_stock(take)),
-                "unit_cost_per_kg": float(round_money(cost_per_kg)),
+                "unit_cost_per_kg": float(round_money(unit_cost)),
                 "total_cost": float(round_money(line_cost)),
+                "cost_status": cost_status,
+                "cost_source": cost_source,
+                "cost_date": cost_date,
             })
 
         if needed > Decimal("0.005"):
@@ -309,12 +377,16 @@ def resolve_packaging_batch_allocations(
             )
 
     eff_cost_per_kg = (total_cost / req_kg) if req_kg > Decimal("0") else Decimal("0")
+    has_estimated_cost = any(a.get("cost_status") == "ESTIMATED" for a in resolved)
+    overall_cost_status = "ESTIMATED" if has_estimated_cost else "ACTUAL"
 
     return {
         "status": "ALLOCATED",
         "total_bulk_kg": float(round_stock(req_kg)),
         "total_bulk_cost": float(round_money(total_cost)),
         "effective_bulk_cost_per_kg": float(round_money(eff_cost_per_kg)),
+        "cost_status": overall_cost_status,
+        "has_estimated_cost": has_estimated_cost,
         "allocations": resolved,
     }
 
@@ -322,15 +394,30 @@ def resolve_packaging_batch_allocations(
 def calculate_finished_stock_balance(
     ledger_records: List[Dict[str, Any]],
     product_id: Optional[str] = None,
+    packaging_batches: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, int]:
     """
     Calculate factory finished packet balances from ProductionStockLedger:
     Finished stock = sum(PACKETS_PACKAGED) + sum(PACKET_RETURN) - sum(CHANNEL_DISPATCH) + adjustments
+
+    Safety constraint:
+    Excludes any packet movements from INCOMPLETE, PENDING_REVIEW, or FAILED packaging batches.
     """
     balances: Dict[str, int] = {}
+    incomplete_pack_ids = set()
+    if packaging_batches:
+        for p in packaging_batches:
+            p_id = str(p.get("packaging_id", "")).strip()
+            p_st = str(p.get("status", "")).strip().upper()
+            if p_st in {"INCOMPLETE", "PENDING_REVIEW", "REJECTED", "FAILED"}:
+                incomplete_pack_ids.add(p_id)
 
     for row in ledger_records:
         typ = str(row.get("movement_type", "")).strip().upper()
+        ref_id = str(row.get("reference_id", "")).strip()
+        if ref_id in incomplete_pack_ids:
+            continue
+
         qty = int(float(row.get("quantity_packets", 0) or 0))
         pid = str(row.get("product_id", "")).strip()
         if not pid:
@@ -513,12 +600,14 @@ def calculate_consolidated_finished_goods_register(
     salesman_stock_ledger: List[Dict[str, Any]],
     users_master: Optional[List[Dict[str, Any]]] = None,
     sale_items_records: Optional[List[Dict[str, Any]]] = None,
+    packaging_batches: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Consolidated Finished Goods Stock Register.
     Calculates stock across all active packet SKUs and locations:
     Factory, Warehouse, Salesmen, Channels.
     Guarantees every active packet SKU is present (including 0 stock).
+    Excludes incomplete packaging batches from usable factory stock.
     """
     def _is_truthy(val: Any) -> bool:
         if isinstance(val, bool):
@@ -534,6 +623,14 @@ def calculate_consolidated_finished_goods_register(
             if uid:
                 users_map[uid] = name
 
+    incomplete_pack_ids = set()
+    if packaging_batches:
+        for p in packaging_batches:
+            p_id = str(p.get("packaging_id", "")).strip()
+            p_st = str(p.get("status", "")).strip().upper()
+            if p_st in {"INCOMPLETE", "PENDING_REVIEW", "REJECTED", "FAILED"}:
+                incomplete_pack_ids.add(p_id)
+
     # 1. Factory finished stock ledger calculations per product_id
     factory_packaged: Dict[str, int] = {}
     factory_returns: Dict[str, int] = {}
@@ -543,6 +640,10 @@ def calculate_consolidated_finished_goods_register(
     last_movements: Dict[str, str] = {}
 
     for row in production_stock_ledger:
+        ref_id = str(row.get("reference_id", "")).strip()
+        if ref_id in incomplete_pack_ids:
+            continue
+
         pid = str(row.get("product_id", "")).strip()
         if not pid:
             continue

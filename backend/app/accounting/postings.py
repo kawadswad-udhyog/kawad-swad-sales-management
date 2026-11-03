@@ -253,6 +253,7 @@ def post_packaging_batch_journal(
     packing_material_cost: Optional[Decimal] = None,
     packing_labor_cost: Optional[Decimal] = None,
     actor: str = "SYSTEM",
+    require_actual_cost: bool = False,
 ) -> Dict[str, Any]:
     """
     Packaging Conversion:
@@ -260,11 +261,34 @@ def post_packaging_batch_journal(
     Credit: Work-in-Progress / Bulk Papad (1230)
     Credit: Packaging Materials Inventory (1250)
     Credit: Wages Payable (2120)
+
+    Enforces strict segregation between ACTUAL and ESTIMATED valuations:
+    - If require_actual_cost is True and any batch cost is ESTIMATED, raises ValueError.
+    - If ESTIMATED costs are used operationally, the voucher is tagged as PROVISIONAL
+      and recorded in IncompleteTransactions for audit and Owner review.
     """
     pack_id = str(pack_data.get("packaging_id", "") or pack_data.get("packaging_batch_id", "")).strip()
     tot_packets = int(float(pack_data.get("total_packets", 0) or pack_data.get("packet_count", 0) or 0))
     p_name = str(pack_data.get("product_name_snapshot", "Papad"))
     bulk_kg = to_decimal(pack_data.get("bulk_kg_used", 0) or 0)
+
+    # Detect estimated cost status
+    is_estimated = (
+        str(pack_data.get("cost_status", "")).strip().upper() == "ESTIMATED"
+        or bool(pack_data.get("has_estimated_cost"))
+    )
+    if not is_estimated and pack_data.get("batch_allocations_json"):
+        try:
+            import json
+            allocs = json.loads(str(pack_data["batch_allocations_json"]))
+            if isinstance(allocs, list):
+                if any(str(a.get("cost_status", "")).strip().upper() == "ESTIMATED" for a in allocs):
+                    is_estimated = True
+        except Exception:
+            pass
+
+    if require_actual_cost and is_estimated:
+        raise ValueError(f"Estimated cost rejected for actual-cost accounting. Authoritative actual cost required for packaging {pack_id}.")
 
     # Dynamically resolve bulk cost if omitted
     if bulk_cost is None:
@@ -309,6 +333,9 @@ def post_packaging_batch_journal(
             rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
             bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(p_name, batches, recipes, stock_ledger, rm_master)
             bulk_cost = bulk_kg * bulk_cost_per_kg
+            is_estimated = True
+            if require_actual_cost:
+                raise ValueError(f"Estimated cost rejected for actual-cost accounting. Authoritative actual cost required for packaging {pack_id}.")
 
     if packing_material_cost is None:
         packing_material_cost = to_decimal(pack_data.get("packaging_material_cost") or pack_data.get("packing_material_cost") or 0)
@@ -323,16 +350,21 @@ def post_packaging_batch_journal(
     if r_finished <= Decimal("0"):
         raise ValueError(f"Cannot post packaging batch journal for {pack_id}: Total finished valuation is ₹0.00.")
 
+    bulk_note = f"Bulk papad consumed: {bulk_kg} kg [ESTIMATED_VALUATION]" if is_estimated else f"Bulk papad consumed: {bulk_kg} kg"
+    finished_note = f"Finished packet addition (PROVISIONAL): {tot_packets} packets of {p_name}" if is_estimated else f"Finished packet addition: {tot_packets} packets of {p_name}"
+    voucher_type = "PROVISIONAL_MANUFACTURING" if is_estimated else "MANUFACTURING"
+    narration_prefix = "[PROVISIONAL_ESTIMATED_VALUATION] " if is_estimated else ""
+
     lines = [
         {
             "account_code": "1240",
             "debit_amount": r_finished,
-            "notes": f"Finished packet addition: {tot_packets} packets of {p_name}",
+            "notes": finished_note,
         },
         {
             "account_code": "1230",
             "credit_amount": r_bulk,
-            "notes": f"Bulk papad consumed: {bulk_kg} kg",
+            "notes": bulk_note,
         },
     ]
 
@@ -350,15 +382,37 @@ def post_packaging_batch_journal(
             "notes": "Direct packaging and sealing labor",
         })
 
-    return post_journal_voucher(
-        voucher_type="MANUFACTURING",
+    res = post_journal_voucher(
+        voucher_type=voucher_type,
         reference_type="PACKAGING_BATCH",
         reference_id=pack_id,
-        narration=f"Packaging conversion: {bulk_kg} kg Bulk -> {tot_packets} Packets {p_name}",
+        narration=f"{narration_prefix}Packaging conversion: {bulk_kg} kg Bulk -> {tot_packets} Packets {p_name}",
         lines=lines,
         posted_by=actor,
         journal_date=str(pack_data.get("packaging_date", "")).strip() or None,
     )
+
+    if is_estimated:
+        try:
+            from app.sheets import db
+            from app.time_utils import now
+            from app.id_generator import make_id
+            db.append_record("IncompleteTransactions", {
+                "transaction_id": make_id("IncompleteTransactions"),
+                "transaction_type": "ESTIMATED_COST_REVIEW_REQUIRED",
+                "idempotency_key": f"acct-est-pack-{pack_id}",
+                "status": "PENDING_REVIEW",
+                "payload_json": json.dumps({"packaging_id": pack_id, "bulk_cost": float(r_bulk), "valuation_status": "ESTIMATED"}),
+                "error_details": "Voucher posted with provisional estimated rates. Requires Owner actual cost confirmation.",
+                "created_at": now(),
+                "updated_at": now(),
+                "resolved_by": "",
+                "resolved_at": "",
+            })
+        except Exception:
+            pass
+
+    return res
 
 
 def post_sale_journal(
