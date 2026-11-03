@@ -110,93 +110,10 @@ var CANONICAL_WORKFORCE_SCHEMAS = {
   ]
 };
 
-// 2. KNOWN PROVISIONAL ALIASES (Mapped Old Header -> Canonical Target Header)
-var WORKFORCE_HEADER_ALIASES = {
-  "EmployeeDocuments": {
-    "employee_id": "user_id",
-    "document_name": "title",
-    "document_url": "file_url",
-    "status": "verification_status"
-  },
-  "EmployeeAttendance": {
-    "date": "attendance_date",
-    "in_time": "check_in_time",
-    "out_time": "check_out_time",
-    "hours_worked": "total_hours"
-  },
-  "WorkAssignments": {
-    "assigned_to": "assigned_to_user_id",
-    "task_name": "title",
-    "proof_link": "proof_url"
-  },
-  "WorkActivityLogs": {
-    "employee_id": "user_id",
-    "date": "activity_date"
-  },
-  "SalaryStructures": {
-    "employee_id": "user_id",
-    "basic": "basic_salary",
-    "special": "special_allowance",
-    "pf": "pf_deduction",
-    "tds": "tds_deduction"
-  },
-  "PayrollRuns": {
-    "payroll_id": "payroll_run_id",
-    "period": "month"
-  },
-  "PayrollItems": {
-    "employee_id": "user_id",
-    "payroll_id": "payroll_run_id",
-    "gross_salary": "gross_amount",
-    "net_salary": "net_amount",
-    "incentive": "incentive_amount",
-    "bonus": "bonus_amount"
-  },
-  "FreelancerProjects": {
-    "freelancer_id": "freelancer_user_id",
-    "budget": "total_budget",
-    "completion_date": "target_completion_date"
-  },
-  "FreelancerMilestones": {
-    "milestone_name": "title"
-  },
-  "LabourMaster": {
-    "worker_id": "labour_id",
-    "name": "full_name",
-    "worker_name": "full_name",
-    "daily_wage": "base_rate"
-  },
-  "LabourAttendance": {
-    "worker_id": "labour_id",
-    "worker_name": "labour_name",
-    "date": "attendance_date"
-  },
-  "LabourWorkEntries": {
-    "worker_id": "labour_id",
-    "worker_name": "labour_name",
-    "activity": "activity_name",
-    "quantity": "units_completed",
-    "unit": "unit_of_measure",
-    "amount": "total_amount"
-  },
-  "LabourWageRecords": {
-    "worker_id": "labour_id",
-    "worker_name": "labour_name",
-    "net_wage": "net_payable"
-  },
-  "WorkforcePayments": {
-    "pay_id": "payment_id",
-    "recipient_type": "payment_type",
-    "date": "payment_date"
-  },
-  "SalaryReceipts": {
-    "date": "payment_date"
-  },
-  "WorkforceAuditLogs": {
-    "user_id": "actor_id",
-    "timestamp": "created_at"
-  }
-};
+// 2. KNOWN PROVISIONAL ALIASES
+// In strict additive reconciliation, provisional aliases are NOT remapped over canonical columns.
+// All existing non-canonical columns are preserved 100% intact as trailing extra columns.
+var WORKFORCE_HEADER_ALIASES = {};
 
 // Protected Core Sheets - STRICTLY FORBIDDEN from being modified by this script
 var PROTECTED_CORE_SHEETS = [
