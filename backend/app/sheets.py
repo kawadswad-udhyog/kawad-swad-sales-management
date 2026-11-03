@@ -65,6 +65,22 @@ ID_PREFIXES = {
     "ProductLots": "LOT",
     "LotMovements": "LMV",
     "ComplaintsRecalls": "CMP",
+    "EmployeeDocuments": "EDOC",
+    "EmployeeAttendance": "EATT",
+    "WorkAssignments": "TSK",
+    "WorkActivityLogs": "ACT",
+    "SalaryStructures": "SST",
+    "PayrollRuns": "PRUN",
+    "PayrollItems": "PITM",
+    "FreelancerProjects": "FPJ",
+    "FreelancerMilestones": "FMS",
+    "LabourMaster": "LBR",
+    "LabourAttendance": "LATT",
+    "LabourWorkEntries": "LWK",
+    "LabourWageRecords": "LWR",
+    "WorkforcePayments": "WPAY",
+    "SalaryReceipts": "RCPT",
+    "WorkforceAuditLogs": "WAUD",
 }
 
 REQUIRED_TABS = {
@@ -77,7 +93,12 @@ REQUIRED_TABS = {
     "RevokedTokens": ["token_id", "jti", "user_id", "revoked_at", "expires_at", "reason"],
     "ApprovalRequests": ["request_id", "request_type", "target_user_id", "requested_by", "requested_by_name", "requested_at", "payload_json", "status", "decided_by", "decided_at", "decision_notes", "execution_error", "executed_at"],
     "AuthUsers": ["auth_id", "user_id", "username", "password_hash", "role", "active", "created_at", "must_change_password", "sessions_revoked_at"],
-    "Users": ["user_id", "full_name", "username", "role", "mobile", "email", "active", "created_at", "notes"],
+    "Users": [
+        "user_id", "full_name", "username", "role", "mobile", "email", "active", "created_at", "notes",
+        "employment_type", "designation", "department", "reporting_manager_id", "joining_date",
+        "employment_status", "salary_frequency", "salary_structure_id", "address", "emergency_contact",
+        "bank_details", "document_references", "updated_at", "created_by", "effective_from", "effective_to",
+    ],
     "Products": ["product_id", "sku", "product_name", "category", "variant", "pack_weight_g", "selling_unit", "retail_pack_only", "active", "notes"],
     "Customers": ["customer_id", "customer_type", "shop_name", "shopkeeper_name", "mobile", "alternate_mobile", "address", "locality_area", "city", "gstin", "map_location", "active", "created_at"],
     "Sales": [
@@ -255,6 +276,54 @@ REQUIRED_TABS = {
         "complaint_id", "report_date", "report_type", "customer_id", "customer_name",
         "product_id", "lot_id", "quantity_affected", "severity", "status", "description",
         "investigation", "corrective_action", "responsible_user_id", "closure_date", "created_at", "notes",
+    ],
+    "EmployeeDocuments": [
+        "doc_id", "user_id", "document_type", "title", "file_url", "verification_status", "verified_by", "verified_at", "expiry_date", "notes", "created_at",
+    ],
+    "EmployeeAttendance": [
+        "attendance_id", "employee_id", "employee_name", "attendance_date", "check_in_time", "check_out_time", "total_hours", "status", "notes", "verified_by", "created_at",
+    ],
+    "WorkAssignments": [
+        "task_id", "title", "description", "assigned_to_user_id", "assigned_to_name", "role", "priority", "status", "due_date", "created_by", "submission_notes", "proof_url", "review_notes", "created_at", "completed_at",
+    ],
+    "WorkActivityLogs": [
+        "activity_id", "user_id", "activity_date", "activity_type", "description", "hours_spent", "task_id", "created_at",
+    ],
+    "SalaryStructures": [
+        "structure_id", "user_id", "basic_salary", "hra", "transport_allowance", "special_allowance", "sales_commission_rate", "pf_deduction", "tds_deduction", "other_deductions", "payment_mode", "effective_from", "notes", "created_at",
+    ],
+    "PayrollRuns": [
+        "payroll_run_id", "month", "run_date", "total_employees", "total_gross", "total_deductions", "total_net", "status", "created_by", "approved_by", "notes", "created_at",
+    ],
+    "PayrollItems": [
+        "item_id", "payroll_run_id", "user_id", "employee_name", "role", "base_salary", "working_days", "present_days", "earned_basic", "allowances", "incentive_amount", "bonus_amount", "deductions", "adjustment_amount", "gross_amount", "net_amount", "payment_status", "payment_id", "notes",
+    ],
+    "FreelancerProjects": [
+        "project_id", "title", "description", "freelancer_user_id", "freelancer_name", "total_budget", "currency", "start_date", "target_completion_date", "status", "deliverables_summary", "notes", "created_at",
+    ],
+    "FreelancerMilestones": [
+        "milestone_id", "project_id", "title", "description", "amount", "due_date", "status", "submission_notes", "submission_link", "review_notes", "approved_at", "payment_id", "created_at",
+    ],
+    "LabourMaster": [
+        "labour_id", "full_name", "category", "wage_type", "base_rate", "daily_expected_hours", "mobile", "emergency_contact", "address", "bank_account_no", "bank_ifsc", "active", "notes", "created_at",
+    ],
+    "LabourAttendance": [
+        "attendance_id", "labour_id", "labour_name", "attendance_date", "status", "hours_worked", "overtime_hours", "wage_type", "daily_rate", "earned_wage", "verified_by", "notes", "created_at",
+    ],
+    "LabourWorkEntries": [
+        "entry_id", "labour_id", "labour_name", "entry_date", "category", "activity_name", "batch_id", "units_completed", "unit_of_measure", "piece_rate", "total_amount", "hours_logged", "approved_by", "notes", "created_at",
+    ],
+    "LabourWageRecords": [
+        "wage_record_id", "labour_id", "labour_name", "period_start", "period_end", "work_days", "total_hours", "piece_work_total", "gross_wage", "advances_deducted", "net_payable", "paid_amount", "payment_status", "paid_at", "payment_reference", "receipt_id", "status", "notes", "created_at",
+    ],
+    "WorkforcePayments": [
+        "payment_id", "reference_id", "payment_type", "recipient_id", "recipient_name", "amount", "payment_method", "payment_reference", "payment_date", "bank_account_credited", "recorded_by", "accounting_journal_ref", "notes", "created_at",
+    ],
+    "SalaryReceipts": [
+        "receipt_id", "receipt_number", "payment_id", "recipient_id", "recipient_name", "recipient_type", "role_or_category", "period_start", "period_end", "payment_date", "payment_method", "payment_reference", "gross_earnings", "total_deductions", "net_paid", "notes", "created_at",
+    ],
+    "WorkforceAuditLogs": [
+        "audit_id", "action", "entity_type", "entity_id", "actor_id", "details", "created_at",
     ],
 }
 
@@ -539,6 +608,8 @@ class SheetsDatabase:
         logger.warning("Error reading %s from sheet: %s", tab_name, last_exc)
         raise RuntimeError(f"Could not read {tab_name} from Google Sheets.") from last_exc
 
+    get_all_records = get_records
+
     def append_record(self, tab_name: str, record: Dict[str, Any], raise_on_error: bool = False) -> bool:
         self._invalidate_records_cache(tab_name)
         failures = self._fail_once.get(tab_name, 0)
@@ -720,6 +791,10 @@ class SheetsDatabase:
             if claims and str(claims[0].get("nonce")) == nonce:
                 return candidate
         raise RuntimeError(f"Could not allocate a unique id for {tab_name}.")
+
+    def get_next_id(self, tab_name: str) -> str:
+        """Alias for generate_id for backwards and modular compatibility."""
+        return self.generate_id(tab_name)
 
     def allocate_bill_number(self) -> str:
         from app.timeutil import business_month

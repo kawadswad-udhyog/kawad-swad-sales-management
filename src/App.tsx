@@ -22,6 +22,8 @@ import { ApprovalsView } from './views/ApprovalsView';
 import { AccountingView } from './views/AccountingView';
 import { PurchasingView } from './views/PurchasingView';
 import { QualityView } from './views/QualityView';
+import { WorkforceView } from './views/WorkforceView';
+import { EmployeePortal } from './employee/EmployeePortal';
 import { AlertTriangle, AlertCircle, RefreshCw, X, ShieldAlert } from 'lucide-react';
 
 
@@ -49,6 +51,7 @@ const MainAppContent: React.FC = () => {
   });
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [isPreviewingEmployeePortal, setIsPreviewingEmployeePortal] = useState(false);
 
   const handleSelectView = (v: ViewType) => {
     setCurrentView(v);
@@ -86,6 +89,25 @@ const MainAppContent: React.FC = () => {
     );
   }
 
+  // Route to Dedicated Employee Portal if employee-only role or Owner previewing
+  const role = String(currentUser?.role || '').toUpperCase();
+  const isEmployeeOnlyRole = [
+    'FREELANCER',
+    'ACCOUNTANT',
+    'SOCIAL_MEDIA_ECOMMERCE_MANAGER',
+    'SOCIAL_MEDIA_MANAGER',
+    'ECOMMERCE_MANAGER',
+  ].includes(role);
+
+  if (isEmployeeOnlyRole || isPreviewingEmployeePortal) {
+    return (
+      <EmployeePortal
+        isOwnerPreviewing={isPreviewingEmployeePortal}
+        onExitPreview={() => setIsPreviewingEmployeePortal(false)}
+      />
+    );
+  }
+
   const renderView = () => {
     switch (currentView) {
       case 'dashboard':
@@ -118,6 +140,8 @@ const MainAppContent: React.FC = () => {
         return <ClosingView />;
       case 'salary':
         return <SalaryView />;
+      case 'workforce':
+        return <WorkforceView onPreviewEmployeePortal={() => setIsPreviewingEmployeePortal(true)} />;
       case 'reports':
         return <ReportsView />;
       case 'accounting':

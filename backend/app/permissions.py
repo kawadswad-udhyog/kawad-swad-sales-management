@@ -5,6 +5,10 @@ OWNERS = {"OWNER", "OWNER_ADMIN", "ADMIN"}
 MANAGERS = OWNERS | {"PA"}
 SALESMEN = {"SALESMAN", "FIELD_SALESMAN"}
 FACTORY_WORKERS = {"FACTORY_WORKER", "PRODUCTION_WORKER", "WORKER"}
+EMPLOYEE_ROLES = {
+    "SALESMAN", "FIELD_SALESMAN", "FREELANCER", "PA", "PERSONAL_ASSISTANT",
+    "ACCOUNTANT", "SOCIAL_MEDIA_ECOMMERCE_MANAGER", "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"
+}
 
 CANONICAL_ROLE_MAP: Dict[str, str] = {
     "OWNER": "OWNER",
@@ -14,6 +18,11 @@ CANONICAL_ROLE_MAP: Dict[str, str] = {
     "PERSONAL_ASSISTANT": "PA",
     "SALESMAN": "SALESMAN",
     "FIELD_SALESMAN": "SALESMAN",
+    "FREELANCER": "FREELANCER",
+    "ACCOUNTANT": "ACCOUNTANT",
+    "SOCIAL_MEDIA_ECOMMERCE_MANAGER": "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
+    "SOCIAL_MEDIA_MANAGER": "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
+    "ECOMMERCE_MANAGER": "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
     "FACTORY_WORKER": "FACTORY_WORKER",
     "PRODUCTION_WORKER": "FACTORY_WORKER",
     "WORKER": "FACTORY_WORKER",
@@ -28,6 +37,8 @@ OWNER_ONLY_PERMISSIONS: Set[Tuple[str, str]] = {
     ("users", "manage_roles"),
     ("users", "create_owner"),
     ("approvals", "decide"),
+    ("workforce", "approve_payroll"),
+    ("workforce", "modify_salary_structures"),
 }
 
 DEFAULT_ROLE_PERMISSIONS: Dict[str, Dict[str, List[str]]] = {
@@ -40,6 +51,7 @@ DEFAULT_ROLE_PERMISSIONS: Dict[str, Dict[str, List[str]]] = {
         "users": ["view", "create", "update", "deactivate", "reset_password", "manage_roles"],
         "approvals": ["view", "decide"],
         "expenses": ["view", "create", "approve"],
+        "workforce": ["view", "create", "update", "deactivate", "manage_tasks", "manage_labour", "manage_salary", "approve_payroll", "record_payment", "view_reports"],
     },
     "PA": {
         "sales": ["view", "create", "export"],
@@ -50,12 +62,26 @@ DEFAULT_ROLE_PERMISSIONS: Dict[str, Dict[str, List[str]]] = {
         "users": ["view", "request_create", "request_update", "request_deactivate", "request_reset_password"],
         "approvals": ["view"],
         "expenses": ["view", "create"],
+        "workforce": ["view_own_tasks", "update_own_tasks", "manage_tasks_assigned", "view_directory", "view_labour"],
     },
     "SALESMAN": {
         "sales": ["view", "create"],
         "inventory": ["view_own"],
-        "attendance": [],
+        "attendance": ["view_own", "check_in", "check_out"],
         "expenses": ["view_own", "create"],
+        "employee_portal": ["view_dashboard", "view_own_tasks", "update_own_tasks", "view_own_profile", "view_own_salary", "view_own_receipts"],
+    },
+    "FREELANCER": {
+        "employee_portal": ["view_dashboard", "view_own_projects", "view_own_tasks", "update_own_tasks", "submit_work", "view_own_profile", "view_own_receipts"],
+    },
+    "ACCOUNTANT": {
+        "accounting": ["view", "create_vouchers", "reconcile_read"],
+        "sales": ["view"],
+        "expenses": ["view", "create"],
+        "employee_portal": ["view_dashboard", "view_own_tasks", "update_own_tasks", "view_own_profile", "view_own_salary", "view_own_receipts"],
+    },
+    "SOCIAL_MEDIA_ECOMMERCE_MANAGER": {
+        "employee_portal": ["view_dashboard", "view_own_tasks", "update_own_tasks", "submit_work", "view_own_profile", "view_own_salary", "view_own_receipts"],
     },
     "FACTORY_WORKER": {
         "production": ["view"],
@@ -186,5 +212,36 @@ def ui_role(role: str) -> str:
         return "SALESMAN"
     if value in FACTORY_WORKERS:
         return "FACTORY_WORKER"
+    if value in {"FREELANCER"}:
+        return "FREELANCER"
+    if value in {"ACCOUNTANT"}:
+        return "ACCOUNTANT"
+    if value in {"SOCIAL_MEDIA_ECOMMERCE_MANAGER", "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"}:
+        return "SOCIAL_MEDIA_ECOMMERCE_MANAGER"
     return CANONICAL_ROLE_MAP.get(value, value or "SALESMAN")
+
+
+def is_employee(user: dict) -> bool:
+    return role_of(user) in EMPLOYEE_ROLES or raw_role_of(user) in EMPLOYEE_ROLES
+
+
+def is_freelancer(user: dict) -> bool:
+    return role_of(user) == "FREELANCER"
+
+
+def is_accountant(user: dict) -> bool:
+    return role_of(user) == "ACCOUNTANT"
+
+
+def is_social_media_manager(user: dict) -> bool:
+    return role_of(user) == "SOCIAL_MEDIA_ECOMMERCE_MANAGER"
+
+
+def portal_experience_for(user: dict) -> str:
+    if is_owner(user):
+        return "OWNER"
+    c_role = role_of(user)
+    if c_role in EMPLOYEE_ROLES:
+        return c_role
+    return "EMPLOYEE"
 

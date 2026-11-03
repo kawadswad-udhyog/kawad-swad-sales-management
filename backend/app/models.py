@@ -35,6 +35,17 @@ class UserProfile(BaseModel):
     role: str
     mobile: Optional[str] = ""
     email: Optional[str] = ""
+    employment_type: Optional[str] = "SALARIED"
+    designation: Optional[str] = ""
+    department: Optional[str] = ""
+    reporting_manager_id: Optional[str] = ""
+    joining_date: Optional[str] = ""
+    employment_status: Optional[str] = "ACTIVE"
+    salary_frequency: Optional[str] = "MONTHLY"
+    salary_structure_id: Optional[str] = ""
+    address: Optional[str] = ""
+    emergency_contact: Optional[str] = ""
+    bank_details: Optional[str] = ""
     active: bool = True
     created_at: Optional[str] = ""
     notes: Optional[str] = ""
@@ -45,6 +56,17 @@ class UserCreate(BaseModel):
     role: str = "SALESMAN"
     mobile: Optional[str] = ""
     email: Optional[str] = ""
+    employment_type: Optional[str] = "SALARIED"
+    designation: Optional[str] = ""
+    department: Optional[str] = ""
+    reporting_manager_id: Optional[str] = ""
+    joining_date: Optional[str] = ""
+    employment_status: Optional[str] = "ACTIVE"
+    salary_frequency: Optional[str] = "MONTHLY"
+    salary_structure_id: Optional[str] = ""
+    address: Optional[str] = ""
+    emergency_contact: Optional[str] = ""
+    bank_details: Optional[str] = ""
     notes: Optional[str] = ""
     password: Optional[str] = ""
 
@@ -53,6 +75,17 @@ class UserUpdate(BaseModel):
     role: Optional[str] = None
     mobile: Optional[str] = None
     email: Optional[str] = None
+    employment_type: Optional[str] = None
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    reporting_manager_id: Optional[str] = None
+    joining_date: Optional[str] = None
+    employment_status: Optional[str] = None
+    salary_frequency: Optional[str] = None
+    salary_structure_id: Optional[str] = None
+    address: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    bank_details: Optional[str] = None
     notes: Optional[str] = None
 
 class UserStatusUpdate(BaseModel):
@@ -488,4 +521,256 @@ class DashboardMetrics(BaseModel):
     salesman_user_id: Optional[str] = None
 
 
+# ============================================================================
+# WORKFORCE, LABOUR, PAYROLL & TASK MODELS
+# ============================================================================
 
+class EmployeeAttendanceRecord(BaseModel):
+    attendance_id: Optional[str] = ""
+    employee_id: str
+    employee_name: Optional[str] = ""
+    attendance_date: str
+    check_in_time: Optional[str] = ""
+    check_out_time: Optional[str] = ""
+    total_hours: float = 0.0
+    status: str = "PRESENT"
+    notes: Optional[str] = ""
+    verified_by: Optional[str] = ""
+    created_at: Optional[str] = ""
+
+class EmployeeAttendanceCheckIn(BaseModel):
+    notes: Optional[str] = ""
+
+class EmployeeAttendanceCheckOut(BaseModel):
+    notes: Optional[str] = ""
+
+class WorkAssignmentModel(BaseModel):
+    task_id: Optional[str] = ""
+    title: str
+    description: Optional[str] = ""
+    assigned_to_user_id: str
+    assigned_to_name: Optional[str] = ""
+    role: Optional[str] = ""
+    priority: str = "MEDIUM"
+    status: str = "PENDING"
+    due_date: Optional[str] = ""
+    created_by: Optional[str] = ""
+    submission_notes: Optional[str] = ""
+    proof_url: Optional[str] = ""
+    review_notes: Optional[str] = ""
+    created_at: Optional[str] = ""
+    completed_at: Optional[str] = ""
+
+class WorkAssignmentCreate(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    assigned_to_user_id: str
+    role: Optional[str] = ""
+    priority: str = "MEDIUM"
+    due_date: Optional[str] = ""
+
+class WorkAssignmentUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    due_date: Optional[str] = None
+
+class WorkAssignmentSubmit(BaseModel):
+    submission_notes: str
+    proof_url: Optional[str] = ""
+
+class WorkAssignmentReview(BaseModel):
+    status: str
+    review_notes: Optional[str] = ""
+
+class FreelancerProjectModel(BaseModel):
+    project_id: Optional[str] = ""
+    title: str
+    description: Optional[str] = ""
+    freelancer_user_id: str
+    freelancer_name: Optional[str] = ""
+    total_budget: float = 0.0
+    currency: str = "INR"
+    start_date: Optional[str] = ""
+    target_completion_date: Optional[str] = ""
+    status: str = "IN_PROGRESS"
+    deliverables_summary: Optional[str] = ""
+    notes: Optional[str] = ""
+    created_at: Optional[str] = ""
+
+class FreelancerProjectCreate(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    freelancer_user_id: str
+    total_budget: float = 0.0
+    start_date: Optional[str] = ""
+    target_completion_date: Optional[str] = ""
+    deliverables_summary: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class FreelancerMilestoneModel(BaseModel):
+    milestone_id: Optional[str] = ""
+    project_id: str
+    title: str
+    description: Optional[str] = ""
+    amount: float = 0.0
+    due_date: Optional[str] = ""
+    status: str = "PENDING"
+    submission_notes: Optional[str] = ""
+    submission_link: Optional[str] = ""
+    review_notes: Optional[str] = ""
+    approved_at: Optional[str] = ""
+    created_at: Optional[str] = ""
+
+class FreelancerMilestoneCreate(BaseModel):
+    project_id: str
+    title: str
+    description: Optional[str] = ""
+    amount: float
+    due_date: Optional[str] = ""
+
+class FreelancerMilestoneSubmit(BaseModel):
+    submission_notes: str
+    submission_link: Optional[str] = ""
+
+class FreelancerMilestoneReview(BaseModel):
+    status: str
+    review_notes: Optional[str] = ""
+
+class LabourMasterModel(BaseModel):
+    labour_id: Optional[str] = ""
+    full_name: str
+    category: str = "GENERAL"
+    wage_type: str = "DAILY"
+    base_rate: float = 0.0
+    daily_expected_hours: float = 8.0
+    mobile: Optional[str] = ""
+    emergency_contact: Optional[str] = ""
+    address: Optional[str] = ""
+    bank_account_no: Optional[str] = ""
+    bank_ifsc: Optional[str] = ""
+    active: bool = True
+    notes: Optional[str] = ""
+    created_at: Optional[str] = ""
+
+class LabourCreate(BaseModel):
+    full_name: str
+    category: str = "GENERAL"
+    wage_type: str = "DAILY"
+    base_rate: float = 0.0
+    daily_expected_hours: float = 8.0
+    mobile: Optional[str] = ""
+    emergency_contact: Optional[str] = ""
+    address: Optional[str] = ""
+    bank_account_no: Optional[str] = ""
+    bank_ifsc: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class LabourUpdate(BaseModel):
+    full_name: Optional[str] = None
+    category: Optional[str] = None
+    wage_type: Optional[str] = None
+    base_rate: Optional[float] = None
+    daily_expected_hours: Optional[float] = None
+    mobile: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    address: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    bank_ifsc: Optional[str] = None
+    active: Optional[bool] = None
+    notes: Optional[str] = None
+
+class LabourAttendanceItem(BaseModel):
+    labour_id: str
+    attendance_date: str
+    status: str = "PRESENT"
+    hours_worked: float = 8.0
+    overtime_hours: float = 0.0
+    notes: Optional[str] = ""
+
+class LabourAttendanceBulk(BaseModel):
+    attendance_date: str
+    records: List[LabourAttendanceItem]
+
+class LabourWorkEntryCreate(BaseModel):
+    labour_id: str
+    entry_date: str
+    category: Optional[str] = ""
+    activity_name: str
+    batch_id: Optional[str] = ""
+    units_completed: float = 0.0
+    unit_of_measure: str = "KG"
+    piece_rate: float = 0.0
+    hours_logged: float = 0.0
+    notes: Optional[str] = ""
+
+class SalaryStructureModel(BaseModel):
+    structure_id: Optional[str] = ""
+    user_id: str
+    basic_salary: float = 0.0
+    hra: float = 0.0
+    transport_allowance: float = 0.0
+    special_allowance: float = 0.0
+    sales_commission_rate: float = 0.0
+    pf_deduction: float = 0.0
+    tds_deduction: float = 0.0
+    other_deductions: float = 0.0
+    payment_mode: str = "BANK_TRANSFER"
+    effective_from: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class SalaryStructureCreate(BaseModel):
+    user_id: str
+    basic_salary: float = 0.0
+    hra: float = 0.0
+    transport_allowance: float = 0.0
+    special_allowance: float = 0.0
+    sales_commission_rate: float = 0.0
+    pf_deduction: float = 0.0
+    tds_deduction: float = 0.0
+    other_deductions: float = 0.0
+    payment_mode: str = "BANK_TRANSFER"
+    effective_from: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class PayrollRunCreate(BaseModel):
+    month: str  # YYYY-MM
+    run_date: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class PayrollItemUpdate(BaseModel):
+    deductions: Optional[float] = None
+    incentive_amount: Optional[float] = None
+    bonus_amount: Optional[float] = None
+    adjustment_amount: Optional[float] = None
+    notes: Optional[str] = None
+
+class WorkforcePaymentCreate(BaseModel):
+    reference_id: str
+    payment_type: str  # SALARY, LABOUR_WAGE, FREELANCER_MILESTONE, INCENTIVE
+    recipient_id: str
+    recipient_name: str
+    amount: float
+    payment_method: str = "BANK_TRANSFER"
+    payment_reference: Optional[str] = ""
+    payment_date: Optional[str] = ""
+    bank_account_credited: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class SalaryReceiptModel(BaseModel):
+    receipt_id: str
+    receipt_number: str
+    recipient_id: str
+    recipient_name: str
+    recipient_type: str
+    role_or_category: str
+    period_start: str
+    period_end: str
+    payment_date: str
+    payment_method: str
+    payment_reference: str
+    gross_earnings: float
+    total_deductions: float
+    net_paid: float
+    notes: str

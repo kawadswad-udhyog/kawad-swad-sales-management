@@ -165,6 +165,30 @@ export function constructApiUrl(
   }
 }
 
+/**
+ * Shared fetch helper ensuring all API calls respect the configured API Base URL
+ * and inject standard authentication headers.
+ */
+export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const baseUrl = getApiBaseUrl();
+  const token = getAuthToken();
+  const { targetUrl } = constructApiUrl(baseUrl, path);
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((options.headers as Record<string, string>) || {}),
+  };
+
+  if (token && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  return fetch(targetUrl, {
+    ...options,
+    headers,
+  });
+}
+
 export class ApiHttpError extends Error {
   status: number;
   category: ApiFailureCategory;

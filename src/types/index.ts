@@ -1,4 +1,17 @@
-export type UserRole = 'OWNER' | 'PA' | 'SALESMAN';
+export type UserRole =
+  | 'OWNER'
+  | 'OWNER_ADMIN'
+  | 'ADMIN'
+  | 'PA'
+  | 'PERSONAL_ASSISTANT'
+  | 'SALESMAN'
+  | 'FIELD_SALESMAN'
+  | 'FREELANCER'
+  | 'ACCOUNTANT'
+  | 'SOCIAL_MEDIA_ECOMMERCE_MANAGER'
+  | 'SOCIAL_MEDIA_MANAGER'
+  | 'ECOMMERCE_MANAGER'
+  | string;
 
 export interface User {
   user_id: string;
@@ -7,6 +20,17 @@ export interface User {
   role: UserRole;
   mobile: string;
   email: string;
+  employment_type?: string;
+  designation?: string;
+  department?: string;
+  reporting_manager_id?: string;
+  joining_date?: string;
+  employment_status?: string;
+  salary_frequency?: string;
+  salary_structure_id?: string;
+  address?: string;
+  emergency_contact?: string;
+  bank_details?: string;
   active: boolean;
   created_at: string;
   notes: string;

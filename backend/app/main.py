@@ -34,6 +34,7 @@ from app.routers import (
     accounting,
     purchasing,
     quality,
+    workforce,
 )
 
 
@@ -104,6 +105,7 @@ app.include_router(workspace.router)
 app.include_router(accounting.router)
 app.include_router(purchasing.router)
 app.include_router(quality.router)
+app.include_router(workforce.router)
 
 
 @app.on_event("startup")

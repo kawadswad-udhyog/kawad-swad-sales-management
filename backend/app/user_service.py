@@ -123,7 +123,9 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
 VALID_ROLES = {
     "OWNER", "OWNER_ADMIN", "ADMIN", "PA", "PERSONAL_ASSISTANT",
     "SALESMAN", "FIELD_SALESMAN", "PRODUCTION", "DISPATCH",
-    "FACTORY_WORKER", "PRODUCTION_WORKER", "WORKER"
+    "FACTORY_WORKER", "PRODUCTION_WORKER", "WORKER",
+    "FREELANCER", "ACCOUNTANT", "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
+    "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"
 }
 VALID_BOOLEANS = {"true", "false", "1", "0", "yes", "no"}
 PLACEHOLDER_NAMES = {"your full name", "test user", "placeholder", "dummy", "admin", "owner", ""}

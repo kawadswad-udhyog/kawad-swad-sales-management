@@ -832,3 +832,80 @@ def post_customer_return_journal(
         journal_date=str(return_data.get("return_date", ""))[:10] or None,
     )
 
+
+def post_workforce_payment_journal(
+    payment_data: Dict[str, Any],
+    actor: str = "SYSTEM",
+) -> Dict[str, Any]:
+    """
+    Workforce Disbursement Entry:
+    1. Factory Labour Wage (LABOUR_WAGE):
+       Debit: 2120 (Accrued Factory Labor & Wages Payable) - Clears accrued manufacturing liability, avoids double counting.
+       Credit: 1110 (Central Factory Safe) if CASH, or 1120 (Bank Current Account) if BANK_TRANSFER / UPI.
+    2. Salesman Salaries & Incentives (SALARY for SALESMAN):
+       Debit: 5220 (Salesman Salary & Performance Incentives).
+       Credit: 1110 (Cash) or 1120 (Bank).
+    3. Administrative Staff Salaries (SALARY for PA, ACCOUNTANT, SOCIAL_MEDIA_MGR, etc.):
+       Debit: 5230 (General & Administrative Expenses).
+       Credit: 1110 (Cash) or 1120 (Bank).
+    4. Freelancer Milestone Payments (FREELANCER_MILESTONE):
+       Debit: 5230 (General & Administrative Expenses - Professional Fees).
+       Credit: 1120 (Bank) or 1110 (Cash).
+    """
+    pay_id = str(payment_data.get("payment_id", "")).strip()
+    amount = to_decimal(payment_data.get("amount", 0) or 0)
+    pay_type = str(payment_data.get("payment_type", "")).strip().upper()
+    role = str(payment_data.get("role_or_category", "")).strip().upper()
+    method = str(payment_data.get("payment_method", "BANK_TRANSFER")).strip().upper()
+    recip_name = str(payment_data.get("recipient_name", "Recipient")).strip()
+    recip_id = str(payment_data.get("recipient_id", "")).strip()
+
+    if amount <= Decimal("0"):
+        return {"status": "SKIPPED", "message": "Zero workforce payment amount"}
+
+    # Credit settlement account
+    credit_code = "1110" if method == "CASH" else "1120"
+    credit_account_name = "Cash-in-Hand (Central Factory Safe)" if credit_code == "1110" else "Bank Current Account (SBI / HDFC)"
+
+    # Debit account resolution
+    if pay_type == "LABOUR_WAGE":
+        debit_code = "2120"
+        debit_note = f"Clear accrued factory labor liability for {recip_name} ({recip_id})"
+    elif pay_type == "SALARY":
+        if role in {"SALESMAN", "FIELD_SALESMAN"}:
+            debit_code = "5220"
+            debit_note = f"Salesman base salary and performance incentives for {recip_name}"
+        else:
+            debit_code = "5230"
+            debit_note = f"Office & administrative staff salary for {recip_name} ({role})"
+    elif pay_type == "FREELANCER_MILESTONE":
+        debit_code = "5230"
+        debit_note = f"Consultant & freelancer milestone payment for {recip_name}"
+    else:
+        debit_code = "5230"
+        debit_note = f"Workforce disbursement for {recip_name}"
+
+    lines = [
+        {
+            "account_code": debit_code,
+            "debit_amount": round_money(amount),
+            "notes": debit_note,
+        },
+        {
+            "account_code": credit_code,
+            "credit_amount": round_money(amount),
+            "notes": f"Disbursement via {method} from {credit_account_name}",
+        },
+    ]
+
+    return post_journal_voucher(
+        voucher_type="PAYMENT",
+        reference_type="WORKFORCE_PAYMENT",
+        reference_id=pay_id,
+        narration=f"Workforce payment ({pay_type}) to {recip_name}: ₹{float(amount):.2f} via {method}",
+        lines=lines,
+        posted_by=actor,
+        journal_date=str(payment_data.get("payment_date", ""))[:10] or None,
+    )
+
+

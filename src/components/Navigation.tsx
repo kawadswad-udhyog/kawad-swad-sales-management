@@ -42,6 +42,7 @@ export type ViewType =
   | 'visits'
   | 'closing'
   | 'salary'
+  | 'workforce'
   | 'reports'
   | 'accounting'
   | 'users'
@@ -215,6 +216,12 @@ export const Navigation: React.FC<NavigationProps> = ({
           view: 'salary',
           label: 'Salary & Payroll',
           icon: <Coins size={18} />,
+          roles: ['OWNER', 'PA'],
+        },
+        {
+          view: 'workforce',
+          label: 'Workforce & Labour',
+          icon: <UsersIcon size={18} />,
           roles: ['OWNER', 'PA'],
         },
         {

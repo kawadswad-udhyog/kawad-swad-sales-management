@@ -56,8 +56,13 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
     if requested_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
         raise HTTPException(status_code=403, detail="Only the business owner can create another owner account.")
 
-    if requested_role not in {"OWNER", "OWNER_ADMIN", "PA", "SALESMAN", "FIELD_SALESMAN"}:
-        raise HTTPException(status_code=422, detail="Role must be OWNER, PA, or SALESMAN.")
+    allowed_roles = {
+        "OWNER", "OWNER_ADMIN", "PA", "SALESMAN", "FIELD_SALESMAN",
+        "FREELANCER", "ACCOUNTANT", "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
+        "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"
+    }
+    if requested_role not in allowed_roles:
+        raise HTTPException(status_code=422, detail=f"Role must be one of: {', '.join(sorted(allowed_roles))}.")
 
     # Validate username uniqueness upfront before creating request or record
     validate_unique_username(req.username)
@@ -79,6 +84,16 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
             "role": requested_role,
             "mobile": req.mobile,
             "email": req.email,
+            "employment_type": req.employment_type,
+            "designation": req.designation,
+            "department": req.department,
+            "reporting_manager_id": req.reporting_manager_id,
+            "joining_date": req.joining_date,
+            "salary_frequency": req.salary_frequency,
+            "salary_structure_id": req.salary_structure_id,
+            "address": req.address,
+            "emergency_contact": req.emergency_contact,
+            "bank_details": req.bank_details,
             "notes": req.notes,
         }
         app_req = create_approval_request(
