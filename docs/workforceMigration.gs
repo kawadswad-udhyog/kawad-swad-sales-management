@@ -449,8 +449,9 @@ function executeWorkforceMigration(authorizedToken1, authorizedToken2) {
     }
 
     if (auditItem.data_rows_count === 0) {
-      // Empty sheet: update headers only, preserving formatting and frozen rows
-      updateEmptySheetHeaders(sheet, canonicalHeaders);
+      // Empty sheet: update headers preserving canonical first, then unmapped extras
+      var totalDestHeaders = canonicalHeaders.concat(auditItem.unmapped_headers);
+      updateEmptySheetHeaders(sheet, totalDestHeaders);
       executionSummary.sheets_migrated.push({
         sheet_name: sheetName,
         method: "HEADER_UPDATE_ONLY",
@@ -633,7 +634,15 @@ function runWorkforceAudit(isExecutionMode) {
       if (canonicalHeaders.indexOf(srcHeader) !== -1) {
         targetField = srcHeader;
       } else if (aliases[srcHeader]) {
-        targetField = aliases[srcHeader];
+        var candidateTarget = aliases[srcHeader];
+        // Decouple colliding aliases:
+        // If the candidateTarget already exists in source_headers as an exact canonical column,
+        // do NOT remap this alias to the same target! Preserve it as an unmapped extra column.
+        if (audit.source_headers.indexOf(candidateTarget) !== -1) {
+          targetField = null;
+        } else {
+          targetField = candidateTarget;
+        }
       }
 
       if (targetField) {
@@ -648,7 +657,7 @@ function runWorkforceAudit(isExecutionMode) {
           audit.column_mapping[srcHeader] = targetField;
         }
       } else {
-        // Unknown extra column
+        // Preserved competing alias or unknown extra column
         audit.unmapped_headers.push(srcHeader);
         audit.column_mapping[srcHeader] = "[PRESERVED_EXTRA]:" + srcHeader;
       }
@@ -718,8 +727,11 @@ function runWorkforceAudit(isExecutionMode) {
       for (var sc = 0; sc < audit.source_headers.length; sc++) {
         var hName = audit.source_headers[sc];
         if (aliases[hName]) {
-          hasAliasesToRemap = true;
-          break;
+          var cand = aliases[hName];
+          if (audit.source_headers.indexOf(cand) === -1) {
+            hasAliasesToRemap = true;
+            break;
+          }
         }
       }
 
@@ -815,14 +827,14 @@ function createAndVerifyBackup(ss, sourceSheet) {
  * Updates Row 1 headers in place without sheet.clear() or column deletion.
  * Preserves formatting, column widths, and frozen rows.
  */
-function updateEmptySheetHeaders(sheet, canonicalHeaders) {
+function updateEmptySheetHeaders(sheet, destHeaders) {
   var currentCols = sheet.getMaxColumns();
-  if (currentCols < canonicalHeaders.length) {
-    sheet.insertColumnsAfter(currentCols, canonicalHeaders.length - currentCols);
+  if (currentCols < destHeaders.length) {
+    sheet.insertColumnsAfter(currentCols, destHeaders.length - currentCols);
   }
 
-  // Set Row 1 canonical headers in place
-  sheet.getRange(1, 1, 1, canonicalHeaders.length).setValues([canonicalHeaders]);
+  // Set Row 1 headers in place
+  sheet.getRange(1, 1, 1, destHeaders.length).setValues([destHeaders]);
 
   // Ensure 1 frozen row
   if (sheet.getFrozenRows() < 1) {
@@ -859,7 +871,13 @@ function migrateSheetWithData(ss, sheet, sheetName, canonicalHeaders, auditItem)
     if (canonicalHeaders.indexOf(sName) !== -1) {
       targetName = sName;
     } else if (WORKFORCE_HEADER_ALIASES[sheetName] && WORKFORCE_HEADER_ALIASES[sheetName][sName]) {
-      targetName = WORKFORCE_HEADER_ALIASES[sheetName][sName];
+      var cand = WORKFORCE_HEADER_ALIASES[sheetName][sName];
+      // If the target already exists in sourceHeaders, preserve this column as extra
+      if (sourceHeaders.indexOf(cand) !== -1) {
+        targetName = sName;
+      } else {
+        targetName = cand;
+      }
     } else {
       // Unmapped extra column
       targetName = sName;
