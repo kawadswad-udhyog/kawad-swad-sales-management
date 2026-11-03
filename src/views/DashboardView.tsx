@@ -615,6 +615,58 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 <div className="text-[10px] text-slate-500">Reconcile field cash</div>
               </div>
             </button>
+
+            <button
+              onClick={() => onNavigate('workforce')}
+              className="flex items-center gap-3 p-3 text-left rounded-xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 transition-colors group cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-lg bg-purple-100 text-purple-800 flex items-center justify-center shrink-0">
+                <Users size={16} />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-slate-900 group-hover:text-purple-900">Workforce & Payroll</div>
+                <div className="text-[10px] text-slate-500">Salaries, tasks & milestones</div>
+              </div>
+            </button>
+
+            <button
+              onClick={() => onNavigate('purchasing')}
+              className="flex items-center gap-3 p-3 text-left rounded-xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 transition-colors group cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                <Receipt size={16} />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-slate-900 group-hover:text-amber-900">Procurement & POs</div>
+                <div className="text-[10px] text-slate-500">Raw materials & goods receipt</div>
+              </div>
+            </button>
+
+            <button
+              onClick={() => onNavigate('accounting')}
+              className="flex items-center gap-3 p-3 text-left rounded-xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 transition-colors group cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-800 flex items-center justify-center shrink-0">
+                <Wallet size={16} />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-slate-900 group-hover:text-indigo-900">Accounting & Ledger</div>
+                <div className="text-[10px] text-slate-500">Double-entry, P&L, balance sheet</div>
+              </div>
+            </button>
+
+            <button
+              onClick={() => onNavigate('approvals')}
+              className="flex items-center gap-3 p-3 text-left rounded-xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 transition-colors group cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center shrink-0">
+                <CheckCircle2 size={16} />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-slate-900 group-hover:text-emerald-900">Approvals & Governance</div>
+                <div className="text-[10px] text-slate-500">Batches, expenses & users</div>
+              </div>
+            </button>
           </div>
         </div>
 

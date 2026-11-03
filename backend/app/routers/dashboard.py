@@ -144,14 +144,25 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
         if str(b.get("status", "")).upper() == "PENDING"
     ) if manager_view else 0.0
 
-    # Attendance metrics
-    workers = db.get_records("Workers", fresh=False)
-    worker_attendance = db.get_records("WorkerAttendance", fresh=False)
-    active_workers_count = sum(1 for w in workers if str(w.get("active", "true")).lower() == "true")
-    workers_present_today = sum(
+    # Attendance metrics across modern LabourMaster and legacy Workers
+    workers = db.get_records("Workers", fresh=False) or []
+    worker_attendance = db.get_records("WorkerAttendance", fresh=False) or []
+    labour_master = db.get_records("LabourMaster", fresh=False) or []
+    labour_attendance = db.get_records("LabourAttendance", fresh=False) or []
+
+    active_legacy = sum(1 for w in workers if str(w.get("active", "true")).lower() in {"true", "1"})
+    active_labour = sum(1 for l in labour_master if str(l.get("active", "true")).lower() in {"true", "1"})
+    active_workers_count = active_legacy + active_labour
+
+    present_legacy = sum(
         1 for a in worker_attendance
         if str(a.get("attendance_date", "")).strip() == today_str and str(a.get("status", "")).upper() in {"PRESENT", "HALF_DAY"}
     )
+    present_labour = sum(
+        1 for a in labour_attendance
+        if str(a.get("attendance_date", "")).strip() == today_str and str(a.get("status", "")).upper() in {"PRESENT", "HALF_DAY"}
+    )
+    workers_present_today = present_legacy + present_labour
 
     # Finished stock available across factory and warehouse
     prod_stock_ledger = db.get_records("ProductionStockLedger", fresh=False)
