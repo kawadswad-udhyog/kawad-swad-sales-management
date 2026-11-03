@@ -367,5 +367,133 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(item["valuation"], 21630.0)
 
 
+    def test_rejected_packaging_batch_excluded_from_finished_goods(self):
+        """Verify REJECTED packaging batches are excluded from finished goods stock and register."""
+        pkg_id = "PKG-REJECTED-001"
+        db.append_record("PackagingBatches", {
+            "packaging_id": pkg_id,
+            "product_id": "PRD-MOONG-500G",
+            "product_name_snapshot": "Moong Papad",
+            "bulk_kg_used": 25.0,
+            "packets_500g": 50,
+            "total_packets": 50,
+            "status": "REJECTED",
+            "notes": "Rejected by QC due to sealing defect",
+        })
+        db.append_record("ProductionStockLedger", {
+            "movement_id": "PSL-REJ-001",
+            "reference_id": pkg_id,
+            "movement_type": "PACKETS_PACKAGED",
+            "product_id": "PRD-MOONG-500G",
+            "quantity_packets": 50,
+            "channel": "FACTORY_FINISHED",
+        })
+
+        ledger = db.get_records("ProductionStockLedger")
+        packages = db.get_records("PackagingBatches")
+        bal = calculate_finished_stock_balance(ledger, "PRD-MOONG-500G", packaging_batches=packages)
+        self.assertEqual(bal.get("PRD-MOONG-500G", 0), 0)
+
+        reg = calculate_consolidated_finished_goods_register(
+            products_master=db.get_records("Products"),
+            production_stock_ledger=ledger,
+            salesman_stock_ledger=[],
+            users_master=[],
+            sale_items_records=[],
+            packaging_batches=packages,
+        )
+        sku_entry = next(r for r in reg["register"] if r["product_id"] == "PRD-MOONG-500G")
+        self.assertEqual(sku_entry["factory_stock"], 0)
+
+    def test_multiple_production_batches_partial_consumption_and_accounting_balance(self):
+        """Verify multiple production batches with partial bulk consumption and balanced journal vouchers."""
+        # Batch A: 100 kg @ ₹140.00
+        db.append_record("ProductionBatches", {
+            "production_id": "PRB-MULTI-A",
+            "product_id": "PRD-MOONG-BULK",
+            "product_name_snapshot": "Moong Papad",
+            "status": "APPROVED",
+            "net_quantity_kg": 100.0,
+            "actual_cost_per_kg": 140.0,
+            "production_date": "2026-11-01",
+        })
+        db.append_record("ProductionStockLedger", {
+            "movement_id": "PSL-M-A1",
+            "reference_id": "PRB-MULTI-A",
+            "movement_type": "BULK_PRODUCED",
+            "product_id": "PRD-MOONG-BULK",
+            "bulk_product_key": "moong papad",
+            "quantity_kg": 100.0,
+            "unit_cost_per_kg": 140.0,
+        })
+
+        # Batch B: 100 kg @ ₹150.00
+        db.append_record("ProductionBatches", {
+            "production_id": "PRB-MULTI-B",
+            "product_id": "PRD-MOONG-BULK",
+            "product_name_snapshot": "Moong Papad",
+            "status": "APPROVED",
+            "net_quantity_kg": 100.0,
+            "actual_cost_per_kg": 150.0,
+            "production_date": "2026-11-02",
+        })
+        db.append_record("ProductionStockLedger", {
+            "movement_id": "PSL-M-B1",
+            "reference_id": "PRB-MULTI-B",
+            "movement_type": "BULK_PRODUCED",
+            "product_id": "PRD-MOONG-BULK",
+            "bulk_product_key": "moong papad",
+            "quantity_kg": 100.0,
+            "unit_cost_per_kg": 150.0,
+        })
+
+        # Allocation: 40 kg from A (remaining: 60 kg) + 60 kg from B (remaining: 40 kg)
+        ledger = db.get_records("ProductionStockLedger")
+        batches = db.get_records("ProductionBatches")
+        alloc_res = resolve_packaging_batch_allocations(
+            bulk_kg_required=100.0,
+            product_id_or_name="Moong Papad",
+            ledger_records=ledger,
+            production_batches=batches,
+            batch_allocations_requested=[
+                {"batch_id": "PRB-MULTI-A", "quantity_kg": 40.0},
+                {"batch_id": "PRB-MULTI-B", "quantity_kg": 60.0},
+            ],
+        )
+
+        expected_bulk_cost = (40.0 * 140.0) + (60.0 * 150.0)  # 5600 + 9000 = 14600
+        self.assertEqual(float(alloc_res["total_bulk_cost"]), 14600.0)
+        self.assertEqual(float(alloc_res["effective_bulk_cost_per_kg"]), 146.0)
+
+        # Post balanced accounting voucher for this packaging run
+        pack_dict = {
+            "packaging_id": "PKG-MULTI-ACCTA",
+            "product_name_snapshot": "Moong Papad",
+            "bulk_kg_used": 100.0,
+            "total_packets": 200,
+            "packaging_date": "2026-11-03",
+            "cost_status": "ACTUAL",
+            "has_estimated_cost": False,
+        }
+        bulk_c = Decimal("14600.00")
+        mat_c = Decimal("300.00")
+        lab_c = Decimal("100.00")
+
+        v_res = post_packaging_batch_journal(
+            pack_dict,
+            bulk_cost=bulk_c,
+            packing_material_cost=mat_c,
+            packing_labor_cost=lab_c,
+            actor="test_user",
+        )
+        self.assertIsNotNone(v_res.get("journal_id"))
+        self.assertEqual(v_res.get("status"), "POSTED")
+        total_dr = sum(Decimal(str(l.get("debit_amount", 0) or 0)) for l in v_res.get("lines", []))
+        total_cr = sum(Decimal(str(l.get("credit_amount", 0) or 0)) for l in v_res.get("lines", []))
+        self.assertEqual(total_dr, total_cr)
+        self.assertEqual(total_dr, Decimal("15000.00"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
