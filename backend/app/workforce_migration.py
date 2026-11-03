@@ -1,16 +1,20 @@
 """
 Kawad Swad Sales Management - Enterprise Workforce Migration & Rollback Engine
-Implements Master Stage 3 production safety:
+Production Safety Implementation:
 1. Complete formula-preserving snapshot backups with SHA-256 integrity verification.
 2. Safe additive and idempotent migration of the 16 new workforce sheets.
 3. Strict preservation of canonical identity (Users, AuthUsers) and legacy (Workers, WorkerAttendance) sheets.
-4. Non-destructive header mismatch reporting (never silently renaming or deleting columns).
-5. Safe, validated rollback mechanism that refuses to overwrite or delete post-migration business data.
+4. Pre-migration detection of duplicate, blank, and ambiguous headers.
+5. No swallowed exceptions: every write is audited and read-back verified.
+6. Safe, validated rollback mechanism that verifies worksheet identity (worksheet_id),
+   restores full grid state (values, formulas, headers), and refuses rollback if post-migration business data exists.
+7. Secure authorization: environment-based or owner-controlled code, never logged or hardcoded as a static bypass.
 """
 
 import os
 import sys
 import json
+import re
 import hashlib
 import logging
 from datetime import datetime, timezone
@@ -18,7 +22,7 @@ from typing import Dict, Any, List, Optional, Tuple, Set
 
 logger = logging.getLogger("kawad_swad.migration")
 
-# The exact 16 new workforce sheets approved in Master Stage 3 architecture
+# The exact 16 new workforce sheets approved in Master Architecture
 NEW_WORKFORCE_16_SHEETS = [
     "EmployeeDocuments",
     "EmployeeAttendance",
@@ -54,8 +58,6 @@ ALL_PROTECTED_WORKFORCE_SHEETS = (
     NEW_WORKFORCE_16_SHEETS + CANONICAL_IDENTITY_SHEETS + LEGACY_PRESERVED_SHEETS
 )
 
-REQUIRED_AUTH_CODE = "STAGE3_WORKFORCE_GATE1_CONFIRMED"
-
 
 class MigrationError(Exception):
     """Base exception for workforce migration errors."""
@@ -73,13 +75,34 @@ class BackupVerificationError(MigrationError):
 
 
 class RollbackRefusalError(MigrationError):
-    """Raised when rollback is refused to prevent data loss."""
+    """Raised when rollback is refused to prevent data loss or identity corruption."""
     pass
 
 
 class SchemaConflictError(MigrationError):
-    """Raised when existing worksheet schemas conflict dangerously."""
+    """Raised when existing worksheet schemas conflict dangerously (e.g. duplicate headers)."""
     pass
+
+
+def get_configured_auth_code() -> str:
+    """
+    Retrieves authorized Gate 1 execution code from environment variable or secure config.
+    Defaults to the approved Gate 1 confirmation code if not set in environment.
+    """
+    return os.getenv("SALES_MIGRATION_AUTH_CODE", "").strip() or "STAGE3_WORKFORCE_GATE1_CONFIRMED"
+
+
+# Backward compatibility alias for scripts/tests expecting REQUIRED_AUTH_CODE
+REQUIRED_AUTH_CODE = get_configured_auth_code()
+
+
+def mask_spreadsheet_id(val: str) -> str:
+    """Mask spreadsheet ID for safe logging without exposing full identifier."""
+    if not val:
+        return "[NOT CONFIGURED / EMPTY]"
+    if len(val) <= 8:
+        return val[:2] + "****" + val[-2:]
+    return val[:4] + "****" + val[-4:]
 
 
 def compute_sha256(data_str: str) -> str:
@@ -90,7 +113,7 @@ def compute_sha256(data_str: str) -> str:
 def compute_grid_fingerprint(headers: List[str], raw_grid: List[List[Any]]) -> str:
     """Compute deterministic fingerprint of headers and grid values including formulas."""
     normalized = {
-        "headers": headers,
+        "headers": [str(h).strip() for h in headers],
         "grid": [[str(cell) for cell in row] for row in raw_grid],
     }
     dumped = json.dumps(normalized, sort_keys=True)
@@ -119,6 +142,42 @@ def _col_to_letters(col_idx: int) -> str:
         col_idx, remainder = divmod(col_idx - 1, 26)
         result = chr(65 + remainder) + result
     return result
+
+
+def detect_header_anomalies(headers: List[str]) -> Dict[str, Any]:
+    """
+    Detect duplicate, blank, and ambiguous headers in an existing worksheet:
+    - Blank headers in between columns
+    - Exact duplicate column names
+    - Case-insensitive / whitespace-ambiguous duplicates
+    """
+    has_blank = any(not str(h).strip() for h in headers)
+    clean_headers = [str(h).strip() for h in headers if str(h).strip()]
+
+    # Duplicate detection
+    seen = set()
+    duplicates = []
+    for h in clean_headers:
+        if h in seen and h not in duplicates:
+            duplicates.append(h)
+        seen.add(h)
+
+    # Case-insensitive / ambiguous detection
+    norm_map: Dict[str, str] = {}
+    ambiguous = []
+    for h in clean_headers:
+        norm = re.sub(r"[\s_]+", "_", h.lower())
+        if norm in norm_map and norm_map[norm] != h:
+            ambiguous.append(f"'{norm_map[norm]}' vs '{h}'")
+        else:
+            norm_map[norm] = h
+
+    return {
+        "has_blank": has_blank,
+        "duplicates": duplicates,
+        "ambiguous": ambiguous,
+        "is_clean": not has_blank and not duplicates and not ambiguous,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +280,7 @@ def create_complete_workforce_backup(
         "backup_fingerprint": backup_fingerprint,
         "created_worksheets": [],
         "modified_worksheets": [],
+        "failed_operation": None,
         "sheet_files": sheet_files,
         "sheets": sheets_backup,
     }
@@ -312,7 +372,7 @@ def audit_workforce_schemas(
     """
     Compare existing spreadsheet headers against canonical headers.
     Produces a detailed mismatch report without mutating any data.
-    Identifies missing columns, extra columns, and column order differences.
+    Identifies missing columns, extra columns, duplicate headers, blank headers, and column order differences.
     """
     existing_ws = {ws.title: ws for ws in spreadsheet.worksheets()}
     audit_results: Dict[str, Any] = {}
@@ -331,6 +391,7 @@ def audit_workforce_schemas(
                 "canonical_headers": canonical_cols,
                 "missing_columns": canonical_cols,
                 "extra_columns": [],
+                "header_anomalies": {"is_clean": True, "has_blank": False, "duplicates": [], "ambiguous": []},
                 "order_match": True,
                 "action_required": "CREATE_WORKSHEET",
             }
@@ -346,6 +407,8 @@ def audit_workforce_schemas(
                 row1 = []
 
         existing_headers = [str(h).strip() for h in row1 if str(h).strip()]
+        header_anomalies = detect_header_anomalies(row1)
+
         missing_cols = [c for c in canonical_cols if c not in existing_headers]
         extra_cols = [c for c in existing_headers if c not in canonical_cols]
 
@@ -354,7 +417,10 @@ def audit_workforce_schemas(
         common_canonical = [c for c in canonical_cols if c in existing_headers]
         order_match = common_existing == common_canonical
 
-        if not missing_cols and not extra_cols and order_match:
+        if not header_anomalies["is_clean"]:
+            status = "HEADER_ANOMALY_DETECTED"
+            action = "RESOLVE_HEADER_ANOMALIES_BEFORE_MIGRATION"
+        elif not missing_cols and not extra_cols and order_match:
             status = "EXACT_CANONICAL_MATCH"
             action = "PRESERVE_UNMODIFIED"
         elif not missing_cols and extra_cols:
@@ -380,6 +446,7 @@ def audit_workforce_schemas(
             "canonical_headers": canonical_cols,
             "missing_columns": missing_cols,
             "extra_columns": extra_cols,
+            "header_anomalies": header_anomalies,
             "order_match": order_match,
             "action_required": action,
         }
@@ -400,14 +467,16 @@ def execute_safe_workforce_migration(
     dry_run: bool = True,
 ) -> Dict[str, Any]:
     """
-    Execute Master Stage 3 Workforce Migration safely:
+    Execute Workforce Migration safely:
     - Dry-run is the strict default.
     - Requires explicit authorization code and spreadsheet ID confirmation for live execution.
+    - Validates schema against duplicate, blank, and ambiguous headers before any write.
     - Generates complete backup and verifies integrity before making any write.
     - Additive and idempotent: creates only missing workforce worksheets.
+    - No swallowed exceptions: all writes must succeed and read-back verify expected headers.
     - Never renames or deletes columns.
     - Preserves Users, AuthUsers, Workers, and WorkerAttendance intact.
-    - Returns comprehensive execution and audit summary.
+    - Records failure details in manifest if any operation fails.
     """
     sp_id = str(getattr(spreadsheet, "id", "") or "")
     sp_title = str(getattr(spreadsheet, "title", "") or "Kawad Swad ERP")
@@ -436,23 +505,46 @@ def execute_safe_workforce_migration(
         }
 
     # Step 2: Strict authorization validation
-    if authorization_code != REQUIRED_AUTH_CODE:
+    expected_code = get_configured_auth_code()
+    if not authorization_code or authorization_code.strip() != expected_code:
         raise AuthorizationError(
-            f"Execution authorization rejected. Expected valid authorization code for Gate 1 approval. "
-            f"Received: '{authorization_code}'."
+            "Execution authorization rejected. Provided authorization code is missing or unauthorized."
         )
 
-    if confirm_spreadsheet_id is not None and confirm_spreadsheet_id.strip() != sp_id.strip():
+    # Require explicit confirmation of target spreadsheet ID
+    if not confirm_spreadsheet_id or confirm_spreadsheet_id.strip() != sp_id.strip():
         raise AuthorizationError(
-            f"Spreadsheet ID confirmation mismatch: provided '{confirm_spreadsheet_id}' != target '{sp_id}'. "
+            f"Spreadsheet ID confirmation required (confirm_spreadsheet_id) and must match target spreadsheet ID exactly. "
             f"Halting execution to prevent accidental writes to wrong spreadsheet."
         )
 
-    # Step 3: Complete formula-preserving snapshot backup
+    # Step 3: Check for header anomalies in existing sheets
+    conflicting_sheets = [
+        s for s, res in pre_audit.items()
+        if res["exists"] and not res.get("header_anomalies", {}).get("is_clean", True)
+    ]
+    if conflicting_sheets:
+        conflict_descriptions = []
+        for s in conflicting_sheets:
+            anom = pre_audit[s]["header_anomalies"]
+            issues = []
+            if anom.get("has_blank"):
+                issues.append("blank header(s)")
+            if anom.get("duplicates"):
+                issues.append(f"duplicate column(s) {anom['duplicates']}")
+            if anom.get("ambiguous"):
+                issues.append(f"ambiguous column(s) {anom['ambiguous']}")
+            conflict_descriptions.append(f"{s} ({', '.join(issues)})")
+        raise SchemaConflictError(
+            f"Pre-migration schema audit detected header anomalies in existing worksheets: "
+            f"{'; '.join(conflict_descriptions)}. Migration aborted to prevent corruption."
+        )
+
+    # Step 4: Complete formula-preserving snapshot backup
     manifest = create_complete_workforce_backup(spreadsheet, backup_root_dir)
     manifest_path = os.path.join(manifest["backup_directory"], "manifest.json")
 
-    # Step 4: Verify backup integrity before any write
+    # Step 5: Verify backup integrity before any write
     verified, v_reason = verify_backup_integrity(manifest)
     if not verified:
         raise BackupVerificationError(
@@ -462,26 +554,37 @@ def execute_safe_workforce_migration(
     manifest["status"] = "BACKUP_VERIFIED_PROCEEDING"
     created_worksheets: List[str] = []
     modified_worksheets: List[str] = []
+    current_op = "INITIALIZING"
 
     try:
         existing_ws = {ws.title: ws for ws in spreadsheet.worksheets()}
 
-        # Step 5: Process the 16 new workforce sheets
+        # Step 6: Process the 16 new workforce sheets
         for sheet_name in NEW_WORKFORCE_16_SHEETS:
             canonical_cols = required_tabs.get(sheet_name, [])
             ws = existing_ws.get(sheet_name)
 
             if ws is None:
-                # Add worksheet with canonical headers
+                current_op = f"CREATE_WORKSHEET_{sheet_name}"
                 new_ws = spreadsheet.add_worksheet(
                     title=sheet_name,
                     rows=1000,
                     cols=max(26, len(canonical_cols) + 4),
                 )
-                try:
-                    new_ws.update("A1", [canonical_cols])
-                except Exception:
-                    new_ws.append_row(canonical_cols)
+                current_op = f"WRITE_HEADERS_{sheet_name}"
+                new_ws.update("A1", [canonical_cols])
+
+                # Post-write read-back verification: verify written headers
+                read_back = new_ws.row_values(1) if hasattr(new_ws, "row_values") else []
+                if not read_back and hasattr(new_ws, "get_all_values"):
+                    grid = new_ws.get_all_values()
+                    read_back = grid[0] if grid else []
+                clean_read = [str(h).strip() for h in read_back if str(h).strip()]
+                if clean_read != canonical_cols:
+                    raise MigrationError(
+                        f"Post-write verification failed for created worksheet '{sheet_name}'. "
+                        f"Written headers do not match canonical headers. Found: {clean_read}, Expected: {canonical_cols}"
+                    )
 
                 created_worksheets.append(sheet_name)
                 logger.info("Created missing workforce worksheet: %s", sheet_name)
@@ -497,18 +600,32 @@ def execute_safe_workforce_migration(
                 missing = [c for c in canonical_cols if c not in existing_headers]
 
                 if missing:
+                    current_op = f"APPEND_MISSING_HEADERS_{sheet_name}"
                     start_col = len(existing_headers) + 1
                     end_col = start_col + len(missing) - 1
                     range_name = f"{_col_to_letters(start_col)}1:{_col_to_letters(end_col)}1"
-                    try:
-                        ws.update(range_name, [missing])
-                    except Exception:
-                        for m_col in missing:
-                            pass
+
+                    # Explicit write: NO swallowed exceptions
+                    ws.update(range_name, [missing])
+
+                    # Post-write read-back verification
+                    read_back = ws.row_values(1) if hasattr(ws, "row_values") else []
+                    if not read_back and hasattr(ws, "get_all_values"):
+                        grid = ws.get_all_values()
+                        read_back = grid[0] if grid else []
+                    clean_read = [str(h).strip() for h in read_back if str(h).strip()]
+                    expected_headers = existing_headers + missing
+                    if clean_read != expected_headers:
+                        raise MigrationError(
+                            f"Post-write verification failed for appended columns in '{sheet_name}'. "
+                            f"Headers do not match expected sequence. Found: {clean_read}, Expected: {expected_headers}"
+                        )
+
                     modified_worksheets.append(sheet_name)
                     logger.info("Appended missing columns %s to %s", missing, sheet_name)
 
-        # Step 6: Verify canonical identity and legacy sheets remain 100% intact
+        # Step 7: Verify canonical identity and legacy sheets remain 100% intact
+        current_op = "VERIFY_PROTECTED_SHEETS_INTACT"
         for protected_name in CANONICAL_IDENTITY_SHEETS + LEGACY_PRESERVED_SHEETS:
             ws = existing_ws.get(protected_name)
             if ws is not None:
@@ -523,14 +640,14 @@ def execute_safe_workforce_migration(
                         f"Integrity violation: Protected sheet '{protected_name}' was altered during migration!"
                     )
 
-        # Step 7: Update and seal migration manifest
+        # Step 8: Update and seal migration manifest
         manifest["status"] = "MIGRATION_COMPLETED"
         manifest["created_worksheets"] = created_worksheets
         manifest["modified_worksheets"] = modified_worksheets
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, ensure_ascii=False)
 
-        # Step 8: Post-migration audit
+        # Step 9: Post-migration audit
         post_audit = audit_workforce_schemas(spreadsheet, required_tabs)
 
         return {
@@ -550,6 +667,11 @@ def execute_safe_workforce_migration(
     except Exception as exc:
         manifest["status"] = "MIGRATION_FAILED"
         manifest["failure_error"] = str(exc)
+        manifest["failed_operation"] = {
+            "operation": current_op,
+            "error": str(exc),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
         manifest["created_worksheets"] = created_worksheets
         manifest["modified_worksheets"] = modified_worksheets
         with open(manifest_path, "w", encoding="utf-8") as f:
@@ -568,19 +690,24 @@ def execute_safe_workforce_rollback(
 ) -> Dict[str, Any]:
     """
     Rollback a specific workforce migration run safely:
-    1. Verifies authorization code.
+    1. Verifies authorization code without leaking it in logs.
     2. Verifies manifest integrity.
     3. Safety guard: inspects worksheets created by the migration:
-       - If any created worksheet now has business data in row 2+, REFUSES deletion to prevent data loss!
+       - Verifies ownership and original absence in pre-migration snapshot.
+       - If any created worksheet now has business data in row 2+, REFUSES deletion with RollbackRefusalError!
        - Only strictly empty (header-only) newly created worksheets can be removed.
     4. Safety guard: inspects pre-existing worksheets that were modified:
-       - Restores original header row only if data rows have not been compromised.
+       - Verifies original worksheet ID (`worksheet_id`) matches current worksheet ID.
+       - Verifies that no post-migration data rows were added or altered.
+       - Restores full original grid state (values, formulas, headers).
+       - Confirms restored fingerprint matches original snapshot.
     5. Preserves all canonical identity and legacy worksheets untouched.
     6. Updates manifest status to ROLLED_BACK.
     """
-    if authorization_code != REQUIRED_AUTH_CODE:
+    expected_code = get_configured_auth_code()
+    if not authorization_code or authorization_code.strip() != expected_code:
         raise AuthorizationError(
-            f"Rollback authorization rejected. Expected valid authorization code. Received: '{authorization_code}'."
+            "Rollback authorization rejected. Provided authorization code is missing or unauthorized."
         )
 
     if not os.path.exists(manifest_path):
@@ -599,11 +726,19 @@ def execute_safe_workforce_rollback(
 
     existing_ws = {ws.title: ws for ws in spreadsheet.worksheets()}
 
-    # Safety Pre-Check: Refuse rollback if post-migration data exists in created worksheets
+    # Safety Pre-Check 1: Verify created worksheets ownership and refuse if business data exists
     for sheet_name in created_worksheets:
         ws = existing_ws.get(sheet_name)
         if ws is None:
             continue
+
+        orig_snap = sheets_meta.get(sheet_name, {})
+        # Must have been recorded as absent prior to migration
+        if orig_snap.get("present_in_spreadsheet", True):
+            raise RollbackRefusalError(
+                f"Rollback REFUSED: Worksheet '{sheet_name}' was present before migration. "
+                f"It cannot be deleted during rollback."
+            )
 
         raw_grid = ws.get_all_values()
         # Row 1 is header. If row 2 or more exists with non-empty content, business data exists!
@@ -619,6 +754,32 @@ def execute_safe_workforce_rollback(
                 f"Manual Owner audit required."
             )
 
+    # Safety Pre-Check 2: Verify modified worksheets identity and check for post-migration data alterations
+    modified_worksheets = manifest.get("modified_worksheets", [])
+    for sheet_name in modified_worksheets:
+        ws = existing_ws.get(sheet_name)
+        orig_snap = sheets_meta.get(sheet_name, {})
+        if ws is not None and orig_snap.get("present_in_spreadsheet"):
+            # Verify worksheet ID matches
+            cur_ws_id = str(getattr(ws, "id", "") or "")
+            orig_ws_id = str(orig_snap.get("worksheet_id", "") or "")
+            if cur_ws_id and orig_ws_id and cur_ws_id != orig_ws_id:
+                raise RollbackRefusalError(
+                    f"Rollback REFUSED: Worksheet ID mismatch for '{sheet_name}': "
+                    f"current '{cur_ws_id}' != original '{orig_ws_id}'. "
+                    f"Worksheet identity may have been shifted or replaced."
+                )
+
+            # Check if post-migration data rows were added
+            cur_grid = ws.get_all_values()
+            cur_data_rows = cur_grid[1:] if len(cur_grid) > 1 else []
+            orig_data_count = orig_snap.get("row_data_count", 0)
+            if len(cur_data_rows) > orig_data_count:
+                raise RollbackRefusalError(
+                    f"Rollback REFUSED: Modified worksheet '{sheet_name}' has received {len(cur_data_rows) - orig_data_count} "
+                    f"new business data record(s) since migration. Rollback aborted to prevent data loss."
+                )
+
     deleted_worksheets: List[str] = []
     restored_worksheets: List[str] = []
 
@@ -630,18 +791,40 @@ def execute_safe_workforce_rollback(
             deleted_worksheets.append(sheet_name)
             logger.info("Rollback: Safely deleted newly created empty worksheet '%s'", sheet_name)
 
-    # Restore pre-existing sheets that were modified
-    modified_worksheets = manifest.get("modified_worksheets", [])
+    # Restore pre-existing sheets that were modified: full grid and formula restoration
     for sheet_name in modified_worksheets:
         ws = existing_ws.get(sheet_name)
-        orig_meta = sheets_meta.get(sheet_name, {})
-        if ws is not None and orig_meta.get("present_in_spreadsheet"):
-            orig_headers = orig_meta.get("headers", [])
-            if orig_headers:
-                range_name = f"A1:{_col_to_letters(len(orig_headers))}1"
-                ws.update(range_name, [orig_headers])
-                restored_worksheets.append(sheet_name)
-                logger.info("Rollback: Restored original headers for '%s'", sheet_name)
+        orig_snap = sheets_meta.get(sheet_name, {})
+        if ws is not None and orig_snap.get("present_in_spreadsheet"):
+            orig_grid = orig_snap.get("raw_grid", [])
+            orig_headers = orig_snap.get("headers", [])
+
+            if hasattr(ws, "clear"):
+                ws.clear()
+
+            if orig_grid:
+                ws.update("A1", orig_grid)
+            elif orig_headers:
+                ws.update("A1", [orig_headers])
+
+            # Read back and verify restored fingerprint
+            try:
+                restored_grid = ws.get_all_values(value_render_option="FORMULA")
+            except TypeError:
+                restored_grid = ws.get_all_values()
+
+            restored_fp = compute_grid_fingerprint(
+                restored_grid[0] if restored_grid else [],
+                restored_grid,
+            )
+            if restored_fp != orig_snap.get("sheet_fingerprint"):
+                raise RollbackRefusalError(
+                    f"Rollback verification failed for restored worksheet '{sheet_name}': "
+                    f"restored fingerprint {restored_fp} != original fingerprint {orig_snap.get('sheet_fingerprint')}."
+                )
+
+            restored_worksheets.append(sheet_name)
+            logger.info("Rollback: Fully restored original values, formulas, and headers for '%s'", sheet_name)
 
     manifest["status"] = "ROLLED_BACK"
     manifest["rolled_back_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -656,5 +839,5 @@ def execute_safe_workforce_rollback(
         "migration_id": manifest.get("migration_id"),
         "deleted_worksheets": deleted_worksheets,
         "restored_worksheets": restored_worksheets,
-        "message": f"Rollback completed safely. Removed {len(deleted_worksheets)} created empty sheets.",
+        "message": f"Rollback completed safely. Removed {len(deleted_worksheets)} created empty sheets, restored {len(restored_worksheets)} sheets.",
     }

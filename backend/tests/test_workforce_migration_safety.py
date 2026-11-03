@@ -22,15 +22,18 @@ from app.workforce_migration import (
     CANONICAL_IDENTITY_SHEETS,
     LEGACY_PRESERVED_SHEETS,
     REQUIRED_AUTH_CODE,
+    get_configured_auth_code,
     create_complete_workforce_backup,
     verify_backup_integrity,
     audit_workforce_schemas,
     execute_safe_workforce_migration,
     execute_safe_workforce_rollback,
     compute_grid_fingerprint,
+    detect_header_anomalies,
     AuthorizationError,
     BackupVerificationError,
     RollbackRefusalError,
+    SchemaConflictError,
     MigrationError,
 )
 
@@ -47,15 +50,20 @@ class SyntheticWorksheet:
         if initial_grid:
             self._grid = [[str(c) if c is not None else "" for c in row] for row in initial_grid]
 
+    def clear(self):
+        """Empties all cells in the worksheet."""
+        self._grid = []
+
     def get_all_values(self, value_render_option: str = "FORMATTED_VALUE") -> List[List[str]]:
         # Returns copy of grid
         return [list(row) for row in self._grid]
 
     def row_values(self, row_idx: int) -> List[str]:
         if 1 <= row_idx <= len(self._grid):
-            # return non-empty trailing trimmed
-            row = self._grid[row_idx - 1]
-            return [c for c in row if c != ""]
+            row = list(self._grid[row_idx - 1])
+            while row and row[-1] == "":
+                row.pop()
+            return row
         return []
 
     def append_row(self, values: List[Any]):
@@ -527,6 +535,133 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
                 confirm_spreadsheet_id="WRONG_SPREADSHEET_ID",
                 dry_run=False,
             )
+
+    def test_16_header_anomaly_detection_blank_duplicate_ambiguous(self):
+        """Scenario 16: Pre-migration schema audit catches blank, duplicate, and ambiguous headers and aborts."""
+        # 1. Blank header test
+        self.spreadsheet.add_worksheet("EmployeeDocuments", initial_grid=[
+            ["doc_id", "", "doc_name", "status"],
+            ["DOC-1", "EMP-1", "Aadhaar", "VERIFIED"],
+        ])
+
+        with self.assertRaises(SchemaConflictError) as cm:
+            execute_safe_workforce_migration(
+                spreadsheet=self.spreadsheet,
+                required_tabs=REQUIRED_TABS,
+                backup_root_dir=self.test_dir,
+                authorization_code=get_configured_auth_code(),
+                confirm_spreadsheet_id=self.sp_id,
+                dry_run=False,
+            )
+        self.assertIn("blank header", str(cm.exception).lower())
+
+        # Clean up for next assertion
+        del self.spreadsheet._worksheets["EmployeeDocuments"]
+
+        # 2. Duplicate header test
+        self.spreadsheet.add_worksheet("EmployeeDocuments", initial_grid=[
+            ["doc_id", "emp_id", "status", "status"],
+            ["DOC-1", "EMP-1", "VERIFIED", "VERIFIED"],
+        ])
+
+        with self.assertRaises(SchemaConflictError) as cm2:
+            execute_safe_workforce_migration(
+                spreadsheet=self.spreadsheet,
+                required_tabs=REQUIRED_TABS,
+                backup_root_dir=self.test_dir,
+                authorization_code=get_configured_auth_code(),
+                confirm_spreadsheet_id=self.sp_id,
+                dry_run=False,
+            )
+        self.assertIn("duplicate column", str(cm2.exception).lower())
+
+    def test_17_post_write_read_back_failure_halts_and_records(self):
+        """Scenario 17: Read-back mismatch after writing headers halts migration and logs failed_operation in manifest."""
+        original_update = SyntheticWorksheet.update
+
+        # Simulate a buggy or truncating Google Sheets update that drops the last header
+        def truncating_update(ws_self, range_name, values):
+            if ws_self.title == "EmployeeDocuments" and range_name == "A1":
+                truncated = [values[0][:-1]]  # Drop last column
+                return original_update(ws_self, range_name, truncated)
+            return original_update(ws_self, range_name, values)
+
+        SyntheticWorksheet.update = truncating_update
+        try:
+            with self.assertRaises(MigrationError) as cm:
+                execute_safe_workforce_migration(
+                    spreadsheet=self.spreadsheet,
+                    required_tabs=REQUIRED_TABS,
+                    backup_root_dir=self.test_dir,
+                    authorization_code=get_configured_auth_code(),
+                    confirm_spreadsheet_id=self.sp_id,
+                    dry_run=False,
+                )
+            self.assertIn("post-write verification failed", str(cm.exception).lower())
+
+            # Check that manifest recorded the failed operation
+            subdirs = [os.path.join(self.test_dir, d) for d in os.listdir(self.test_dir)]
+            manifest_path = os.path.join(subdirs[0], "manifest.json")
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+            self.assertEqual(manifest["status"], "MIGRATION_FAILED")
+            self.assertEqual(manifest["failed_operation"]["operation"], "WRITE_HEADERS_EmployeeDocuments")
+        finally:
+            SyntheticWorksheet.update = original_update
+
+    def test_18_full_grid_rollback_restoration_values_and_formulas(self):
+        """Scenario 18: Rollback restores original full grid (values + formulas) and verifies fingerprint."""
+        # Create a pre-existing workforce worksheet with formula and values, missing some canonical headers
+        canon_headers = REQUIRED_TABS["SalaryStructures"]
+        truncated = canon_headers[:3]  # structure_id, emp_id, base_salary
+        self.spreadsheet.add_worksheet("SalaryStructures", initial_grid=[
+            truncated,
+            ["STR-001", "EMP-01", "25000"],
+            ["STR-002", "EMP-02", "=C2*1.2"],  # Formula in grid
+        ])
+
+        # Run migration - appends missing columns to SalaryStructures
+        res = execute_safe_workforce_migration(
+            spreadsheet=self.spreadsheet,
+            required_tabs=REQUIRED_TABS,
+            backup_root_dir=self.test_dir,
+            authorization_code=get_configured_auth_code(),
+            confirm_spreadsheet_id=self.sp_id,
+            dry_run=False,
+        )
+        self.assertIn("SalaryStructures", res["modified_worksheets"])
+        manifest_path = os.path.join(res["backup_directory"], "manifest.json")
+
+        # Prior to rollback, verify that SalaryStructures now has all canonical headers
+        ws = self.spreadsheet.worksheet("SalaryStructures")
+        self.assertEqual(len(ws.get_all_values()[0]), len(canon_headers))
+
+        # Execute rollback
+        rb_res = execute_safe_workforce_rollback(
+            spreadsheet=self.spreadsheet,
+            manifest_path=manifest_path,
+            authorization_code=get_configured_auth_code(),
+        )
+        self.assertIn("SalaryStructures", rb_res["restored_worksheets"])
+
+        # Verify grid restored exactly to truncated original including formula
+        restored_grid = ws.get_all_values()
+        self.assertEqual(restored_grid[0], truncated)
+        self.assertEqual(restored_grid[1], ["STR-001", "EMP-01", "25000"])
+        self.assertEqual(restored_grid[2], ["STR-002", "EMP-02", "=C2*1.2"])
+
+    def test_19_missing_confirm_spreadsheet_id_rejected(self):
+        """Scenario 19: Missing confirm_spreadsheet_id is rejected when spreadsheet has an ID."""
+        with self.assertRaises(AuthorizationError) as cm:
+            execute_safe_workforce_migration(
+                spreadsheet=self.spreadsheet,
+                required_tabs=REQUIRED_TABS,
+                backup_root_dir=self.test_dir,
+                authorization_code=get_configured_auth_code(),
+                confirm_spreadsheet_id=None,
+                dry_run=False,
+            )
+        self.assertIn("confirm_spreadsheet_id", str(cm.exception))
 
 
 if __name__ == "__main__":

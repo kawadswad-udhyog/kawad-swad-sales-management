@@ -41,7 +41,7 @@ from app.workforce_migration import (
     NEW_WORKFORCE_16_SHEETS,
     CANONICAL_IDENTITY_SHEETS,
     LEGACY_PRESERVED_SHEETS,
-    REQUIRED_AUTH_CODE,
+    get_configured_auth_code,
     audit_workforce_schemas,
     execute_safe_workforce_migration,
     execute_safe_workforce_rollback,
