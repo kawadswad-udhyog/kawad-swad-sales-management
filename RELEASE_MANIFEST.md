@@ -50,17 +50,22 @@ python3 backend/scripts/migrate_workforce_stage3.py --dry-run
 
 #### Authorized Live Migration:
 ```bash
+# Requires explicit environment authorization variable set by owner:
+export SALES_MIGRATION_AUTH_CODE="<SECURE_OWNER_AUTH_CODE>"
+
 python3 backend/scripts/migrate_workforce_stage3.py --execute \
-    --authorization-code="${SALES_MIGRATION_AUTH_CODE:-STAGE3_WORKFORCE_GATE1_CONFIRMED}" \
+    --authorization-code="$SALES_MIGRATION_AUTH_CODE" \
     --confirm-spreadsheet-id="<PRODUCTION_SPREADSHEET_ID>" \
     --backup-dir="backend/backups"
 ```
 
 #### Guarded Rollback (Allowed only before live business data entry):
 ```bash
+export SALES_MIGRATION_AUTH_CODE="<SECURE_OWNER_AUTH_CODE>"
+
 python3 backend/scripts/migrate_workforce_stage3.py --rollback \
-    --manifest="backend/backups/workforce_stage3_<MIGRATION_ID>/manifest.json" \
-    --authorization-code="${SALES_MIGRATION_AUTH_CODE:-STAGE3_WORKFORCE_GATE1_CONFIRMED}"
+    --manifest="backend/backups/workforce_<MIGRATION_ID>/manifest.json" \
+    --authorization-code="$SALES_MIGRATION_AUTH_CODE"
 ```
 
 *Note: The rollback engine refuses worksheet deletion if row 2+ contains active business records (`RollbackRefusalError`).*

@@ -243,19 +243,36 @@ def main():
                 grid.append([r.get(c, "") for c in headers])
             spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=30, initial_grid=grid)
 
+    auth_code = args.authorization_code.strip() or os.getenv("SALES_MIGRATION_AUTH_CODE", "").strip()
+
     if args.rollback:
         if not args.manifest:
             print("Error: --manifest=<PATH_TO_MANIFEST_JSON> is required for --rollback")
             sys.exit(1)
+        if not auth_code:
+            print("\n[CRITICAL ERROR] Execution authorization missing:")
+            print("SALES_MIGRATION_AUTH_CODE environment variable is not configured and --authorization-code was not provided.")
+            print("Rollback requires explicit authorization. Execution aborted.")
+            sys.exit(1)
         run_rollback(
             spreadsheet=spreadsheet,
             manifest_path=args.manifest,
-            auth_code=args.authorization_code,
+            auth_code=auth_code,
         )
     elif args.execute:
+        if not auth_code:
+            print("\n[CRITICAL ERROR] Execution authorization missing:")
+            print("SALES_MIGRATION_AUTH_CODE environment variable is not configured and --authorization-code was not provided.")
+            print("Live migration requires explicit authorization. Execution aborted.")
+            sys.exit(1)
+        if not args.confirm_spreadsheet_id:
+            print("\n[CRITICAL ERROR] Target spreadsheet confirmation missing:")
+            print("--confirm-spreadsheet-id=<TARGET_SPREADSHEET_ID> is required for live execution.")
+            print("Execution aborted to prevent accidental writes to wrong spreadsheet.")
+            sys.exit(1)
         run_execute_migration(
             spreadsheet=spreadsheet,
-            auth_code=args.authorization_code,
+            auth_code=auth_code,
             confirm_sp_id=args.confirm_spreadsheet_id,
             backup_dir=args.backup_dir,
         )

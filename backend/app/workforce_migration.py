@@ -86,14 +86,17 @@ class SchemaConflictError(MigrationError):
 
 def get_configured_auth_code() -> str:
     """
-    Retrieves authorized Gate 1 execution code from environment variable or secure config.
-    Defaults to the approved Gate 1 confirmation code if not set in environment.
+    Retrieves authorized Gate 1 execution code strictly from environment variable SALES_MIGRATION_AUTH_CODE.
+    Raises AuthorizationError if SALES_MIGRATION_AUTH_CODE is not configured or empty.
+    Zero static fallbacks permitted. Secrets are never exposed in source code, logs, or reports.
     """
-    return os.getenv("SALES_MIGRATION_AUTH_CODE", "").strip() or "STAGE3_WORKFORCE_GATE1_CONFIRMED"
-
-
-# Backward compatibility alias for scripts/tests expecting REQUIRED_AUTH_CODE
-REQUIRED_AUTH_CODE = get_configured_auth_code()
+    code = os.getenv("SALES_MIGRATION_AUTH_CODE", "").strip()
+    if not code:
+        raise AuthorizationError(
+            "SALES_MIGRATION_AUTH_CODE environment variable is not configured. "
+            "Execution aborted. Live migration and rollback require explicit environment authorization."
+        )
+    return code
 
 
 def mask_spreadsheet_id(val: str) -> str:
@@ -621,8 +624,19 @@ def execute_safe_workforce_migration(
                             f"Headers do not match expected sequence. Found: {clean_read}, Expected: {expected_headers}"
                         )
 
+                    # Record expected post-migration fingerprint for rollback verification
+                    try:
+                        post_grid = ws.get_all_values(value_render_option="FORMULA")
+                    except TypeError:
+                        post_grid = ws.get_all_values()
+                    post_fp = compute_grid_fingerprint(clean_read, post_grid)
+                    if sheet_name in manifest["sheets"]:
+                        manifest["sheets"][sheet_name]["expected_post_migration_fingerprint"] = post_fp
+                        manifest["sheets"][sheet_name]["post_migration_headers"] = clean_read
+                        manifest["sheets"][sheet_name]["post_migration_row_count"] = len(post_grid)
+
                     modified_worksheets.append(sheet_name)
-                    logger.info("Appended missing columns %s to %s", missing, sheet_name)
+                    logger.info("Appended missing columns %s to %s (post-migration fingerprint: %s)", missing, sheet_name, post_fp[:8])
 
         # Step 7: Verify canonical identity and legacy sheets remain 100% intact
         current_op = "VERIFY_PROTECTED_SHEETS_INTACT"
@@ -679,6 +693,59 @@ def execute_safe_workforce_migration(
         raise
 
 
+def generate_rollback_recovery_report(
+    backup_dir: str,
+    migration_id: str,
+    sheet_name: str,
+    ws_id: str,
+    reasons: List[str],
+    current_row_count: int,
+    original_row_count: int,
+) -> str:
+    """
+    Generates a structured recovery report on disk when automatic rollback is refused
+    to prevent business data loss or accidental overwrites.
+    """
+    report = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "migration_id": migration_id,
+        "sheet_name": sheet_name,
+        "worksheet_id": ws_id,
+        "status": "AUTOMATIC_ROLLBACK_REFUSED",
+        "reasons": reasons,
+        "current_row_count": current_row_count,
+        "original_row_count": original_row_count,
+        "action_taken": "Rollback refused. Existing worksheet left unmodified. No cells were cleared.",
+        "properties_restored_by_engine": [
+            "Row 1 canonical/original headers",
+            "Cell string and numeric values across all grid cells",
+            "Cell formulas (rendered and preserved in FORMULA mode, e.g. =E2*F2)",
+        ],
+        "properties_unrestorable_automatically": [
+            "Cell formatting (font family, colors, weights, borders, alignments)",
+            "Column widths and row heights",
+            "Conditional formatting rules",
+            "Embedded chart widgets, slicers, or pivot tables",
+            "Protected ranges and sheet permissions",
+        ],
+        "manual_recovery_recommendations": [
+            "Inspect newly added business records in the worksheet before modifying.",
+            f"Compare with the original verified snapshot at: {os.path.join(backup_dir, f'{sheet_name}.json')}",
+            "Export current live rows to CSV before performing any manual reconciliation.",
+            "Owner authorization required to truncate or alter any post-migration data rows.",
+        ],
+    }
+    report_filename = f"recovery_report_{sheet_name}_{migration_id}.json"
+    report_path = os.path.join(backup_dir, report_filename)
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        logger.warning("Recovery report written to: %s", report_path)
+    except Exception as e:
+        logger.error("Failed to write recovery report to disk: %s", e)
+    return report_path
+
+
 # ---------------------------------------------------------------------------
 # Rollback Engine
 # ---------------------------------------------------------------------------
@@ -698,7 +765,10 @@ def execute_safe_workforce_rollback(
        - Only strictly empty (header-only) newly created worksheets can be removed.
     4. Safety guard: inspects pre-existing worksheets that were modified:
        - Verifies original worksheet ID (`worksheet_id`) matches current worksheet ID.
-       - Verifies that no post-migration data rows were added or altered.
+       - Verifies worksheet title and migration ID.
+       - Verifies pre-migration fingerprint and expected post-migration fingerprint.
+       - Verifies that no post-migration data rows were added or existing cells altered.
+       - Never executes ws.clear() if unexpected changes exist; generates recovery report on refusal.
        - Restores full original grid state (values, formulas, headers).
        - Confirms restored fingerprint matches original snapshot.
     5. Preserves all canonical identity and legacy worksheets untouched.
@@ -759,26 +829,82 @@ def execute_safe_workforce_rollback(
     for sheet_name in modified_worksheets:
         ws = existing_ws.get(sheet_name)
         orig_snap = sheets_meta.get(sheet_name, {})
-        if ws is not None and orig_snap.get("present_in_spreadsheet"):
-            # Verify worksheet ID matches
-            cur_ws_id = str(getattr(ws, "id", "") or "")
-            orig_ws_id = str(orig_snap.get("worksheet_id", "") or "")
-            if cur_ws_id and orig_ws_id and cur_ws_id != orig_ws_id:
-                raise RollbackRefusalError(
-                    f"Rollback REFUSED: Worksheet ID mismatch for '{sheet_name}': "
-                    f"current '{cur_ws_id}' != original '{orig_ws_id}'. "
-                    f"Worksheet identity may have been shifted or replaced."
+        if ws is None or not orig_snap.get("present_in_spreadsheet"):
+            continue
+
+        reasons: List[str] = []
+        cur_ws_id = str(getattr(ws, "id", "") or "")
+        orig_ws_id = str(orig_snap.get("worksheet_id", "") or "")
+
+        # 1. Verify worksheet ID matches
+        if cur_ws_id and orig_ws_id and cur_ws_id != orig_ws_id:
+            reasons.append(
+                f"Worksheet ID mismatch for '{sheet_name}': current '{cur_ws_id}' != original '{orig_ws_id}'"
+            )
+
+        # 2. Verify worksheet title matches
+        if ws.title != sheet_name:
+            reasons.append(
+                f"Worksheet title mismatch: current '{ws.title}' != expected '{sheet_name}'"
+            )
+
+        # 3. Verify migration ID
+        if not manifest.get("migration_id"):
+            reasons.append("Migration manifest is missing a valid migration_id.")
+
+        # 4. Verify original fingerprint
+        orig_fp = orig_snap.get("sheet_fingerprint")
+        if not orig_fp:
+            reasons.append(f"Original pre-migration fingerprint missing for '{sheet_name}'.")
+
+        # Fetch current grid including formulas
+        try:
+            cur_grid = ws.get_all_values(value_render_option="FORMULA")
+        except TypeError:
+            cur_grid = ws.get_all_values()
+
+        cur_data_rows = cur_grid[1:] if len(cur_grid) > 1 else []
+        orig_data_count = orig_snap.get("row_data_count", 0)
+        orig_raw_grid = orig_snap.get("raw_grid", [])
+        orig_data_rows = orig_raw_grid[1:] if len(orig_raw_grid) > 1 else []
+
+        # 5. Check if post-migration data rows were added
+        if len(cur_data_rows) > orig_data_count:
+            reasons.append(
+                f"Worksheet '{sheet_name}' has received {len(cur_data_rows) - orig_data_count} "
+                f"new business data record(s) since migration (current: {len(cur_data_rows)}, original: {orig_data_count})"
+            )
+
+        # 6. Check if original business data rows were modified
+        if cur_data_rows[:orig_data_count] != orig_data_rows[:orig_data_count]:
+            reasons.append(
+                f"Existing business data records in '{sheet_name}' were altered after migration"
+            )
+
+        # 7. Check expected post-migration fingerprint
+        expected_post_fp = orig_snap.get("expected_post_migration_fingerprint")
+        if expected_post_fp:
+            cur_fp = compute_grid_fingerprint(cur_grid[0] if cur_grid else [], cur_grid)
+            if cur_fp != expected_post_fp:
+                reasons.append(
+                    f"Current grid fingerprint '{cur_fp[:8]}' does not match expected post-migration fingerprint '{expected_post_fp[:8]}'"
                 )
 
-            # Check if post-migration data rows were added
-            cur_grid = ws.get_all_values()
-            cur_data_rows = cur_grid[1:] if len(cur_grid) > 1 else []
-            orig_data_count = orig_snap.get("row_data_count", 0)
-            if len(cur_data_rows) > orig_data_count:
-                raise RollbackRefusalError(
-                    f"Rollback REFUSED: Modified worksheet '{sheet_name}' has received {len(cur_data_rows) - orig_data_count} "
-                    f"new business data record(s) since migration. Rollback aborted to prevent data loss."
-                )
+        if reasons:
+            report_path = generate_rollback_recovery_report(
+                backup_dir=backup_dir,
+                migration_id=manifest.get("migration_id", "UNKNOWN"),
+                sheet_name=sheet_name,
+                ws_id=cur_ws_id,
+                reasons=reasons,
+                current_row_count=len(cur_grid),
+                original_row_count=len(orig_raw_grid),
+            )
+            raise RollbackRefusalError(
+                f"Rollback REFUSED for modified worksheet '{sheet_name}': {'; '.join(reasons)}. "
+                f"Automatic rollback aborted to protect business data. "
+                f"Recovery report generated at: {report_path}"
+            )
 
     deleted_worksheets: List[str] = []
     restored_worksheets: List[str] = []

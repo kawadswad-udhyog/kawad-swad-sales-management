@@ -70,4 +70,26 @@ export default defineConfig({
       '/auth': createProxyRule('/auth'),
     },
   },
+  build: {
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('react') || id.includes('react-dom') || id.includes('scheduler')) {
+              return 'vendor-react';
+            }
+            if (id.includes('lucide-react')) {
+              return 'vendor-icons';
+            }
+            if (id.includes('jspdf') || id.includes('html2canvas') || id.includes('dompurify')) {
+              return 'vendor-pdf';
+            }
+            return 'vendor-utils';
+          }
+        },
+      },
+    },
+  },
 });
+

@@ -21,7 +21,6 @@ from app.workforce_migration import (
     NEW_WORKFORCE_16_SHEETS,
     CANONICAL_IDENTITY_SHEETS,
     LEGACY_PRESERVED_SHEETS,
-    REQUIRED_AUTH_CODE,
     get_configured_auth_code,
     create_complete_workforce_backup,
     verify_backup_integrity,
@@ -129,6 +128,8 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp(prefix="ks_workforce_test_")
         self.sp_id = "TEST-SP-KAWAD-SWAD-01"
+        self.auth_code = "TEST_AUTH_CODE_SECURE_987654"
+        os.environ["SALES_MIGRATION_AUTH_CODE"] = self.auth_code
         self.spreadsheet = SyntheticSpreadsheet(spreadsheet_id=self.sp_id, title="Kawad Swad Production Test")
 
         # Initialize canonical identity sheets with synthetic records
@@ -167,7 +168,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -198,7 +199,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -210,7 +211,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -232,7 +233,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -259,7 +260,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -287,7 +288,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -335,7 +336,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
                 spreadsheet=self.spreadsheet,
                 required_tabs=REQUIRED_TABS,
                 backup_root_dir=self.test_dir,
-                authorization_code=REQUIRED_AUTH_CODE,
+                authorization_code=self.auth_code,
                 confirm_spreadsheet_id=self.sp_id,
                 dry_run=False,
             )
@@ -371,7 +372,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
                 spreadsheet=self.spreadsheet,
                 required_tabs=REQUIRED_TABS,
                 backup_root_dir=self.test_dir,
-                authorization_code=REQUIRED_AUTH_CODE,
+                authorization_code=self.auth_code,
                 confirm_spreadsheet_id=self.sp_id,
                 dry_run=False,
             )
@@ -386,7 +387,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
         rollback_res = execute_safe_workforce_rollback(
             spreadsheet=self.spreadsheet,
             manifest_path=manifest_path,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
         )
 
         self.assertEqual(rollback_res["status"], "ROLLBACK_SUCCESSFUL")
@@ -403,7 +404,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -413,7 +414,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
         rollback_res = execute_safe_workforce_rollback(
             spreadsheet=self.spreadsheet,
             manifest_path=manifest_path,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
         )
 
         self.assertEqual(rollback_res["status"], "ROLLBACK_SUCCESSFUL")
@@ -430,7 +431,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -446,7 +447,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             execute_safe_workforce_rollback(
                 spreadsheet=self.spreadsheet,
                 manifest_path=manifest_path,
-                authorization_code=REQUIRED_AUTH_CODE,
+                authorization_code=self.auth_code,
             )
 
         self.assertIn("active business record", str(cm.exception))
@@ -464,7 +465,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -481,7 +482,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
             spreadsheet=self.spreadsheet,
             required_tabs=REQUIRED_TABS,
             backup_root_dir=self.test_dir,
-            authorization_code=REQUIRED_AUTH_CODE,
+            authorization_code=self.auth_code,
             confirm_spreadsheet_id=self.sp_id,
             dry_run=False,
         )
@@ -531,7 +532,7 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
                 spreadsheet=self.spreadsheet,
                 required_tabs=REQUIRED_TABS,
                 backup_root_dir=self.test_dir,
-                authorization_code=REQUIRED_AUTH_CODE,
+                authorization_code=self.auth_code,
                 confirm_spreadsheet_id="WRONG_SPREADSHEET_ID",
                 dry_run=False,
             )
@@ -662,6 +663,90 @@ class WorkforceMigrationSafetyTests(unittest.TestCase):
                 dry_run=False,
             )
         self.assertIn("confirm_spreadsheet_id", str(cm.exception))
+
+    def test_20_missing_auth_code_env_var_aborts_immediately(self):
+        """Scenario 20: Missing SALES_MIGRATION_AUTH_CODE environment variable aborts execution with AuthorizationError."""
+        orig_code = os.environ.pop("SALES_MIGRATION_AUTH_CODE", None)
+        try:
+            with self.assertRaises(AuthorizationError) as cm:
+                get_configured_auth_code()
+            self.assertIn("SALES_MIGRATION_AUTH_CODE", str(cm.exception))
+
+            with self.assertRaises(AuthorizationError) as cm2:
+                execute_safe_workforce_migration(
+                    spreadsheet=self.spreadsheet,
+                    required_tabs=REQUIRED_TABS,
+                    backup_root_dir=self.test_dir,
+                    authorization_code="ANY_TOKEN",
+                    confirm_spreadsheet_id=self.sp_id,
+                    dry_run=False,
+                )
+            self.assertIn("SALES_MIGRATION_AUTH_CODE", str(cm2.exception))
+        finally:
+            if orig_code is not None:
+                os.environ["SALES_MIGRATION_AUTH_CODE"] = orig_code
+
+    def test_21_rollback_refuses_when_unexpected_data_or_cells_modified_and_generates_recovery_report(self):
+        """Scenario 21: Rollback refuses clear/restoration when unexpected data or modified cells exist, generating a recovery report."""
+        canon_headers = REQUIRED_TABS["SalaryStructures"]
+        truncated = canon_headers[:3]
+        self.spreadsheet.add_worksheet("SalaryStructures", initial_grid=[
+            truncated,
+            ["STR-001", "EMP-01", "25000"],
+            ["STR-002", "EMP-02", "=C2*1.2"],
+        ])
+
+        # Run migration
+        res = execute_safe_workforce_migration(
+            spreadsheet=self.spreadsheet,
+            required_tabs=REQUIRED_TABS,
+            backup_root_dir=self.test_dir,
+            authorization_code=self.auth_code,
+            confirm_spreadsheet_id=self.sp_id,
+            dry_run=False,
+        )
+        manifest_path = os.path.join(res["backup_directory"], "manifest.json")
+        ws = self.spreadsheet.worksheet("SalaryStructures")
+
+        # Simulate unexpected user modification after migration: edit cell in existing business record
+        ws._grid[1][2] = "99999"  # Altered base_salary from 25000 to 99999
+
+        clear_called = [False]
+        orig_clear = ws.clear
+        def tracked_clear():
+            clear_called[0] = True
+            orig_clear()
+        ws.clear = tracked_clear
+
+        try:
+            with self.assertRaises(RollbackRefusalError) as cm:
+                execute_safe_workforce_rollback(
+                    spreadsheet=self.spreadsheet,
+                    manifest_path=manifest_path,
+                    authorization_code=self.auth_code,
+                )
+
+            # Assert ws.clear() was NEVER called
+            self.assertFalse(clear_called[0])
+
+            # Assert refusal reason mentions altered data or fingerprint mismatch
+            err_msg = str(cm.exception)
+            self.assertIn("Rollback REFUSED", err_msg)
+            self.assertIn("recovery_report_SalaryStructures", err_msg)
+
+            # Assert recovery report was generated on disk
+            report_files = [f for f in os.listdir(res["backup_directory"]) if f.startswith("recovery_report_SalaryStructures")]
+            self.assertEqual(len(report_files), 1)
+            report_full_path = os.path.join(res["backup_directory"], report_files[0])
+            with open(report_full_path, "r", encoding="utf-8") as f:
+                report_data = json.load(f)
+
+            self.assertEqual(report_data["status"], "AUTOMATIC_ROLLBACK_REFUSED")
+            self.assertIn("properties_restored_by_engine", report_data)
+            self.assertIn("properties_unrestorable_automatically", report_data)
+            self.assertIn("manual_recovery_recommendations", report_data)
+        finally:
+            ws.clear = orig_clear
 
 
 if __name__ == "__main__":
