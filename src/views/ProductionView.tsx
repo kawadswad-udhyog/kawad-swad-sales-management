@@ -2813,11 +2813,30 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 value={pack.notes}
                 onChange={e => setPack({ ...pack, notes: e.target.value })}
               />
-              <button style={btn} disabled={busy}>
-                Record packaging
-              </button>
+              <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginTop: 4 }}>
+                {(() => {
+                  const pk200 = Number(pack.packets_200g) || 0;
+                  const pk500 = Number(pack.packets_500g) || 0;
+                  const pk1000 = Number(pack.packets_1000g) || 0;
+                  const livePackedKg = Math.round(((pk200 * 0.2) + (pk500 * 0.5) + (pk1000 * 1.0)) * 1000) / 1000;
+                  const liveBulkUsed = Number(pack.bulk_kg_used) || 0;
+                  const liveDiffKg = liveBulkUsed > 0 ? Math.round((liveBulkUsed - livePackedKg) * 1000) / 1000 : 0;
+                  if (liveBulkUsed <= 0 && livePackedKg <= 0) return null;
+                  return (
+                    <div style={{ fontSize: 13, color: '#334155', background: '#f8fafc', padding: '6px 12px', borderRadius: 8, border: '1px solid #cbd5e1' }}>
+                      📦 Packed Output: <b>{livePackedKg} kg</b> ({pk200 + pk500 + pk1000} packets) | Bulk Input: <b>{liveBulkUsed} kg</b>{' '}
+                      <span style={{ color: Math.abs(liveDiffKg) <= 0.05 ? '#166534' : liveDiffKg > 0 ? '#b91c1c' : '#d97706', fontWeight: 700 }}>
+                        (Variance: {liveDiffKg > 0 ? '+' : ''}{liveDiffKg} kg)
+                      </span>
+                    </div>
+                  );
+                })()}
+                <button style={{ ...btn, marginLeft: 'auto' }} disabled={busy}>
+                  Record packaging
+                </button>
+              </div>
             </form>
-            <p style={{ color: '#64748b' }}>
+            <p style={{ color: '#64748b', fontSize: 12, marginTop: 8 }}>
               Expected kg = 200 g packets × 0.2 + 500 g packets × 0.5 + 1 kg packets × 1. The system records and flags any difference
               for physical audit reconciliation.
             </p>

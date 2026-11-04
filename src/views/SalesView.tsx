@@ -4,6 +4,15 @@ import { CustomerType, Sale, SaleItem, Product } from '../types';
 import { generateInvoicePdf } from '../utils/generateInvoicePdf';
 import { InvoiceModal } from '../components/InvoiceModal';
 import { PageHeader } from '../components/common/PageHeader';
+import {
+  CalculationPreview,
+  MoneyInput,
+  QuantityInput,
+  TextInput,
+  SelectInput,
+  FormField,
+  FormSection,
+} from '../components/common/FormComponents';
 
 interface CartLine {
   product_id: string;
@@ -1154,61 +1163,69 @@ export const SalesView: React.FC = () => {
             </div>
           )}
 
-          {/* Step 6: Summary, Discount & Total */}
-          <div style={{ background: '#f8fafc', padding: '18px', borderRadius: '10px', border: '1px solid #e2e8f0', marginBottom: '20px' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '14px', alignItems: 'center' }}>
-              <div>
-                <span style={{ fontSize: '0.85rem', color: '#64748b' }}>Items Subtotal:</span>
-                <div style={{ fontSize: '1.2rem', fontWeight: 600, color: '#1e293b' }}>
-                  ₹{subtotal.toFixed(2)}
-                </div>
-              </div>
+          {/* Step 6: Summary, Discount & Total with FormComponents */}
+          <div className="space-y-4 mb-6">
+            <CalculationPreview
+              title="Sales Order & Settlement Preview"
+              items={[
+                {
+                  label: 'Items Subtotal',
+                  value: `₹${subtotal.toFixed(2)}`,
+                  subtitle: `${cart.length} lines · ${totalPackets} pkts`,
+                },
+                {
+                  label: 'Total Weight',
+                  value: `${totalQualifyingWeightKg.toFixed(2)} kg`,
+                  subtitle: 'Qualifying papad mass',
+                  variant: 'slate',
+                },
+                {
+                  label: 'Trade Discount',
+                  value: discountAmount > 0 ? `-₹${Number(discountAmount).toFixed(2)}` : '₹0.00',
+                  subtitle: discountAmount > 0 ? 'Approved concession' : 'No discount',
+                  variant: discountAmount > 0 ? 'amber' : 'slate',
+                },
+                {
+                  label: 'Final Bill Total',
+                  value: `₹${billTotal.toFixed(2)}`,
+                  subtitle: `Paid via ${paymentMethod}`,
+                  isHighlight: true,
+                  variant: 'emerald',
+                },
+              ]}
+            />
 
-              <div>
-                <label style={{ margin: 0 }}>
-                  <span style={{ fontSize: '0.82rem', color: '#64748b' }}>Discount ₹ (Optional):</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={discountAmount || ''}
-                    placeholder="0"
-                    onFocus={(e) => e.target.select()}
+            <div className="bg-white border border-[#E7E2D6] rounded-2xl p-5 shadow-xs space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FormField
+                  label="Trade / Route Discount (₹)"
+                  helpText="Optional concession granted to retailer or bulk buyer"
+                >
+                  <MoneyInput
+                    value={discountAmount || 0}
+                    onChange={(val) => {
+                      invalidateDraftKey();
+                      setDiscountAmount(val);
+                    }}
+                    placeholder="0.00"
+                  />
+                </FormField>
+
+                <FormField
+                  label="Bill Notes / Remarks (Optional)"
+                  helpText="Driver details, delivery notes, or special shop instructions"
+                >
+                  <TextInput
+                    maxLength={500}
+                    placeholder="e.g. Delivered to Kasrawad shop; payment collected in cash"
+                    value={notes}
                     onChange={(e) => {
                       invalidateDraftKey();
-                      setDiscountAmount(Math.max(0, Number(e.target.value) || 0));
+                      setNotes(e.target.value);
                     }}
-                    style={{ width: '100%', marginTop: '3px', padding: '7px 10px' }}
                   />
-                </label>
+                </FormField>
               </div>
-
-              <div style={{ background: '#ecfdf5', padding: '12px 16px', borderRadius: '8px', textAlign: 'right', border: '1px solid #a7f3d0' }}>
-                <span style={{ fontSize: '0.85rem', color: '#047857', fontWeight: 700 }}>FINAL BILL TOTAL</span>
-                <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#065f46' }}>
-                  ₹{billTotal.toFixed(2)}
-                </div>
-                <div style={{ fontSize: '0.78rem', color: '#047857', marginTop: '2px' }}>
-                  Full payment will be marked as {paymentMethod}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ marginTop: '12px' }}>
-              <label style={{ margin: 0 }}>
-                <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Bill Notes / Remarks (Optional):</span>
-                <input
-                  type="text"
-                  maxLength={500}
-                  placeholder="Delivery remarks, driver details, or shop notes..."
-                  value={notes}
-                  onChange={(e) => {
-                    invalidateDraftKey();
-                    setNotes(e.target.value);
-                  }}
-                  style={{ width: '100%', marginTop: '3px', padding: '7px 10px' }}
-                />
-              </label>
             </div>
           </div>
 

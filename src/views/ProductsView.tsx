@@ -1,6 +1,19 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
+import { Package } from 'lucide-react';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  TextInput,
+  SelectInput,
+  QuantityInput,
+  TextArea,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
 
 const CATEGORIES = ['ALL', 'Papad', 'Masala', 'Katran'] as const;
 
@@ -226,166 +239,144 @@ export const ProductsView: React.FC = () => {
         </div>
       )}
 
-      {/* Product Form Card (Collapsible) */}
+      {/* Product Form using FormComponents */}
       {isManager && isFormOpen && (
-        <div className="card" style={{ marginBottom: '20px', background: '#f8fafc', border: '1px solid #cbd5e1' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h2 style={{ margin: 0, fontSize: '1.2rem' }}>
-              {editingId ? 'Edit Product Details' : 'Add New Product to Catalogue'}
-            </h2>
-            <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
-              SKU is immutable after creation to protect past sales records
-            </span>
-          </div>
-
-          <form className="inline" onSubmit={handleSubmit}>
-            <label>
-              SKU <span style={{ color: '#b91c1c' }}>*</span>
-              <input
-                required
-                maxLength={60}
-                placeholder="e.g. KS-MMP-200"
-                value={sku}
-                onChange={(e) => setSku(e.target.value)}
-                disabled={!!editingId}
-                style={{ padding: '8px', background: editingId ? '#f1f5f9' : '#fff' }}
-                title={editingId ? 'SKU cannot be altered to preserve billing history' : ''}
+        <div className="mb-6">
+          <FormLayout
+            title={editingId ? 'Edit Product Details' : 'Add New Product to Catalogue'}
+            subtitle={editingId ? 'SKU is locked to preserve billing history' : 'Define SKU, formulation category, and retail packaging specs'}
+            icon={<Package size={18} />}
+            maxWidth="3xl"
+            onSubmit={handleSubmit}
+            onCancel={resetForm}
+            actions={
+              <FormActions
+                onCancel={resetForm}
+                cancelLabel="Cancel"
+                saveLabel={editingId ? 'Save Changes' : 'Save Product'}
               />
-            </label>
-
-            <label>
-              Product Name <span style={{ color: '#b91c1c' }}>*</span>
-              <input
+            }
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <FormField
+                label="SKU Code"
                 required
-                maxLength={120}
-                placeholder="e.g. Moong Masala Papad 200g"
-                value={productName}
-                onChange={(e) => setProductName(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
-
-            <label>
-              Category
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                style={{ padding: '8px' }}
+                helpText={editingId ? 'SKU is immutable after creation' : 'Unique identifier (e.g. KS-MMP-200)'}
               >
-                <option value="Papad">Papad</option>
-                <option value="Masala">Masala</option>
-                <option value="Katran">Katran</option>
-              </select>
-            </label>
-
-            <label>
-              Variant
-              <input
-                required
-                value={variant}
-                onChange={(e) => setVariant(e.target.value)}
-                placeholder="e.g. Plain, Spicy, Jeera, Special"
-                style={{ padding: '8px' }}
-              />
-            </label>
-
-            <label>
-              Pack Weight (grams)
-              <div style={{ display: 'flex', gap: '4px' }}>
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
+                <TextInput
                   required
-                  value={packWeightG}
-                  onChange={(e) => setPackWeightG(Number(e.target.value))}
-                  style={{ width: '80px', padding: '8px' }}
+                  maxLength={60}
+                  placeholder="e.g. KS-MMP-200"
+                  value={sku}
+                  onChange={(e) => setSku(e.target.value)}
+                  disabled={!!editingId}
                 />
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => setPackWeightG(200)}
-                  style={{ padding: '4px 6px', fontSize: '0.75rem' }}
-                >
-                  200g
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => setPackWeightG(500)}
-                  style={{ padding: '4px 6px', fontSize: '0.75rem' }}
-                >
-                  500g
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => setPackWeightG(1000)}
-                  style={{ padding: '4px 6px', fontSize: '0.75rem' }}
-                >
-                  1kg
-                </button>
+              </FormField>
+
+              <FormField label="Product Name" required helpText="Catalogue name displayed on invoices">
+                <TextInput
+                  required
+                  maxLength={120}
+                  placeholder="e.g. Moong Masala Papad 200g"
+                  value={productName}
+                  onChange={(e) => setProductName(e.target.value)}
+                />
+              </FormField>
+
+              <FormField label="Category">
+                <SelectInput
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  options={[
+                    { value: 'Papad', label: 'Papad' },
+                    { value: 'Masala', label: 'Masala' },
+                    { value: 'Katran', label: 'Katran' },
+                  ]}
+                />
+              </FormField>
+
+              <FormField label="Variant" required helpText="Taste or spice formulation">
+                <TextInput
+                  required
+                  value={variant}
+                  onChange={(e) => setVariant(e.target.value)}
+                  placeholder="e.g. Plain, Spicy, Jeera, Special"
+                />
+              </FormField>
+
+              <FormField label="Pack Net Weight (grams)" required helpText="Select preset or enter exact grams">
+                <div className="space-y-1.5">
+                  <QuantityInput
+                    unit="g"
+                    min={1}
+                    step={1}
+                    value={packWeightG}
+                    onChange={(val) => setPackWeightG(val)}
+                  />
+                  <div className="flex gap-1.5">
+                    {[200, 500, 1000].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setPackWeightG(preset)}
+                        className={`px-2 py-0.5 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
+                          packWeightG === preset
+                            ? 'bg-[#0F2C23] text-white'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                        }`}
+                      >
+                        {preset >= 1000 ? `${preset / 1000}kg` : `${preset}g`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </FormField>
+
+              <FormField label="Selling Unit">
+                <SelectInput
+                  value={sellingUnit}
+                  onChange={(e) => setSellingUnit(e.target.value as 'packet' | 'kg')}
+                  options={[
+                    { value: 'packet', label: 'packet' },
+                    { value: 'kg', label: 'kg' },
+                  ]}
+                />
+              </FormField>
+
+              <div className="sm:col-span-2 lg:col-span-3 flex items-center gap-6 pt-1">
+                <label className="flex items-center gap-2 cursor-pointer select-none text-xs font-semibold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={retailPackOnly}
+                    onChange={(e) => setRetailPackOnly(e.target.checked)}
+                    className="w-4 h-4 rounded text-[#0F2C23] focus:ring-[#0F2C23]"
+                  />
+                  <span>Retail pack only</span>
+                </label>
+
+                <label className="flex items-center gap-2 cursor-pointer select-none text-xs font-semibold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={active}
+                    onChange={(e) => setActive(e.target.checked)}
+                    className="w-4 h-4 rounded text-[#0F2C23] focus:ring-[#0F2C23]"
+                  />
+                  <span>Active for Sales & Billing</span>
+                </label>
               </div>
-            </label>
 
-            <label>
-              Selling Unit
-              <select
-                value={sellingUnit}
-                onChange={(e) => setSellingUnit(e.target.value as 'packet' | 'kg')}
-                style={{ padding: '8px' }}
-              >
-                <option value="packet">packet</option>
-                <option value="kg">kg</option>
-              </select>
-            </label>
-
-            <label className="check-label" style={{ paddingTop: '10px' }}>
-              <input
-                type="checkbox"
-                checked={retailPackOnly}
-                onChange={(e) => setRetailPackOnly(e.target.checked)}
-              />
-              Retail pack only
-            </label>
-
-            <label className="check-label" style={{ paddingTop: '10px' }}>
-              <input
-                type="checkbox"
-                checked={active}
-                onChange={(e) => setActive(e.target.checked)}
-              />
-              Active in sales
-            </label>
-
-            <label style={{ gridColumn: 'span 2' }}>
-              Notes / Packaging Specs
-              <input
-                maxLength={500}
-                placeholder="Packaging notes, barcode details, target market..."
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
-
-            <div className="actions" style={{ gridColumn: 'span 2', marginTop: '10px', display: 'flex', gap: '10px' }}>
-              <button
-                type="submit"
-                style={{ background: '#047857', color: '#fff', padding: '10px 20px', fontWeight: 600 }}
-              >
-                {editingId ? '💾 Save Changes' : '💾 Save Product'}
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={resetForm}
-                style={{ padding: '10px 16px' }}
-              >
-                Cancel
-              </button>
+              <div className="sm:col-span-2 lg:col-span-3">
+                <FormField label="Notes / Packaging Specs" helpText="Barcode details, carton dimensions, or market restrictions">
+                  <TextInput
+                    maxLength={500}
+                    placeholder="Packaging notes, barcode details, target market..."
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+                </FormField>
+              </div>
             </div>
-          </form>
+          </FormLayout>
         </div>
       )}
 

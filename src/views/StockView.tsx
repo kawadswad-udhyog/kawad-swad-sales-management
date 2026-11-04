@@ -3,6 +3,19 @@ import { useStore } from '../context/StoreContext';
 import { StockTxnType, FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
 import { apiRequest } from '../services/api';
 import { exportSheetToExcel } from '../utils/exportToExcel';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  MoneyInput,
+  QuantityInput,
+  TextInput,
+  SelectInput,
+  CalculationPreview,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
 
 export const StockView: React.FC = () => {
   const {
@@ -560,79 +573,95 @@ export const StockView: React.FC = () => {
               </div>
             )}
 
-            <form onSubmit={handleReconcileOpening} className="inline" style={{ marginBottom: 12 }}>
-              <label>
-                Location / Node
-                <select
-                  value={reconLocation}
-                  onChange={(e) => setReconLocation(e.target.value)}
-                >
-                  <option value="WAREHOUSE">🏢 Central Warehouse (Company Stock)</option>
-                  <option value="FACTORY">🏭 Factory Finished Goods Storage</option>
-                  {activeSalesmen.map((u) => (
-                    <option key={u.user_id} value={u.user_id}>
-                      🚶 Salesman: {u.full_name} ({u.user_id})
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <form onSubmit={handleReconcileOpening} className="space-y-4 mb-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <FormField label="Location / Node" required>
+                  <SelectInput
+                    value={reconLocation}
+                    onChange={(e) => setReconLocation(e.target.value)}
+                  >
+                    <option value="WAREHOUSE">🏢 Central Warehouse (Company Stock)</option>
+                    <option value="FACTORY">🏭 Factory Finished Goods Storage</option>
+                    {activeSalesmen.map((u) => (
+                      <option key={u.user_id} value={u.user_id}>
+                        🚶 Salesman: {u.full_name} ({u.user_id})
+                      </option>
+                    ))}
+                  </SelectInput>
+                </FormField>
 
-              <label>
-                Product SKU
-                <select
-                  required
-                  value={reconProductId}
-                  onChange={(e) => setReconProductId(e.target.value)}
-                >
-                  {activeProducts.map((p) => (
-                    <option key={p.product_id} value={p.product_id}>
-                      {p.sku} · {p.product_name} ({p.pack_weight_g}g)
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <FormField label="Product SKU" required>
+                  <SelectInput
+                    required
+                    value={reconProductId}
+                    onChange={(e) => setReconProductId(e.target.value)}
+                  >
+                    {activeProducts.map((p) => (
+                      <option key={p.product_id} value={p.product_id}>
+                        {p.sku} · {p.product_name} ({p.pack_weight_g}g)
+                      </option>
+                    ))}
+                  </SelectInput>
+                </FormField>
 
-              <label>
-                Actual Physical Count
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  required
-                  value={reconPhysicalCount}
-                  onChange={(e) => setReconPhysicalCount(Number(e.target.value))}
-                />
-              </label>
+                <FormField label="Actual Physical Count" required helpText="Counted packets in warehouse/van">
+                  <QuantityInput
+                    unit="pkts"
+                    min={0}
+                    step={1}
+                    value={reconPhysicalCount}
+                    onChange={(val) => setReconPhysicalCount(val)}
+                  />
+                </FormField>
 
-              <label>
-                Audit Reference / Verification Tag
-                <input
-                  placeholder="e.g. AUDIT-2026-COUNT, Physical stock audit"
-                  value={reconReference}
-                  onChange={(e) => setReconReference(e.target.value)}
-                />
-              </label>
+                <FormField label="Audit Reference Tag" helpText="e.g. AUDIT-2026-COUNT">
+                  <TextInput
+                    placeholder="e.g. AUDIT-2026-COUNT"
+                    value={reconReference}
+                    onChange={(e) => setReconReference(e.target.value)}
+                  />
+                </FormField>
 
-              <label style={{ gridColumn: 'span 2' }}>
-                Reason / Investigation Note
-                <input
-                  placeholder="Explanation of variance or opening balance setup..."
-                  value={reconReason}
-                  onChange={(e) => setReconReason(e.target.value)}
-                />
-              </label>
-
-              <div style={{ gridColumn: '1 / -1', background: '#f8fafc', padding: 10, borderRadius: 6, border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-                <div>
-                  Current Ledger Expected: <b>{currentExpectedCount} pkts</b> | Physical Count: <b>{reconPhysicalCount} pkts</b> |
-                  Balancing Adjustment:{' '}
-                  <b style={{ color: liveAdjustmentDiff >= 0 ? '#15803d' : '#b91c1c' }}>
-                    {liveAdjustmentDiff > 0 ? `+${liveAdjustmentDiff}` : liveAdjustmentDiff} pkts
-                  </b>
+                <div className="sm:col-span-2 lg:col-span-4">
+                  <FormField label="Reason / Investigation Note" helpText="Explanation of physical count or opening baseline setup">
+                    <TextInput
+                      placeholder="Explanation of variance or opening balance setup..."
+                      value={reconReason}
+                      onChange={(e) => setReconReason(e.target.value)}
+                    />
+                  </FormField>
                 </div>
-                <button type="submit" disabled={reconLoading} style={{ background: '#176b52' }}>
-                  {reconLoading ? 'Reconciling...' : '✓ Submit Audited Reconciliation'}
-                </button>
+              </div>
+
+              <CalculationPreview
+                title="Reconciliation Variance Analysis"
+                items={[
+                  {
+                    label: 'Current Ledger Expected',
+                    value: `${currentExpectedCount} pkts`,
+                    subtitle: 'Recorded in ledger',
+                  },
+                  {
+                    label: 'Actual Physical Count',
+                    value: `${reconPhysicalCount} pkts`,
+                    subtitle: 'Audited physical stock',
+                    variant: 'slate',
+                  },
+                  {
+                    label: 'Balancing Adjustment',
+                    value: liveAdjustmentDiff >= 0 ? `+${liveAdjustmentDiff} pkts` : `${liveAdjustmentDiff} pkts`,
+                    subtitle: liveAdjustmentDiff === 0 ? 'Exact match' : liveAdjustmentDiff > 0 ? 'Surplus adjustment' : 'Shortage write-off',
+                    isHighlight: true,
+                    variant: liveAdjustmentDiff === 0 ? 'emerald' : liveAdjustmentDiff > 0 ? 'amber' : 'rose',
+                  },
+                ]}
+              />
+
+              <div className="flex justify-end pt-2">
+                <SaveButton
+                  label="Submit Audited Reconciliation"
+                  isLoading={reconLoading}
+                />
               </div>
             </form>
           </div>
@@ -652,78 +681,80 @@ export const StockView: React.FC = () => {
             {isManager ? (
               <>
                 <h2>Record stock movement</h2>
-                <form className="inline" onSubmit={handleSubmit}>
-                  <label>
-                    Movement
-                    <select
-                      value={txnType}
-                      onChange={(e) => setTxnType(e.target.value as StockTxnType)}
+                <form onSubmit={handleSubmit} className="space-y-4 mb-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <FormField label="Movement Type" required>
+                      <SelectInput
+                        value={txnType}
+                        onChange={(e) => setTxnType(e.target.value as StockTxnType)}
+                      >
+                        <option value="COMPANY_RECEIPT">🏢 Company stock received / opening</option>
+                        <option value="ISSUED">🚶 Issue to salesman (Van Load)</option>
+                        <option value="RETURNED">↩️ Return from salesman (Van Return)</option>
+                        <option value="COMPANY_ADJUSTMENT">📈 Company stock positive adjustment</option>
+                        <option value="SALESMAN_ADJUSTMENT">📊 Salesman stock positive adjustment</option>
+                      </SelectInput>
+                    </FormField>
+
+                    <FormField label="Product SKU" required>
+                      <SelectInput
+                        required
+                        value={productId}
+                        onChange={(e) => setProductId(e.target.value)}
+                      >
+                        {activeProducts.map((p) => (
+                          <option key={p.product_id} value={p.product_id}>
+                            {p.sku} · {p.product_name} ({p.pack_weight_g}g)
+                          </option>
+                        ))}
+                      </SelectInput>
+                    </FormField>
+
+                    <FormField
+                      label="Salesman / Assignee"
+                      required={needsSalesman}
+                      helpText={needsSalesman ? 'Required for van issues and returns' : 'Not required for company inventory'}
                     >
-                      <option value="COMPANY_RECEIPT">Company stock received / opening</option>
-                      <option value="ISSUED">Issue to salesman</option>
-                      <option value="RETURNED">Return from salesman</option>
-                      <option value="COMPANY_ADJUSTMENT">Company stock positive adjustment</option>
-                      <option value="SALESMAN_ADJUSTMENT">Salesman stock positive adjustment</option>
-                    </select>
-                  </label>
+                      <SelectInput
+                        value={salesmanId}
+                        onChange={(e) => setSalesmanId(e.target.value)}
+                        disabled={!needsSalesman}
+                        required={needsSalesman}
+                      >
+                        {activeSalesmen.map((u) => (
+                          <option key={u.user_id} value={u.user_id}>
+                            {u.full_name} ({u.user_id})
+                          </option>
+                        ))}
+                      </SelectInput>
+                    </FormField>
 
-              <label>
-                Product
-                <select
-                  required
-                  value={productId}
-                  onChange={(e) => setProductId(e.target.value)}
-                >
-                  {activeProducts.map((p) => (
-                    <option key={p.product_id} value={p.product_id}>
-                      {p.sku} · {p.product_name} ({p.pack_weight_g}g)
-                    </option>
-                  ))}
-                </select>
-              </label>
+                    <FormField label="Quantity (Packets)" required helpText="Quantity to move">
+                      <QuantityInput
+                        unit="pkts"
+                        min={1}
+                        step={1}
+                        value={quantity}
+                        onChange={(val) => setQuantity(val)}
+                      />
+                    </FormField>
 
-              <label>
-                Salesman
-                <select
-                  value={salesmanId}
-                  onChange={(e) => setSalesmanId(e.target.value)}
-                  disabled={!needsSalesman}
-                  required={needsSalesman}
-                >
-                  {activeSalesmen.map((u) => (
-                    <option key={u.user_id} value={u.user_id}>
-                      {u.full_name} ({u.user_id})
-                    </option>
-                  ))}
-                </select>
-              </label>
+                    <div className="sm:col-span-2 lg:col-span-4">
+                      <FormField label="Notes / Challan Reference" helpText="Opening stock, challan #, return voucher note...">
+                        <TextInput
+                          maxLength={500}
+                          placeholder="Opening stock, challan #, return voucher note..."
+                          value={notes}
+                          onChange={(e) => setNotes(e.target.value)}
+                        />
+                      </FormField>
+                    </div>
+                  </div>
 
-              <label>
-                Quantity
-                <input
-                  type="number"
-                  min="0.001"
-                  step="0.001"
-                  required
-                  value={quantity}
-                  onChange={(e) => setQuantity(Number(e.target.value))}
-                />
-              </label>
-
-              <label style={{ gridColumn: 'span 2' }}>
-                Notes / reference
-                <input
-                  maxLength={500}
-                  placeholder="Opening stock, challan #, return voucher note..."
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                />
-              </label>
-
-              <div style={{ marginTop: '6px' }}>
-                <button type="submit">Record movement</button>
-              </div>
-            </form>
+                  <div className="flex justify-end pt-2">
+                    <SaveButton label="Record Stock Movement" />
+                  </div>
+                </form>
           </>
         ) : (
           <p className="muted">
@@ -811,63 +842,61 @@ export const StockView: React.FC = () => {
           Reconcile physical inventory counts against expected ledger balances. Differences remain pending review and are never automatically marked as losses without Owner/PA approval.
         </p>
 
-        <form className="inline" onSubmit={handleDiscrepancySubmit} style={{ marginBottom: '16px' }}>
-          <label>
-            Location
-            <select value={discLocation} onChange={(e) => setDiscLocation(e.target.value)}>
-              <option value="COMPANY_WAREHOUSE">Company Central Warehouse</option>
-              {activeSalesmen.map((u) => (
-                <option key={u.user_id} value={u.user_id}>
-                  Salesman: {u.full_name} ({u.user_id})
-                </option>
-              ))}
-            </select>
-          </label>
+        <form onSubmit={handleDiscrepancySubmit} className="space-y-4 mb-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <FormField label="Location / Custody" required>
+              <SelectInput value={discLocation} onChange={(e) => setDiscLocation(e.target.value)}>
+                <option value="COMPANY_WAREHOUSE">🏢 Central Warehouse</option>
+                {activeSalesmen.map((u) => (
+                  <option key={u.user_id} value={u.user_id}>
+                    🚶 Salesman: {u.full_name} ({u.user_id})
+                  </option>
+                ))}
+              </SelectInput>
+            </FormField>
 
-          <label>
-            Product
-            <select value={discProductId} onChange={(e) => setDiscProductId(e.target.value)}>
-              {activeProducts.map((p) => (
-                <option key={p.product_id} value={p.product_id}>
-                  {p.sku} - {p.product_name} ({p.pack_weight_g}g)
-                </option>
-              ))}
-            </select>
-          </label>
+            <FormField label="Product SKU" required>
+              <SelectInput value={discProductId} onChange={(e) => setDiscProductId(e.target.value)}>
+                {activeProducts.map((p) => (
+                  <option key={p.product_id} value={p.product_id}>
+                    {p.sku} - {p.product_name} ({p.pack_weight_g}g)
+                  </option>
+                ))}
+              </SelectInput>
+            </FormField>
 
-          <label>
-            Expected Count
-            <input
-              type="number"
-              value={discExpected}
-              onChange={(e) => setDiscExpected(Number(e.target.value))}
-              placeholder="System expected"
-            />
-          </label>
+            <FormField label="Expected Ledger Count" required>
+              <QuantityInput
+                unit="pkts"
+                value={discExpected}
+                onChange={(val) => setDiscExpected(val)}
+                placeholder="System expected"
+              />
+            </FormField>
 
-          <label>
-            Physical Count
-            <input
-              type="number"
-              value={discPhysical}
-              onChange={(e) => setDiscPhysical(Number(e.target.value))}
-              placeholder="Actual counted"
-            />
-          </label>
+            <FormField label="Physical Counted" required>
+              <QuantityInput
+                unit="pkts"
+                value={discPhysical}
+                onChange={(val) => setDiscPhysical(val)}
+                placeholder="Actual counted"
+              />
+            </FormField>
 
-          <label style={{ flex: '1 1 200px' }}>
-            Explanation / Reason
-            <input
-              type="text"
-              value={discReason}
-              onChange={(e) => setDiscReason(e.target.value)}
-              placeholder="e.g. Physical count post-market, batch recount"
-            />
-          </label>
+            <div className="sm:col-span-2 lg:col-span-4">
+              <FormField label="Audit Explanation / Reason" helpText="e.g. Physical count post-market, batch recount, carton damage">
+                <TextInput
+                  value={discReason}
+                  onChange={(e) => setDiscReason(e.target.value)}
+                  placeholder="e.g. Physical count post-market, batch recount"
+                />
+              </FormField>
+            </div>
+          </div>
 
-          <button type="submit" style={{ alignSelf: 'flex-end', padding: '9px 18px' }}>
-            📝 Record Physical Count
-          </button>
+          <div className="flex justify-end pt-2">
+            <SaveButton label="Record Physical Audit Count" />
+          </div>
         </form>
 
         {stockDiscrepancies && stockDiscrepancies.length > 0 ? (
@@ -1129,70 +1158,58 @@ export const StockView: React.FC = () => {
               </button>
             </div>
 
-            {/* Legacy Cost Resolution Form (Owner Only) */}
+            {/* Legacy Cost Resolution Form using FormComponents */}
             {resolvingBatchId && isManager && (
-              <div
-                style={{
-                  background: '#fefce8',
-                  border: '1px solid #fde047',
-                  borderRadius: 6,
-                  padding: 14,
-                  marginBottom: 16,
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <strong style={{ color: '#854d0e' }}>
-                    ⚖️ Resolve Legacy Cost for Batch: {resolvingBatchId}
-                  </strong>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => setResolvingBatchId(null)}
-                    style={{ padding: '2px 8px', fontSize: '0.75rem' }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-                <form onSubmit={handleResolveLegacyCost} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, alignItems: 'end' }}>
-                  <label style={{ fontSize: '0.85rem' }}>
-                    Unit Cost (₹/kg)
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0.01"
-                      required
-                      value={resolveRate || ''}
-                      onChange={(e) => setResolveRate(Number(e.target.value))}
-                      placeholder="e.g. 145.50"
+              <div className="mb-5">
+                <FormLayout
+                  title={`Resolve Legacy Cost for Batch: ${resolvingBatchId}`}
+                  subtitle="Authoritative costing setup for legacy production run"
+                  maxWidth="2xl"
+                  onSubmit={handleResolveLegacyCost}
+                  onCancel={() => setResolvingBatchId(null)}
+                  actions={
+                    <FormActions
+                      onCancel={() => setResolvingBatchId(null)}
+                      cancelLabel="Cancel"
+                      saveLabel="Save Batch Cost"
+                      isLoading={resolvingLoading}
+                      disabled={resolveRate <= 0 || !resolveNotes.trim()}
                     />
-                  </label>
-                  <label style={{ fontSize: '0.85rem' }}>
-                    Cost Classification
-                    <select
-                      value={resolveStatus}
-                      onChange={(e) => setResolveStatus(e.target.value as 'ACTUAL' | 'ESTIMATED')}
-                    >
-                      <option value="ACTUAL">ACTUAL (Verified Historical Invoices)</option>
-                      <option value="ESTIMATED">ESTIMATED (Provisional / Benchmark)</option>
-                    </select>
-                  </label>
-                  <label style={{ fontSize: '0.85rem', gridColumn: 'span 2' }}>
-                    Audit Explanation / Source
-                    <input
-                      required
-                      value={resolveNotes}
-                      onChange={(e) => setResolveNotes(e.target.value)}
-                      placeholder="e.g. Audit based on RawMaterialLedger invoice RM-INV-042 and milling yield"
-                    />
-                  </label>
-                  <button
-                    type="submit"
-                    disabled={resolvingLoading || resolveRate <= 0 || !resolveNotes.trim()}
-                    style={{ background: '#15803d', color: '#fff', padding: '8px 16px', fontSize: '0.85rem' }}
-                  >
-                    {resolvingLoading ? 'Saving...' : '✓ Save Batch Cost'}
-                  </button>
-                </form>
+                  }
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <FormField label="Unit Cost (₹/kg)" required helpText="Calculated or audited cost per kg of bulk papad">
+                      <MoneyInput
+                        value={resolveRate || ''}
+                        onChange={(val) => setResolveRate(val)}
+                        placeholder="145.50"
+                        required
+                      />
+                    </FormField>
+
+                    <FormField label="Cost Classification" required helpText="Actual invoice or provisional estimate">
+                      <SelectInput
+                        value={resolveStatus}
+                        onChange={(e) => setResolveStatus(e.target.value as 'ACTUAL' | 'ESTIMATED')}
+                        options={[
+                          { value: 'ACTUAL', label: 'ACTUAL (Verified Historical Invoices)' },
+                          { value: 'ESTIMATED', label: 'ESTIMATED (Provisional / Benchmark)' },
+                        ]}
+                      />
+                    </FormField>
+
+                    <div className="sm:col-span-2">
+                      <FormField label="Audit Explanation / Source" required helpText="Source document or calculation basis">
+                        <TextInput
+                          required
+                          value={resolveNotes}
+                          onChange={(e) => setResolveNotes(e.target.value)}
+                          placeholder="e.g. Audit based on RawMaterialLedger invoice RM-INV-042 and milling yield"
+                        />
+                      </FormField>
+                    </div>
+                  </div>
+                </FormLayout>
               </div>
             )}
 

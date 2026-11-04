@@ -16,6 +16,18 @@ import {
   FileText,
   CreditCard,
 } from 'lucide-react';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  MoneyInput,
+  TextInput,
+  TextArea,
+  CalculationPreview,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
 
 const COMMON_EXPENSE_DESCRIPTIONS = [
   'Motorcycle Petrol / Fuel',
@@ -147,19 +159,18 @@ export const ExpensesView: React.FC = () => {
         </div>
       )}
 
-      {/* Expense Submission Form */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">
-        <h2 className="text-base font-bold text-slate-900 mb-1">Record Expense Claim</h2>
-        <p className="text-xs text-slate-500 mb-4">
-          Approved cash claims automatically reduce cash due back during evening closing.
-        </p>
+      {/* Expense Submission Form using FormComponents */}
+      <div className="bg-white border border-[#E7E2D6] rounded-2xl shadow-sm overflow-hidden">
+        <div className="p-5 sm:p-6 border-b border-[#F0ECE1] bg-[#FAF8F5]">
+          <h2 className="text-base sm:text-lg font-bold text-slate-900 m-0">Record Expense Claim</h2>
+          <p className="text-xs text-slate-500 mt-1 m-0">
+            Approved cash claims automatically reduce cash due back during evening closing.
+          </p>
+        </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="p-5 sm:p-6 space-y-5">
           {/* Category Selector */}
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-              Expense Category
-            </label>
+          <FormField label="Expense Category" required>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               {CATEGORIES.map((c) => {
                 const isSelected = category === c.key;
@@ -170,11 +181,11 @@ export const ExpensesView: React.FC = () => {
                     onClick={() => setCategory(c.key)}
                     className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
                       isSelected
-                        ? 'bg-emerald-50 border-emerald-500 text-emerald-950 font-bold shadow-2xs'
+                        ? 'bg-[#0F2C23] text-white font-bold shadow-xs border-[#0F2C23]'
                         : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700'
                     }`}
                   >
-                    <span className={isSelected ? 'text-emerald-700' : 'text-slate-400'}>
+                    <span className={isSelected ? 'text-white' : 'text-slate-400'}>
                       {c.icon}
                     </span>
                     <span className="text-xs">{c.label}</span>
@@ -182,96 +193,93 @@ export const ExpensesView: React.FC = () => {
                 );
               })}
             </div>
-          </div>
+          </FormField>
 
           {/* Amount & Quick Buttons */}
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-              Amount (₹)
-            </label>
-            <div className="flex items-center gap-2 flex-wrap">
-              <input
-                type="number"
-                min="1"
-                step="1"
+          <FormField
+            label="Amount (₹)"
+            required
+            helpText="Enter claimed amount or tap a preset chip"
+          >
+            <div className="space-y-2">
+              <MoneyInput
+                value={amount}
+                onChange={(val) => setAmount(val)}
+                placeholder="100.00"
                 required
-                value={amount || ''}
-                onChange={(e) => setAmount(Number(e.target.value))}
-                className="w-32 px-3 py-2 text-base font-extrabold bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-mono"
               />
-              {[50, 100, 200, 500].map((quick) => (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {[50, 100, 200, 500].map((quick) => (
+                  <button
+                    key={quick}
+                    type="button"
+                    onClick={() => setAmount(quick)}
+                    className="px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
+                  >
+                    ₹{quick}
+                  </button>
+                ))}
                 <button
-                  key={quick}
                   type="button"
-                  onClick={() => setAmount(quick)}
-                  className="px-3 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
+                  onClick={() => setAmount((prev) => prev + 50)}
+                  className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg transition-colors cursor-pointer"
                 >
-                  ₹{quick}
+                  +₹50
                 </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => setAmount((prev) => prev + 50)}
-                className="px-3 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
-              >
-                +₹50
-              </button>
+              </div>
             </div>
-          </div>
+          </FormField>
 
           {/* Shortcuts & Description */}
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-              Description
-            </label>
-            <div className="flex flex-wrap gap-1.5 mb-2.5">
-              {COMMON_EXPENSE_DESCRIPTIONS.map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  onClick={() => setDescription(d)}
-                  className={`px-2.5 py-1 text-xs rounded-md transition-colors cursor-pointer ${
-                    description === d
-                      ? 'bg-emerald-100 text-emerald-800 font-semibold'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
+          <FormField
+            label="Description"
+            required
+            helpText="Click a common description or type a custom remark"
+          >
+            <div className="space-y-2">
+              <div className="flex flex-wrap gap-1.5">
+                {COMMON_EXPENSE_DESCRIPTIONS.map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => setDescription(d)}
+                    className={`px-2.5 py-1 text-xs rounded-md transition-colors cursor-pointer ${
+                      description === d
+                        ? 'bg-[#0F2C23] text-white font-semibold'
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                    }`}
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
+              <TextInput
+                required
+                placeholder="e.g. Motorcycle petrol, Bus cartage slip, packing tape..."
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
             </div>
-            <input
-              type="text"
-              required
-              placeholder="e.g. Motorcycle petrol, Bus cartage slip, packing tape..."
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-medium"
-            />
-          </div>
+          </FormField>
 
           {/* Reference / Slip number */}
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-              Receipt / Bill Slip Number (Optional)
-            </label>
-            <input
-              type="text"
+          <FormField
+            label="Receipt / Bill Slip Number (Optional)"
+            helpText="Reference number on the physical cash voucher, petrol bill, or UTR"
+          >
+            <TextInput
               placeholder="e.g. SLIP-1029, Fuel bill invoice number..."
               value={receiptRef}
               onChange={(e) => setReceiptRef(e.target.value)}
-              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
             />
-          </div>
+          </FormField>
 
           <div className="pt-2 flex justify-end">
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2.5 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
-            >
-              {isSubmitting ? 'Submitting…' : 'Submit Expense'}
-            </button>
+            <SaveButton
+              label="Submit Expense Claim"
+              isLoading={isSubmitting}
+              icon={<Receipt size={14} />}
+            />
           </div>
         </form>
       </div>
@@ -374,42 +382,47 @@ export const ExpensesView: React.FC = () => {
         )}
       </div>
 
-      {/* Rejection Modal (No window.prompt!) */}
+      {/* Rejection Modal using FormComponents */}
       {rejectingExpense && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 p-6 space-y-4">
-            <h3 className="text-base font-bold text-slate-900 m-0">Reject Expense Claim</h3>
-            <p className="text-xs text-slate-500 m-0">
-              Please enter the reason for rejecting expense {rejectingExpense.expense_id} (₹{rejectingExpense.amount.toFixed(2)}).
-            </p>
-            <textarea
-              required
-              rows={3}
-              value={rejectionReason}
-              onChange={(e) => setRejectionReason(e.target.value)}
-              placeholder="e.g. Duplicate claim, missing receipt, exceeds allowable daily limit..."
-              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-red-500 font-medium"
-            />
-            <div className="flex justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={() => {
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <FormLayout
+            title="Reject Expense Claim"
+            subtitle={`Expense #${rejectingExpense.expense_id} · Claimed ₹${rejectingExpense.amount.toFixed(2)} (${rejectingExpense.description})`}
+            icon={<XCircle size={18} />}
+            maxWidth="md"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleConfirmReject();
+            }}
+            onCancel={() => {
+              setRejectingExpense(null);
+              setRejectionReason('');
+            }}
+            actions={
+              <FormActions
+                onCancel={() => {
                   setRejectingExpense(null);
                   setRejectionReason('');
                 }}
-                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmReject}
-                className="px-4 py-2 text-xs font-bold text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors cursor-pointer"
-              >
-                Confirm Rejection
-              </button>
-            </div>
-          </div>
+                cancelLabel="Cancel"
+                saveLabel="Confirm Rejection"
+              />
+            }
+          >
+            <FormField
+              label="Rejection Reason (Required)"
+              required
+              helpText="Specify why this operational claim cannot be reimbursed"
+            >
+              <TextArea
+                required
+                rows={3}
+                value={rejectionReason}
+                onChange={(e) => setRejectionReason(e.target.value)}
+                placeholder="e.g. Duplicate claim, missing receipt, exceeds allowable daily limit..."
+              />
+            </FormField>
+          </FormLayout>
         </div>
       )}
     </div>

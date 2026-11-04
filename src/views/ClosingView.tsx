@@ -15,6 +15,18 @@ import {
   X,
   FileText,
 } from 'lucide-react';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  MoneyInput,
+  TextInput,
+  TextArea,
+  CalculationPreview,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
 
 export const ClosingView: React.FC = () => {
   const {
@@ -163,89 +175,99 @@ export const ClosingView: React.FC = () => {
         </div>
       </div>
 
-      {/* Submission Form */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">
-        <h2 className="text-base font-bold text-slate-900 mb-1">Submit Day-End Cash Count</h2>
-        <p className="text-xs text-slate-500 mb-4">
-          Enter your morning cash float and physical cash returned to calculate any surplus or shortage.
-        </p>
+      {/* Submission Form using FormComponents */}
+      <div className="bg-white border border-[#E7E2D6] rounded-2xl shadow-sm overflow-hidden">
+        <div className="p-5 sm:p-6 border-b border-[#F0ECE1] bg-[#FAF8F5]">
+          <h2 className="text-base sm:text-lg font-bold text-slate-900 m-0">
+            Submit Day-End Cash Count
+          </h2>
+          <p className="text-xs text-slate-500 mt-1 m-0">
+            Enter your morning cash float and physical cash returned to calculate live surplus or shortage before handover.
+          </p>
+        </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Opening Float (₹)
-              </label>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                required
+        <form onSubmit={handleSubmit} className="p-5 sm:p-6 space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <FormField
+              label="Morning Cash Float (₹)"
+              required
+              helpText="Starting cash balance issued at beginning of route"
+            >
+              <MoneyInput
                 value={openingCash}
-                onChange={(e) => setOpeningCash(Number(e.target.value))}
-                className="w-full px-3 py-2 text-sm font-bold bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Physical Cash Handed Over (₹)
-              </label>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
+                onChange={(val) => setOpeningCash(val)}
+                placeholder="500.00"
                 required
-                value={physicalCashReturned}
-                onChange={(e) => setPhysicalCashReturned(Number(e.target.value))}
-                className="w-full px-3 py-2 text-sm font-bold bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-mono"
               />
-            </div>
+            </FormField>
 
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Live Calculated Difference
-              </label>
-              <div
-                className={`px-3 py-2 rounded-lg text-sm font-black border font-mono ${
-                  liveDifference === 0
-                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                    : liveDifference > 0
-                    ? 'bg-sky-50 border-sky-200 text-sky-900'
-                    : 'bg-red-50 border-red-200 text-red-900'
-                }`}
-              >
-                {liveDifference > 0
-                  ? `+₹${liveDifference.toFixed(2)} (Surplus)`
-                  : liveDifference < 0
-                  ? `-₹${Math.abs(liveDifference).toFixed(2)} (Shortage)`
-                  : '₹0.00 (Exact Match)'}
-              </div>
-            </div>
+            <FormField
+              label="Physical Cash Handed Over (₹)"
+              required
+              helpText="Actual cash collected and counted at end of day"
+            >
+              <MoneyInput
+                value={physicalCashReturned}
+                onChange={(val) => setPhysicalCashReturned(val)}
+                placeholder="0.00"
+                required
+              />
+            </FormField>
           </div>
 
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-              Closing Notes (Optional)
-            </label>
-            <input
-              type="text"
+          <CalculationPreview
+            title="Live Cash Reconciliation"
+            items={[
+              {
+                label: 'Opening Float',
+                value: `₹${Number(openingCash).toFixed(2)}`,
+                subtitle: 'Morning start',
+              },
+              {
+                label: 'Cash Sales',
+                value: `+₹${metrics.cash_collected.toFixed(2)}`,
+                subtitle: 'Route sales',
+                variant: 'emerald',
+              },
+              {
+                label: 'Approved Expenses',
+                value: `-₹${metrics.approved_cash_expenses.toFixed(2)}`,
+                subtitle: 'Fuel & cartage',
+                variant: 'rose',
+              },
+              {
+                label: 'Live Difference',
+                value:
+                  liveDifference > 0
+                    ? `+₹${liveDifference.toFixed(2)} (Surplus)`
+                    : liveDifference < 0
+                    ? `-₹${Math.abs(liveDifference).toFixed(2)} (Shortage)`
+                    : '₹0.00 (Match)',
+                subtitle: liveDifference === 0 ? 'Balanced' : liveDifference > 0 ? 'Surplus cash' : 'Shortage cash',
+                isHighlight: true,
+                variant: liveDifference === 0 ? 'emerald' : liveDifference > 0 ? 'amber' : 'rose',
+              },
+            ]}
+          />
+
+          <FormField
+            label="Closing Notes / Denominations (Optional)"
+            helpText="Record currency note counts (e.g., 500x2, 200x5) or explanation for discrepancy"
+          >
+            <TextInput
               maxLength={500}
-              placeholder="e.g. Denomination breakdown, explanation for shortage or customer credit..."
+              placeholder="e.g. 500x3, 200x5, 100x10. Shortage due to credit approved for shopkeeper..."
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
             />
-          </div>
+          </FormField>
 
           <div className="pt-2 flex justify-end">
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2.5 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
-            >
-              {isSubmitting ? 'Submitting…' : 'Submit Daily Cash Closing'}
-            </button>
+            <SaveButton
+              label="Submit Daily Cash Closing"
+              isLoading={isSubmitting}
+              icon={<Coins size={14} />}
+            />
           </div>
         </form>
       </div>
@@ -344,55 +366,47 @@ export const ClosingView: React.FC = () => {
         )}
       </div>
 
-      {/* Review Confirmation Modal */}
+      {/* Review Confirmation Modal using FormComponents */}
       {reviewingClosing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 p-6 space-y-4">
-            <h3 className="text-base font-bold text-slate-900 m-0">
-              {reviewingClosing.decision === 'CONFIRMED' ? 'Confirm Daily Closing' : 'Request Cash Correction'}
-            </h3>
-            <p className="text-xs text-slate-500 m-0">
-              Closing #{reviewingClosing.closing.closing_id} · Expected ₹{reviewingClosing.closing.expected_cash_return.toFixed(2)}, Physical ₹{reviewingClosing.closing.physical_cash_returned.toFixed(2)}.
-            </p>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                {reviewingClosing.decision === 'CORRECTION_REQUIRED' ? 'Correction Reason (Required)' : 'Review Notes (Optional)'}
-              </label>
-              <textarea
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <FormLayout
+            title={reviewingClosing.decision === 'CONFIRMED' ? 'Confirm Daily Closing' : 'Request Cash Correction'}
+            subtitle={`Closing #${reviewingClosing.closing.closing_id} · Expected ₹${reviewingClosing.closing.expected_cash_return.toFixed(2)}, Physical Handover ₹${reviewingClosing.closing.physical_cash_returned.toFixed(2)}`}
+            icon={reviewingClosing.decision === 'CONFIRMED' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+            maxWidth="md"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleConfirmReview();
+            }}
+            onCancel={() => {
+              setReviewingClosing(null);
+              setReviewNote('');
+            }}
+            actions={
+              <FormActions
+                onCancel={() => {
+                  setReviewingClosing(null);
+                  setReviewNote('');
+                }}
+                cancelLabel="Cancel"
+                saveLabel={reviewingClosing.decision === 'CONFIRMED' ? 'Confirm Closing' : 'Submit Correction'}
+              />
+            }
+          >
+            <FormField
+              label={reviewingClosing.decision === 'CORRECTION_REQUIRED' ? 'Correction Reason (Required)' : 'Review Notes (Optional)'}
+              required={reviewingClosing.decision === 'CORRECTION_REQUIRED'}
+              helpText={reviewingClosing.decision === 'CORRECTION_REQUIRED' ? 'Explain the discrepancy to be rectified by the salesman' : 'Optional supervisory confirmation remarks'}
+            >
+              <TextArea
                 rows={3}
                 required={reviewingClosing.decision === 'CORRECTION_REQUIRED'}
                 value={reviewNote}
                 onChange={(e) => setReviewNote(e.target.value)}
                 placeholder="Enter review explanation or reason..."
-                className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
               />
-            </div>
-
-            <div className="flex justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setReviewingClosing(null);
-                  setReviewNote('');
-                }}
-                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmReview}
-                className={`px-4 py-2 text-xs font-bold text-white rounded-lg transition-colors cursor-pointer ${
-                  reviewingClosing.decision === 'CONFIRMED'
-                    ? 'bg-emerald-800 hover:bg-emerald-900'
-                    : 'bg-amber-700 hover:bg-amber-800'
-                }`}
-              >
-                {reviewingClosing.decision === 'CONFIRMED' ? 'Confirm Closing' : 'Submit Correction Request'}
-              </button>
-            </div>
-          </div>
+            </FormField>
+          </FormLayout>
         </div>
       )}
     </div>

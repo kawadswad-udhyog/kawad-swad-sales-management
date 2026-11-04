@@ -35,7 +35,17 @@ import type {
   LotMovement,
   CustomerReturn,
   ComplaintRecall,
-} from '../types';
+import {
+  FormLayout,
+  FormField,
+  TextInput,
+  SelectInput,
+  TextArea,
+  DateInput,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
 
 type QualityTab = 'checks' | 'lots' | 'returns' | 'complaints';
 
@@ -698,350 +708,280 @@ export const QualityView: React.FC = () => {
 
       {/* Modal: New QC Check */}
       {showCheckModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Record Quality Control Inspection</h3>
-              <button onClick={() => setShowCheckModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateCheck} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Check Type</label>
-                <select
-                  value={newCheck.check_type}
-                  onChange={(e) => setNewCheck({ ...newCheck, check_type: e.target.value as any })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="FINISHED_GOODS">Finished Goods Inspection</option>
-                  <option value="IN_PROCESS">In-Process / Moisture & Rolling Test</option>
-                  <option value="RAW_MATERIAL">Raw Material Inward Inspection</option>
-                </select>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Item / Product Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={newCheck.item_name}
-                  onChange={(e) => setNewCheck({ ...newCheck, item_name: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Inspection Decision *</label>
-                <select
-                  value={newCheck.decision}
-                  onChange={(e) => setNewCheck({ ...newCheck, decision: e.target.value as any })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="PASS">PASS — Compliant with quality standards</option>
-                  <option value="HOLD">HOLD — Quarantine for lab re-test</option>
-                  <option value="FAIL">FAIL — Reject / Non-conforming</option>
-                </select>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Observation & Test Results</label>
-                <textarea
-                  rows={2}
-                  value={newCheck.notes}
-                  onChange={(e) => setNewCheck({ ...newCheck, notes: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowCheckModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Submit Inspection
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <FormLayout
+          asModal
+          title="Record Quality Control Inspection"
+          subtitle="Mandatory quality check for raw materials, in-process dough/rolling, or finished lots"
+          onClose={() => setShowCheckModal(false)}
+          maxWidth="max-w-md"
+        >
+          <form onSubmit={handleCreateCheck} className="space-y-4">
+            <FormField label="Check Type" required helpText="Select inspection stage">
+              <SelectInput
+                value={newCheck.check_type}
+                onChange={(e) => setNewCheck({ ...newCheck, check_type: e.target.value as any })}
+                options={[
+                  { value: 'FINISHED_GOODS', label: 'Finished Goods Inspection' },
+                  { value: 'IN_PROCESS', label: 'In-Process / Moisture & Rolling Test' },
+                  { value: 'RAW_MATERIAL', label: 'Raw Material Inward Inspection' },
+                ]}
+              />
+            </FormField>
+
+            <FormField label="Item / Product Name" required helpText="Product variant or raw material identifier">
+              <TextInput
+                type="text"
+                required
+                value={newCheck.item_name}
+                onChange={(e) => setNewCheck({ ...newCheck, item_name: e.target.value })}
+              />
+            </FormField>
+
+            <FormField label="Inspection Decision" required helpText="Disposition based on laboratory standards">
+              <SelectInput
+                value={newCheck.decision}
+                onChange={(e) => setNewCheck({ ...newCheck, decision: e.target.value as any })}
+                options={[
+                  { value: 'PASS', label: 'PASS — Compliant with quality standards' },
+                  { value: 'HOLD', label: 'HOLD — Quarantine for lab re-test' },
+                  { value: 'FAIL', label: 'FAIL — Reject / Non-conforming' },
+                ]}
+              />
+            </FormField>
+
+            <FormField label="Observation & Test Results" helpText="Specific measurements, moisture %, or defect reasons">
+              <TextArea
+                rows={2}
+                value={newCheck.notes}
+                onChange={(e) => setNewCheck({ ...newCheck, notes: e.target.value })}
+                placeholder="e.g. Moisture within 11.2% limit, crispness passed"
+              />
+            </FormField>
+
+            <FormActions>
+              <CancelButton onClick={() => setShowCheckModal(false)} />
+              <SaveButton label="Submit Inspection" variant="primary" />
+            </FormActions>
+          </form>
+        </FormLayout>
       )}
 
       {/* Modal: New Lot */}
       {showLotModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Create Traceable Product Lot</h3>
-              <button onClick={() => setShowLotModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
+        <FormLayout
+          asModal
+          title="Create Traceable Product Lot"
+          subtitle="Generate batch identifier and expiry tracker for finished goods inventory"
+          onClose={() => setShowLotModal(false)}
+          maxWidth="max-w-md"
+        >
+          <form onSubmit={handleCreateLot} className="space-y-4">
+            <FormField label="Product Catalogue Item" required helpText="Select finished goods SKU">
+              <SelectInput
+                value={newLot.product_id}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  const name = id === 'PRD-PAPAD-400' ? 'Kawad Special Mung Papad (400g)' : 'Kawad Masala Papad (200g)';
+                  setNewLot({ ...newLot, product_id: id, product_name: name });
+                }}
+                options={[
+                  { value: 'PRD-PAPAD-400', label: 'Kawad Special Mung Papad (400g)' },
+                  { value: 'PRD-PAPAD-200', label: 'Kawad Masala Papad (200g)' },
+                ]}
+              />
+            </FormField>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <FormField label="Batch Packets" required helpText="Number of packaged units">
+                <TextInput
+                  type="number"
+                  min="1"
+                  required
+                  value={newLot.initial_quantity}
+                  onChange={(e) => setNewLot({ ...newLot, initial_quantity: Number(e.target.value) })}
+                />
+              </FormField>
+
+              <FormField label="Expiry Date" helpText="Recommended shelf life">
+                <DateInput
+                  value={newLot.expiry_date}
+                  onChange={(val) => setNewLot({ ...newLot, expiry_date: val })}
+                />
+              </FormField>
             </div>
-            <form onSubmit={handleCreateLot} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Product *</label>
-                <select
-                  value={newLot.product_id}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    const name = id === 'PRD-PAPAD-400' ? 'Kawad Special Mung Papad (400g)' : 'Kawad Masala Papad (200g)';
-                    setNewLot({ ...newLot, product_id: id, product_name: name });
-                  }}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="PRD-PAPAD-400">Kawad Special Mung Papad (400g)</option>
-                  <option value="PRD-PAPAD-200">Kawad Masala Papad (200g)</option>
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Batch Packets *</label>
-                  <input
-                    type="number"
-                    min="1"
-                    required
-                    value={newLot.initial_quantity}
-                    onChange={(e) => setNewLot({ ...newLot, initial_quantity: Number(e.target.value) })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Expiry Date</label>
-                  <input
-                    type="date"
-                    value={newLot.expiry_date}
-                    onChange={(e) => setNewLot({ ...newLot, expiry_date: e.target.value })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowLotModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Generate Lot
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+
+            <FormActions>
+              <CancelButton onClick={() => setShowLotModal(false)} />
+              <SaveButton label="Generate Lot" variant="primary" />
+            </FormActions>
+          </form>
+        </FormLayout>
       )}
 
       {/* Modal: Customer Return */}
       {showReturnModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Intake Customer Return (Quarantine)</h3>
-              <button onClick={() => setShowReturnModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateReturn} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Customer / Shop Name *</label>
-                <input
-                  type="text"
+        <FormLayout
+          asModal
+          title="Intake Customer Return (Quarantine)"
+          subtitle="Record goods received back from distributors or retail partners"
+          onClose={() => setShowReturnModal(false)}
+          maxWidth="max-w-md"
+        >
+          <form onSubmit={handleCreateReturn} className="space-y-4">
+            <FormField label="Customer / Shop Name" required helpText="Entity returning the stock">
+              <TextInput
+                type="text"
+                required
+                value={newReturn.customer_name}
+                onChange={(e) => setNewReturn({ ...newReturn, customer_name: e.target.value })}
+                placeholder="e.g. Balaji Kirana Store"
+              />
+            </FormField>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <FormField label="Packets Returned" required helpText="Count of returned units">
+                <TextInput
+                  type="number"
+                  min="1"
                   required
-                  value={newReturn.customer_name}
-                  onChange={(e) => setNewReturn({ ...newReturn, customer_name: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                  value={newReturn.items[0].quantity}
+                  onChange={(e) => {
+                    const updated = [...newReturn.items];
+                    updated[0].quantity = Number(e.target.value);
+                    setNewReturn({ ...newReturn, items: updated });
+                  }}
                 />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Packets Returned *</label>
-                  <input
-                    type="number"
-                    min="1"
-                    required
-                    value={newReturn.items[0].quantity}
-                    onChange={(e) => {
-                      const updated = [...newReturn.items];
-                      updated[0].quantity = Number(e.target.value);
-                      setNewReturn({ ...newReturn, items: updated });
-                    }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Disposition *</label>
-                  <select
-                    value={newReturn.disposition}
-                    onChange={(e) => setNewReturn({ ...newReturn, disposition: e.target.value as any })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  >
-                    <option value="PENDING_INSPECTION">Hold in Quarantine</option>
-                    <option value="SCRAP">Scrap / Write-off</option>
-                    <option value="RESTOCK">Restock (Inspected OK)</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Return Reason</label>
-                <input
-                  type="text"
-                  value={newReturn.notes}
-                  onChange={(e) => setNewReturn({ ...newReturn, notes: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+              </FormField>
+
+              <FormField label="Disposition" required helpText="Initial warehouse quarantine status">
+                <SelectInput
+                  value={newReturn.disposition}
+                  onChange={(e) => setNewReturn({ ...newReturn, disposition: e.target.value as any })}
+                  options={[
+                    { value: 'PENDING_INSPECTION', label: 'Hold in Quarantine' },
+                    { value: 'SCRAP', label: 'Scrap / Write-off' },
+                    { value: 'RESTOCK', label: 'Restock (Inspected OK)' },
+                  ]}
                 />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowReturnModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-amber-700 text-white font-semibold hover:bg-amber-800"
-                >
-                  Accept Return to Quarantine
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+              </FormField>
+            </div>
+
+            <FormField label="Return Reason" helpText="Customer feedback or reason for return">
+              <TextInput
+                type="text"
+                value={newReturn.notes}
+                onChange={(e) => setNewReturn({ ...newReturn, notes: e.target.value })}
+                placeholder="e.g. Outer carton was crushed during transit"
+              />
+            </FormField>
+
+            <FormActions>
+              <CancelButton onClick={() => setShowReturnModal(false)} />
+              <SaveButton label="Accept Return to Quarantine" variant="primary" />
+            </FormActions>
+          </form>
+        </FormLayout>
       )}
 
       {/* Modal: Complaint / Recall */}
       {showComplaintModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Log Quality Complaint / Recall</h3>
-              <button onClick={() => setShowComplaintModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
+        <FormLayout
+          asModal
+          title="Log Quality Complaint / Recall"
+          subtitle="Register customer defect escalation or initiate batch recall protocol"
+          onClose={() => setShowComplaintModal(false)}
+          maxWidth="max-w-md"
+        >
+          <form onSubmit={handleCreateComplaint} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <FormField label="Ticket Type" helpText="Complaint vs formal recall">
+                <SelectInput
+                  value={newComplaint.report_type}
+                  onChange={(e) => setNewComplaint({ ...newComplaint, report_type: e.target.value as any })}
+                  options={[
+                    { value: 'COMPLAINT', label: 'Customer Complaint' },
+                    { value: 'RECALL', label: 'Product Recall Notice' },
+                  ]}
+                />
+              </FormField>
+
+              <FormField label="Severity" helpText="Risk level to consumer">
+                <SelectInput
+                  value={newComplaint.severity}
+                  onChange={(e) => setNewComplaint({ ...newComplaint, severity: e.target.value as any })}
+                  options={[
+                    { value: 'LOW', label: 'Low' },
+                    { value: 'MEDIUM', label: 'Medium' },
+                    { value: 'HIGH', label: 'High' },
+                    { value: 'CRITICAL', label: 'Critical' },
+                  ]}
+                />
+              </FormField>
             </div>
-            <form onSubmit={handleCreateComplaint} className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Ticket Type</label>
-                  <select
-                    value={newComplaint.report_type}
-                    onChange={(e) => setNewComplaint({ ...newComplaint, report_type: e.target.value as any })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  >
-                    <option value="COMPLAINT">Customer Complaint</option>
-                    <option value="RECALL">Product Recall Notice</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Severity</label>
-                  <select
-                    value={newComplaint.severity}
-                    onChange={(e) => setNewComplaint({ ...newComplaint, severity: e.target.value as any })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  >
-                    <option value="LOW">Low</option>
-                    <option value="MEDIUM">Medium</option>
-                    <option value="HIGH">High</option>
-                    <option value="CRITICAL">Critical</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Customer / Complainant</label>
-                <input
-                  type="text"
-                  value={newComplaint.customer_name}
-                  onChange={(e) => setNewComplaint({ ...newComplaint, customer_name: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Defect Description *</label>
-                <textarea
-                  rows={2}
-                  required
-                  value={newComplaint.description}
-                  onChange={(e) => setNewComplaint({ ...newComplaint, description: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowComplaintModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-red-700 text-white font-semibold hover:bg-red-800"
-                >
-                  Submit Ticket
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+
+            <FormField label="Customer / Complainant" helpText="Contact person or shopkeeper">
+              <TextInput
+                type="text"
+                value={newComplaint.customer_name}
+                onChange={(e) => setNewComplaint({ ...newComplaint, customer_name: e.target.value })}
+                placeholder="e.g. Shri Krishna Supermarket"
+              />
+            </FormField>
+
+            <FormField label="Defect Description" required helpText="Describe defect, off-taste, packaging leak, etc.">
+              <TextArea
+                rows={3}
+                required
+                value={newComplaint.description}
+                onChange={(e) => setNewComplaint({ ...newComplaint, description: e.target.value })}
+                placeholder="Detailed explanation of the issue reported by the customer…"
+              />
+            </FormField>
+
+            <FormActions>
+              <CancelButton onClick={() => setShowComplaintModal(false)} />
+              <SaveButton label="Submit Ticket" variant="danger" />
+            </FormActions>
+          </form>
+        </FormLayout>
       )}
 
       {/* Modal: Resolve Complaint */}
       {showResolveModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Resolve Complaint {showResolveModal.complaint_id}</h3>
-              <button onClick={() => setShowResolveModal(null)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleResolveComplaint} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Root Cause & Investigation *</label>
-                <textarea
-                  rows={2}
-                  required
-                  value={resolveForm.investigation}
-                  onChange={(e) => setResolveForm({ ...resolveForm, investigation: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Corrective & Preventive Action (CAPA) *</label>
-                <textarea
-                  rows={2}
-                  required
-                  value={resolveForm.corrective_action}
-                  onChange={(e) => setResolveForm({ ...resolveForm, corrective_action: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowResolveModal(null)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Close Ticket with CAPA
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <FormLayout
+          asModal
+          title={`Resolve Complaint ${showResolveModal.complaint_id}`}
+          subtitle="Document root cause and preventive actions (CAPA) before formal closure"
+          onClose={() => setShowResolveModal(null)}
+          maxWidth="max-w-md"
+        >
+          <form onSubmit={handleResolveComplaint} className="space-y-4">
+            <FormField label="Root Cause & Investigation" required helpText="Why did the defect occur in the batch?">
+              <TextArea
+                rows={2}
+                required
+                value={resolveForm.investigation}
+                onChange={(e) => setResolveForm({ ...resolveForm, investigation: e.target.value })}
+                placeholder="Investigation findings…"
+              />
+            </FormField>
+
+            <FormField label="Corrective & Preventive Action (CAPA)" required helpText="Action taken to prevent recurrence">
+              <TextArea
+                rows={2}
+                required
+                value={resolveForm.corrective_action}
+                onChange={(e) => setResolveForm({ ...resolveForm, corrective_action: e.target.value })}
+                placeholder="Preventive steps implemented…"
+              />
+            </FormField>
+
+            <FormActions>
+              <CancelButton onClick={() => setShowResolveModal(null)} />
+              <SaveButton label="Close Ticket with CAPA" variant="primary" />
+            </FormActions>
+          </form>
+        </FormLayout>
       )}
     </div>
   );

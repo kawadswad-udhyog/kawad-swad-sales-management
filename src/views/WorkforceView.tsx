@@ -26,6 +26,21 @@ import {
   X,
 } from 'lucide-react';
 import { generateSalaryReceiptPdf } from '../utils/generateSalaryReceiptPdf';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  MoneyInput,
+  QuantityInput,
+  TextInput,
+  SelectInput,
+  DateInput,
+  TextArea,
+  FormActions,
+  SaveButton,
+  CancelButton,
+  CalculationPreview,
+} from '../components/common/FormComponents';
 
 type WorkforceTab =
   | 'overview'
@@ -1260,112 +1275,105 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         />
       )}
 
-      {/* MODAL: Calculate Payroll */}
+      {/* MODAL: Calculate Payroll using FormComponents */}
       {showCalcPayrollModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl overflow-hidden p-6 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="text-sm font-bold text-slate-900 m-0">Run Monthly Payroll</h3>
-              <button onClick={() => setShowCalcPayrollModal(false)} className="text-slate-400 hover:text-slate-700">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Select Processing Month (YYYY-MM)</label>
+          <FormLayout
+            title="Run Monthly Payroll"
+            subtitle="Evaluate attendance records, pro-rata wages, and salesman sales commissions"
+            icon={<Coins size={18} />}
+            maxWidth="md"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleCalculatePayroll();
+            }}
+            onCancel={() => setShowCalcPayrollModal(false)}
+            actions={
+              <FormActions
+                onCancel={() => setShowCalcPayrollModal(false)}
+                cancelLabel="Cancel"
+                saveLabel="Calculate Draft Payroll"
+                isLoading={isLoading}
+              />
+            }
+          >
+            <FormField
+              label="Select Processing Month (YYYY-MM)"
+              required
+              helpText="The engine will pro-rate basic wages against working days and compute incentives"
+            >
               <input
                 type="month"
                 value={calcMonth}
                 onChange={(e) => setCalcMonth(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200 font-bold"
+                className="w-full text-xs p-2.5 rounded-xl border border-slate-300 font-bold focus:ring-2 focus:ring-[#0F2C23]"
+                required
               />
-              <p className="text-[11px] text-slate-500 mt-2">
-                The engine will evaluate attendance records, calculate basic pro-rata wages, compute salesman sales incentives, and create itemized payroll records.
-              </p>
-            </div>
-
-            <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowCalcPayrollModal(false)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleCalculatePayroll}
-                disabled={isLoading}
-                className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs cursor-pointer disabled:opacity-50"
-              >
-                {isLoading ? 'Calculating…' : 'Calculate Draft Payroll'}
-              </button>
-            </div>
-          </div>
+            </FormField>
+          </FormLayout>
         </div>
       )}
 
-      {/* MODAL: Disburse Payment */}
+      {/* MODAL: Disburse Payment using FormComponents */}
       {showDisburseModal && selectedDisburseItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl overflow-hidden p-6 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="text-sm font-bold text-slate-900 m-0">Record Payment & Generate Slip</h3>
-              <button onClick={() => setShowDisburseModal(false)} className="text-slate-400 hover:text-slate-700">
-                <X size={18} />
-              </button>
-            </div>
+          <FormLayout
+            title="Record Payment & Generate Slip"
+            subtitle={`Disbursement for ${selectedDisburseItem.recipient_name} (${selectedDisburseItem.type})`}
+            icon={<CreditCard size={18} />}
+            maxWidth="md"
+            onSubmit={handleRecordPayment}
+            onCancel={() => setShowDisburseModal(false)}
+            actions={
+              <FormActions
+                onCancel={() => setShowDisburseModal(false)}
+                cancelLabel="Cancel"
+                saveLabel="Confirm & Generate Slip"
+                isLoading={isLoading}
+              />
+            }
+          >
+            <CalculationPreview
+              items={[
+                {
+                  label: 'Recipient',
+                  value: selectedDisburseItem.recipient_name,
+                  subtitle: selectedDisburseItem.type,
+                },
+                {
+                  label: 'Disbursement Due',
+                  value: `₹${selectedDisburseItem.amount.toFixed(2)}`,
+                  subtitle: 'Approved payout',
+                  isHighlight: true,
+                  variant: 'emerald',
+                },
+              ]}
+            />
 
-            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs space-y-1">
-              <div>Recipient: <strong>{selectedDisburseItem.recipient_name}</strong></div>
-              <div>Type: <strong>{selectedDisburseItem.type}</strong></div>
-              <div>Amount to Disburse: <strong className="text-emerald-700">₹{selectedDisburseItem.amount.toFixed(2)}</strong></div>
-            </div>
+            <FormField label="Payment Method" required>
+              <SelectInput
+                value={disburseMethod}
+                onChange={(e) => setDisburseMethod(e.target.value)}
+                options={[
+                  { value: 'BANK_TRANSFER', label: 'Bank Transfer (NEFT/RTGS/IMPS)' },
+                  { value: 'UPI', label: 'UPI Direct' },
+                  { value: 'CASH', label: 'Cash Disbursement' },
+                  { value: 'CHEQUE', label: 'Company Cheque' },
+                ]}
+              />
+            </FormField>
 
-            <form onSubmit={handleRecordPayment} className="space-y-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Payment Method</label>
-                <select
-                  value={disburseMethod}
-                  onChange={(e) => setDisburseMethod(e.target.value)}
-                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200 font-semibold"
-                >
-                  <option value="BANK_TRANSFER">Bank Transfer (NEFT/RTGS/IMPS)</option>
-                  <option value="UPI">UPI Direct</option>
-                  <option value="CASH">Cash Disbursement</option>
-                  <option value="CHEQUE">Company Cheque</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Transaction Reference / UTR Number</label>
-                <input
-                  type="text"
-                  value={disburseRef}
-                  onChange={(e) => setDisburseRef(e.target.value)}
-                  placeholder="e.g. UTR123456789 or Cash Voucher #"
-                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-                />
-              </div>
-
-              <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowDisburseModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs cursor-pointer disabled:opacity-50"
-                >
-                  {isLoading ? 'Processing…' : 'Confirm & Generate Slip'}
-                </button>
-              </div>
-            </form>
-          </div>
+            <FormField
+              label="Transaction Reference / UTR Number"
+              helpText="e.g. UTR123456789, Cheque #, or Cash Voucher ID"
+            >
+              <TextInput
+                value={disburseRef}
+                onChange={(e) => setDisburseRef(e.target.value)}
+                placeholder="e.g. UTR123456789 or Cash Voucher #"
+              />
+            </FormField>
+          </FormLayout>
         </div>
       )}
 
@@ -1431,102 +1439,88 @@ const AddLabourModal: React.FC<{ onClose: () => void; onSuccess: (msg: string) =
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl overflow-hidden p-6 space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <h3 className="text-sm font-bold text-slate-900 m-0">Register Labour Worker</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
-            <X size={18} />
-          </button>
+      <FormLayout
+        title="Register Labour Worker"
+        subtitle="Daily floor labour, piece-rate roller, or packaging worker"
+        icon={<UserPlus size={18} />}
+        maxWidth="md"
+        onSubmit={handleSubmit}
+        onCancel={onClose}
+        actions={
+          <FormActions
+            onCancel={onClose}
+            cancelLabel="Cancel"
+            saveLabel="Register Worker"
+            isLoading={isSubmitting}
+          />
+        }
+      >
+        {error && (
+          <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold">
+            {error}
+          </div>
+        )}
+
+        <FormField label="Worker Full Name" required helpText="Official worker name">
+          <TextInput
+            required
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            placeholder="e.g. Radheshyam Sharma"
+          />
+        </FormField>
+
+        <div className="grid grid-cols-2 gap-3">
+          <FormField label="Station / Category">
+            <SelectInput
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              options={[
+                { value: 'ROLLING', label: 'Papad Rolling' },
+                { value: 'PACKING', label: 'Pouch Packaging' },
+                { value: 'ROASTING', label: 'Roasting & Drying' },
+                { value: 'CLEANING', label: 'Sanitation / Cleaning' },
+                { value: 'GENERAL', label: 'General Factory' },
+              ]}
+            />
+          </FormField>
+
+          <FormField label="Wage Basis">
+            <SelectInput
+              value={wageType}
+              onChange={(e) => setWageType(e.target.value)}
+              options={[
+                { value: 'DAILY', label: 'Daily Wage' },
+                { value: 'PIECE_RATE', label: 'Piece-Rate / Per KG' },
+                { value: 'HOURLY', label: 'Hourly Wage' },
+                { value: 'MONTHLY', label: 'Monthly Fixed' },
+              ]}
+            />
+          </FormField>
         </div>
 
-        {error && <div className="p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{error}</div>}
+        <FormField
+          label="Standard Rate (₹)"
+          required
+          helpText="Base daily wage or piece-rate per kg"
+        >
+          <MoneyInput
+            value={baseRate}
+            onChange={(val) => setBaseRate(String(val))}
+            placeholder="450.00"
+            required
+          />
+        </FormField>
 
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Worker Full Name *</label>
-            <input
-              type="text"
-              required
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              placeholder="e.g. Radheshyam Sharma"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Station / Category</label>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              >
-                <option value="ROLLING">Papad Rolling</option>
-                <option value="PACKING">Pouch Packaging</option>
-                <option value="ROASTING">Roasting & Drying</option>
-                <option value="CLEANING">Sanitation / Cleaning</option>
-                <option value="GENERAL">General Factory</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Wage Basis</label>
-              <select
-                value={wageType}
-                onChange={(e) => setWageType(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              >
-                <option value="DAILY">Daily Wage</option>
-                <option value="PIECE_RATE">Piece-Rate / Per KG</option>
-                <option value="HOURLY">Hourly Wage</option>
-                <option value="MONTHLY">Monthly Fixed</option>
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Standard Rate (₹)</label>
-            <input
-              type="number"
-              step="any"
-              required
-              value={baseRate}
-              onChange={(e) => setBaseRate(e.target.value)}
-              placeholder="e.g. 450 for Daily, or 12 for Piece-Rate"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Mobile Contact</label>
-            <input
-              type="tel"
-              value={mobile}
-              onChange={(e) => setMobile(e.target.value)}
-              placeholder="+91 98765 00000"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs disabled:opacity-50"
-            >
-              {isSubmitting ? 'Registering…' : 'Register Worker'}
-            </button>
-          </div>
-        </form>
-      </div>
+        <FormField label="Mobile Contact" helpText="10-digit mobile number for communication">
+          <TextInput
+            type="tel"
+            value={mobile}
+            onChange={(e) => setMobile(e.target.value)}
+            placeholder="e.g. 9876543210"
+          />
+        </FormField>
+      </FormLayout>
     </div>
   );
 };
@@ -1577,101 +1571,78 @@ const AssignTaskModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl overflow-hidden p-6 space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <h3 className="text-sm font-bold text-slate-900 m-0">Assign Work Task</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
-            <X size={18} />
-          </button>
+    <FormLayout
+      asModal
+      title="Assign Work Task"
+      subtitle="Delegate work orders and deliverables to employees with clear targets and due dates"
+      onClose={onClose}
+      maxWidth="max-w-md"
+    >
+      {error && <div className="p-3 rounded-xl bg-red-50 text-red-700 text-xs font-semibold mb-4 border border-red-200">{error}</div>}
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <FormField label="Assign To Employee" required helpText="Select the staff member or field officer responsible">
+          <SelectInput
+            value={assigneeId}
+            onChange={(e) => setAssigneeId(e.target.value)}
+            options={employees.map((emp) => ({
+              value: emp.user_id,
+              label: `${emp.full_name} (${emp.role})`,
+            }))}
+          />
+        </FormField>
+
+        <FormField label="Task Title" required helpText="Concise summary of the assignment">
+          <TextInput
+            type="text"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Visit 10 shopkeepers in Sadar Bazaar / Create Papad banner"
+          />
+        </FormField>
+
+        <FormField label="Detailed Instructions" helpText="Provide clear targets, requirements, and verification criteria">
+          <TextArea
+            rows={3}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Provide targets, instructions, and verification criteria…"
+          />
+        </FormField>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <FormField label="Priority">
+            <SelectInput
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              options={[
+                { value: 'LOW', label: 'Low' },
+                { value: 'MEDIUM', label: 'Medium' },
+                { value: 'HIGH', label: 'High' },
+                { value: 'URGENT', label: 'Urgent' },
+              ]}
+            />
+          </FormField>
+
+          <FormField label="Due Date">
+            <DateInput
+              value={dueDate}
+              onChange={(val) => setDueDate(val)}
+            />
+          </FormField>
         </div>
 
-        {error && <div className="p-2.5 rounded-lg bg-red-50 text-red-700 text-xs">{error}</div>}
-
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Assign To Employee *</label>
-            <select
-              value={assigneeId}
-              onChange={(e) => setAssigneeId(e.target.value)}
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            >
-              {employees.map((emp) => (
-                <option key={emp.user_id} value={emp.user_id}>
-                  {emp.full_name} ({emp.role})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Task Title *</label>
-            <input
-              type="text"
-              required
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Visit 10 shopkeepers in Sadar Bazaar / Create Papad banner"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Detailed Instructions</label>
-            <textarea
-              rows={3}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Provide targets, instructions, and verification criteria…"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Priority</label>
-              <select
-                value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              >
-                <option value="LOW">Low</option>
-                <option value="MEDIUM">Medium</option>
-                <option value="HIGH">High</option>
-                <option value="URGENT">Urgent</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Due Date</label>
-              <input
-                type="date"
-                value={dueDate}
-                onChange={(e) => setDueDate(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              />
-            </div>
-          </div>
-
-          <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs disabled:opacity-50"
-            >
-              {isSubmitting ? 'Assigning…' : 'Assign Task'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <FormActions>
+          <CancelButton onClick={onClose} />
+          <SaveButton
+            label={isSubmitting ? 'Assigning…' : 'Assign Task'}
+            isLoading={isSubmitting}
+            variant="primary"
+          />
+        </FormActions>
+      </form>
+    </FormLayout>
   );
 };
 
@@ -1681,7 +1652,6 @@ const ReviewTaskModal: React.FC<{
   onClose: () => void;
   onSuccess: (msg: string) => void;
 }> = ({ task, onClose, onSuccess }) => {
-  const token = getAuthToken();
   const [status, setStatus] = useState('APPROVED');
   const [reviewNotes, setReviewNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -1706,70 +1676,56 @@ const ReviewTaskModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl overflow-hidden p-6 space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <h3 className="text-sm font-bold text-slate-900 m-0">Review Task Deliverable</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs space-y-1">
-          <div>Task: <strong>{task.title}</strong></div>
-          <div>Submitted by: <strong>{task.assigned_to_name}</strong></div>
-          <div>Deliverable Notes: <span className="text-slate-600">{task.submission_notes}</span></div>
-          {task.proof_url && (
-            <a href={task.proof_url} target="_blank" rel="noreferrer" className="text-emerald-700 font-bold underline block mt-1">
-              Open Deliverable Link
-            </a>
-          )}
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Decision</label>
-            <select
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200 font-bold"
-            >
-              <option value="APPROVED">Approve Deliverable</option>
-              <option value="REJECTED">Reject / Request Revisions</option>
-              <option value="COMPLETED">Mark as Completed</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Review Feedback Notes</label>
-            <textarea
-              rows={2}
-              value={reviewNotes}
-              onChange={(e) => setReviewNotes(e.target.value)}
-              placeholder="Feedback for employee…"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs disabled:opacity-50"
-            >
-              {isSubmitting ? 'Saving…' : 'Submit Decision'}
-            </button>
-          </div>
-        </form>
+    <FormLayout
+      asModal
+      title="Review Task Deliverable"
+      subtitle="Inspect submitted work proof and approve or request revisions"
+      onClose={onClose}
+      maxWidth="max-w-md"
+    >
+      <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs space-y-1.5 mb-4">
+        <div>Task: <strong className="text-slate-800">{task.title}</strong></div>
+        <div>Submitted by: <strong className="text-slate-800">{task.assigned_to_name}</strong></div>
+        <div>Deliverable Notes: <span className="text-slate-600">{task.submission_notes || 'No notes provided'}</span></div>
+        {task.proof_url && (
+          <a href={task.proof_url} target="_blank" rel="noreferrer" className="text-emerald-700 font-bold underline inline-flex items-center gap-1 mt-1">
+            Open Deliverable Link <ExternalLink size={12} />
+          </a>
+        )}
       </div>
-    </div>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <FormField label="Decision" required helpText="Confirm if deliverable meets quality standards">
+          <SelectInput
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            options={[
+              { value: 'APPROVED', label: 'Approve Deliverable' },
+              { value: 'REJECTED', label: 'Reject / Request Revisions' },
+              { value: 'COMPLETED', label: 'Mark as Completed' },
+            ]}
+          />
+        </FormField>
+
+        <FormField label="Review Feedback Notes" helpText="Guidance or revision requests for the employee">
+          <TextArea
+            rows={2}
+            value={reviewNotes}
+            onChange={(e) => setReviewNotes(e.target.value)}
+            placeholder="Feedback for employee…"
+          />
+        </FormField>
+
+        <FormActions>
+          <CancelButton onClick={onClose} />
+          <SaveButton
+            label={isSubmitting ? 'Saving…' : 'Submit Decision'}
+            isLoading={isSubmitting}
+            variant="primary"
+          />
+        </FormActions>
+      </form>
+    </FormLayout>
   );
 };
 
@@ -1779,10 +1735,8 @@ const CreateProjectModal: React.FC<{
   onClose: () => void;
   onSuccess: (msg: string) => void;
 }> = ({ employees, onClose, onSuccess }) => {
-  const token = getAuthToken();
   const [freelancerId, setFreelancerId] = useState(employees[0]?.user_id || '');
   const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
   const [budget, setBudget] = useState('');
   const [targetDate, setTargetDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -1796,7 +1750,7 @@ const CreateProjectModal: React.FC<{
         body: JSON.stringify({
           freelancer_user_id: freelancerId,
           title: title.trim(),
-          description: description.trim(),
+          description: '',
           total_budget: Number(budget) || 0,
           target_completion_date: targetDate,
         }),
@@ -1810,86 +1764,62 @@ const CreateProjectModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl overflow-hidden p-6 space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <h3 className="text-sm font-bold text-slate-900 m-0">Create Freelancer Project</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
-            <X size={18} />
-          </button>
+    <FormLayout
+      asModal
+      title="Create Freelancer Project"
+      subtitle="Establish milestones and agreed payout budget for contracted partners"
+      onClose={onClose}
+      maxWidth="max-w-md"
+    >
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <FormField label="Contractor / Freelancer" required helpText="Select assigned freelance partner">
+          <SelectInput
+            value={freelancerId}
+            onChange={(e) => setFreelancerId(e.target.value)}
+            options={employees.map((emp) => ({
+              value: emp.user_id,
+              label: `${emp.full_name} (${emp.role})`,
+            }))}
+          />
+        </FormField>
+
+        <FormField label="Project Scope / Title" required helpText="Deliverable overview">
+          <TextInput
+            type="text"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Papad Pouch Redesign & Print Files"
+          />
+        </FormField>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <FormField label="Total Agreed Budget" required helpText="Total contracted sum">
+            <MoneyInput
+              value={budget}
+              onChange={(val) => setBudget(String(val))}
+              placeholder="25000"
+            />
+          </FormField>
+
+          <FormField label="Target Date" helpText="Expected delivery date">
+            <DateInput
+              value={targetDate}
+              onChange={(val) => setTargetDate(val)}
+            />
+          </FormField>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Contractor / Freelancer</label>
-            <select
-              value={freelancerId}
-              onChange={(e) => setFreelancerId(e.target.value)}
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            >
-              {employees.map((emp) => (
-                <option key={emp.user_id} value={emp.user_id}>
-                  {emp.full_name} ({emp.role})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Project Scope / Title *</label>
-            <input
-              type="text"
-              required
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Papad Pouch Redesign & Print Files"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Total Agreed Budget (₹)</label>
-              <input
-                type="number"
-                required
-                value={budget}
-                onChange={(e) => setBudget(e.target.value)}
-                placeholder="25000"
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Target Date</label>
-              <input
-                type="date"
-                value={targetDate}
-                onChange={(e) => setTargetDate(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              />
-            </div>
-          </div>
-
-          <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs disabled:opacity-50"
-            >
-              {isSubmitting ? 'Creating…' : 'Create Project'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <FormActions>
+          <CancelButton onClick={onClose} />
+          <SaveButton
+            label={isSubmitting ? 'Creating…' : 'Create Project'}
+            isLoading={isSubmitting}
+            variant="primary"
+          />
+        </FormActions>
+      </form>
+    </FormLayout>
   );
 };
 
@@ -1899,7 +1829,6 @@ const AddMilestoneModal: React.FC<{
   onClose: () => void;
   onSuccess: (msg: string) => void;
 }> = ({ projectId, onClose, onSuccess }) => {
-  const token = getAuthToken();
   const [title, setTitle] = useState('');
   const [amount, setAmount] = useState('');
   const [dueDate, setDueDate] = useState('');
@@ -1927,70 +1856,50 @@ const AddMilestoneModal: React.FC<{
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-xl overflow-hidden p-6 space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <h3 className="text-sm font-bold text-slate-900 m-0">Add Project Milestone</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
-            <X size={18} />
-          </button>
+    <FormLayout
+      asModal
+      title="Add Project Milestone"
+      subtitle="Define a stage deliverable and tied disbursement amount"
+      onClose={onClose}
+      maxWidth="max-w-md"
+    >
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <FormField label="Milestone Title" required helpText="Specific deliverable for this stage">
+          <TextInput
+            type="text"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Initial Packaging Vector Mockups"
+          />
+        </FormField>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <FormField label="Milestone Payout" required helpText="Amount released upon milestone sign-off">
+            <MoneyInput
+              value={amount}
+              onChange={(val) => setAmount(String(val))}
+              placeholder="10000"
+            />
+          </FormField>
+
+          <FormField label="Target Date" helpText="Expected completion date">
+            <DateInput
+              value={dueDate}
+              onChange={(val) => setDueDate(val)}
+            />
+          </FormField>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">Milestone Title *</label>
-            <input
-              type="text"
-              required
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Initial Packaging Vector Mockups"
-              className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Milestone Payout (₹) *</label>
-              <input
-                type="number"
-                required
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                placeholder="10000"
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Target Date</label>
-              <input
-                type="date"
-                value={dueDate}
-                onChange={(e) => setDueDate(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-200"
-              />
-            </div>
-          </div>
-
-          <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs disabled:opacity-50"
-            >
-              {isSubmitting ? 'Adding…' : 'Add Milestone'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <FormActions>
+          <CancelButton onClick={onClose} />
+          <SaveButton
+            label={isSubmitting ? 'Adding…' : 'Add Milestone'}
+            isLoading={isSubmitting}
+            variant="primary"
+          />
+        </FormActions>
+      </form>
+    </FormLayout>
   );
 };

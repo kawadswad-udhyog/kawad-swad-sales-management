@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Truck,
   Plus,
@@ -15,6 +15,11 @@ import {
   ArrowRightLeft,
   X,
   CreditCard,
+  Trash2,
+  PackagePlus,
+  Calculator,
+  Building2,
+  FileSpreadsheet,
 } from 'lucide-react';
 import {
   getSuppliers,
@@ -40,6 +45,35 @@ import type {
   SupplierPayment,
   SupplierReturn,
 } from '../types';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  MoneyInput,
+  QuantityInput,
+  DateInput,
+  CalculationPreview,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
+
+export const RAW_MATERIAL_CATALOG = [
+  { id: 'RM-WHOLE-MOONG-DAL', name: 'Whole Moong Dal (Raw Grain)', unit: 'kg', defaultRate: 85, gstRate: 0, category: 'Dal' },
+  { id: 'RM-WHOLE-URAD-DAL', name: 'Whole Urad Dal (Raw Grain)', unit: 'kg', defaultRate: 98, gstRate: 0, category: 'Dal' },
+  { id: 'RM-WHOLE-CHANA-DAL', name: 'Whole Chana Dal (Raw Grain)', unit: 'kg', defaultRate: 72, gstRate: 0, category: 'Dal' },
+  { id: 'RM-SPICE-BLACK-PEPPER', name: 'Black Pepper (Kali Mirch)', unit: 'kg', defaultRate: 640, gstRate: 0.05, category: 'Spice' },
+  { id: 'RM-SPICE-JEERA', name: 'Jeera (Cumin Seeds)', unit: 'kg', defaultRate: 320, gstRate: 0.05, category: 'Spice' },
+  { id: 'RM-SPICE-RED-CHILLI', name: 'Red Chilli Powder', unit: 'kg', defaultRate: 280, gstRate: 0.05, category: 'Spice' },
+  { id: 'RM-SPICE-HING', name: 'Hing (Compounded Asafoetida)', unit: 'kg', defaultRate: 1400, gstRate: 0.05, category: 'Spice' },
+  { id: 'RM-ADD-PAPAD-KHAR', name: 'Saji Khar / Papad Khar', unit: 'kg', defaultRate: 65, gstRate: 0.05, category: 'Additive' },
+  { id: 'RM-ADD-SALT', name: 'Iodized Salt', unit: 'kg', defaultRate: 18, gstRate: 0, category: 'Additive' },
+  { id: 'RM-ADD-EDIBLE-OIL', name: 'Edible Cooking Oil', unit: 'kg', defaultRate: 135, gstRate: 0.05, category: 'Additive' },
+  { id: 'RM-PKG-POUCH-200G', name: 'Printed Pouch Film (200g Moong)', unit: 'kg', defaultRate: 260, gstRate: 0.18, category: 'Packaging' },
+  { id: 'RM-PKG-POUCH-400G', name: 'Printed Pouch Film (400g Moong)', unit: 'kg', defaultRate: 260, gstRate: 0.18, category: 'Packaging' },
+  { id: 'RM-PKG-POUCH-500G', name: 'Printed Pouch Film (500g Chana)', unit: 'kg', defaultRate: 260, gstRate: 0.18, category: 'Packaging' },
+  { id: 'RM-PKG-MASTER-CARTON', name: '5-Ply Master Corrugated Boxes', unit: 'packet', defaultRate: 42, gstRate: 0.18, category: 'Packaging' },
+];
 
 type PurchasingTab = 'suppliers' | 'orders' | 'receipts' | 'bills' | 'payments' | 'returns';
 
@@ -92,7 +126,14 @@ export const PurchasingView: React.FC = () => {
     expected_delivery_date: '',
     notes: '',
     items: [
-      { material_id: 'RM-MUNG-WHOLE', material_name: 'Mung Whole Dal (Raw Grain)', ordered_quantity: 1000, unit: 'kg', unit_price: 85, gst_rate: 0 },
+      {
+        material_id: 'RM-WHOLE-MOONG-DAL',
+        material_name: 'Whole Moong Dal (Raw Grain)',
+        ordered_quantity: 1000,
+        unit: 'kg',
+        unit_price: 85,
+        tax_rate: 0,
+      },
     ],
   });
 
@@ -104,16 +145,29 @@ export const PurchasingView: React.FC = () => {
     vehicle_number: '',
     notes: '',
     items: [
-      { material_id: 'RM-MUNG-WHOLE', material_name: 'Mung Whole Dal (Raw Grain)', received_quantity: 1000, unit: 'kg', unit_price: 85, storage_location: 'MAIN_GRAIN_SILO', batch_reference: `LOT-RM-${Date.now().toString().slice(-4)}` },
+      {
+        po_item_id: '',
+        material_id: 'RM-WHOLE-MOONG-DAL',
+        material_name: 'Whole Moong Dal (Raw Grain)',
+        delivered_quantity: 1000,
+        accepted_quantity: 1000,
+        rejected_quantity: 0,
+        unit: 'kg',
+        unit_price: 85,
+        rejection_reason: '',
+      },
     ],
   });
 
   const [newBill, setNewBill] = useState({
     supplier_id: '',
+    po_id: '',
+    receipt_id: '',
     bill_number: '',
     bill_date: new Date().toISOString().split('T')[0],
     due_date: '',
     taxable_amount: 0,
+    gst_rate_preset: 0, // 0, 5, 12, 18
     cgst_amount: 0,
     sgst_amount: 0,
     freight_amount: 0,
@@ -137,7 +191,13 @@ export const PurchasingView: React.FC = () => {
     reason: 'Damaged packaging / moisture exceeding limit',
     notes: '',
     items: [
-      { material_id: 'RM-MUNG-WHOLE', material_name: 'Mung Whole Dal', returned_quantity: 50, unit: 'kg', unit_price: 85 },
+      {
+        material_id: 'RM-WHOLE-MOONG-DAL',
+        material_name: 'Whole Moong Dal (Raw Grain)',
+        returned_quantity: 50,
+        unit: 'kg',
+        unit_price: 85,
+      },
     ],
   });
 
@@ -766,637 +826,1034 @@ export const PurchasingView: React.FC = () => {
         </div>
       )}
 
-      {/* Modal: New Supplier */}
+      {/* 1. Modal: Register New Supplier */}
       {showSupplierModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Register New Raw Material Supplier</h3>
-              <button onClick={() => setShowSupplierModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateSupplier} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Supplier / Firm Name *</label>
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <FormLayout
+            title="Register Raw Material Supplier"
+            subtitle="Add a certified grain mandi trader, spice merchant, or packaging vendor"
+            icon={<Building2 size={20} />}
+            onSubmit={handleCreateSupplier}
+            onCancel={() => setShowSupplierModal(false)}
+            maxWidth="lg"
+            actions={
+              <FormActions>
+                <CancelButton onClick={() => setShowSupplierModal(false)} />
+                <SaveButton label="Save Supplier" icon={<Building2 size={15} />} />
+              </FormActions>
+            }
+          >
+            <FormSection title="Vendor & Mandi Details">
+              <FormField label="Supplier / Firm Name" required>
                 <input
                   type="text"
                   required
                   value={newSupplier.supplier_name}
                   onChange={(e) => setNewSupplier({ ...newSupplier, supplier_name: e.target.value })}
-                  placeholder="e.g. Marwar Agro Traders"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                  placeholder="e.g. Marwar Agro Traders / Bikaner Mandi"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:border-transparent outline-none"
                 />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Contact Person</label>
+              </FormField>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FormField label="Contact Person">
                   <input
                     type="text"
                     value={newSupplier.contact_person}
                     onChange={(e) => setNewSupplier({ ...newSupplier, contact_person: e.target.value })}
-                    placeholder="Owner name"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                    placeholder="Owner / Proprietor name"
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:border-transparent outline-none"
                   />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Mobile Number *</label>
+                </FormField>
+                <FormField label="Mobile Number" required helpText="10-digit primary mobile">
                   <input
                     type="tel"
                     required
+                    maxLength={10}
                     value={newSupplier.mobile}
-                    onChange={(e) => setNewSupplier({ ...newSupplier, mobile: e.target.value })}
+                    onChange={(e) => setNewSupplier({ ...newSupplier, mobile: e.target.value.replace(/\D/g, '') })}
                     placeholder="98XXXXXXXX"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:border-transparent outline-none"
                   />
-                </div>
+                </FormField>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">City</label>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FormField label="Mandi / City">
                   <input
                     type="text"
                     value={newSupplier.city}
                     onChange={(e) => setNewSupplier({ ...newSupplier, city: e.target.value })}
                     placeholder="Bikaner"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:border-transparent outline-none"
                   />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Credit Days</label>
-                  <input
-                    type="number"
-                    min="0"
+                </FormField>
+                <FormField label="Credit Terms (Days)">
+                  <QuantityInput
+                    unit="days"
+                    min={0}
+                    max={120}
                     value={newSupplier.payment_terms_days}
-                    onChange={(e) => setNewSupplier({ ...newSupplier, payment_terms_days: Number(e.target.value) })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                    onChange={(val) => setNewSupplier({ ...newSupplier, payment_terms_days: val })}
                   />
-                </div>
+                </FormField>
               </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">GSTIN</label>
+
+              <FormField label="GSTIN (15 Digits)" helpText="Format: 08AAAAA0000A1Z5 (Leave blank if unregistered mandi dealer)">
                 <input
                   type="text"
+                  maxLength={15}
                   value={newSupplier.gstin}
-                  onChange={(e) => setNewSupplier({ ...newSupplier, gstin: e.target.value })}
+                  onChange={(e) => setNewSupplier({ ...newSupplier, gstin: e.target.value.toUpperCase() })}
                   placeholder="08AAAAA0000A1Z5"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg font-mono focus:outline-hidden focus:border-emerald-600"
+                  className="w-full px-3.5 py-2.5 text-sm font-mono uppercase border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:border-transparent outline-none"
                 />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Address / Mandi Location</label>
+              </FormField>
+
+              <FormField label="Address / Mandi Shop Reference">
                 <textarea
                   rows={2}
                   value={newSupplier.address}
                   onChange={(e) => setNewSupplier({ ...newSupplier, address: e.target.value })}
-                  placeholder="Krishi Mandi, Bikaner"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                  placeholder="Shop #14, Grain Market, Krishi Upaj Mandi, Bikaner"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:border-transparent outline-none"
                 />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowSupplierModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Save Supplier
-                </button>
-              </div>
-            </form>
-          </div>
+              </FormField>
+            </FormSection>
+          </FormLayout>
         </div>
       )}
 
-      {/* Modal: New Purchase Order */}
-      {showOrderModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Issue Purchase Order</h3>
-              <button onClick={() => setShowOrderModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateOrder} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Select Supplier *</label>
-                <select
-                  required
-                  value={newOrder.supplier_id}
-                  onChange={(e) => setNewOrder({ ...newOrder, supplier_id: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="">-- Choose Supplier --</option>
-                  {suppliers.map((s) => (
-                    <option key={s.supplier_id} value={s.supplier_id}>
-                      {s.supplier_name} ({s.city})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">PO Date</label>
-                  <input
-                    type="date"
-                    required
-                    value={newOrder.order_date}
-                    onChange={(e) => setNewOrder({ ...newOrder, order_date: e.target.value })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Expected Delivery</label>
-                  <input
-                    type="date"
-                    value={newOrder.expected_delivery_date}
-                    onChange={(e) => setNewOrder({ ...newOrder, expected_delivery_date: e.target.value })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-              </div>
-              {/* Item row */}
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-                <div className="font-semibold text-slate-700">Order Item</div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="col-span-2">
-                    <label className="block text-2xs text-slate-500 mb-0.5">Raw Material</label>
-                    <select
-                      value={newOrder.items[0].material_id}
-                      onChange={(e) => {
-                        const mId = e.target.value;
-                        const name = mId === 'RM-MUNG-WHOLE' ? 'Mung Whole Dal' : 'Urad Whole Dal';
-                        const updated = [...newOrder.items];
-                        updated[0].material_id = mId;
-                        updated[0].material_name = name;
-                        setNewOrder({ ...newOrder, items: updated });
-                      }}
-                      className="w-full px-2 py-1 text-xs border border-slate-300 rounded-lg"
-                    >
-                      <option value="RM-MUNG-WHOLE">Mung Whole Dal (Raw Grain)</option>
-                      <option value="RM-URAD-WHOLE">Urad Whole Dal (Raw Grain)</option>
-                    </select>
+      {/* 2. Modal: Multi-Item Purchase Order */}
+      {showOrderModal && (() => {
+        const poSubtotal = newOrder.items.reduce(
+          (sum, itm) => sum + (Number(itm.ordered_quantity) || 0) * (Number(itm.unit_price) || 0),
+          0
+        );
+        const poGstTotal = newOrder.items.reduce((sum, itm) => {
+          const base = (Number(itm.ordered_quantity) || 0) * (Number(itm.unit_price) || 0);
+          return sum + base * (Number(itm.tax_rate) || 0);
+        }, 0);
+        const poGrandTotal = Math.round((poSubtotal + poGstTotal) * 100) / 100;
+        const totalItemsQty = newOrder.items.reduce((sum, itm) => sum + (Number(itm.ordered_quantity) || 0), 0);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <FormLayout
+              title="Issue Purchase Order (PO)"
+              subtitle="Generate a binding procurement order with agreed mandi rates and GST terms"
+              icon={<Truck size={20} />}
+              onSubmit={handleCreateOrder}
+              onCancel={() => setShowOrderModal(false)}
+              maxWidth="3xl"
+              actions={
+                <FormActions>
+                  <CancelButton onClick={() => setShowOrderModal(false)} />
+                  <SaveButton label="Issue Purchase Order" icon={<Truck size={15} />} />
+                </FormActions>
+              }
+            >
+              <FormSection title="Supplier & Schedule">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="sm:col-span-2">
+                    <FormField label="Select Raw Material Supplier" required>
+                      <select
+                        required
+                        value={newOrder.supplier_id}
+                        onChange={(e) => setNewOrder({ ...newOrder, supplier_id: e.target.value })}
+                        className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 focus:border-transparent outline-none"
+                      >
+                        <option value="">-- Choose Vendor / Mandi Trader --</option>
+                        {suppliers.map((s) => (
+                          <option key={s.supplier_id} value={s.supplier_id}>
+                            {s.supplier_name} ({s.city}) — Credit: {s.payment_terms_days}d
+                          </option>
+                        ))}
+                      </select>
+                    </FormField>
                   </div>
                   <div>
-                    <label className="block text-2xs text-slate-500 mb-0.5">Qty (kg)</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={newOrder.items[0].ordered_quantity}
-                      onChange={(e) => {
-                        const updated = [...newOrder.items];
-                        updated[0].ordered_quantity = Number(e.target.value);
-                        setNewOrder({ ...newOrder, items: updated });
-                      }}
-                      className="w-full px-2 py-1 text-xs border border-slate-300 rounded-lg"
-                    />
+                    <FormField label="Expected Delivery Date">
+                      <DateInput
+                        value={newOrder.expected_delivery_date}
+                        onChange={(val) => setNewOrder({ ...newOrder, expected_delivery_date: val })}
+                      />
+                    </FormField>
                   </div>
                 </div>
-                <div>
-                  <label className="block text-2xs text-slate-500 mb-0.5">Agreed Rate (₹/kg)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    step="0.5"
-                    value={newOrder.items[0].unit_price}
-                    onChange={(e) => {
-                      const updated = [...newOrder.items];
-                      updated[0].unit_price = Number(e.target.value);
-                      setNewOrder({ ...newOrder, items: updated });
-                    }}
-                    className="w-full px-2 py-1 text-xs border border-slate-300 rounded-lg"
-                  />
-                </div>
-                <div className="text-right text-xs font-bold text-slate-800">
-                  Estimated Total: ₹{(newOrder.items[0].ordered_quantity * newOrder.items[0].unit_price).toLocaleString()}
-                </div>
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowOrderModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Issue Purchase Order
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+              </FormSection>
 
-      {/* Modal: New GRN */}
-      {showReceiptModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Inward Raw Material (Goods Receipt Note)</h3>
-              <button onClick={() => setShowReceiptModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateReceipt} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Supplier *</label>
-                <select
-                  required
-                  value={newReceipt.supplier_id}
-                  onChange={(e) => setNewReceipt({ ...newReceipt, supplier_id: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="">-- Choose Supplier --</option>
-                  {suppliers.map((s) => (
-                    <option key={s.supplier_id} value={s.supplier_id}>
-                      {s.supplier_name}
-                    </option>
+              <FormSection
+                title="Procurement Line Items"
+                description="Specify raw materials, quantities, agreed purchase rates, and GST tax treatment"
+              >
+                <div className="space-y-3">
+                  {newOrder.items.map((item, idx) => {
+                    const lineSubtotal = (Number(item.ordered_quantity) || 0) * (Number(item.unit_price) || 0);
+                    const lineTax = lineSubtotal * (Number(item.tax_rate) || 0);
+                    const lineTotal = Math.round((lineSubtotal + lineTax) * 100) / 100;
+
+                    return (
+                      <div
+                        key={idx}
+                        className="p-3.5 sm:p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                            <span className="w-5 h-5 rounded-full bg-emerald-800 text-white inline-flex items-center justify-center text-2xs font-mono">
+                              {idx + 1}
+                            </span>
+                            Item Line
+                          </span>
+                          {newOrder.items.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNewOrder({
+                                  ...newOrder,
+                                  items: newOrder.items.filter((_, i) => i !== idx),
+                                });
+                              }}
+                              className="text-xs text-rose-600 hover:text-rose-700 font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-md hover:bg-rose-50"
+                            >
+                              <Trash2 size={13} /> Remove
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                          <div className="sm:col-span-5">
+                            <label className="block text-2xs font-bold uppercase text-slate-600 mb-1">
+                              Raw Material *
+                            </label>
+                            <select
+                              value={item.material_id}
+                              onChange={(e) => {
+                                const selectedCat = RAW_MATERIAL_CATALOG.find((m) => m.id === e.target.value);
+                                const updated = [...newOrder.items];
+                                updated[idx] = {
+                                  ...updated[idx],
+                                  material_id: e.target.value,
+                                  material_name: selectedCat?.name || e.target.value,
+                                  unit: selectedCat?.unit || 'kg',
+                                  unit_price: selectedCat?.defaultRate || updated[idx].unit_price,
+                                  tax_rate: selectedCat?.gstRate ?? updated[idx].tax_rate,
+                                };
+                                setNewOrder({ ...newOrder, items: updated });
+                              }}
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                            >
+                              <optgroup label="Whole Grain Dals (Direct Mandi)">
+                                {RAW_MATERIAL_CATALOG.filter((m) => m.category === 'Dal').map((m) => (
+                                  <option key={m.id} value={m.id}>
+                                    🌾 {m.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="Spices & Seasonings">
+                                {RAW_MATERIAL_CATALOG.filter((m) => m.category === 'Spice').map((m) => (
+                                  <option key={m.id} value={m.id}>
+                                    🌶️ {m.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="Food Additives & Processing">
+                                {RAW_MATERIAL_CATALOG.filter((m) => m.category === 'Additive').map((m) => (
+                                  <option key={m.id} value={m.id}>
+                                    🧪 {m.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="Packaging Materials & Cartons">
+                                {RAW_MATERIAL_CATALOG.filter((m) => m.category === 'Packaging').map((m) => (
+                                  <option key={m.id} value={m.id}>
+                                    📦 {m.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            </select>
+                          </div>
+
+                          <div className="sm:col-span-3">
+                            <label className="block text-2xs font-bold uppercase text-slate-600 mb-1">
+                              Quantity ({item.unit}) *
+                            </label>
+                            <input
+                              type="number"
+                              min="0.1"
+                              step="any"
+                              required
+                              value={item.ordered_quantity}
+                              onChange={(e) => {
+                                const updated = [...newOrder.items];
+                                updated[idx].ordered_quantity = Number(e.target.value);
+                                setNewOrder({ ...newOrder, items: updated });
+                              }}
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-emerald-600 outline-none font-semibold text-slate-800"
+                            />
+                          </div>
+
+                          <div className="sm:col-span-2">
+                            <label className="block text-2xs font-bold uppercase text-slate-600 mb-1">
+                              Rate (₹/{item.unit}) *
+                            </label>
+                            <input
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              required
+                              value={item.unit_price}
+                              onChange={(e) => {
+                                const updated = [...newOrder.items];
+                                updated[idx].unit_price = Number(e.target.value);
+                                setNewOrder({ ...newOrder, items: updated });
+                              }}
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-emerald-600 outline-none font-semibold text-slate-800"
+                            />
+                          </div>
+
+                          <div className="sm:col-span-2">
+                            <label className="block text-2xs font-bold uppercase text-slate-600 mb-1">
+                              GST Rate
+                            </label>
+                            <select
+                              value={item.tax_rate}
+                              onChange={(e) => {
+                                const updated = [...newOrder.items];
+                                updated[idx].tax_rate = Number(e.target.value);
+                                setNewOrder({ ...newOrder, items: updated });
+                              }}
+                              className="w-full px-2 py-2 text-xs border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-emerald-600 outline-none font-semibold text-slate-700"
+                            >
+                              <option value={0}>0% (Exempt Grain)</option>
+                              <option value={0.05}>5% (Spices / Oil)</option>
+                              <option value={0.12}>12%</option>
+                              <option value={0.18}>18% (Packaging)</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-200/80 text-xs">
+                          <span className="text-slate-500">
+                            Base: ₹{lineSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })} + GST: ₹{lineTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                          </span>
+                          <span className="font-bold text-slate-900">
+                            Line Total: ₹{lineTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewOrder({
+                        ...newOrder,
+                        items: [
+                          ...newOrder.items,
+                          {
+                            material_id: 'RM-WHOLE-URAD-DAL',
+                            material_name: 'Whole Urad Dal (Raw Grain)',
+                            ordered_quantity: 500,
+                            unit: 'kg',
+                            unit_price: 98,
+                            tax_rate: 0,
+                          },
+                        ],
+                      });
+                    }}
+                    className="w-full py-2.5 border-2 border-dashed border-emerald-400/80 rounded-xl text-emerald-800 font-semibold text-xs hover:bg-emerald-50 transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <Plus size={14} /> Add Another Raw Material Line
+                  </button>
+                </div>
+              </FormSection>
+
+              <CalculationPreview
+                title="Purchase Order Financial Summary"
+                items={[
+                  { label: 'Total Ordered Quantity', value: `${totalItemsQty.toLocaleString()} units / kg` },
+                  { label: 'Taxable Subtotal', value: `₹${poSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                  { label: 'GST Tax Amount', value: `₹${poGstTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                  {
+                    label: 'Grand Order Commitment',
+                    value: `₹${poGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+                    isHighlight: true,
+                  },
+                ]}
+              />
+
+              <FormSection title="Purchase Order Notes" defaultOpen={false}>
+                <FormField label="Terms & Delivery Instructions">
+                  <textarea
+                    rows={2}
+                    value={newOrder.notes}
+                    onChange={(e) => setNewOrder({ ...newOrder, notes: e.target.value })}
+                    placeholder="e.g. Moisture must be <= 11%, delivery via transport bilty to factory shed"
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
+                  />
+                </FormField>
+              </FormSection>
+            </FormLayout>
+          </div>
+        );
+      })()}
+
+      {/* 3. Modal: Inward Goods Receipt Note (GRN) */}
+      {showReceiptModal && (() => {
+        const totalDelivered = newReceipt.items.reduce((s, itm) => s + (Number(itm.delivered_quantity) || 0), 0);
+        const totalAccepted = newReceipt.items.reduce((s, itm) => s + (Number(itm.accepted_quantity) || 0), 0);
+        const totalRejected = newReceipt.items.reduce((s, itm) => s + (Number(itm.rejected_quantity) || 0), 0);
+        const totalAcceptedValue = newReceipt.items.reduce(
+          (s, itm) => s + (Number(itm.accepted_quantity) || 0) * (Number(itm.unit_price) || 0),
+          0
+        );
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <FormLayout
+              title="Inward Goods Receipt Note (GRN)"
+              subtitle="Inspect incoming grain & materials, record accepted stock, and update raw material inventory"
+              icon={<PackageCheck size={20} />}
+              onSubmit={handleCreateReceipt}
+              onCancel={() => setShowReceiptModal(false)}
+              maxWidth="3xl"
+              actions={
+                <FormActions>
+                  <CancelButton onClick={() => setShowReceiptModal(false)} />
+                  <SaveButton label="Confirm Inward GRN" icon={<PackageCheck size={15} />} />
+                </FormActions>
+              }
+            >
+              <FormSection title="Receiving Reference & PO Link">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <FormField label="Link to Purchase Order (Optional)">
+                    <select
+                      value={newReceipt.po_id}
+                      onChange={(e) => {
+                        const poId = e.target.value;
+                        const matchPo = orders.find((o) => o.po_id === poId);
+                        if (matchPo) {
+                          setNewReceipt({
+                            ...newReceipt,
+                            po_id: poId,
+                            supplier_id: matchPo.supplier_id,
+                            items: (matchPo.items || []).map((pi) => ({
+                              po_item_id: pi.po_item_id || '',
+                              material_id: (pi as any).material_id || pi.raw_material_id || 'RM-WHOLE-MOONG-DAL',
+                              material_name: pi.material_name,
+                              delivered_quantity: pi.ordered_quantity,
+                              accepted_quantity: pi.ordered_quantity,
+                              rejected_quantity: 0,
+                              unit: pi.unit,
+                              unit_price: pi.unit_price,
+                              rejection_reason: '',
+                            })),
+                          });
+                        } else {
+                          setNewReceipt({ ...newReceipt, po_id: '' });
+                        }
+                      }}
+                      className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                    >
+                      <option value="">-- Direct Mandi Purchase (No PO) --</option>
+                      {orders
+                        .filter((o) => o.status !== 'CANCELLED')
+                        .map((o) => (
+                          <option key={o.po_id} value={o.po_id}>
+                            {o.po_number} — {o.supplier_name} (₹{Number(o.total_amount || 0).toLocaleString()})
+                          </option>
+                        ))}
+                    </select>
+                  </FormField>
+
+                  <FormField label="Supplier / Firm Name *" required>
+                    <select
+                      required
+                      value={newReceipt.supplier_id}
+                      onChange={(e) => setNewReceipt({ ...newReceipt, supplier_id: e.target.value })}
+                      className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                    >
+                      <option value="">-- Choose Vendor --</option>
+                      {suppliers.map((s) => (
+                        <option key={s.supplier_id} value={s.supplier_id}>
+                          {s.supplier_name} ({s.city})
+                        </option>
+                      ))}
+                    </select>
+                  </FormField>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <FormField label="Inward Date *" required>
+                    <DateInput
+                      value={newReceipt.receipt_date}
+                      onChange={(val) => setNewReceipt({ ...newReceipt, receipt_date: val })}
+                    />
+                  </FormField>
+                  <FormField label="Vendor Challan / Bilty #" required helpText="Transport consignment reference">
+                    <input
+                      type="text"
+                      required
+                      value={newReceipt.vendor_delivery_challan}
+                      onChange={(e) => setNewReceipt({ ...newReceipt, vendor_delivery_challan: e.target.value })}
+                      placeholder="e.g. BL-98412 / Mandi Memo"
+                      className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
+                    />
+                  </FormField>
+                  <FormField label="Truck / Vehicle Number">
+                    <input
+                      type="text"
+                      value={newReceipt.vehicle_number}
+                      onChange={(e) => setNewReceipt({ ...newReceipt, vehicle_number: e.target.value.toUpperCase() })}
+                      placeholder="RJ-07-GA-1234"
+                      className="w-full px-3.5 py-2.5 text-sm uppercase font-mono border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
+                    />
+                  </FormField>
+                </div>
+              </FormSection>
+
+              <FormSection
+                title="Physical Inspection & Quantity Reconciliation"
+                description="Weighbridge / physical scale counts: accepted stock goes directly to Factory Raw Material Ledger"
+              >
+                <div className="space-y-4">
+                  {newReceipt.items.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-sm text-slate-900">
+                          {item.material_name}
+                        </span>
+                        <span className="text-xs px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-800 font-bold">
+                          ₹{Number(item.unit_price).toFixed(2)} / {item.unit}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <FormField label={`Delivered Quantity (${item.unit}) *`}>
+                          <input
+                            type="number"
+                            min="0.1"
+                            step="any"
+                            required
+                            value={item.delivered_quantity}
+                            onChange={(e) => {
+                              const deliv = Number(e.target.value);
+                              const updated = [...newReceipt.items];
+                              updated[idx].delivered_quantity = deliv;
+                              updated[idx].accepted_quantity = Math.max(0, deliv - updated[idx].rejected_quantity);
+                              setNewReceipt({ ...newReceipt, items: updated });
+                            }}
+                            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white font-semibold"
+                          />
+                        </FormField>
+
+                        <FormField label={`Accepted Quantity (${item.unit}) *`}>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            required
+                            value={item.accepted_quantity}
+                            onChange={(e) => {
+                              const acc = Number(e.target.value);
+                              const updated = [...newReceipt.items];
+                              updated[idx].accepted_quantity = acc;
+                              updated[idx].rejected_quantity = Math.max(0, updated[idx].delivered_quantity - acc);
+                              setNewReceipt({ ...newReceipt, items: updated });
+                            }}
+                            className="w-full px-3 py-2 text-sm border border-emerald-500 rounded-lg bg-white font-bold text-emerald-800"
+                          />
+                        </FormField>
+
+                        <FormField label={`Rejected Quantity (${item.unit})`}>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={item.rejected_quantity}
+                            onChange={(e) => {
+                              const rej = Number(e.target.value);
+                              const updated = [...newReceipt.items];
+                              updated[idx].rejected_quantity = rej;
+                              updated[idx].accepted_quantity = Math.max(0, updated[idx].delivered_quantity - rej);
+                              setNewReceipt({ ...newReceipt, items: updated });
+                            }}
+                            className="w-full px-3 py-2 text-sm border border-rose-400 rounded-lg bg-white font-bold text-rose-800"
+                          />
+                        </FormField>
+                      </div>
+
+                      {item.rejected_quantity > 0 && (
+                        <FormField label="Rejection Justification *" required>
+                          <input
+                            type="text"
+                            required
+                            value={item.rejection_reason}
+                            onChange={(e) => {
+                              const updated = [...newReceipt.items];
+                              updated[idx].rejection_reason = e.target.value;
+                              setNewReceipt({ ...newReceipt, items: updated });
+                            }}
+                            placeholder="e.g. Moisture > 14%, foreign particles, or damaged bags"
+                            className="w-full px-3 py-1.5 text-xs border border-rose-300 rounded-lg bg-rose-50/50"
+                          />
+                        </FormField>
+                      )}
+                    </div>
                   ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Receipt Date</label>
-                  <input
-                    type="date"
-                    required
-                    value={newReceipt.receipt_date}
-                    onChange={(e) => setNewReceipt({ ...newReceipt, receipt_date: e.target.value })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
                 </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Vehicle / Truck No</label>
-                  <input
-                    type="text"
-                    value={newReceipt.vehicle_number}
-                    onChange={(e) => setNewReceipt({ ...newReceipt, vehicle_number: e.target.value })}
-                    placeholder="RJ-07-GA-1234"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Vendor Challan / Bilty #</label>
-                <input
-                  type="text"
-                  value={newReceipt.vendor_delivery_challan}
-                  onChange={(e) => setNewReceipt({ ...newReceipt, vendor_delivery_challan: e.target.value })}
-                  placeholder="CH-98712"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Quantity (kg) *</label>
-                  <input
-                    type="number"
-                    min="1"
-                    required
-                    value={newReceipt.items[0].received_quantity}
-                    onChange={(e) => {
-                      const updated = [...newReceipt.items];
-                      updated[0].received_quantity = Number(e.target.value);
-                      setNewReceipt({ ...newReceipt, items: updated });
-                    }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Unit Rate (₹/kg) *</label>
-                  <input
-                    type="number"
-                    min="1"
-                    required
-                    value={newReceipt.items[0].unit_price}
-                    onChange={(e) => {
-                      const updated = [...newReceipt.items];
-                      updated[0].unit_price = Number(e.target.value);
-                      setNewReceipt({ ...newReceipt, items: updated });
-                    }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowReceiptModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Confirm Inward GRN
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+              </FormSection>
 
-      {/* Modal: Book Supplier Bill */}
+              <CalculationPreview
+                title="Inward Inventory Accounting Impact"
+                items={[
+                  { label: 'Total Inward Delivered', value: `${totalDelivered.toLocaleString()} kg` },
+                  { label: 'Accepted to Stock Ledger', value: `${totalAccepted.toLocaleString()} kg` },
+                  { label: 'Rejected at Gate', value: `${totalRejected.toLocaleString()} kg` },
+                  {
+                    label: 'Accepted Stock Valuation',
+                    value: `₹${totalAcceptedValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+                    isHighlight: true,
+                  },
+                ]}
+              />
+            </FormLayout>
+          </div>
+        );
+      })()}
+
+      {/* 4. Modal: Book Supplier Bill / Invoice */}
       {showBillModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Book Supplier Bill / Invoice</h3>
-              <button onClick={() => setShowBillModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateBill} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Supplier *</label>
-                <select
-                  required
-                  value={newBill.supplier_id}
-                  onChange={(e) => setNewBill({ ...newBill, supplier_id: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="">-- Choose Supplier --</option>
-                  {suppliers.map((s) => (
-                    <option key={s.supplier_id} value={s.supplier_id}>
-                      {s.supplier_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Supplier Invoice # *</label>
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <FormLayout
+            title="Book Supplier Invoice / Bill"
+            subtitle="Record vendor bill in accounts payable with automated GST calculation and freight capitalization"
+            icon={<Receipt size={20} />}
+            onSubmit={handleCreateBill}
+            onCancel={() => setShowBillModal(false)}
+            maxWidth="xl"
+            actions={
+              <FormActions>
+                <CancelButton onClick={() => setShowBillModal(false)} />
+                <SaveButton label="Book Supplier Bill" icon={<Receipt size={15} />} />
+              </FormActions>
+            }
+          >
+            <FormSection title="Supplier & Invoice Details">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FormField label="Supplier *" required>
+                  <select
+                    required
+                    value={newBill.supplier_id}
+                    onChange={(e) => setNewBill({ ...newBill, supplier_id: e.target.value })}
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    <option value="">-- Choose Supplier --</option>
+                    {suppliers.map((s) => (
+                      <option key={s.supplier_id} value={s.supplier_id}>
+                        {s.supplier_name}
+                      </option>
+                    ))}
+                  </select>
+                </FormField>
+
+                <FormField label="Supplier Invoice # *" required>
                   <input
                     type="text"
                     required
                     value={newBill.bill_number}
                     onChange={(e) => setNewBill({ ...newBill, bill_number: e.target.value })}
-                    placeholder="INV-2026-081"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                    placeholder="e.g. INV-2026-081"
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                   />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Invoice Date *</label>
-                  <input
-                    type="date"
-                    required
-                    value={newBill.bill_date}
-                    onChange={(e) => setNewBill({ ...newBill, bill_date: e.target.value })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
+                </FormField>
               </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Taxable Amount (₹) *</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  required
-                  value={newBill.taxable_amount}
-                  onChange={(e) => {
-                    const amt = Number(e.target.value);
-                    setNewBill({ ...newBill, taxable_amount: amt, total_amount: amt + newBill.cgst_amount + newBill.sgst_amount + newBill.freight_amount });
-                  }}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">CGST / SGST (₹)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={newBill.cgst_amount}
-                    onChange={(e) => {
-                      const cgst = Number(e.target.value);
-                      setNewBill({ ...newBill, cgst_amount: cgst, sgst_amount: cgst, total_amount: newBill.taxable_amount + (cgst * 2) + newBill.freight_amount });
-                    }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Freight (₹)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={newBill.freight_amount}
-                    onChange={(e) => {
-                      const fr = Number(e.target.value);
-                      setNewBill({ ...newBill, freight_amount: fr, total_amount: newBill.taxable_amount + (newBill.cgst_amount * 2) + fr });
-                    }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
-                </div>
-              </div>
-              <div className="p-2.5 bg-slate-50 border rounded-lg text-right font-bold text-slate-900 text-xs">
-                Total Bill Payable: ₹{newBill.total_amount.toLocaleString()}
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowBillModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Book Bill
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
-      {/* Modal: Record Supplier Payment */}
-      {showPaymentModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Record Supplier Payment</h3>
-              <button onClick={() => setShowPaymentModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreatePayment} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Supplier *</label>
-                <select
-                  required
-                  value={newPayment.supplier_id}
-                  onChange={(e) => setNewPayment({ ...newPayment, supplier_id: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="">-- Choose Supplier --</option>
-                  {suppliers.map((s) => (
-                    <option key={s.supplier_id} value={s.supplier_id}>
-                      {s.supplier_name}
-                    </option>
-                  ))}
-                </select>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FormField label="Invoice Date *" required>
+                  <DateInput
+                    value={newBill.bill_date}
+                    onChange={(val) => setNewBill({ ...newBill, bill_date: val })}
+                  />
+                </FormField>
+                <FormField label="Payment Due Date">
+                  <DateInput
+                    value={newBill.due_date}
+                    onChange={(val) => setNewBill({ ...newBill, due_date: val })}
+                  />
+                </FormField>
               </div>
-              <div className="grid grid-cols-2 gap-2">
+            </FormSection>
+
+            <FormSection title="Amounts & GST Breakdown">
+              <FormField label="Taxable Subtotal (₹) *" required>
+                <MoneyInput
+                  value={newBill.taxable_amount}
+                  onChange={(amt) => {
+                    const gstRate = newBill.gst_rate_preset / 100;
+                    const halfGst = (amt * gstRate) / 2;
+                    const tot = Math.round((amt + (halfGst * 2) + newBill.freight_amount) * 100) / 100;
+                    setNewBill({
+                      ...newBill,
+                      taxable_amount: amt,
+                      cgst_amount: halfGst,
+                      sgst_amount: halfGst,
+                      total_amount: tot,
+                    });
+                  }}
+                />
+              </FormField>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Payment Mode</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    GST Rate Preset
+                  </label>
                   <select
-                    value={newPayment.payment_mode}
-                    onChange={(e) => setNewPayment({ ...newPayment, payment_mode: e.target.value as any })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                    value={newBill.gst_rate_preset}
+                    onChange={(e) => {
+                      const rate = Number(e.target.value);
+                      const halfGst = (newBill.taxable_amount * (rate / 100)) / 2;
+                      const tot = Math.round((newBill.taxable_amount + (halfGst * 2) + newBill.freight_amount) * 100) / 100;
+                      setNewBill({
+                        ...newBill,
+                        gst_rate_preset: rate,
+                        cgst_amount: halfGst,
+                        sgst_amount: halfGst,
+                        total_amount: tot,
+                      });
+                    }}
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
                   >
-                    <option value="BANK">Bank Transfer (NEFT/RTGS)</option>
-                    <option value="UPI">UPI</option>
-                    <option value="CASH">Factory Cash</option>
+                    <option value={0}>0% (Exempt Grains)</option>
+                    <option value={5}>5% (Spices / 2.5% each)</option>
+                    <option value={12}>12% (6% each)</option>
+                    <option value={18}>18% (Packaging / 9% each)</option>
                   </select>
                 </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Amount (₹) *</label>
-                  <input
-                    type="number"
-                    min="1"
-                    step="0.01"
-                    required
-                    value={newPayment.amount}
-                    onChange={(e) => setNewPayment({ ...newPayment, amount: Number(e.target.value) })}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+
+                <FormField label="CGST (₹)">
+                  <MoneyInput
+                    value={newBill.cgst_amount}
+                    onChange={(cgst) => {
+                      const tot = Math.round((newBill.taxable_amount + cgst + newBill.sgst_amount + newBill.freight_amount) * 100) / 100;
+                      setNewBill({ ...newBill, cgst_amount: cgst, total_amount: tot });
+                    }}
                   />
-                </div>
+                </FormField>
+
+                <FormField label="SGST (₹)">
+                  <MoneyInput
+                    value={newBill.sgst_amount}
+                    onChange={(sgst) => {
+                      const tot = Math.round((newBill.taxable_amount + newBill.cgst_amount + sgst + newBill.freight_amount) * 100) / 100;
+                      setNewBill({ ...newBill, sgst_amount: sgst, total_amount: tot });
+                    }}
+                  />
+                </FormField>
               </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">UTR / Bank Reference #</label>
-                <input
-                  type="text"
-                  value={newPayment.reference_no}
-                  onChange={(e) => setNewPayment({ ...newPayment, reference_no: e.target.value })}
-                  placeholder="UTR-202610-098234"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+
+              <FormField label="Freight & Unloading Expenses (₹)">
+                <MoneyInput
+                  value={newBill.freight_amount}
+                  onChange={(fr) => {
+                    const tot = Math.round((newBill.taxable_amount + newBill.cgst_amount + newBill.sgst_amount + fr) * 100) / 100;
+                    setNewBill({ ...newBill, freight_amount: fr, total_amount: tot });
+                  }}
                 />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowPaymentModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-                >
-                  Post Payment
-                </button>
-              </div>
-            </form>
-          </div>
+              </FormField>
+            </FormSection>
+
+            <CalculationPreview
+              title="Payable Invoice Summary"
+              items={[
+                { label: 'Taxable Goods Subtotal', value: `₹${newBill.taxable_amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                { label: 'Input Tax Credit (CGST + SGST)', value: `₹${(newBill.cgst_amount + newBill.sgst_amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                { label: 'Freight Charges', value: `₹${newBill.freight_amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                {
+                  label: 'Total Accounts Payable',
+                  value: `₹${newBill.total_amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+                  isHighlight: true,
+                },
+              ]}
+            />
+          </FormLayout>
         </div>
       )}
 
-      {/* Modal: Supplier Return */}
-      {showReturnModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-sm font-bold text-slate-900">Issue Return to Supplier (Debit Note)</h3>
-              <button onClick={() => setShowReturnModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={16} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateReturn} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Supplier *</label>
-                <select
-                  required
-                  value={newReturn.supplier_id}
-                  onChange={(e) => setNewReturn({ ...newReturn, supplier_id: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                >
-                  <option value="">-- Choose Supplier --</option>
-                  {suppliers.map((s) => (
-                    <option key={s.supplier_id} value={s.supplier_id}>
-                      {s.supplier_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Quantity to Return (kg)</label>
-                  <input
-                    type="number"
-                    min="1"
+      {/* 5. Modal: Record Supplier Payment */}
+      {showPaymentModal && (() => {
+        const vendorBills = bills.filter((b) => b.supplier_id === newPayment.supplier_id && b.status !== 'PAID');
+        const selectedBill = bills.find((b) => b.bill_id === newPayment.bill_id);
+        const billAmount = Number(selectedBill?.total_amount || 0);
+        const remainingAfter = Math.max(0, billAmount - (Number(newPayment.amount) || 0));
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <FormLayout
+              title="Record Supplier Payment"
+              subtitle="Disburse funds via Bank Transfer, UPI, or Factory Cash and reconcile accounts payable"
+              icon={<CreditCard size={20} />}
+              onSubmit={handleCreatePayment}
+              onCancel={() => setShowPaymentModal(false)}
+              maxWidth="lg"
+              actions={
+                <FormActions>
+                  <CancelButton onClick={() => setShowPaymentModal(false)} />
+                  <SaveButton label="Disburse & Post Payment" icon={<CreditCard size={15} />} />
+                </FormActions>
+              }
+            >
+              <FormSection title="Payee & Bill Reference">
+                <FormField label="Select Raw Material Supplier *" required>
+                  <select
                     required
-                    value={newReturn.items[0].returned_quantity}
-                    onChange={(e) => {
-                      const updated = [...newReturn.items];
-                      updated[0].returned_quantity = Number(e.target.value);
-                      setNewReturn({ ...newReturn, items: updated });
-                    }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
-                  />
+                    value={newPayment.supplier_id}
+                    onChange={(e) => setNewPayment({ ...newPayment, supplier_id: e.target.value, bill_id: '' })}
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    <option value="">-- Choose Vendor --</option>
+                    {suppliers.map((s) => (
+                      <option key={s.supplier_id} value={s.supplier_id}>
+                        {s.supplier_name} ({s.city})
+                      </option>
+                    ))}
+                  </select>
+                </FormField>
+
+                {newPayment.supplier_id && vendorBills.length > 0 && (
+                  <FormField label="Link to Unpaid Bill">
+                    <select
+                      value={newPayment.bill_id}
+                      onChange={(e) => {
+                        const bId = e.target.value;
+                        const match = vendorBills.find((b) => b.bill_id === bId);
+                        setNewPayment({
+                          ...newPayment,
+                          bill_id: bId,
+                          amount: match ? Number(match.total_amount) : newPayment.amount,
+                        });
+                      }}
+                      className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                    >
+                      <option value="">-- On Account Payment (General) --</option>
+                      {vendorBills.map((b) => (
+                        <option key={b.bill_id} value={b.bill_id}>
+                          Bill #{b.bill_number} ({b.bill_date}) — Total: ₹{Number(b.total_amount).toLocaleString()}
+                        </option>
+                      ))}
+                    </select>
+                  </FormField>
+                )}
+              </FormSection>
+
+              <FormSection title="Payment Details">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <FormField label="Disbursement Date *" required>
+                    <DateInput
+                      value={newPayment.payment_date}
+                      onChange={(val) => setNewPayment({ ...newPayment, payment_date: val })}
+                    />
+                  </FormField>
+                  <FormField label="Payment Channel *" required>
+                    <select
+                      value={newPayment.payment_mode}
+                      onChange={(e) => setNewPayment({ ...newPayment, payment_mode: e.target.value as any })}
+                      className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none font-semibold"
+                    >
+                      <option value="BANK">🏦 Bank NEFT / RTGS</option>
+                      <option value="UPI">📱 UPI Direct</option>
+                      <option value="CASH">💵 Factory Petty Cash</option>
+                      <option value="NEFT">📄 Cheque Clearing</option>
+                    </select>
+                  </FormField>
                 </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Rate (₹/kg)</label>
+
+                <FormField label="Disbursement Amount (₹) *" required>
+                  <div className="space-y-1.5">
+                    <MoneyInput
+                      value={newPayment.amount}
+                      onChange={(val) => setNewPayment({ ...newPayment, amount: val })}
+                    />
+                    {selectedBill && (
+                      <button
+                        type="button"
+                        onClick={() => setNewPayment({ ...newPayment, amount: billAmount })}
+                        className="text-xs text-emerald-700 hover:text-emerald-800 font-semibold underline"
+                      >
+                        Click to fill full bill balance (₹{billAmount.toLocaleString()})
+                      </button>
+                    )}
+                  </div>
+                </FormField>
+
+                <FormField label="Bank Reference / UTR Number *" required helpText="Unique transaction identifier from bank/UPI">
                   <input
-                    type="number"
-                    min="1"
+                    type="text"
                     required
-                    value={newReturn.items[0].unit_price}
-                    onChange={(e) => {
-                      const updated = [...newReturn.items];
-                      updated[0].unit_price = Number(e.target.value);
-                      setNewReturn({ ...newReturn, items: updated });
-                    }}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                    value={newPayment.reference_no}
+                    onChange={(e) => setNewPayment({ ...newPayment, reference_no: e.target.value })}
+                    placeholder="e.g. UTR-202611-891234 / UPI Ref"
+                    className="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                   />
-                </div>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Reason for Rejection *</label>
-                <input
-                  type="text"
-                  required
-                  value={newReturn.reason}
-                  onChange={(e) => setNewReturn({ ...newReturn, reason: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:outline-hidden focus:border-emerald-600"
+                </FormField>
+              </FormSection>
+
+              {selectedBill && (
+                <CalculationPreview
+                  title="Payment Settlement Reconciliation"
+                  items={[
+                    { label: 'Original Bill Payable', value: `₹${billAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                    { label: 'This Payment Amount', value: `₹${Number(newPayment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                    {
+                      label: 'Remaining Unpaid Balance',
+                      value: `₹${remainingAfter.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+                      isHighlight: remainingAfter === 0,
+                    },
+                  ]}
                 />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowReturnModal(false)}
-                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-amber-700 text-white font-semibold hover:bg-amber-800"
-                >
-                  Issue Debit Return
-                </button>
-              </div>
-            </form>
+              )}
+            </FormLayout>
           </div>
-        </div>
-      )}
+        );
+      })()}
+
+      {/* 6. Modal: Supplier Return (Debit Note) */}
+      {showReturnModal && (() => {
+        const retQty = Number(newReturn.items[0]?.returned_quantity || 0);
+        const retRate = Number(newReturn.items[0]?.unit_price || 0);
+        const debitTotal = Math.round(retQty * retRate * 100) / 100;
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <FormLayout
+              title="Issue Supplier Return (Debit Note)"
+              subtitle="Return defective raw materials to vendor, generate a debit note, and deduct stock"
+              icon={<ArrowRightLeft size={20} />}
+              onSubmit={handleCreateReturn}
+              onCancel={() => setShowReturnModal(false)}
+              maxWidth="lg"
+              actions={
+                <FormActions>
+                  <CancelButton onClick={() => setShowReturnModal(false)} />
+                  <SaveButton label="Issue Debit Note & Return" icon={<ArrowRightLeft size={15} />} variant="danger" />
+                </FormActions>
+              }
+            >
+              <FormSection title="Vendor & Material Selection">
+                <FormField label="Supplier *" required>
+                  <select
+                    required
+                    value={newReturn.supplier_id}
+                    onChange={(e) => setNewReturn({ ...newReturn, supplier_id: e.target.value })}
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    <option value="">-- Choose Vendor --</option>
+                    {suppliers.map((s) => (
+                      <option key={s.supplier_id} value={s.supplier_id}>
+                        {s.supplier_name} ({s.city})
+                      </option>
+                    ))}
+                  </select>
+                </FormField>
+
+                <FormField label="Raw Material to Return *" required>
+                  <select
+                    value={newReturn.items[0].material_id}
+                    onChange={(e) => {
+                      const selectedCat = RAW_MATERIAL_CATALOG.find((m) => m.id === e.target.value);
+                      const updated = [...newReturn.items];
+                      updated[0] = {
+                        ...updated[0],
+                        material_id: e.target.value,
+                        material_name: selectedCat?.name || e.target.value,
+                        unit_price: selectedCat?.defaultRate || updated[0].unit_price,
+                      };
+                      setNewReturn({ ...newReturn, items: updated });
+                    }}
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    {RAW_MATERIAL_CATALOG.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                </FormField>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <FormField label="Quantity to Return (kg) *" required>
+                    <QuantityInput
+                      unit="kg"
+                      value={newReturn.items[0].returned_quantity}
+                      onChange={(val) => {
+                        const updated = [...newReturn.items];
+                        updated[0].returned_quantity = val;
+                        setNewReturn({ ...newReturn, items: updated });
+                      }}
+                    />
+                  </FormField>
+
+                  <FormField label="Credit Agreed Rate (₹/kg) *" required>
+                    <MoneyInput
+                      value={newReturn.items[0].unit_price}
+                      onChange={(val) => {
+                        const updated = [...newReturn.items];
+                        updated[0].unit_price = val;
+                        setNewReturn({ ...newReturn, items: updated });
+                      }}
+                    />
+                  </FormField>
+                </div>
+              </FormSection>
+
+              <FormSection title="Rejection Reason & Documentation">
+                <FormField label="Primary Cause of Return *" required>
+                  <select
+                    value={newReturn.reason}
+                    onChange={(e) => setNewReturn({ ...newReturn, reason: e.target.value })}
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none font-medium"
+                  >
+                    <option value="Damaged packaging / moisture exceeding limit">Damaged packaging / moisture exceeding limit</option>
+                    <option value="High foreign matter / stone / dirt contamination">High foreign matter / stone / dirt contamination</option>
+                    <option value="Insect infestation / pest damage">Insect infestation / pest damage</option>
+                    <option value="Wrong grain grade or variety delivered">Wrong grain grade or variety delivered</option>
+                    <option value="Purchase rate / invoice discrepancy">Purchase rate / invoice discrepancy</option>
+                  </select>
+                </FormField>
+
+                <FormField label="Inspector Observations">
+                  <textarea
+                    rows={2}
+                    value={newReturn.notes}
+                    onChange={(e) => setNewReturn({ ...newReturn, notes: e.target.value })}
+                    placeholder="Provide specific QC lab report or visual inspection findings"
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
+                  />
+                </FormField>
+              </FormSection>
+
+              <CalculationPreview
+                title="Debit Note Financial Impact"
+                items={[
+                  { label: 'Returned Grain Mass', value: `${retQty.toLocaleString()} kg` },
+                  { label: 'Agreed Mandi Rate', value: `₹${retRate.toFixed(2)}/kg` },
+                  {
+                    label: 'Total Debit Note Issued',
+                    value: `₹${debitTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+                    isHighlight: true,
+                  },
+                ]}
+              />
+            </FormLayout>
+          </div>
+        );
+      })()}
     </div>
   );
 };

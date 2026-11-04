@@ -47,6 +47,15 @@ import {
   Coins,
   Receipt,
 } from 'lucide-react';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  TextArea,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
 
 type AccountingTab =
   | 'trial-balance'
@@ -1598,51 +1607,47 @@ export const AccountingView: React.FC = () => {
       )}
 
 
-      {/* Reversal Confirmation Modal */}
+      {/* Reversal Confirmation Modal using FormComponents */}
       {reversalTarget && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
-            <div className="flex items-center gap-3 text-rose-700">
-              <ShieldAlert size={24} />
-              <h3 className="text-base font-bold text-slate-900">
-                Post Compensating Reversal Voucher
-              </h3>
-            </div>
-            <p className="text-xs text-slate-600">
-              You are about to reverse voucher <strong className="font-mono">{reversalTarget.journal_id}</strong> ({reversalTarget.narration}) totaling {formatCurrency(reversalTarget.total_debit)}.
-            </p>
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <FormLayout
+            title="Post Compensating Reversal Voucher"
+            subtitle={`Voucher #${reversalTarget.journal_id} (${reversalTarget.narration}) · Total ${formatCurrency(reversalTarget.total_debit)}`}
+            icon={<ShieldAlert size={20} />}
+            maxWidth="md"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleReverseVoucher();
+            }}
+            onCancel={() => setReversalTarget(null)}
+            actions={
+              <FormActions
+                onCancel={() => setReversalTarget(null)}
+                cancelLabel="Cancel"
+                saveLabel="Confirm Reversal"
+                isLoading={reversing}
+                disabled={!reversalReason.trim()}
+              />
+            }
+          >
             <div className="p-3 bg-amber-50 rounded-xl text-amber-900 text-xs border border-amber-200">
               In strict double-entry accounting, posted entries cannot be deleted. An equal and opposite compensating voucher will be permanently posted to nullify the financial impact.
             </div>
-            <div>
-              <label className="text-xs font-bold text-slate-700 block mb-1">
-                Reason for Reversal <span className="text-rose-600">*</span>
-              </label>
-              <textarea
+
+            <FormField
+              label="Reason for Reversal"
+              required
+              helpText="State the audit justification (e.g. Authorized customer order cancellation / duplicate entry correction)"
+            >
+              <TextArea
                 value={reversalReason}
                 onChange={(e) => setReversalReason(e.target.value)}
                 placeholder="e.g. Authorized customer order cancellation / duplicate entry correction"
-                className="w-full p-2.5 border border-slate-300 rounded-xl text-xs font-medium focus:ring-2 focus:ring-rose-500 focus:outline-none"
                 rows={3}
+                required
               />
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => setReversalTarget(null)}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
-                disabled={reversing}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleReverseVoucher}
-                disabled={reversing || !reversalReason.trim()}
-                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-50"
-              >
-                {reversing ? 'Reversing…' : 'Confirm Reversal'}
-              </button>
-            </div>
-          </div>
+            </FormField>
+          </FormLayout>
         </div>
       )}
     </div>

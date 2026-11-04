@@ -17,6 +17,17 @@ import {
   CheckCircle2,
   AlertCircle,
 } from 'lucide-react';
+import {
+  FormLayout,
+  FormSection,
+  FormField,
+  TextInput,
+  SelectInput,
+  TextArea,
+  FormActions,
+  SaveButton,
+  CancelButton,
+} from '../components/common/FormComponents';
 
 interface CustomersViewProps {
   onNavigate?: (view: ViewType) => void;
@@ -151,120 +162,81 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
         </div>
       )}
 
-      {/* Add Customer Form Modal / Card */}
+      {/* Add Customer Form Modal using FormComponents */}
       {isFormOpen && (
-        <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">
-          <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
-            <div>
-              <h2 className="text-base font-bold text-slate-900 m-0">Register New Customer / Partner</h2>
-              <p className="text-xs text-slate-500 m-0">Only Shop/Business Name is mandatory; contact info is optional</p>
-            </div>
-            <button onClick={() => setIsFormOpen(false)} className="text-slate-400 hover:text-slate-600 p-1">
-              <X size={18} />
-            </button>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="mb-6">
+          <FormLayout
+            title="Register New Customer / Partner"
+            subtitle="Only Shop/Business Name is mandatory; contact info and locality are optional"
+            icon={<Users size={18} />}
+            maxWidth="3xl"
+            onSubmit={handleSubmit}
+            onCancel={() => setIsFormOpen(false)}
+            actions={
+              <FormActions
+                onCancel={() => setIsFormOpen(false)}
+                cancelLabel="Cancel"
+                saveLabel="Save Customer"
+              />
+            }
+          >
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Customer Type <span className="text-emerald-700">*</span>
-                </label>
-                <select
+              <FormField label="Customer Type" required>
+                <SelectInput
                   value={customerType}
                   onChange={(e) => setCustomerType(e.target.value as CustomerType)}
-                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-medium"
-                >
-                  <option value="RETAILER">RETAILER (Kirana / Store)</option>
-                  <option value="WHOLESALER">WHOLESALER (Bulk Trader)</option>
-                  <option value="DISTRIBUTOR">DISTRIBUTOR (Area Agency)</option>
-                  <option value="RETAIL">RETAIL (Direct Consumer)</option>
-                </select>
-              </div>
+                  options={[
+                    { value: 'RETAILER', label: 'RETAILER (Kirana / Store)' },
+                    { value: 'WHOLESALER', label: 'WHOLESALER (Bulk Trader)' },
+                    { value: 'DISTRIBUTOR', label: 'DISTRIBUTOR (Area Agency)' },
+                    { value: 'RETAIL', label: 'RETAIL (Direct Consumer)' },
+                  ]}
+                />
+              </FormField>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Shop / Business Name <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
+              <FormField label="Shop / Business Name" required helpText="Official trade name or store banner">
+                <TextInput
                   required
                   value={shopName}
                   onChange={(e) => setShopName(e.target.value)}
                   placeholder="e.g. Bharat Kirana Store"
-                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-medium"
                 />
-              </div>
+              </FormField>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Owner / Shopkeeper Name
-                </label>
-                <input
-                  type="text"
+              <FormField label="Owner / Shopkeeper Name" helpText="Proprietor contact person">
+                <TextInput
                   value={shopkeeperName}
                   onChange={(e) => setShopkeeperName(e.target.value)}
                   placeholder="e.g. Bharat Patel"
-                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
                 />
-              </div>
+              </FormField>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Primary Mobile
-                </label>
-                <input
+              <FormField label="Primary Mobile" helpText="10-digit phone number for WhatsApp receipts">
+                <TextInput
                   type="tel"
                   value={mobile}
                   onChange={(e) => setMobile(e.target.value)}
-                  placeholder="10-digit mobile"
-                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
+                  placeholder="e.g. 9826012345"
                 />
-              </div>
+              </FormField>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Area / Locality
-                </label>
-                <input
-                  type="text"
+              <FormField label="Area / Locality" helpText="Market location or delivery zone">
+                <TextInput
                   value={localityArea}
                   onChange={(e) => setLocalityArea(e.target.value)}
                   placeholder="e.g. Main Market, Kasrawad"
-                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
                 />
-              </div>
+              </FormField>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  City / Town
-                </label>
-                <input
-                  type="text"
+              <FormField label="City / Town" helpText="Town or district">
+                <TextInput
                   value={city}
                   onChange={(e) => setCity(e.target.value)}
                   placeholder="e.g. Khargone, Barwaha"
-                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
                 />
-              </div>
+              </FormField>
             </div>
-
-            <div className="flex justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={() => setIsFormOpen(false)}
-                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors cursor-pointer shadow-xs"
-              >
-                Save Customer
-              </button>
-            </div>
-          </form>
+          </FormLayout>
         </div>
       )}
 

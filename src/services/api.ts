@@ -1060,18 +1060,32 @@ export async function createPurchaseOrder(payload: {
   expected_delivery_date?: string;
   notes?: string;
   items: Array<{
-    material_id: string;
+    material_id?: string;
+    raw_material_id?: string;
     material_name: string;
     ordered_quantity: number;
     unit: string;
     unit_price: number;
     gst_rate?: number;
+    tax_rate?: number;
     notes?: string;
   }>;
 }): Promise<PurchaseOrder> {
+  const normalized = {
+    ...payload,
+    items: payload.items.map((item) => ({
+      ...item,
+      raw_material_id: item.raw_material_id || item.material_id || 'RM-WHOLE-MOONG-DAL',
+      material_name: item.material_name,
+      ordered_quantity: Number(item.ordered_quantity),
+      unit: item.unit || 'kg',
+      unit_price: Number(item.unit_price),
+      tax_rate: item.tax_rate !== undefined ? Number(item.tax_rate) : (item.gst_rate !== undefined ? Number(item.gst_rate) : 0),
+    })),
+  };
   return apiRequest<PurchaseOrder>('/api/purchasing/orders', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
   });
 }
 
@@ -1091,15 +1105,24 @@ export async function createGoodsReceipt(payload: {
   receipt_date: string;
   po_id?: string;
   vendor_delivery_challan?: string;
+  delivery_challan?: string;
+  invoice_reference?: string;
   vehicle_number?: string;
+  quality_status?: string;
   notes?: string;
   items: Array<{
     po_item_id?: string;
-    material_id: string;
+    material_id?: string;
+    raw_material_id?: string;
     material_name: string;
     unit: string;
-    received_quantity: number;
-    unit_price: number;
+    delivered_quantity?: number;
+    accepted_quantity?: number;
+    rejected_quantity?: number;
+    received_quantity?: number;
+    unit_price?: number;
+    unit_rate?: number;
+    rejection_reason?: string;
     tax_rate?: number;
     gst_treatment?: string;
     storage_location?: string;
@@ -1108,9 +1131,35 @@ export async function createGoodsReceipt(payload: {
     notes?: string;
   }>;
 }): Promise<GoodsReceipt> {
+  const invoiceRef = payload.invoice_reference || payload.vendor_delivery_challan || payload.delivery_challan || `CH-${Date.now().toString().slice(-6)}`;
+  const normalized = {
+    ...payload,
+    invoice_reference: invoiceRef,
+    delivery_challan: payload.delivery_challan || payload.vendor_delivery_challan || invoiceRef,
+    quality_status: payload.quality_status || 'ACCEPTED',
+    items: payload.items.map((item) => {
+      const deliv = Number(item.delivered_quantity ?? item.received_quantity ?? 0);
+      const rej = Number(item.rejected_quantity ?? 0);
+      const acc = Number(item.accepted_quantity ?? (deliv >= rej ? deliv - rej : deliv));
+      const rate = Number(item.unit_rate ?? item.unit_price ?? 0);
+      return {
+        ...item,
+        po_item_id: item.po_item_id || '',
+        raw_material_id: item.raw_material_id || item.material_id || 'RM-WHOLE-MOONG-DAL',
+        material_name: item.material_name,
+        delivered_quantity: deliv,
+        accepted_quantity: acc,
+        rejected_quantity: rej,
+        unit: item.unit || 'kg',
+        unit_rate: rate,
+        unit_price: rate,
+        rejection_reason: item.rejection_reason || '',
+      };
+    }),
+  };
   return apiRequest<GoodsReceipt>('/api/purchasing/goods-receipts', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
   });
 }
 

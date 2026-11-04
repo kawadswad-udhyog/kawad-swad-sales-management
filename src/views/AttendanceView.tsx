@@ -16,6 +16,15 @@ import {
   Edit3,
   Users,
 } from 'lucide-react';
+import {
+  FormField,
+  FormSection,
+  DateInput,
+  TextInput,
+  SelectInput,
+  CalculationPreview,
+  SaveButton,
+} from '../components/common/FormComponents';
 
 type Row = Record<string, any>;
 const today = new Date().toISOString().slice(0, 10);
@@ -701,56 +710,23 @@ export const AttendanceView: React.FC = () => {
           </form>
         )}
 
-        {/* INDIVIDUAL ENTRY MODE */}
+        {/* INDIVIDUAL ENTRY MODE using FormComponents */}
         {entryMode === 'individual' && (
-          <form onSubmit={handleRecordAttendance}>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                gap: '14px',
-                alignItems: 'flex-start',
-              }}
-            >
-              {/* Work Date */}
-              <div>
-                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>
-                  Work Date *
-                </label>
-                <input
-                  type="date"
+          <form onSubmit={handleRecordAttendance} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <FormField label="Work Date" required>
+                <DateInput
                   value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
+                  onChange={(val) => setSelectedDate(val)}
                   required
-                  style={{
-                    width: '100%',
-                    padding: '9px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '0.90rem',
-                    boxSizing: 'border-box',
-                  }}
                 />
-              </div>
+              </FormField>
 
-              {/* Worker Selector */}
-              <div>
-                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>
-                  Select Worker *
-                </label>
-                <select
+              <FormField label="Select Worker" required>
+                <SelectInput
                   value={selectedWorkerId}
                   onChange={(e) => setSelectedWorkerId(e.target.value)}
                   required
-                  style={{
-                    width: '100%',
-                    padding: '9px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '0.90rem',
-                    boxSizing: 'border-box',
-                    background: '#ffffff',
-                  }}
                 >
                   <option value="">-- Choose Worker --</option>
                   {activeWorkers.map((w) => (
@@ -758,108 +734,93 @@ export const AttendanceView: React.FC = () => {
                       {w.worker_name} (₹{w.daily_wage || 0}/day)
                     </option>
                   ))}
-                </select>
-              </div>
+                </SelectInput>
+              </FormField>
 
-              {/* Status Selection Buttons */}
-              <div>
-                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>
-                  Attendance Status *
-                </label>
-                <div style={{ display: 'flex', gap: '6px' }}>
+              <FormField label="Attendance Status" required>
+                <div className="grid grid-cols-3 gap-1.5 pt-0.5">
                   <button
                     type="button"
                     onClick={() => setSelectedStatus('PRESENT')}
-                    style={{
-                      flex: 1,
-                      padding: '8px 10px',
-                      borderRadius: '7px',
-                      border: selectedStatus === 'PRESENT' ? '2px solid #166534' : '1px solid #cbd5e1',
-                      background: selectedStatus === 'PRESENT' ? '#ecfdf5' : '#ffffff',
-                      color: selectedStatus === 'PRESENT' ? '#166534' : '#475569',
-                      fontWeight: selectedStatus === 'PRESENT' ? 700 : 500,
-                      fontSize: '0.82rem',
-                      cursor: 'pointer',
-                    }}
+                    className={`py-2 px-1 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
+                      selectedStatus === 'PRESENT'
+                        ? 'bg-emerald-50 border-emerald-600 text-emerald-800'
+                        : 'bg-white border-slate-300 text-slate-600'
+                    }`}
                   >
                     ✓ Present
                   </button>
                   <button
                     type="button"
                     onClick={() => setSelectedStatus('HALF_DAY')}
-                    style={{
-                      flex: 1,
-                      padding: '8px 10px',
-                      borderRadius: '7px',
-                      border: selectedStatus === 'HALF_DAY' ? '2px solid #b45309' : '1px solid #cbd5e1',
-                      background: selectedStatus === 'HALF_DAY' ? '#fffbeb' : '#ffffff',
-                      color: selectedStatus === 'HALF_DAY' ? '#b45309' : '#475569',
-                      fontWeight: selectedStatus === 'HALF_DAY' ? 700 : 500,
-                      fontSize: '0.82rem',
-                      cursor: 'pointer',
-                    }}
+                    className={`py-2 px-1 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
+                      selectedStatus === 'HALF_DAY'
+                        ? 'bg-amber-50 border-amber-600 text-amber-800'
+                        : 'bg-white border-slate-300 text-slate-600'
+                    }`}
                   >
-                    ½ Half Day
+                    ½ Half
                   </button>
                   <button
                     type="button"
                     onClick={() => setSelectedStatus('ABSENT')}
-                    style={{
-                      flex: 1,
-                      padding: '8px 10px',
-                      borderRadius: '7px',
-                      border: selectedStatus === 'ABSENT' ? '2px solid #64748b' : '1px solid #cbd5e1',
-                      background: selectedStatus === 'ABSENT' ? '#f1f5f9' : '#ffffff',
-                      color: selectedStatus === 'ABSENT' ? '#0f172a' : '#475569',
-                      fontWeight: selectedStatus === 'ABSENT' ? 700 : 500,
-                      fontSize: '0.82rem',
-                      cursor: 'pointer',
-                    }}
+                    className={`py-2 px-1 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
+                      selectedStatus === 'ABSENT'
+                        ? 'bg-slate-100 border-slate-600 text-slate-900'
+                        : 'bg-white border-slate-300 text-slate-600'
+                    }`}
                   >
                     ✗ Absent
                   </button>
                 </div>
-              </div>
+              </FormField>
 
-              {/* Notes Input */}
-              <div>
-                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>
-                  Shift / Shift Notes (Optional)
-                </label>
-                <input
-                  type="text"
+              <FormField label="Shift Notes (Optional)" helpText="Morning rolling, evening packaging, etc.">
+                <TextInput
                   placeholder="e.g. Morning rolling shift"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '9px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '0.90rem',
-                    boxSizing: 'border-box',
-                  }}
                 />
-              </div>
+              </FormField>
             </div>
+
+            {/* Live Calculation of Accrued Wage */}
+            {selectedWorker && !existingRecordForWorker && (
+              <CalculationPreview
+                title="Accrued Daily Wage Calculation"
+                items={[
+                  {
+                    label: 'Base Daily Wage',
+                    value: `₹${selectedWorker.daily_wage || 0}`,
+                    subtitle: 'Full day rate',
+                  },
+                  {
+                    label: 'Selected Status',
+                    value: selectedStatus,
+                    subtitle: selectedStatus === 'PRESENT' ? '1.0 day' : selectedStatus === 'HALF_DAY' ? '0.5 day' : '0.0 day',
+                    variant: selectedStatus === 'PRESENT' ? 'emerald' : selectedStatus === 'HALF_DAY' ? 'amber' : 'slate',
+                  },
+                  {
+                    label: 'Accrued Day Wage',
+                    value: `₹${
+                      selectedStatus === 'PRESENT'
+                        ? selectedWorker.daily_wage || 0
+                        : selectedStatus === 'HALF_DAY'
+                        ? ((selectedWorker.daily_wage || 0) * 0.5).toFixed(2)
+                        : '0.00'
+                    }`,
+                    subtitle: 'WIP wage accrual',
+                    isHighlight: true,
+                    variant: 'emerald',
+                  },
+                ]}
+              />
+            )}
 
             {/* Inline Duplicate Warning Badge */}
             {existingRecordForWorker && (
-              <div
-                style={{
-                  marginTop: '14px',
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: '#fffbeb',
-                  border: '1px solid #fde68a',
-                  color: '#92400e',
-                  fontSize: '0.84rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                }}
-              >
-                <AlertTriangle size={16} />
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
+                <AlertTriangle size={16} className="shrink-0 text-amber-700" />
                 <span>
                   <strong>Attendance Already Recorded:</strong> {existingRecordForWorker.worker_name_snapshot || selectedWorker?.worker_name} is marked as{' '}
                   <strong>{existingRecordForWorker.status}</strong> on {selectedDate} (₹{existingRecordForWorker.wage_accrued || 0}).
@@ -869,36 +830,13 @@ export const AttendanceView: React.FC = () => {
             )}
 
             {/* Action Row */}
-            <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end', gap: '10px', alignItems: 'center' }}>
-              {selectedWorker && !existingRecordForWorker && (
-                <span style={{ fontSize: '0.84rem', color: '#475569' }}>
-                  Accrued wage for {selectedStatus}:{' '}
-                  <strong style={{ color: '#166534' }}>
-                    ₹{selectedStatus === 'PRESENT' ? selectedWorker.daily_wage : selectedStatus === 'HALF_DAY' ? (selectedWorker.daily_wage || 0) * 0.5 : 0}
-                  </strong>
-                </span>
-              )}
-
-              <button
-                type="submit"
-                disabled={isSubmitting || Boolean(existingRecordForWorker) || !isGoogleSheetsConnected || !persistentWritesEnabled}
-                style={{
-                  padding: '10px 22px',
-                  borderRadius: '8px',
-                  border: 'none',
-                  background: Boolean(existingRecordForWorker) || !isGoogleSheetsConnected || !persistentWritesEnabled ? '#94a3b8' : '#166534',
-                  color: '#ffffff',
-                  fontWeight: 700,
-                  fontSize: '0.90rem',
-                  cursor: Boolean(existingRecordForWorker) || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                }}
-              >
-                <UserCheck size={16} />
-                {isSubmitting ? 'Saving Attendance…' : 'Record Attendance'}
-              </button>
+            <div className="flex justify-end pt-2">
+              <SaveButton
+                label="Record Attendance"
+                isLoading={isSubmitting}
+                disabled={Boolean(existingRecordForWorker) || !isGoogleSheetsConnected || !persistentWritesEnabled}
+                icon={<UserCheck size={14} />}
+              />
             </div>
           </form>
         )}
