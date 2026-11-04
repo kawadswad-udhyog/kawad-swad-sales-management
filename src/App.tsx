@@ -134,14 +134,7 @@ const MainAppContent: React.FC = () => {
   }
 
   if (!currentUser) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex flex-col">
-        <Header />
-        <main className="flex-1">
-          <LoginModal />
-        </main>
-      </div>
-    );
+    return <LoginModal />;
   }
 
   if ((isEmployeeOnlyRole && !activeWorkspaceOverride) || isPreviewingEmployeePortal) {

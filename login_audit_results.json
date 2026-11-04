@@ -1,0 +1,47 @@
+{
+  "screenshots": {
+    "desktop": "/app/applet/public/screenshots/after_login_desktop_1440x900.png",
+    "tablet": "/app/applet/public/screenshots/after_login_tablet_768x1024.png",
+    "mobile": "/app/applet/public/screenshots/after_login_mobile_390x844.png"
+  },
+  "scenarios": {
+    "desktopBranding": {
+      "result": "PASS",
+      "details": "Two-section desktop layout renders complete Kawad Swad brand pillars and clear sign-in card."
+    },
+    "emptyFieldsValidation": {
+      "result": "PASS",
+      "details": "Friendly validation message shown when submitting empty credentials."
+    },
+    "showHidePassword": {
+      "result": "PASS",
+      "details": "Smooth password visibility toggle verified with accessible aria-labels."
+    },
+    "invalidCredentials": {
+      "result": "PASS",
+      "details": "Clear, friendly invalid credentials notice displayed with red alert styling."
+    },
+    "rememberUsername": {
+      "result": "PASS",
+      "details": "Username safely persisted to ks_remembered_username. Password strictly never stored in browser storage."
+    },
+    "workspaceLaunchAndEnterKey": {
+      "result": "PASS",
+      "details": "Keyboard Enter key submission succeeded and immediately resolved authenticated OWNER workspace."
+    },
+    "serverConfigPanel": {
+      "result": "PASS",
+      "details": "Collapsible server config panel operates cleanly without cluttering the primary view."
+    }
+  },
+  "responsive": {
+    "tablet": {
+      "result": "PASS",
+      "details": "Tablet viewport centers card elegantly with responsive touch padding and readable typography."
+    },
+    "mobile": {
+      "result": "PASS",
+      "details": "Mobile layout prioritizes sign-in form with compact header and zero horizontal overflow."
+    }
+  }
+}
