@@ -25,48 +25,68 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
 
   let autoVariant: BadgeVariant = variant || 'neutral';
   if (!variant) {
-    if (['APPROVED', 'PRESENT', 'PAID', 'DELIVERED', 'ISSUED', 'CONNECTED', 'OK', 'RECEIVED', 'ACTIVE'].includes(norm)) {
+    if (['APPROVED', 'PRESENT', 'PAID', 'DELIVERED', 'ISSUED', 'CONNECTED', 'OK', 'RECEIVED', 'ACTIVE', 'POSTED', 'SUBMITTED_APPROVED'].includes(norm)) {
       autoVariant = 'success';
-    } else if (['PENDING', 'HALF_DAY', 'SUBMITTED', 'DRAFT', 'CONNECTING', 'UNPAID'].includes(norm)) {
+    } else if (['PENDING', 'HALF_DAY', 'SUBMITTED', 'DRAFT', 'CONNECTING', 'UNPAID', 'IN_PROGRESS'].includes(norm)) {
       autoVariant = 'warning';
-    } else if (['REJECTED', 'ABSENT', 'CANCELLED', 'DISCONNECTED', 'ERROR', 'INACTIVE'].includes(norm)) {
+    } else if (['REJECTED', 'ABSENT', 'CANCELLED', 'DISCONNECTED', 'ERROR', 'INACTIVE', 'FAILED'].includes(norm)) {
       autoVariant = 'danger';
-    } else if (['ECOMMERCE', 'WHOLESALE', 'RETAIL', 'BULK'].includes(norm)) {
+    } else if (['ECOMMERCE', 'WHOLESALE', 'RETAIL', 'BULK', 'EXPORT'].includes(norm)) {
       autoVariant = 'info';
     }
   }
 
-  const styles: Record<BadgeVariant, { bg: string; text: string; border: string }> = {
-    success: { bg: '#ecfdf5', text: '#15803d', border: '#bbf7d0' },
-    warning: { bg: '#fffbeb', text: '#b45309', border: '#fde68a' },
-    danger: { bg: '#fef2f2', text: '#b91c1c', border: '#fecaca' },
-    info: { bg: '#f0f9ff', text: '#0369a1', border: '#bae6fd' },
-    purple: { bg: '#faf5ff', text: '#7e22ce', border: '#e9d5ff' },
-    neutral: { bg: '#f1f5f9', text: '#475569', border: '#e2e8f0' },
+  const colorStyles: Record<BadgeVariant, { dot: string; text: string; bg: string; border: string }> = {
+    success: {
+      dot: 'bg-emerald-600',
+      text: 'text-emerald-900',
+      bg: 'bg-emerald-50',
+      border: 'border-emerald-200',
+    },
+    warning: {
+      dot: 'bg-amber-500',
+      text: 'text-amber-900',
+      bg: 'bg-amber-50',
+      border: 'border-amber-200',
+    },
+    danger: {
+      dot: 'bg-rose-500',
+      text: 'text-rose-900',
+      bg: 'bg-rose-50',
+      border: 'border-rose-200',
+    },
+    info: {
+      dot: 'bg-sky-500',
+      text: 'text-sky-900',
+      bg: 'bg-sky-50',
+      border: 'border-sky-200',
+    },
+    purple: {
+      dot: 'bg-purple-500',
+      text: 'text-purple-900',
+      bg: 'bg-purple-50',
+      border: 'border-purple-200',
+    },
+    neutral: {
+      dot: 'bg-slate-400',
+      text: 'text-slate-700',
+      bg: 'bg-slate-100',
+      border: 'border-slate-200',
+    },
   };
 
-  const current = styles[autoVariant] || styles.neutral;
+  const style = colorStyles[autoVariant];
   const isSm = size === 'sm';
 
   return (
     <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '4px',
-        padding: isSm ? '2px 6px' : '3px 8px',
-        fontSize: isSm ? '0.70rem' : '0.78rem',
-        fontWeight: 600,
-        borderRadius: '6px',
-        background: current.bg,
-        color: current.text,
-        border: `1px solid ${current.border}`,
-        lineHeight: 1.2,
-        whiteSpace: 'nowrap',
-      }}
+      className={`inline-flex items-center gap-1.5 font-semibold border rounded-md uppercase tracking-wider ${
+        isSm ? 'px-2 py-0.5 text-[10px]' : 'px-2.5 py-1 text-xs'
+      } ${style.bg} ${style.text} ${style.border}`}
     >
-      {icon}
-      <span>{status || 'Unknown'}</span>
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${style.dot}`} />
+      {icon && <span className="shrink-0">{icon}</span>}
+      <span className="truncate">{status}</span>
     </span>
   );
 };

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useStore, StoreProvider } from './context/StoreContext';
 import { Header } from './components/Header';
 import { Navigation, ViewType } from './components/Navigation';
@@ -24,8 +24,8 @@ import { PurchasingView } from './views/PurchasingView';
 import { QualityView } from './views/QualityView';
 import { WorkforceView } from './views/WorkforceView';
 import { EmployeePortal } from './employee/EmployeePortal';
+import { WorkspaceId, WORKSPACES, getWorkspaceForRole } from './utils/workspaces';
 import { AlertTriangle, AlertCircle, RefreshCw, X, ShieldAlert } from 'lucide-react';
-
 
 const MainAppContent: React.FC = () => {
   const {
@@ -42,24 +42,79 @@ const MainAppContent: React.FC = () => {
     reconnectGoogleSheets,
   } = useStore();
 
-  const [currentView, setCurrentView] = useState<ViewType>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = sessionStorage.getItem('ks_current_view');
-      if (saved) return saved as ViewType;
-    }
-    return 'dashboard';
-  });
+  const [activeWorkspaceOverride, setActiveWorkspaceOverride] = useState<WorkspaceId | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isPreviewingEmployeePortal, setIsPreviewingEmployeePortal] = useState(false);
 
-  const handleSelectView = (v: ViewType) => {
-    setCurrentView(v);
-    setIsMobileNavOpen(false);
+  // Active workspace calculation
+  const role = String(currentUser?.role || '').toUpperCase();
+  const isOwner = ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(role);
+
+  const activeWorkspace = useMemo(() => {
+    if (isOwner && activeWorkspaceOverride && WORKSPACES[activeWorkspaceOverride]) {
+      return WORKSPACES[activeWorkspaceOverride];
+    }
+    return getWorkspaceForRole(currentUser?.role);
+  }, [currentUser?.role, isOwner, activeWorkspaceOverride]);
+
+  // View state with strict authorization enforcement
+  const [currentView, setCurrentView] = useState<ViewType>(() => {
     if (typeof window !== 'undefined') {
-      sessionStorage.setItem('ks_current_view', v);
+      const saved = sessionStorage.getItem('ks_current_view') as ViewType | null;
+      if (saved) return saved;
+    }
+    return 'dashboard';
+  });
+
+  // Ensure currentView is always valid and authorized for the active workspace
+  useEffect(() => {
+    if (currentUser && activeWorkspace) {
+      if (!activeWorkspace.allowedViews.includes(currentView)) {
+        setCurrentView(activeWorkspace.defaultView);
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('ks_current_view', activeWorkspace.defaultView);
+        }
+      }
+    }
+  }, [currentUser, activeWorkspace, currentView]);
+
+  const handleSelectView = (v: ViewType) => {
+    // Only allow selecting views permitted in the active workspace
+    if (activeWorkspace.allowedViews.includes(v)) {
+      setCurrentView(v);
+      setIsMobileNavOpen(false);
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem('ks_current_view', v);
+      }
+    } else {
+      setCurrentView(activeWorkspace.defaultView);
     }
   };
+
+  const handleWorkspaceChange = (wId: WorkspaceId) => {
+    setActiveWorkspaceOverride(wId);
+    const targetWs = WORKSPACES[wId];
+    if (targetWs) {
+      if (!targetWs.allowedViews.includes(currentView)) {
+        handleSelectView(targetWs.defaultView);
+      }
+    }
+  };
+
+  const handleExitWorkspacePreview = () => {
+    setActiveWorkspaceOverride(null);
+    const ownerWs = WORKSPACES.owner;
+    handleSelectView(ownerWs.defaultView);
+  };
+
+  // Dedicated Employee Portal for employee-only roles or when explicitly requested
+  const isEmployeeOnlyRole = [
+    'FREELANCER',
+    'SOCIAL_MEDIA_ECOMMERCE_MANAGER',
+    'SOCIAL_MEDIA_MANAGER',
+    'ECOMMERCE_MANAGER',
+  ].includes(role);
 
   if (isLoading && !currentUser) {
     return (
@@ -89,17 +144,7 @@ const MainAppContent: React.FC = () => {
     );
   }
 
-  // Route to Dedicated Employee Portal if employee-only role or Owner previewing
-  const role = String(currentUser?.role || '').toUpperCase();
-  const isEmployeeOnlyRole = [
-    'FREELANCER',
-    'ACCOUNTANT',
-    'SOCIAL_MEDIA_ECOMMERCE_MANAGER',
-    'SOCIAL_MEDIA_MANAGER',
-    'ECOMMERCE_MANAGER',
-  ].includes(role);
-
-  if (isEmployeeOnlyRole || isPreviewingEmployeePortal) {
+  if ((isEmployeeOnlyRole && !activeWorkspaceOverride) || isPreviewingEmployeePortal) {
     return (
       <EmployeePortal
         isOwnerPreviewing={isPreviewingEmployeePortal}
@@ -111,7 +156,12 @@ const MainAppContent: React.FC = () => {
   const renderView = () => {
     switch (currentView) {
       case 'dashboard':
-        return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
+        return (
+          <DashboardView
+            onNavigate={(v) => handleSelectView(v)}
+            activeWorkspaceId={activeWorkspace.id}
+          />
+        );
       case 'purchasing':
         return <PurchasingView />;
       case 'production':
@@ -141,18 +191,26 @@ const MainAppContent: React.FC = () => {
       case 'salary':
         return <SalaryView />;
       case 'workforce':
-        return <WorkforceView onPreviewEmployeePortal={() => setIsPreviewingEmployeePortal(true)} />;
+        return (
+          <WorkforceView
+            onPreviewEmployeePortal={() => setIsPreviewingEmployeePortal(true)}
+          />
+        );
       case 'reports':
         return <ReportsView />;
       case 'accounting':
         return <AccountingView />;
       case 'audit':
         return <AuditView />;
-
       case 'users':
         return <UsersView />;
       default:
-        return <DashboardView onNavigate={(v) => handleSelectView(v)} />;
+        return (
+          <DashboardView
+            onNavigate={(v) => handleSelectView(v)}
+            activeWorkspaceId={activeWorkspace.id}
+          />
+        );
     }
   };
 
@@ -162,6 +220,10 @@ const MainAppContent: React.FC = () => {
         currentView={currentView}
         onToggleMobileNav={() => setIsMobileNavOpen((prev) => !prev)}
         onNavigate={handleSelectView}
+        activeWorkspaceId={activeWorkspace.id}
+        onChangeWorkspace={handleWorkspaceChange}
+        isOwnerPreviewing={Boolean(activeWorkspaceOverride)}
+        onExitWorkspacePreview={handleExitWorkspacePreview}
       />
 
       {/* Critical Status Banners */}
@@ -251,6 +313,7 @@ const MainAppContent: React.FC = () => {
           onSelectView={handleSelectView}
           isOpenMobile={isMobileNavOpen}
           onCloseMobile={() => setIsMobileNavOpen(false)}
+          activeWorkspaceId={activeWorkspace.id}
         />
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
           <ErrorBoundary>

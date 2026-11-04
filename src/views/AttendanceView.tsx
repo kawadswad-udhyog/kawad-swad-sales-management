@@ -285,81 +285,57 @@ export const AttendanceView: React.FC = () => {
           <button
             onClick={loadData}
             disabled={isLoading}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '8px 14px',
-              borderRadius: '8px',
-              background: '#f8fafc',
-              border: '1px solid #cbd5e1',
-              color: '#475569',
-              fontWeight: 600,
-              fontSize: '0.84rem',
-              cursor: isLoading ? 'not-allowed' : 'pointer',
-            }}
+            className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
           >
-            <RefreshCw size={14} className={isLoading ? 'spin-icon' : ''} />
-            Refresh
+            <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
+            <span>Refresh</span>
           </button>
         }
       />
 
       {/* Top Stat Cards for Selected Filter Date */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px', marginBottom: '20px' }}>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
         <StatCard
-          title={`Total Workers on ${filterDate}`}
+          title={`Workers on ${filterDate}`}
           value={dateRecords.length}
           subtext={`Out of ${activeWorkers.length} active workers`}
-          icon={<Users size={18} />}
+          icon={<Users size={16} />}
         />
         <StatCard
           title="Present & Half Day"
           value={`${presentCount} Full / ${halfDayCount} Half`}
-          subtext={`Total attendance logged`}
-          icon={<CheckCircle2 size={18} />}
-          iconBg="#ecfdf5"
-          iconColor="#15803d"
+          subtext="Total attendance logged"
+          icon={<CheckCircle2 size={16} />}
         />
         <StatCard
           title="Reported Absent"
           value={absentCount}
           subtext="No wage accrued"
-          icon={<AlertTriangle size={18} />}
-          iconBg="#fef2f2"
-          iconColor="#b91c1c"
+          icon={<AlertTriangle size={16} />}
+          alert={absentCount > 0}
+          alertColor="amber"
         />
         <StatCard
           title="Total Wages Accrued"
           value={`₹${totalWageAccrued.toFixed(2)}`}
-          subtext={`Daily wage payout commitment`}
-          icon={<Calendar size={18} />}
-          iconBg="#eff6ff"
-          iconColor="#1d4ed8"
+          subtext="Daily wage payout commitment"
+          icon={<Calendar size={16} />}
         />
       </div>
 
       {/* Feedback Banner */}
       {feedback && (
         <div
-          style={{
-            padding: '12px 16px',
-            borderRadius: '8px',
-            marginBottom: '16px',
-            fontSize: '0.88rem',
-            fontWeight: 500,
-            background: feedback.type === 'success' ? '#ecfdf5' : '#fef2f2',
-            color: feedback.type === 'success' ? '#166534' : '#b91c1c',
-            border: `1px solid ${feedback.type === 'success' ? '#bbf7d0' : '#fecaca'}`,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}
+          className={`p-3.5 rounded-xl text-xs flex items-center justify-between border mb-4 ${
+            feedback.type === 'error'
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+          }`}
         >
-          <span>{feedback.message}</span>
+          <span className="font-medium">{feedback.message}</span>
           <button
             onClick={() => setFeedback(null)}
-            style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1rem' }}
+            className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
           >
             ✕
           </button>

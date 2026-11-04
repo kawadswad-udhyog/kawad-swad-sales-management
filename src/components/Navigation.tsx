@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import {
   LayoutDashboard,
@@ -7,7 +7,7 @@ import {
   Package,
   Boxes,
   ShoppingCart,
-  CheckSquare,
+  CheckCircle2,
   Users as UsersIcon,
   Tag,
   Receipt,
@@ -23,8 +23,16 @@ import {
   ChevronRight,
   Truck,
   ShieldCheck,
+  Briefcase,
+  Search,
 } from 'lucide-react';
-
+import {
+  getWorkspaceForRole,
+  getNavItemsForWorkspace,
+  ALL_NAV_ITEMS,
+  WorkspaceId,
+  WORKSPACES,
+} from '../utils/workspaces';
 
 export type ViewType =
   | 'dashboard'
@@ -48,36 +56,46 @@ export type ViewType =
   | 'users'
   | 'audit';
 
-
 interface NavigationProps {
   currentView: ViewType;
   onSelectView: (view: ViewType) => void;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
+  activeWorkspaceId?: WorkspaceId;
 }
 
-interface NavItem {
-  view: ViewType;
-  label: string;
-  icon: React.ReactNode;
-  roles: string[];
-  badge?: number;
-  badgeColor?: string;
-}
-
-interface NavSection {
-  title: string;
-  items: NavItem[];
-}
+const VIEW_ICONS: Record<ViewType, React.ReactNode> = {
+  dashboard: <LayoutDashboard size={18} />,
+  workforce: <Briefcase size={18} />,
+  sales: <ShoppingCart size={18} />,
+  customers: <UsersIcon size={18} />,
+  production: <Factory size={18} />,
+  stock: <Boxes size={18} />,
+  attendance: <UserCheck size={18} />,
+  accounting: <Scale size={18} />,
+  approvals: <CheckCircle2 size={18} />,
+  reports: <FileText size={18} />,
+  users: <Shield size={18} />,
+  audit: <Activity size={18} />,
+  purchasing: <Truck size={18} />,
+  packaging: <Package size={18} />,
+  quality: <ShieldCheck size={18} />,
+  expenses: <Receipt size={18} />,
+  visits: <MapPin size={18} />,
+  closing: <Lock size={18} />,
+  salary: <Coins size={18} />,
+  products: <Tag size={18} />,
+};
 
 export const Navigation: React.FC<NavigationProps> = ({
   currentView,
   onSelectView,
   isOpenMobile = false,
   onCloseMobile,
+  activeWorkspaceId,
 }) => {
   const { currentUser, approvalRequests, expenses, dashboardMetrics } = useStore();
-  const role = currentUser?.role;
+  const [navSearch, setNavSearch] = useState('');
 
   const [isCollapsed, setIsCollapsed] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -96,162 +114,35 @@ export const Navigation: React.FC<NavigationProps> = ({
     });
   };
 
+  // Resolve current active workspace config
+  const workspaceConfig = useMemo(() => {
+    if (activeWorkspaceId && WORKSPACES[activeWorkspaceId]) {
+      return WORKSPACES[activeWorkspaceId];
+    }
+    return getWorkspaceForRole(currentUser?.role);
+  }, [currentUser?.role, activeWorkspaceId]);
+
+  // Derive allowed navigation items for this workspace
+  const navItems = useMemo(() => {
+    const rawItems = getNavItemsForWorkspace(workspaceConfig);
+    if (!navSearch.trim()) return rawItems;
+    const q = navSearch.toLowerCase().trim();
+    return rawItems.filter(
+      (item) =>
+        item.label.toLowerCase().includes(q) ||
+        item.description.toLowerCase().includes(q)
+    );
+  }, [workspaceConfig, navSearch]);
+
+  // Badges calculation
   const pendingApprovalsCount =
     (approvalRequests?.filter((r) => r.status === 'PENDING').length || 0) +
     (dashboardMetrics?.pending_production_approvals || 0);
 
   const pendingExpensesCount =
-    expenses?.filter((e) => e.approval_status === 'PENDING').length ||
+    expenses?.filter((e) => String(e.approval_status || '').toUpperCase() === 'PENDING').length ||
     dashboardMetrics?.pending_expenses ||
     0;
-
-  const sections: NavSection[] = [
-    {
-      title: 'Operations',
-      items: [
-        {
-          view: 'dashboard',
-          label: role === 'SALESMAN' ? 'Field Workspace' : 'Dashboard',
-          icon: <LayoutDashboard size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-        },
-        {
-          view: 'purchasing',
-          label: 'Purchasing & Vendors',
-          icon: <Truck size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'production',
-          label: 'Production',
-          icon: <Factory size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'attendance',
-          label: 'Attendance',
-          icon: <UserCheck size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'packaging',
-          label: 'Packaging',
-          icon: <Package size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-      ],
-    },
-    {
-      title: 'Inventory & Approvals',
-      items: [
-        {
-          view: 'stock',
-          label: 'Inventory Ledgers',
-          icon: <Boxes size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-        },
-        {
-          view: 'quality',
-          label: 'Quality & Traceability',
-          icon: <ShieldCheck size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'approvals',
-          label: 'Approvals',
-          icon: <CheckSquare size={18} />,
-          roles: ['OWNER', 'PA'],
-          badge: pendingApprovalsCount,
-          badgeColor: 'bg-amber-600 text-white',
-        },
-      ],
-    },
-    {
-      title: 'Commercial & Sales',
-      items: [
-        {
-          view: 'sales',
-          label: 'Sales & Bills',
-          icon: <ShoppingCart size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-        },
-        {
-          view: 'customers',
-          label: 'Customers',
-          icon: <UsersIcon size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-        },
-        {
-          view: 'products',
-          label: 'Product Catalogue',
-          icon: <Tag size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-        },
-        {
-          view: 'expenses',
-          label: 'Expenses & Claims',
-          icon: <Receipt size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-          badge: role !== 'SALESMAN' && pendingExpensesCount > 0 ? pendingExpensesCount : undefined,
-          badgeColor: 'bg-amber-600 text-white',
-        },
-        {
-          view: 'visits',
-          label: 'Shop Visits',
-          icon: <MapPin size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-        },
-        {
-          view: 'closing',
-          label: 'Daily Cash Closing',
-          icon: <Lock size={18} />,
-          roles: ['OWNER', 'PA', 'SALESMAN'],
-        },
-      ],
-    },
-    {
-      title: 'Management & Admin',
-      items: [
-        {
-          view: 'salary',
-          label: 'Salary & Payroll',
-          icon: <Coins size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'workforce',
-          label: 'Workforce & Labour',
-          icon: <UsersIcon size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'reports',
-          label: 'Reports & Exports',
-          icon: <FileText size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'accounting',
-          label: 'General Ledger & Accounts',
-          icon: <Scale size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'users',
-
-          label: 'Team & Security',
-          icon: <Shield size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-        {
-          view: 'audit',
-          label: 'Audit & Health',
-          icon: <Activity size={18} />,
-          roles: ['OWNER', 'PA'],
-        },
-      ],
-    },
-  ];
 
   const handleSelect = (v: ViewType) => {
     onSelectView(v);
@@ -262,21 +153,22 @@ export const Navigation: React.FC<NavigationProps> = ({
 
   return (
     <>
-      {/* Mobile Backdrop */}
+      {/* Mobile Drawer Backdrop */}
       {isOpenMobile && (
         <div
           onClick={onCloseMobile}
-          className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-40 lg:hidden"
+          className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-40 lg:hidden transition-opacity"
+          aria-hidden="true"
         />
       )}
 
-      {/* Sidebar Container */}
+      {/* Main Sidebar */}
       <aside
-        className={`app-sidebar ${isOpenMobile ? 'mobile-open' : ''} ${
-          isCollapsed ? 'lg:w-18' : 'lg:w-64'
-        } bg-white border-r border-slate-200 flex flex-col shrink-0 select-none transition-all duration-200 ease-in-out z-30`}
+        className={`fixed inset-y-0 left-0 z-40 bg-white border-r border-slate-200 flex flex-col shrink-0 select-none transition-all duration-200 ease-in-out lg:static ${
+          isOpenMobile ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
+        } ${isCollapsed ? 'lg:w-18' : 'lg:w-64'}`}
       >
-        {/* Brand header */}
+        {/* Brand & Workspace Header */}
         <div className="h-16 border-b border-slate-200 px-4 flex items-center justify-between shrink-0">
           <div className={`flex items-center gap-3 overflow-hidden ${isCollapsed ? 'lg:hidden' : ''}`}>
             <div className="w-8 h-8 rounded-lg bg-emerald-800 text-white flex items-center justify-center font-extrabold text-sm shadow-xs shrink-0">
@@ -286,13 +178,13 @@ export const Navigation: React.FC<NavigationProps> = ({
               <div className="font-bold text-slate-900 text-sm tracking-tight truncate leading-tight">
                 Kawad Swad
               </div>
-              <div className="text-[11px] text-slate-500 font-medium truncate">
-                Enterprise ERP
+              <div className="text-[11px] text-emerald-700 font-semibold truncate">
+                {workspaceConfig.title}
               </div>
             </div>
           </div>
 
-          {/* When collapsed on desktop, show only logo */}
+          {/* When collapsed on desktop */}
           {isCollapsed && (
             <div className="hidden lg:flex w-full items-center justify-center">
               <div className="w-8 h-8 rounded-lg bg-emerald-800 text-white flex items-center justify-center font-extrabold text-sm shadow-xs">
@@ -305,97 +197,111 @@ export const Navigation: React.FC<NavigationProps> = ({
           {onCloseMobile && (
             <button
               onClick={onCloseMobile}
-              className="lg:hidden p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition-colors"
-              title="Close navigation"
+              className="lg:hidden p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+              aria-label="Close navigation"
             >
               <X size={18} />
             </button>
           )}
         </div>
 
-        {/* Navigation items list */}
-        <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
-          {sections.map((section, idx) => {
-            const visibleItems = section.items.filter((item) => role && item.roles.includes(role));
-            if (visibleItems.length === 0) return null;
+        {/* Quick Search inside Navigation (desktop expanded only) */}
+        {!isCollapsed && navItems.length > 6 && (
+          <div className="px-3 pt-3 pb-1">
+            <div className="relative">
+              <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center text-slate-400 pointer-events-none">
+                <Search size={13} />
+              </span>
+              <input
+                type="text"
+                value={navSearch}
+                onChange={(e) => setNavSearch(e.target.value)}
+                placeholder="Find in menu…"
+                className="w-full pl-7 pr-6 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-medium placeholder:text-slate-400"
+              />
+              {navSearch && (
+                <button
+                  onClick={() => setNavSearch('')}
+                  className="absolute inset-y-0 right-0 pr-2 flex items-center text-slate-400 hover:text-slate-600"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Navigation Links */}
+        <nav
+          className="flex-1 overflow-y-auto px-3 py-3 space-y-1"
+          aria-label="Primary Navigation"
+        >
+          {navItems.map((item) => {
+            const isActive = currentView === item.view;
+            const icon = VIEW_ICONS[item.view] || <LayoutDashboard size={18} />;
+
+            let badgeCount: number | undefined;
+            let badgeColor = 'bg-amber-100 text-amber-900 border-amber-300';
+            if (item.view === 'approvals' && pendingApprovalsCount > 0) {
+              badgeCount = pendingApprovalsCount;
+            } else if (item.view === 'expenses' && pendingExpensesCount > 0) {
+              badgeCount = pendingExpensesCount;
+            }
 
             return (
-              <div key={idx} className="space-y-1">
-                {/* Section header */}
-                <div
-                  className={`text-[11px] font-semibold tracking-wider text-slate-400 uppercase px-3 py-1 ${
-                    isCollapsed ? 'lg:hidden' : ''
+              <button
+                key={item.view}
+                type="button"
+                onClick={() => handleSelect(item.view)}
+                title={isCollapsed ? `${item.label} · ${item.description}` : undefined}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all duration-150 cursor-pointer ${
+                  isActive
+                    ? 'bg-emerald-800 text-white shadow-2xs'
+                    : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                } ${isCollapsed ? 'justify-center px-2' : ''}`}
+              >
+                <span
+                  className={`shrink-0 ${
+                    isActive ? 'text-white' : 'text-slate-500'
                   }`}
                 >
-                  {section.title}
-                </div>
+                  {icon}
+                </span>
 
-                {visibleItems.map((item) => {
-                  const isActive = currentView === item.view;
-                  return (
-                    <button
-                      key={item.view}
-                      onClick={() => handleSelect(item.view)}
-                      title={isCollapsed ? item.label : undefined}
-                      className={`group relative flex items-center w-full px-3 py-2 rounded-lg text-xs font-semibold transition-colors duration-150 text-left outline-none ${
-                        isActive
-                          ? 'bg-emerald-50 text-emerald-900 font-bold'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
-                      } ${isCollapsed ? 'lg:justify-center lg:px-2' : 'gap-3'}`}
-                    >
-                      {/* Active indicator bar */}
-                      {isActive && (
-                        <span className="absolute left-0 top-1.5 bottom-1.5 w-1 bg-emerald-700 rounded-r-md" />
-                      )}
+                {!isCollapsed && (
+                  <span className="truncate flex-1 text-left">
+                    {item.label}
+                  </span>
+                )}
 
-                      <span
-                        className={`shrink-0 transition-colors ${
-                          isActive
-                            ? 'text-emerald-700'
-                            : 'text-slate-400 group-hover:text-slate-600'
-                        }`}
-                      >
-                        {item.icon}
-                      </span>
-
-                      <span
-                        className={`truncate flex-1 ${
-                          isCollapsed ? 'lg:hidden' : 'block'
-                        }`}
-                      >
-                        {item.label}
-                      </span>
-
-                      {item.badge !== undefined && item.badge > 0 && (
-                        <span
-                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${
-                            item.badgeColor || 'bg-slate-200 text-slate-700'
-                          } ${isCollapsed ? 'lg:hidden' : 'inline-block'}`}
-                        >
-                          {item.badge}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+                {!isCollapsed && badgeCount !== undefined && badgeCount > 0 && (
+                  <span
+                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${badgeColor}`}
+                  >
+                    {badgeCount}
+                  </span>
+                )}
+              </button>
             );
           })}
-        </div>
+        </nav>
 
-        {/* Footer Collapse Toggle (Desktop) */}
-        <div className="border-t border-slate-200 p-2.5 bg-slate-50/60 hidden lg:flex items-center justify-between">
-          {!isCollapsed && (
-            <div className="px-2 text-[11px] text-slate-400 truncate">
-              v1.0 · Nimar, MP
-            </div>
-          )}
+        {/* Desktop Collapse Toggle */}
+        <div className="hidden lg:flex p-3 border-t border-slate-200 justify-end">
           <button
+            type="button"
             onClick={toggleCollapse}
-            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-md transition-colors mx-auto"
+            className="w-full flex items-center justify-center gap-2 p-2 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 text-xs font-semibold transition-colors cursor-pointer"
             title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
-            {isCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+            {isCollapsed ? (
+              <ChevronRight size={16} />
+            ) : (
+              <>
+                <ChevronLeft size={16} />
+                <span>Collapse</span>
+              </>
+            )}
           </button>
         </div>
       </aside>

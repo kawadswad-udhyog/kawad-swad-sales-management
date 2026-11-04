@@ -10,6 +10,8 @@ interface StatCardProps {
   alert?: boolean;
   alertColor?: 'amber' | 'red';
   onClick?: () => void;
+  trend?: string;
+  trendPositive?: boolean;
 }
 
 export const StatCard: React.FC<StatCardProps> = ({
@@ -17,24 +19,20 @@ export const StatCard: React.FC<StatCardProps> = ({
   value,
   subtext,
   icon,
-  iconBg = '#ecfdf5',
-  iconColor = '#166534',
   alert = false,
   alertColor = 'amber',
   onClick,
+  trend,
+  trendPositive,
 }) => {
   const isClickable = Boolean(onClick);
 
-  let border = '1px solid #e2e8f0';
-  let bg = '#ffffff';
-
+  let borderClasses = 'border-slate-200 bg-white hover:border-slate-300';
   if (alert) {
     if (alertColor === 'red') {
-      border = '1px solid #fca5a5';
-      bg = '#fef2f2';
+      borderClasses = 'border-red-200 bg-red-50/40 hover:border-red-300';
     } else {
-      border = '1px solid #fde68a';
-      bg = '#fffbeb';
+      borderClasses = 'border-amber-200 bg-amber-50/40 hover:border-amber-300';
     }
   }
 
@@ -44,73 +42,43 @@ export const StatCard: React.FC<StatCardProps> = ({
       role={isClickable ? 'button' : undefined}
       tabIndex={isClickable ? 0 : undefined}
       onKeyDown={isClickable ? (e) => e.key === 'Enter' && onClick!() : undefined}
-      style={{
-        background: bg,
-        border,
-        borderRadius: '12px',
-        padding: '16px 18px',
-        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.05)',
-        cursor: isClickable ? 'pointer' : 'default',
-        transition: 'transform 0.15s ease, box-shadow 0.15s ease',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between',
-        gap: '8px',
-      }}
+      className={`border rounded-xl p-4 sm:p-5 shadow-2xs transition-all duration-150 flex flex-col justify-between gap-3 ${borderClasses} ${
+        isClickable ? 'cursor-pointer hover:shadow-xs active:scale-[0.99]' : ''
+      }`}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
-        <span
-          style={{
-            fontSize: '0.80rem',
-            fontWeight: 600,
-            color: alert ? (alertColor === 'red' ? '#991b1b' : '#92400e') : '#64748b',
-            textTransform: 'uppercase',
-            letterSpacing: '0.04em',
-          }}
-        >
+      <div className="flex items-start justify-between gap-3">
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 leading-snug">
           {title}
         </span>
         {icon && (
-          <div
-            style={{
-              width: '32px',
-              height: '32px',
-              borderRadius: '8px',
-              background: iconBg,
-              color: iconColor,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0,
-            }}
-          >
+          <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-100 flex items-center justify-center shrink-0 shadow-2xs">
             {icon}
           </div>
         )}
       </div>
 
-      <div
-        style={{
-          fontSize: '1.65rem',
-          fontWeight: 800,
-          color: alert ? (alertColor === 'red' ? '#b91c1c' : '#b45309') : '#0f172a',
-          lineHeight: 1.15,
-        }}
-      >
-        {value}
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
+          {value}
+        </div>
+        {trend && (
+          <span
+            className={`text-xs font-bold ${
+              trendPositive ? 'text-emerald-700' : 'text-slate-500'
+            }`}
+          >
+            {trend}
+          </span>
+        )}
       </div>
 
       {subtext && (
-        <span
-          style={{
-            fontSize: '0.78rem',
-            color: alert ? (alertColor === 'red' ? '#b91c1c' : '#92400e') : '#64748b',
-            fontWeight: 500,
-          }}
-        >
+        <div className="text-xs text-slate-500 font-medium leading-relaxed border-t border-slate-100 pt-2 -mb-0.5">
           {subtext}
-        </span>
+        </div>
       )}
     </div>
   );
 };
+
+export const SummaryCard = StatCard;

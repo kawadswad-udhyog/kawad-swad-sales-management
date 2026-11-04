@@ -2,17 +2,32 @@ import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { CustomerType } from '../types';
 import { ViewType } from '../components/Navigation';
+import { PageHeader } from '../components/common/PageHeader';
+import { SearchFilter } from '../components/common/SearchFilter';
+import { StatusBadge } from '../components/common/StatusBadge';
+import { EmptyState } from '../components/common/EmptyState';
+import {
+  Users,
+  Plus,
+  Phone,
+  MapPin,
+  ShoppingCart,
+  Building,
+  X,
+  CheckCircle2,
+  AlertCircle,
+} from 'lucide-react';
 
 interface CustomersViewProps {
   onNavigate?: (view: ViewType) => void;
 }
 
-const CUSTOMER_TYPES: Array<{ type: CustomerType | 'ALL'; label: string }> = [
-  { type: 'ALL', label: 'All Partners' },
-  { type: 'RETAILER', label: 'Retailers' },
-  { type: 'WHOLESALER', label: 'Wholesalers' },
-  { type: 'DISTRIBUTOR', label: 'Distributors' },
-  { type: 'RETAIL', label: 'Retail' },
+const CUSTOMER_TYPE_OPTIONS: Array<{ value: CustomerType | 'ALL'; label: string }> = [
+  { value: 'ALL', label: 'All Partners' },
+  { value: 'RETAILER', label: 'Retailers' },
+  { value: 'WHOLESALER', label: 'Wholesalers' },
+  { value: 'DISTRIBUTOR', label: 'Distributors' },
+  { value: 'RETAIL', label: 'Retail' },
 ];
 
 export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
@@ -59,7 +74,6 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
       });
 
       setNotice({ msg: `Customer "${shopName}" registered successfully.` });
-      // Reset form & close
       setShopName('');
       setShopkeeperName('');
       setMobile('');
@@ -102,317 +116,242 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
   }, [customers, filter, selectedType]);
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '16px' }}>
-        <div>
-          <h1 style={{ margin: 0 }}>Customer &amp; Retailer Directory</h1>
-          <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.9rem' }}>
-            Fast partner search, 1-tap quick billing, and streamlined customer registration
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setIsFormOpen(!isFormOpen)}
-          style={{
-            background: isFormOpen ? '#475569' : '#0f766e',
-            color: '#fff',
-            padding: '8px 16px',
-            borderRadius: '6px',
-            fontSize: '0.88rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-          }}
-        >
-          <span>{isFormOpen ? '✕ Close Form' : '➕ Add Saved Customer'}</span>
-        </button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Customers & Trade Directory"
+        subtitle="Search retail outlets, wholesale accounts, contact details, and start 1-tap sales orders"
+        icon={<Users size={22} />}
+        actions={
+          <button
+            type="button"
+            onClick={() => setIsFormOpen(!isFormOpen)}
+            className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            {isFormOpen ? <X size={15} /> : <Plus size={15} />}
+            <span>{isFormOpen ? 'Cancel' : 'Add Customer'}</span>
+          </button>
+        }
+      />
 
       {notice && (
-        <div className={notice.error ? 'notice-error' : 'notice-success'} style={{ marginBottom: '16px' }}>
-          {notice.msg}
+        <div
+          className={`p-3.5 rounded-xl text-xs flex items-center justify-between border ${
+            notice.error
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {notice.error ? <AlertCircle size={16} className="text-red-600" /> : <CheckCircle2 size={16} className="text-emerald-600" />}
+            <span className="font-medium">{notice.msg}</span>
+          </div>
+          <button onClick={() => setNotice(null)} className="p-1 text-slate-400 hover:text-slate-600">
+            <X size={14} />
+          </button>
         </div>
       )}
 
-      {/* Add customer form card (collapsible for fast lookup) */}
+      {/* Add Customer Form Modal / Card */}
       {isFormOpen && (
-        <div className="card" style={{ marginBottom: '20px', background: '#f8fafc', border: '1px solid #cbd5e1' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h2 style={{ margin: 0, fontSize: '1.15rem' }}>Register Saved Customer / Trade Partner</h2>
-            <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
-              Only Shop/Business Name is mandatory; contact info is optional
-            </span>
+        <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">
+          <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 m-0">Register New Customer / Partner</h2>
+              <p className="text-xs text-slate-500 m-0">Only Shop/Business Name is mandatory; contact info is optional</p>
+            </div>
+            <button onClick={() => setIsFormOpen(false)} className="text-slate-400 hover:text-slate-600 p-1">
+              <X size={18} />
+            </button>
           </div>
 
-          <form className="inline" onSubmit={handleSubmit}>
-            <label>
-              Customer type
-              <select
-                value={customerType}
-                onChange={(e) => setCustomerType(e.target.value as CustomerType)}
-                style={{ padding: '8px' }}
-              >
-                <option value="RETAILER">RETAILER (Kirana)</option>
-                <option value="WHOLESALER">WHOLESALER (Bulk)</option>
-                <option value="DISTRIBUTOR">DISTRIBUTOR (Area)</option>
-                <option value="RETAIL">RETAIL (Consumer)</option>
-              </select>
-            </label>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Customer Type <span className="text-emerald-700">*</span>
+                </label>
+                <select
+                  value={customerType}
+                  onChange={(e) => setCustomerType(e.target.value as CustomerType)}
+                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-medium"
+                >
+                  <option value="RETAILER">RETAILER (Kirana / Store)</option>
+                  <option value="WHOLESALER">WHOLESALER (Bulk Trader)</option>
+                  <option value="DISTRIBUTOR">DISTRIBUTOR (Area Agency)</option>
+                  <option value="RETAIL">RETAIL (Direct Consumer)</option>
+                </select>
+              </div>
 
-            <label>
-              Shop / Business Name <span style={{ color: '#b91c1c' }}>*</span>
-              <input
-                required
-                maxLength={150}
-                placeholder="e.g. Patidar Daily Needs"
-                value={shopName}
-                onChange={(e) => setShopName(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Shop / Business Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={shopName}
+                  onChange={(e) => setShopName(e.target.value)}
+                  placeholder="e.g. Bharat Kirana Store"
+                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-medium"
+                />
+              </div>
 
-            <label>
-              Contact Person (Optional)
-              <input
-                maxLength={100}
-                placeholder="Shopkeeper / owner name"
-                value={shopkeeperName}
-                onChange={(e) => setShopkeeperName(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Owner / Shopkeeper Name
+                </label>
+                <input
+                  type="text"
+                  value={shopkeeperName}
+                  onChange={(e) => setShopkeeperName(e.target.value)}
+                  placeholder="e.g. Bharat Patel"
+                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
+                />
+              </div>
 
-            <label>
-              Mobile (Optional)
-              <input
-                type="tel"
-                maxLength={20}
-                placeholder="10-digit number"
-                value={mobile}
-                onChange={(e) => setMobile(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Primary Mobile
+                </label>
+                <input
+                  type="tel"
+                  value={mobile}
+                  onChange={(e) => setMobile(e.target.value)}
+                  placeholder="10-digit mobile"
+                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
+                />
+              </div>
 
-            <label>
-              Alternate Mobile (Optional)
-              <input
-                type="tel"
-                maxLength={20}
-                value={alternateMobile}
-                placeholder="Secondary phone"
-                onChange={(e) => setAlternateMobile(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Area / Locality
+                </label>
+                <input
+                  type="text"
+                  value={localityArea}
+                  onChange={(e) => setLocalityArea(e.target.value)}
+                  placeholder="e.g. Main Market, Kasrawad"
+                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
+                />
+              </div>
 
-            <label>
-              Area / Locality (Optional)
-              <input
-                maxLength={100}
-                placeholder="e.g. Sarafa Chowk, Main Market"
-                value={localityArea}
-                onChange={(e) => setLocalityArea(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  City / Town
+                </label>
+                <input
+                  type="text"
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="e.g. Khargone, Barwaha"
+                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
+                />
+              </div>
+            </div>
 
-            <label>
-              City / Village (Optional)
-              <input
-                maxLength={100}
-                placeholder="Khargone, Khandwa, Barwani..."
-                value={city}
-                onChange={(e) => setCity(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
-
-            <label>
-              Map Location / Landmark (Optional)
-              <input
-                maxLength={300}
-                placeholder="Landmark or maps link"
-                value={mapLocation}
-                onChange={(e) => setMapLocation(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
-
-            <label style={{ gridColumn: 'span 2' }}>
-              Address (Optional)
-              <input
-                maxLength={500}
-                placeholder="Complete street address..."
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
-
-            <label style={{ gridColumn: 'span 2' }}>
-              Notes / Delivery Habits (Optional)
-              <input
-                maxLength={500}
-                placeholder="Preferred delivery timing, credit status, special requests..."
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                style={{ padding: '8px' }}
-              />
-            </label>
-
-            <div style={{ gridColumn: 'span 2', marginTop: '10px', display: 'flex', gap: '10px' }}>
-              <button
-                type="submit"
-                style={{ background: '#047857', color: '#fff', padding: '10px 20px', fontWeight: 600 }}
-              >
-                💾 Save Customer Record
-              </button>
+            <div className="flex justify-end gap-2.5 pt-2">
               <button
                 type="button"
-                className="secondary"
                 onClick={() => setIsFormOpen(false)}
-                style={{ padding: '10px 16px' }}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
               >
                 Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors cursor-pointer shadow-xs"
+              >
+                Save Customer
               </button>
             </div>
           </form>
         </div>
       )}
 
-      {/* Filter and Search Bar */}
-      <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '14px' }}>
-          {/* Category Filter Buttons */}
-          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-            {CUSTOMER_TYPES.map(({ type, label }) => {
-              const isSelected = selectedType === type;
-              return (
-                <button
-                  key={type}
-                  type="button"
-                  onClick={() => setSelectedType(type)}
-                  style={{
-                    padding: '6px 14px',
-                    fontSize: '0.84rem',
-                    borderRadius: '6px',
-                    border: isSelected ? '1px solid #0f766e' : '1px solid #cbd5e1',
-                    background: isSelected ? '#0f766e' : '#ffffff',
-                    color: isSelected ? '#ffffff' : '#475569',
-                    fontWeight: isSelected ? 600 : 500,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+      {/* Search & Segmented Filter */}
+      <SearchFilter
+        searchTerm={filter}
+        onSearchChange={setFilter}
+        searchPlaceholder="Search by shop name, owner, city, or phone…"
+        filterValue={selectedType}
+        onFilterChange={setSelectedType}
+        filterOptions={CUSTOMER_TYPE_OPTIONS.map((opt) => ({
+          ...opt,
+          count: opt.value === 'ALL'
+            ? customers.length
+            : customers.filter((c) => c.customer_type === opt.value).length,
+        }))}
+      />
 
-          <div style={{ minWidth: '260px', flex: '1', maxWidth: '380px' }}>
-            <input
-              type="text"
-              placeholder="🔍 Search shop, phone, contact, locality..."
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              style={{ width: '100%', padding: '8px 12px', fontSize: '0.9rem' }}
-            />
-          </div>
+      {/* Customer Directory Table & Cards */}
+      {filtered.length === 0 ? (
+        <div className="bg-white border border-slate-200 rounded-2xl p-6">
+          <EmptyState
+            title="No Customers Found"
+            description={filter ? 'No customers match your search criteria.' : 'No customers registered yet.'}
+            icon={<Users size={28} />}
+            actionLabel={filter ? 'Clear Search' : 'Add First Customer'}
+            onAction={filter ? () => setFilter('') : () => setIsFormOpen(true)}
+          />
         </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+          {filtered.map((c) => (
+            <div
+              key={c.customer_id}
+              className="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-4 shadow-2xs transition-all flex flex-col justify-between gap-3"
+            >
+              <div>
+                <div className="flex items-start justify-between gap-2 mb-1.5">
+                  <h3 className="text-sm font-bold text-slate-900 tracking-tight leading-snug m-0">
+                    {c.shop_name}
+                  </h3>
+                  <StatusBadge status={c.customer_type} size="sm" />
+                </div>
 
-        {filtered.length > 0 ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Shop / Business</th>
-                  <th>Type</th>
-                  <th>Contact Person</th>
-                  <th>Mobile</th>
-                  <th>Area / City</th>
-                  <th style={{ textAlign: 'center' }}>Fast Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((c) => (
-                  <tr key={c.customer_id}>
-                    <td>
-                      <div>
-                        <strong style={{ fontSize: '0.95rem', color: '#1e293b' }}>{c.shop_name}</strong>
-                        <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                          ID: <code>{c.customer_id}</code>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <span
-                        style={{
-                          fontSize: '0.78rem',
-                          background: '#f1f5f9',
-                          padding: '3px 8px',
-                          borderRadius: '4px',
-                          fontWeight: 600,
-                          color: '#334155',
-                        }}
-                      >
-                        {c.customer_type}
-                      </span>
-                    </td>
-                    <td>{c.shopkeeper_name || '—'}</td>
-                    <td>
-                      {c.mobile ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span>{c.mobile}</span>
-                          <a
-                            href={`https://wa.me/91${c.mobile.replace(/\D/g, '').slice(-10)}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ textDecoration: 'none', fontSize: '0.85rem' }}
-                            title="Chat on WhatsApp"
-                          >
-                            💬
-                          </a>
-                        </div>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                    <td>
-                      {[c.locality_area, c.city].filter(Boolean).join(', ') || '—'}
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <button
-                        type="button"
-                        onClick={() => handleStartBilling(c.customer_id)}
-                        style={{
-                          padding: '5px 12px',
-                          fontSize: '0.82rem',
-                          background: '#047857',
-                          color: '#fff',
-                          borderRadius: '4px',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                          fontWeight: 600,
-                        }}
-                        title="Start billing for this customer immediately"
-                      >
-                        <span>⚡</span>
-                        <span>Bill Customer</span>
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div style={{ padding: '24px', textAlign: 'center', color: '#64748b' }}>
-            No matching customers found. Use the quick walk-in sale or click "+ Add Saved Customer".
-          </div>
-        )}
-      </div>
+                <div className="space-y-1 text-xs text-slate-600">
+                  {c.shopkeeper_name && (
+                    <div className="text-slate-500 font-medium">
+                      Contact: <span className="text-slate-800">{c.shopkeeper_name}</span>
+                    </div>
+                  )}
+
+                  {c.mobile && (
+                    <div className="flex items-center gap-1.5 text-slate-600 font-mono">
+                      <Phone size={12} className="text-slate-400" />
+                      <a href={`tel:${c.mobile}`} className="hover:text-emerald-700 hover:underline">
+                        {c.mobile}
+                      </a>
+                    </div>
+                  )}
+
+                  {(c.locality_area || c.city) && (
+                    <div className="flex items-center gap-1.5 text-slate-500 text-[11px]">
+                      <MapPin size={12} className="text-slate-400 shrink-0" />
+                      <span className="truncate">{[c.locality_area, c.city].filter(Boolean).join(', ')}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-mono text-slate-400">
+                  {c.customer_id}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => handleStartBilling(c.customer_id)}
+                  className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <ShoppingCart size={13} />
+                  <span>New Order</span>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

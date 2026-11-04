@@ -522,32 +522,27 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const liveVariance = liveBenchmarkYield && liveNetYield ? (parseFloat(liveNetYield) - parseFloat(liveBenchmarkYield)).toFixed(2) : null;
 
   return (
-    <section style={{ padding: '18px 20px', maxWidth: 1250, margin: '0 auto' }}>
-      <div style={{ marginBottom: 14 }}>
-        <h2 style={{ margin: '0 0 5px', color: '#14532d' }}>🏭 Kawad Swad Production & Recipe Master</h2>
-        <p style={{ margin: 0, color: '#64748b' }}>
-          Version 2.0 Papad Formulas (Moong, Chana, Urad) → Factory Bulk Production → Packets → Channel Dispatch.
+    <section className="space-y-6 max-w-7xl mx-auto">
+      <div className="pb-4 border-b border-slate-200">
+        <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight m-0">
+          Production & Manufacturing
+        </h1>
+        <p className="text-xs sm:text-sm text-slate-500 mt-1 mb-0 leading-relaxed">
+          Factory recipe formulation batches, raw dal milling, packaging, and finished stock register
         </p>
       </div>
 
       {message && (
         <div
           role="status"
-          style={{
-            ...card,
-            background: isError ? '#fef2f2' : '#f0fdf4',
-            borderColor: isError ? '#fca5a5' : '#86efac',
-            color: isError ? '#991b1b' : '#166534',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            boxShadow: isError ? '0 1px 3px rgba(239, 68, 68, 0.1)' : '0 1px 3px rgba(34, 197, 94, 0.1)',
-          }}
+          className={`p-3.5 rounded-xl text-xs flex items-center justify-between border ${
+            isError
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+          }`}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 18 }}>{isError ? '⚠️' : '✓'}</span>
-            <span style={{ fontWeight: 600, fontSize: 14 }}>{message}</span>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold">{message}</span>
           </div>
           <button
             type="button"
@@ -555,16 +550,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               setMessage('');
               setMessageType(null);
             }}
-            style={{
-              background: 'transparent',
-              border: 0,
-              cursor: 'pointer',
-              color: isError ? '#991b1b' : '#166534',
-              fontSize: 18,
-              fontWeight: 'bold',
-              padding: '0 6px',
-              lineHeight: 1,
-            }}
+            className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
             title="Dismiss message"
             aria-label="Dismiss message"
           >
@@ -573,17 +559,70 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
         </div>
       )}
 
-      <div>
-        {sectionButton('finished_goods', '📦 Finished Goods Register')}
-        {sectionButton('master_recipes', '📜 Papad Formula Master (v2.0)')}
-        {sectionButton('raw_materials', '🌾 Raw Materials Inward')}
-        {sectionButton('milling', '🥣 Dal Milling (Flour Prep)')}
-        {sectionButton('overview', 'Overview & Stock')}
-        {sectionButton('workers', 'Workers')}
-        {sectionButton('recipes', 'Custom Recipes')}
-        {sectionButton('production', 'Daily Production')}
-        {sectionButton('packaging', 'Packaging')}
-        {sectionButton('dispatch', 'Dispatch')}
+      <div className="flex items-center gap-1.5 p-1.5 bg-slate-100 rounded-xl overflow-x-auto border border-slate-200/60">
+        <button
+          onClick={() => setTab('production')}
+          type="button"
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            tab === 'production' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Daily Production
+        </button>
+        <button
+          onClick={() => setTab('packaging')}
+          type="button"
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            tab === 'packaging' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Packaging
+        </button>
+        <button
+          onClick={() => setTab('milling')}
+          type="button"
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            tab === 'milling' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Dal Milling
+        </button>
+        <button
+          onClick={() => setTab('raw_materials')}
+          type="button"
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            tab === 'raw_materials' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Raw Materials
+        </button>
+        <button
+          onClick={() => setTab('finished_goods')}
+          type="button"
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            tab === 'finished_goods' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Finished Goods Register
+        </button>
+        <button
+          onClick={() => setTab('master_recipes')}
+          type="button"
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            tab === 'master_recipes' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Recipe Master (v2.0)
+        </button>
+        <button
+          onClick={() => setTab('dispatch')}
+          type="button"
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            tab === 'dispatch' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Channel Dispatch
+        </button>
       </div>
 
       {/* MASTER RECIPES TAB */}

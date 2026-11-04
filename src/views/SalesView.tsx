@@ -3,6 +3,7 @@ import { useStore } from '../context/StoreContext';
 import { CustomerType, Sale, SaleItem, Product } from '../types';
 import { generateInvoicePdf } from '../utils/generateInvoicePdf';
 import { InvoiceModal } from '../components/InvoiceModal';
+import { PageHeader } from '../components/common/PageHeader';
 
 interface CartLine {
   product_id: string;
@@ -455,32 +456,21 @@ export const SalesView: React.FC = () => {
   );
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '16px' }}>
-        <div>
-          <h1 style={{ margin: 0 }}>Sales, Billing &amp; Invoicing</h1>
-          <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.9rem' }}>
-            Rapid billing workspace · Direct spot sales, retailer orders &amp; instant invoice generation
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={resetFormDeliberately}
-          style={{
-            background: '#0e7490',
-            color: '#fff',
-            fontSize: '0.88rem',
-            padding: '8px 16px',
-            borderRadius: '6px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-          }}
-        >
-          <span>➕</span>
-          <span>Start Fresh Bill</span>
-        </button>
-      </div>
+    <div className="space-y-6 max-w-7xl mx-auto">
+      <PageHeader
+        title="Sales, Billing &amp; Invoicing"
+        subtitle="Rapid billing workspace · Direct spot sales, retailer orders &amp; instant invoice generation"
+        actions={
+          <button
+            type="button"
+            onClick={resetFormDeliberately}
+            className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            <span>➕</span>
+            <span>Start Fresh Bill</span>
+          </button>
+        }
+      />
 
       {notice && (
         <div className={notice.error ? 'notice-error' : 'notice-success'} style={{ marginBottom: '16px' }}>

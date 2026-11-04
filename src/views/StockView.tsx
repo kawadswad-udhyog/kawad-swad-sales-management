@@ -308,41 +308,50 @@ export const StockView: React.FC = () => {
   };
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 8 }}>
-        <div>
-          <h1 style={{ margin: 0 }}>Stock &amp; Ready-Packet Register</h1>
-          <p className="muted" style={{ margin: '4px 0 0' }}>
-            Authoritative ready-to-sell packet inventory across Factory, Warehouse, Field Salesmen, and Channels.
-          </p>
-        </div>
+    <div className="space-y-6 max-w-7xl mx-auto">
+      <div className="pb-4 border-b border-slate-200">
+        <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight m-0">
+          Stock & Inventory Ledgers
+        </h1>
+        <p className="text-xs sm:text-sm text-slate-500 mt-1 mb-0 leading-relaxed">
+          Ready-to-sell packet inventory across Factory, Warehouse, Field Salesmen, and Channels
+        </p>
       </div>
 
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+      <div className="flex items-center gap-1.5 p-1.5 bg-slate-100 rounded-xl overflow-x-auto border border-slate-200/60">
         <button
           type="button"
           onClick={() => setStockTab('register')}
-          className={stockTab === 'register' ? '' : 'secondary'}
-          style={{ fontWeight: 600 }}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            stockTab === 'register'
+              ? 'bg-white text-slate-900 shadow-2xs font-bold'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
         >
-          📦 Finished Goods Register
+          Finished Goods Register
         </button>
         <button
           type="button"
           onClick={() => setStockTab('movements')}
-          className={stockTab === 'movements' ? '' : 'secondary'}
-          style={{ fontWeight: 600 }}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+            stockTab === 'movements'
+              ? 'bg-white text-slate-900 shadow-2xs font-bold'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
         >
-          🔄 Stock Movements &amp; Ledgers
+          Stock Movements &amp; Ledgers
         </button>
         {isManager && (
           <button
             type="button"
             onClick={() => setStockTab('physical')}
-            className={stockTab === 'physical' ? '' : 'secondary'}
-            style={{ fontWeight: 600 }}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
+              stockTab === 'physical'
+                ? 'bg-white text-slate-900 shadow-2xs font-bold'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
           >
-            ⚖️ Physical Count &amp; Reconciliation
+            Physical Count &amp; Reconciliation
           </button>
         )}
       </div>

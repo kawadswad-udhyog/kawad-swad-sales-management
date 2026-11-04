@@ -1,6 +1,21 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Expense } from '../types';
+import { PageHeader } from '../components/common/PageHeader';
+import { StatusBadge } from '../components/common/StatusBadge';
+import { EmptyState } from '../components/common/EmptyState';
+import {
+  Receipt,
+  Plus,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
+  X,
+  Fuel,
+  Package,
+  FileText,
+  CreditCard,
+} from 'lucide-react';
 
 const COMMON_EXPENSE_DESCRIPTIONS = [
   'Motorcycle Petrol / Fuel',
@@ -11,11 +26,11 @@ const COMMON_EXPENSE_DESCRIPTIONS = [
   'Mobile Calls / Data',
 ];
 
-const CATEGORIES: Array<{ key: 'TRAVEL' | 'DELIVERY' | 'OTHER' | 'DIGITAL'; label: string; icon: string }> = [
-  { key: 'TRAVEL', label: 'Travel / Fuel', icon: '⛽' },
-  { key: 'DELIVERY', label: 'Delivery', icon: '📦' },
-  { key: 'OTHER', label: 'Other', icon: '📝' },
-  { key: 'DIGITAL', label: 'Digital (Non-cash)', icon: '💳' },
+const CATEGORIES: Array<{ key: 'TRAVEL' | 'DELIVERY' | 'OTHER' | 'DIGITAL'; label: string; icon: React.ReactNode }> = [
+  { key: 'TRAVEL', label: 'Travel / Fuel', icon: <Fuel size={16} /> },
+  { key: 'DELIVERY', label: 'Delivery', icon: <Package size={16} /> },
+  { key: 'OTHER', label: 'Other', icon: <FileText size={16} /> },
+  { key: 'DIGITAL', label: 'Digital', icon: <CreditCard size={16} /> },
 ];
 
 export const ExpensesView: React.FC = () => {
@@ -28,8 +43,13 @@ export const ExpensesView: React.FC = () => {
   const [receiptRef, setReceiptRef] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Reject dialog state (avoiding window.prompt)
+  const [rejectingExpense, setRejectingExpense] = useState<Expense | null>(null);
+  const [rejectionReason, setRejectionReason] = useState('');
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
@@ -43,36 +63,48 @@ export const ExpensesView: React.FC = () => {
     }
 
     try {
-      submitExpense({
+      setIsSubmitting(true);
+      await submitExpense({
         category,
         amount: Number(amount),
         description: description.trim(),
         receipt_link_or_file_ref: receiptRef.trim(),
       });
-
-      setNotice({ msg: `✅ Expense of ₹${amount} submitted for manager review and approval.` });
+      setNotice({ msg: `Expense of ₹${amount} submitted for approval.` });
       setDescription('');
       setReceiptRef('');
       setAmount(100);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to submit expense';
       setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const handleApprove = (e: Expense) => {
-    approveExpense(e.expense_id, 'Approved by manager');
-    setNotice({ msg: `Expense ${e.expense_id} approved. Marked as cash-reducing.` });
+  const handleApprove = async (e: Expense) => {
+    try {
+      await approveExpense(e.expense_id, 'Approved by manager');
+      setNotice({ msg: `Expense ${e.expense_id} approved. Marked as cash-reducing.` });
+    } catch (err: unknown) {
+      setNotice({ msg: err instanceof Error ? err.message : 'Failed to approve', error: true });
+    }
   };
 
-  const handleReject = (e: Expense) => {
-    const reason = window.prompt('Please provide a reason for rejecting this expense:');
-    if (!reason || !reason.trim()) {
+  const handleConfirmReject = async () => {
+    if (!rejectingExpense) return;
+    if (!rejectionReason.trim()) {
       setNotice({ msg: 'A reason is required to reject an expense.', error: true });
       return;
     }
-    rejectExpense(e.expense_id, reason.trim());
-    setNotice({ msg: `Expense ${e.expense_id} rejected.` });
+    try {
+      await rejectExpense(rejectingExpense.expense_id, rejectionReason.trim());
+      setNotice({ msg: `Expense ${rejectingExpense.expense_id} rejected.` });
+      setRejectingExpense(null);
+      setRejectionReason('');
+    } catch (err: unknown) {
+      setNotice({ msg: err instanceof Error ? err.message : 'Failed to reject', error: true });
+    }
   };
 
   // Filter based on user role
@@ -90,54 +122,74 @@ export const ExpensesView: React.FC = () => {
   });
 
   return (
-    <div>
-      <h1>Expenses &amp; Approval Register</h1>
+    <div className="space-y-6 max-w-5xl mx-auto">
+      <PageHeader
+        title="Expenses & Claims"
+        subtitle="Submit field fuel, meals, delivery cartage, and review operational expense claims"
+        icon={<Receipt size={22} />}
+      />
 
       {notice && (
-        <div className={notice.error ? 'notice-error' : 'notice-success'}>
-          {notice.msg}
+        <div
+          className={`p-3.5 rounded-xl text-xs flex items-center justify-between border ${
+            notice.error
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {notice.error ? <AlertCircle size={16} className="text-red-600" /> : <CheckCircle2 size={16} className="text-emerald-600" />}
+            <span className="font-medium">{notice.msg}</span>
+          </div>
+          <button onClick={() => setNotice(null)} className="p-1 text-slate-400 hover:text-slate-600">
+            <X size={14} />
+          </button>
         </div>
       )}
 
-      <div className="card">
-        <h2>Submit Field Expense</h2>
+      {/* Expense Submission Form */}
+      <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">
+        <h2 className="text-base font-bold text-slate-900 mb-1">Record Expense Claim</h2>
+        <p className="text-xs text-slate-500 mb-4">
+          Approved cash claims automatically reduce cash due back during evening closing.
+        </p>
 
-        {/* Category Buttons */}
-        <div style={{ marginBottom: '14px' }}>
-          <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '6px' }}>
-            Category
-          </label>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '8px' }}>
-            {CATEGORIES.map((c) => (
-              <button
-                key={c.key}
-                type="button"
-                onClick={() => setCategory(c.key)}
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  border: category === c.key ? '2px solid #0f766e' : '1px solid #cbd5e1',
-                  background: category === c.key ? '#f0fdfa' : '#ffffff',
-                  color: category === c.key ? '#115e59' : '#334155',
-                  fontWeight: category === c.key ? 700 : 500,
-                  cursor: 'pointer',
-                  textAlign: 'center',
-                }}
-              >
-                <span style={{ fontSize: '1.2rem', display: 'block', marginBottom: '2px' }}>{c.icon}</span>
-                {c.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <form onSubmit={handleSubmit}>
-          {/* Quick Amount Selector */}
-          <div style={{ marginBottom: '14px' }}>
-            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '6px' }}>
-              Amount ₹
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Category Selector */}
+          <div>
+            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+              Expense Category
             </label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '6px' }}>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              {CATEGORIES.map((c) => {
+                const isSelected = category === c.key;
+                return (
+                  <button
+                    key={c.key}
+                    type="button"
+                    onClick={() => setCategory(c.key)}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+                      isSelected
+                        ? 'bg-emerald-50 border-emerald-500 text-emerald-950 font-bold shadow-2xs'
+                        : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700'
+                    }`}
+                  >
+                    <span className={isSelected ? 'text-emerald-700' : 'text-slate-400'}>
+                      {c.icon}
+                    </span>
+                    <span className="text-xs">{c.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Amount & Quick Buttons */}
+          <div>
+            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+              Amount (₹)
+            </label>
+            <div className="flex items-center gap-2 flex-wrap">
               <input
                 type="number"
                 min="1"
@@ -145,199 +197,168 @@ export const ExpensesView: React.FC = () => {
                 required
                 value={amount || ''}
                 onChange={(e) => setAmount(Number(e.target.value))}
-                style={{ width: '130px', fontSize: '1.1rem', fontWeight: 700, padding: '7px 10px' }}
+                className="w-32 px-3 py-2 text-base font-extrabold bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-mono"
               />
+              {[50, 100, 200, 500].map((quick) => (
+                <button
+                  key={quick}
+                  type="button"
+                  onClick={() => setAmount(quick)}
+                  className="px-3 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
+                >
+                  ₹{quick}
+                </button>
+              ))}
               <button
                 type="button"
-                className="secondary"
-                onClick={() => setAmount(50)}
-                style={{ padding: '6px 12px', fontSize: '0.82rem' }}
-              >
-                ₹50
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setAmount(100)}
-                style={{ padding: '6px 12px', fontSize: '0.82rem' }}
-              >
-                ₹100
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setAmount(200)}
-                style={{ padding: '6px 12px', fontSize: '0.82rem' }}
-              >
-                ₹200
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setAmount(500)}
-                style={{ padding: '6px 12px', fontSize: '0.82rem' }}
-              >
-                ₹500
-              </button>
-              <button
-                type="button"
-                className="secondary"
                 onClick={() => setAmount((prev) => prev + 50)}
-                style={{ padding: '6px 10px', fontSize: '0.82rem' }}
+                className="px-3 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
               >
                 +₹50
               </button>
             </div>
           </div>
 
-          {/* Common Description Shortcuts */}
-          <div style={{ marginBottom: '14px' }}>
-            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '6px' }}>
-              Description (One-Tap Shortcuts)
+          {/* Shortcuts & Description */}
+          <div>
+            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+              Description
             </label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
+            <div className="flex flex-wrap gap-1.5 mb-2.5">
               {COMMON_EXPENSE_DESCRIPTIONS.map((d) => (
                 <button
                   key={d}
                   type="button"
                   onClick={() => setDescription(d)}
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: '0.78rem',
-                    borderRadius: '14px',
-                    border: description === d ? '1px solid #0f766e' : '1px solid #cbd5e1',
-                    background: description === d ? '#ccfbf1' : '#f8fafc',
-                    color: description === d ? '#115e59' : '#475569',
-                    cursor: 'pointer',
-                  }}
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors cursor-pointer ${
+                    description === d
+                      ? 'bg-emerald-100 text-emerald-800 font-semibold'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                  }`}
                 >
                   {d}
                 </button>
               ))}
             </div>
             <input
+              type="text"
               required
               placeholder="e.g. Motorcycle petrol, Bus cartage slip, packing tape..."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              style={{ width: '100%' }}
+              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-medium"
             />
           </div>
 
-          <div style={{ marginBottom: '16px' }}>
-            <label>
-              <span style={{ fontSize: '0.85rem', fontWeight: 600, display: 'block', marginBottom: '4px' }}>
-                Receipt Link / File Ref / Slip Number (Optional)
-              </span>
-              <input
-                placeholder="e.g. SLIP-1029, Fuel bill link, receipt note..."
-                value={receiptRef}
-                onChange={(e) => setReceiptRef(e.target.value)}
-                style={{ width: '100%' }}
-              />
+          {/* Reference / Slip number */}
+          <div>
+            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+              Receipt / Bill Slip Number (Optional)
             </label>
+            <input
+              type="text"
+              placeholder="e.g. SLIP-1029, Fuel bill invoice number..."
+              value={receiptRef}
+              onChange={(e) => setReceiptRef(e.target.value)}
+              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700"
+            />
           </div>
 
-          <button type="submit" style={{ padding: '10px 20px', fontSize: '0.95rem' }}>
-            📤 Submit Expense for Approval
-          </button>
+          <div className="pt-2 flex justify-end">
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="px-5 py-2.5 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {isSubmitting ? 'Submitting…' : 'Submit Expense'}
+            </button>
+          </div>
         </form>
-
-        <p className="muted" style={{ marginTop: '12px' }}>
-          New submissions start as PENDING. Approved cash expenses automatically reduce physical cash due back
-          during evening closing.
-        </p>
       </div>
 
-      <div className="card">
-        <div className="toolbar" style={{ flexWrap: 'wrap', gap: '8px' }}>
-          <h2>
-            Expenses Register <span className="count">{filteredExpenses.length}</span>
-          </h2>
-          <div className="actions">
-            <button
-              type="button"
-              className={filterStatus === 'ALL' ? '' : 'secondary'}
-              onClick={() => setFilterStatus('ALL')}
-              style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              className={filterStatus === 'PENDING' ? '' : 'secondary'}
-              onClick={() => setFilterStatus('PENDING')}
-              style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-            >
-              Pending
-            </button>
-            <button
-              type="button"
-              className={filterStatus === 'APPROVED' ? '' : 'secondary'}
-              onClick={() => setFilterStatus('APPROVED')}
-              style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-            >
-              Approved
-            </button>
+      {/* Expenses Register Table */}
+      <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 mb-4 border-b border-slate-100">
+          <div>
+            <h2 className="text-base font-bold text-slate-900 m-0">
+              Expenses History ({filteredExpenses.length})
+            </h2>
+            <p className="text-xs text-slate-500 m-0">Recent expense records and verification status</p>
+          </div>
+
+          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg border border-slate-200/60 shrink-0">
+            {['ALL', 'PENDING', 'APPROVED', 'REJECTED'].map((st) => (
+              <button
+                key={st}
+                type="button"
+                onClick={() => setFilterStatus(st)}
+                className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                  filterStatus === st ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {st}
+              </button>
+            ))}
           </div>
         </div>
 
-        {filteredExpenses.length > 0 ? (
-          <div className="table-wrap">
-            <table>
+        {filteredExpenses.length === 0 ? (
+          <EmptyState
+            title="No Expenses Recorded"
+            description="No expense claims match the selected filter."
+            icon={<Receipt size={28} />}
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs text-left">
               <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Salesman</th>
-                  <th>Category</th>
-                  <th>Amount</th>
-                  <th>Description</th>
-                  <th>Status</th>
-                  {isManager && <th>Review Action</th>}
+                <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-500 uppercase tracking-wider text-[11px]">
+                  <th className="py-2.5 px-3">Date</th>
+                  <th className="py-2.5 px-3">Category</th>
+                  <th className="py-2.5 px-3">Amount</th>
+                  <th className="py-2.5 px-3">Description</th>
+                  <th className="py-2.5 px-3">Status</th>
+                  {isManager && <th className="py-2.5 px-3 text-right">Action</th>}
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-slate-100">
                 {filteredExpenses.map((exp) => (
-                  <tr key={exp.expense_id}>
-                    <td>{new Date(exp.expense_datetime).toLocaleDateString('en-IN')}</td>
-                    <td>{exp.salesman_user_id}</td>
-                    <td>
-                      <span style={{ fontSize: '0.8rem', background: '#f1f5f9', padding: '2px 6px', borderRadius: '4px' }}>
-                        {exp.category}
-                      </span>
+                  <tr key={exp.expense_id} className="hover:bg-slate-50/50">
+                    <td className="py-3 px-3 font-medium text-slate-700 whitespace-nowrap">
+                      {new Date(exp.expense_datetime).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
                     </td>
-                    <td>
-                      <strong style={{ color: '#b91c1c' }}>₹{exp.amount.toFixed(2)}</strong>
+                    <td className="py-3 px-3 font-semibold text-slate-800">
+                      {exp.category}
                     </td>
-                    <td>
-                      {exp.description}
+                    <td className="py-3 px-3 font-extrabold text-slate-900 font-mono">
+                      ₹{exp.amount.toFixed(2)}
+                    </td>
+                    <td className="py-3 px-3 text-slate-700 max-w-xs">
+                      <div>{exp.description}</div>
                       {exp.receipt_link_or_file_ref && (
-                        <div className="muted" style={{ fontSize: '0.75rem' }}>
+                        <div className="text-[10px] text-slate-400 font-mono">
                           Ref: {exp.receipt_link_or_file_ref}
                         </div>
                       )}
                     </td>
-                    <td>
-                      <span className={`badge ${exp.approval_status === 'APPROVED' ? 'on' : ''}`}>
-                        {exp.approval_status}
-                      </span>
+                    <td className="py-3 px-3">
+                      <StatusBadge status={exp.approval_status} size="sm" />
                     </td>
                     {isManager && (
-                      <td>
+                      <td className="py-3 px-3 text-right">
                         {exp.approval_status === 'PENDING' && (
-                          <div className="actions">
+                          <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
                               onClick={() => handleApprove(exp)}
-                              style={{ padding: '3px 8px', fontSize: '0.78rem', background: '#16a34a', color: '#fff' }}
+                              className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-md transition-colors cursor-pointer"
                             >
                               Approve
                             </button>
                             <button
                               type="button"
-                              className="secondary"
-                              onClick={() => handleReject(exp)}
-                              style={{ padding: '3px 8px', fontSize: '0.78rem', color: '#dc2626' }}
+                              onClick={() => setRejectingExpense(exp)}
+                              className="px-2.5 py-1 text-xs font-semibold bg-red-50 hover:bg-red-100 text-red-800 rounded-md transition-colors cursor-pointer"
                             >
                               Reject
                             </button>
@@ -350,10 +371,47 @@ export const ExpensesView: React.FC = () => {
               </tbody>
             </table>
           </div>
-        ) : (
-          <p className="muted">No expenses recorded for this filter.</p>
         )}
       </div>
+
+      {/* Rejection Modal (No window.prompt!) */}
+      {rejectingExpense && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-base font-bold text-slate-900 m-0">Reject Expense Claim</h3>
+            <p className="text-xs text-slate-500 m-0">
+              Please enter the reason for rejecting expense {rejectingExpense.expense_id} (₹{rejectingExpense.amount.toFixed(2)}).
+            </p>
+            <textarea
+              required
+              rows={3}
+              value={rejectionReason}
+              onChange={(e) => setRejectionReason(e.target.value)}
+              placeholder="e.g. Duplicate claim, missing receipt, exceeds allowable daily limit..."
+              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-red-500 font-medium"
+            />
+            <div className="flex justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setRejectingExpense(null);
+                  setRejectionReason('');
+                }}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmReject}
+                className="px-4 py-2 text-xs font-bold text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors cursor-pointer"
+              >
+                Confirm Rejection
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
