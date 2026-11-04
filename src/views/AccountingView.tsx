@@ -498,12 +498,12 @@ export const AccountingView: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-slate-700">
                         {formatCurrency(
-                          trialBalance.rows.reduce((sum, r) => sum + r.total_debit, 0)
+                          (trialBalance.rows || []).reduce((sum, r) => sum + r.total_debit, 0)
                         )}
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-slate-700">
                         {formatCurrency(
-                          trialBalance.rows.reduce((sum, r) => sum + r.total_credit, 0)
+                          (trialBalance.rows || []).reduce((sum, r) => sum + r.total_credit, 0)
                         )}
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-emerald-900 bg-emerald-50">
@@ -1340,7 +1340,7 @@ export const AccountingView: React.FC = () => {
             <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-right">
               <span className="text-xs text-red-600 font-semibold block">Total Receivables Outstanding</span>
               <span className="text-xl font-bold font-mono text-red-700">
-                {formatCurrency(debtors.reduce((acc, d) => acc + (d.outstanding_balance || 0), 0))}
+                {formatCurrency((debtors || []).reduce((acc, d) => acc + (d.outstanding_balance || 0), 0))}
               </span>
             </div>
           </div>
@@ -1402,7 +1402,7 @@ export const AccountingView: React.FC = () => {
             <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-right">
               <span className="text-xs text-red-600 font-semibold block">Total Payables Outstanding</span>
               <span className="text-xl font-bold font-mono text-red-700">
-                {formatCurrency(creditors.reduce((acc, c) => acc + (c.outstanding_payable || 0), 0))}
+                {formatCurrency((creditors || []).reduce((acc, c) => acc + (c.outstanding_payable || 0), 0))}
               </span>
             </div>
           </div>
