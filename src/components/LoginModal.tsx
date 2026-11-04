@@ -8,12 +8,12 @@ import {
   Eye,
   EyeOff,
   Settings,
-  CheckCircle2,
   Factory,
   Truck,
   Scale,
   ShieldCheck,
-  Building2,
+  ArrowRight,
+  HelpCircle,
 } from 'lucide-react';
 
 const REMEMBERED_USER_KEY = 'ks_remembered_username';
@@ -35,6 +35,7 @@ export const LoginModal: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<{ message: string; type: 'auth' | 'network' | 'forbidden' } | null>(null);
   const [showServerConfig, setShowServerConfig] = useState(false);
+  const [showHelpNote, setShowHelpNote] = useState(false);
   const [customUrl, setCustomUrl] = useState(backendUrl);
 
   // Restore remembered username on mount if previously chosen
@@ -47,14 +48,14 @@ export const LoginModal: React.FC = () => {
           setRememberUser(true);
         }
       } catch {
-        // ignore localStorage access limitations
+        // Safe fallback if storage is restricted
       }
     }
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isLoading) return;
+    if (isLoading) return; // Prevent duplicate concurrent submissions
     setError(null);
 
     const cleanUser = username.trim();
@@ -66,7 +67,7 @@ export const LoginModal: React.FC = () => {
       return;
     }
 
-    // Save or clear remembered username preference (strictly username only, never password)
+    // Persist remembered username (strictly username only, never password)
     if (typeof window !== 'undefined') {
       try {
         if (rememberUser) {
@@ -75,7 +76,7 @@ export const LoginModal: React.FC = () => {
           localStorage.removeItem(REMEMBERED_USER_KEY);
         }
       } catch {
-        // ignore
+        // Safe fallback
       }
     }
 
@@ -142,18 +143,16 @@ export const LoginModal: React.FC = () => {
   const getConnectionState = () => {
     if (!isBackendConnected) {
       return {
-        label: 'API Server Standby',
+        label: 'API Standby',
         dot: 'bg-amber-400',
-        text: 'text-amber-700',
-        bg: 'bg-amber-50 border-amber-200',
+        text: 'text-amber-800',
       };
     }
     if (!isGoogleSheetsConnected) {
       return {
         label: 'API Connected · Sheets Offline',
         dot: 'bg-amber-400',
-        text: 'text-amber-700',
-        bg: 'bg-amber-50 border-amber-200',
+        text: 'text-amber-800',
       };
     }
     if (!persistentWritesEnabled) {
@@ -161,146 +160,145 @@ export const LoginModal: React.FC = () => {
         label: 'API Connected · Storage Standby',
         dot: 'bg-amber-400 animate-pulse',
         text: 'text-amber-800',
-        bg: 'bg-amber-50 border-amber-300',
       };
     }
     return {
       label: 'System Online · Storage Verified',
-      dot: 'bg-emerald-500',
-      text: 'text-emerald-800',
-      bg: 'bg-emerald-50 border-emerald-200',
+      dot: 'bg-emerald-400',
+      text: 'text-emerald-300',
     };
   };
 
   const connState = getConnectionState();
 
   return (
-    <div className="min-h-screen w-full bg-[#FAF8F5] flex flex-col lg:flex-row items-stretch select-none">
+    <div className="min-h-screen w-full bg-[#F8F6F0] flex flex-col lg:flex-row items-stretch select-none font-sans text-slate-800">
       {/* ------------------------------------------------------------------ */}
       {/* LEFT SECTION: BRAND IDENTITY & OPERATIONAL PILLARS (Desktop)       */}
       {/* ------------------------------------------------------------------ */}
-      <div className="hidden lg:flex lg:w-1/2 xl:w-5/12 bg-gradient-to-br from-emerald-950 via-emerald-900 to-slate-950 text-white flex-col justify-between p-12 xl:p-16 relative overflow-hidden shrink-0 shadow-2xl">
-        {/* Subtle decorative background watermark */}
-        <div className="absolute -right-20 -bottom-20 w-96 h-96 rounded-full bg-emerald-600/10 blur-3xl pointer-events-none" />
-        <div className="absolute -left-20 -top-20 w-80 h-80 rounded-full bg-emerald-500/10 blur-3xl pointer-events-none" />
+      <div className="hidden lg:flex lg:w-[48%] xl:w-[44%] bg-[#0F2C23] text-white flex-col justify-between p-12 xl:p-16 relative overflow-hidden shrink-0 shadow-2xl">
+        {/* Subtle, refined atmospheric lighting */}
+        <div className="absolute -right-24 -bottom-24 w-96 h-96 rounded-full bg-emerald-600/10 blur-3xl pointer-events-none" />
+        <div className="absolute -left-20 -top-20 w-80 h-80 rounded-full bg-[#184638]/40 blur-3xl pointer-events-none" />
 
         {/* Top Header: Brand Emblem & ERP Identity */}
         <div className="relative z-10">
-          <div className="flex items-center gap-3.5 mb-8">
-            <div className="w-12 h-12 rounded-xl bg-white text-emerald-900 flex items-center justify-center font-black text-xl shadow-lg border border-amber-200/40">
+          <div className="flex items-center gap-3.5 mb-10">
+            {/* Elegant Monogram Badge */}
+            <div className="w-12 h-12 rounded-xl bg-white text-[#0F2C23] flex items-center justify-center font-black text-xl shadow-lg border border-amber-100/50 tracking-tighter shrink-0">
               KS
             </div>
             <div>
-              <span className="text-xs font-extrabold tracking-widest text-emerald-300 uppercase block">
+              <span className="text-[11px] font-bold tracking-[0.2em] text-[#D8B468] uppercase block leading-none mb-1.5">
                 Kawad Swad Udhyog
               </span>
-              <span className="text-xl font-bold tracking-tight text-white block">
+              <span className="text-xl font-bold tracking-tight text-white block leading-tight" style={{ color: '#ffffff' }}>
                 Enterprise Resource Planning
               </span>
             </div>
           </div>
 
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-800/60 border border-emerald-500/30 text-emerald-200 backdrop-blur-xs mb-8">
-            <Building2 size={13} className="text-emerald-300" />
-            <span>Manufacturing & Sales Management</span>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md text-[11px] font-semibold bg-white/10 border border-white/15 text-emerald-200 backdrop-blur-xs mb-8">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#D8B468]" />
+            <span style={{ color: '#A7F3D0' }}>Nimar Agro-Industrial Operations</span>
           </div>
 
-          <h1 className="text-4xl xl:text-5xl font-black tracking-tight text-white leading-tight">
+          <h1 className="text-3xl xl:text-4xl font-extrabold tracking-tight leading-snug !text-white" style={{ color: '#ffffff' }}>
             Business Management System
           </h1>
-          <p className="mt-3 text-lg font-medium text-emerald-200/90 tracking-wide">
+          <p className="mt-3 text-base font-medium tracking-wide !text-emerald-100" style={{ color: '#D1FAE5' }}>
             One System. Every Operation.
           </p>
         </div>
 
-        {/* Middle: Manufacturing & Operations Pillars */}
-        <div className="my-10 space-y-4 relative z-10">
-          <div className="flex items-start gap-3.5 p-3.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xs">
-            <div className="w-9 h-9 rounded-lg bg-emerald-800/80 flex items-center justify-center text-emerald-200 shrink-0 mt-0.5">
+        {/* Middle: Authentic Operational Pillars */}
+        <div className="my-8 space-y-3.5 relative z-10">
+          <div className="flex items-start gap-3.5 p-3.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xs transition-colors hover:bg-white/8">
+            <div className="w-9 h-9 rounded-lg bg-emerald-950/90 border border-emerald-700/50 flex items-center justify-center text-emerald-300 shrink-0 mt-0.5 shadow-xs">
               <Factory size={18} />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-white m-0">Factory & Milling Operations</h2>
-              <p className="text-xs text-emerald-100/70 mt-0.5 leading-relaxed m-0">
-                Moong & chana milling, automated recipe BOMs, packaging batches, and floor attendance.
+              <h2 className="text-sm font-bold !text-white m-0" style={{ color: '#ffffff' }}>Factory & Milling Operations</h2>
+              <p className="text-xs !text-emerald-100/80 mt-1 leading-relaxed m-0" style={{ color: '#D1FAE5' }}>
+                Moong & chana pulse milling, dynamic recipe bill of materials, packaging batches, and floor muster rolls.
               </p>
             </div>
           </div>
 
-          <div className="flex items-start gap-3.5 p-3.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xs">
-            <div className="w-9 h-9 rounded-lg bg-emerald-800/80 flex items-center justify-center text-emerald-200 shrink-0 mt-0.5">
+          <div className="flex items-start gap-3.5 p-3.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xs transition-colors hover:bg-white/8">
+            <div className="w-9 h-9 rounded-lg bg-emerald-950/90 border border-emerald-700/50 flex items-center justify-center text-emerald-300 shrink-0 mt-0.5 shadow-xs">
               <Truck size={18} />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-white m-0">Field Sales & Van Inventory</h2>
-              <p className="text-xs text-emerald-100/70 mt-0.5 leading-relaxed m-0">
-                Live shopkeeper invoicing, van packet stock balances, and instant cash collections.
+              <h2 className="text-sm font-bold !text-white m-0" style={{ color: '#ffffff' }}>Field Sales & Van Inventory</h2>
+              <p className="text-xs !text-emerald-100/80 mt-1 leading-relaxed m-0" style={{ color: '#D1FAE5' }}>
+                Live shopkeeper route billing, van vehicle stock balances, instant receipts, and cash closing.
               </p>
             </div>
           </div>
 
-          <div className="flex items-start gap-3.5 p-3.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xs">
-            <div className="w-9 h-9 rounded-lg bg-emerald-800/80 flex items-center justify-center text-emerald-200 shrink-0 mt-0.5">
+          <div className="flex items-start gap-3.5 p-3.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xs transition-colors hover:bg-white/8">
+            <div className="w-9 h-9 rounded-lg bg-emerald-950/90 border border-emerald-700/50 flex items-center justify-center text-emerald-300 shrink-0 mt-0.5 shadow-xs">
               <Scale size={18} />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-white m-0">Double-Entry Financial Ledgers</h2>
-              <p className="text-xs text-emerald-100/70 mt-0.5 leading-relaxed m-0">
-                Balanced trial balance, customer receivables, supplier payables, and daily closings.
+              <h2 className="text-sm font-bold !text-white m-0" style={{ color: '#ffffff' }}>Double-Entry Financial Ledgers</h2>
+              <p className="text-xs !text-emerald-100/80 mt-1 leading-relaxed m-0" style={{ color: '#D1FAE5' }}>
+                Trial balances, customer receivables, supplier payables, workforce payroll, and bank disbursements.
               </p>
             </div>
           </div>
         </div>
 
         {/* Bottom: Heritage & System Health */}
-        <div className="pt-6 border-t border-emerald-800/60 flex items-center justify-between text-xs text-emerald-300/80 relative z-10">
+        <div className="pt-6 border-t border-emerald-800/40 flex items-center justify-between text-xs text-emerald-200/80 relative z-10">
           <div>
-            <span className="font-semibold text-emerald-200 block">Kawad Swad Udhyog</span>
-            <span className="text-[11px] text-emerald-400/80">Nimar Region, Madhya Pradesh · Est. 1998</span>
+            <span className="font-semibold text-white block" style={{ color: '#ffffff' }}>Kawad Swad Udhyog</span>
+            <span className="text-[11px] text-[#D8B468]">Nimar Region, Madhya Pradesh · Est. 1998</span>
           </div>
 
-          <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-emerald-950/80 border border-emerald-800/50 text-[11px] font-medium text-emerald-300">
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/25 border border-white/10 text-[11px] font-medium text-emerald-200">
             <span className={`w-2 h-2 rounded-full ${connState.dot}`} />
-            <span>{connState.label}</span>
+            <span style={{ color: '#E2E8F0' }}>{connState.label}</span>
           </div>
         </div>
       </div>
 
       {/* ------------------------------------------------------------------ */}
-      {/* RIGHT SECTION: CLEAN & MODERN LOGIN FORM                           */}
+      {/* RIGHT SECTION: CLEAN, FOCUSED & ACCESSIBLE LOGIN CARD              */}
       {/* ------------------------------------------------------------------ */}
       <div className="flex-1 flex flex-col justify-center items-center p-6 sm:p-10 lg:p-16">
-        {/* Mobile Header Branding (Visible on mobile/tablet only) */}
+        {/* Mobile Header Branding (Visible on mobile/tablet viewports) */}
         <div className="lg:hidden w-full max-w-md text-center mb-6">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-emerald-800 text-white font-black text-xl mb-2.5 shadow-md border border-amber-200/30">
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-[#0F2C23] text-white font-black text-xl mb-3 shadow-md border border-amber-200/20">
             KS
           </div>
-          <h2 className="text-xl font-black text-slate-900 tracking-tight m-0">
+          <span className="text-[11px] font-bold tracking-[0.18em] text-[#A67C38] uppercase block leading-none mb-1">
             Kawad Swad Udhyog
-          </h2>
-          <p className="text-xs text-emerald-800 font-semibold mt-0.5 m-0">
+          </span>
+          <h2 className="text-xl font-bold text-slate-900 tracking-tight m-0">
             Business Management System
-          </p>
+          </h2>
           <p className="text-xs text-slate-500 mt-1 m-0">
             One System. Every Operation.
           </p>
         </div>
 
         {/* Main Login Card */}
-        <div className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl shadow-xl shadow-slate-200/50 p-7 sm:p-9 relative">
+        <div className="w-full max-w-md bg-white border border-[#E7E2D6] rounded-2xl shadow-[0_10px_35px_-10px_rgba(15,44,35,0.07)] p-8 sm:p-10 relative">
           {/* Card Title & Instructions */}
-          <div className="mb-6">
+          <div className="mb-7">
             <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold text-slate-900 tracking-tight m-0">
-                Sign In to ERP
+              <h2 className="text-2xl font-bold text-slate-900 tracking-tight m-0">
+                Staff Sign In
               </h2>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                <ShieldCheck size={13} className="text-emerald-700" />
-                Staff Portal
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-bold bg-[#F4F1EA] text-[#0F2C23] border border-[#DDD7C9]">
+                <ShieldCheck size={13} className="text-[#0F2C23]" />
+                Secure Portal
               </span>
             </div>
-            <p className="text-xs text-slate-500 mt-1.5 leading-relaxed m-0">
-              Enter your staff credentials to access your daily operational workspace.
+            <p className="text-xs text-slate-500 mt-2 leading-relaxed m-0">
+              Enter your assigned staff credentials to access your daily operational workspace.
             </p>
           </div>
 
@@ -314,8 +312,8 @@ export const LoginModal: React.FC = () => {
               >
                 User ID / Username
               </label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 text-slate-400 pointer-events-none">
+              <div className="relative flex items-center">
+                <span className="absolute left-3.5 text-slate-400 pointer-events-none flex items-center">
                   <User size={17} />
                 </span>
                 <input
@@ -328,9 +326,10 @@ export const LoginModal: React.FC = () => {
                   }}
                   autoComplete="username"
                   required
-                  placeholder="e.g. owner, sales_ramesh, factory_lead"
+                  placeholder="e.g. owner, ramesh_sales, factory_mgr"
                   disabled={isLoading}
-                  className="w-full pl-10 pr-3 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:border-emerald-800 transition-colors disabled:bg-slate-50 disabled:text-slate-500 font-medium placeholder:text-slate-400"
+                  style={{ paddingLeft: '44px', paddingRight: '14px' }}
+                  className="w-full py-3 text-sm bg-white border border-slate-300 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#0F2C23] focus:border-[#0F2C23] transition-colors disabled:bg-slate-50 disabled:text-slate-500 font-medium placeholder:text-slate-400"
                 />
               </div>
             </div>
@@ -343,8 +342,8 @@ export const LoginModal: React.FC = () => {
               >
                 Password
               </label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 text-slate-400 pointer-events-none">
+              <div className="relative flex items-center">
+                <span className="absolute left-3.5 text-slate-400 pointer-events-none flex items-center">
                   <Lock size={17} />
                 </span>
                 <input
@@ -359,12 +358,13 @@ export const LoginModal: React.FC = () => {
                   required
                   placeholder="Enter your password"
                   disabled={isLoading}
-                  className="w-full pl-10 pr-11 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:border-emerald-800 transition-colors disabled:bg-slate-50 disabled:text-slate-500 font-medium placeholder:text-slate-400"
+                  style={{ paddingLeft: '44px', paddingRight: '44px' }}
+                  className="w-full py-3 text-sm bg-white border border-slate-300 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#0F2C23] focus:border-[#0F2C23] transition-colors disabled:bg-slate-50 disabled:text-slate-500 font-medium placeholder:text-slate-400"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 flex items-center pr-3.5 text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+                  className="absolute right-3 text-slate-400 hover:text-slate-700 transition-colors cursor-pointer p-1"
                   tabIndex={-1}
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                 >
@@ -373,9 +373,12 @@ export const LoginModal: React.FC = () => {
               </div>
             </div>
 
-            {/* Remember Username Option */}
-            <div className="flex items-center justify-between pt-1">
-              <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-600 select-none">
+            {/* Remember Username Option & Staff Support Note */}
+            <div className="flex items-center justify-between pt-1 gap-2">
+              <label
+                style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}
+                className="text-xs font-medium text-slate-600 select-none cursor-pointer"
+              >
                 <input
                   type="checkbox"
                   checked={rememberUser}
@@ -391,11 +394,31 @@ export const LoginModal: React.FC = () => {
                     }
                   }}
                   disabled={isLoading}
-                  className="w-4 h-4 rounded text-emerald-800 focus:ring-emerald-700 border-slate-300 cursor-pointer"
+                  className="w-4 h-4 shrink-0 rounded text-[#0F2C23] focus:ring-[#0F2C23] border-slate-300 cursor-pointer mr-2"
                 />
-                <span>Remember User ID on this device</span>
+                <span className="truncate">Remember User ID on this device</span>
               </label>
+
+              <button
+                type="button"
+                onClick={() => setShowHelpNote(!showHelpNote)}
+                className="text-xs text-slate-500 hover:text-[#0F2C23] transition-colors inline-flex items-center gap-1 cursor-pointer font-medium shrink-0"
+                title="Forgot Password or Account Help"
+              >
+                <HelpCircle size={13} />
+                <span>Help</span>
+              </button>
             </div>
+
+            {/* Help Callout for Password Reset & Access Support */}
+            {showHelpNote && (
+              <div className="p-3 bg-[#FAF8F3] border border-[#E7E2D6] rounded-xl text-xs text-slate-600 space-y-1">
+                <p className="font-semibold text-slate-800 m-0">Need account access or password reset?</p>
+                <p className="m-0 leading-relaxed text-slate-600 text-[11px]">
+                  Passcode credentials are managed centrally. Please contact your factory supervisor, personal assistant (PA), or the system administrator to reset your credentials.
+                </p>
+              </div>
+            )}
 
             {/* Error Message Alert */}
             {error && (
@@ -415,7 +438,7 @@ export const LoginModal: React.FC = () => {
                   />
                   <span>
                     {error.type === 'auth'
-                      ? 'Authentication Failed'
+                      ? 'Authentication Notice'
                       : error.type === 'network'
                       ? 'Connection Notice'
                       : 'Access Restricted'}
@@ -429,7 +452,7 @@ export const LoginModal: React.FC = () => {
             <button
               type="submit"
               disabled={isLoading}
-              className="w-full py-3 px-4 rounded-xl bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white font-bold text-sm shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed mt-2"
+              className="w-full py-3.5 px-4 rounded-xl bg-[#0F2C23] hover:bg-[#153D31] active:bg-[#0A201A] text-white font-bold text-sm shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed mt-3"
             >
               {isLoading ? (
                 <>
@@ -437,13 +460,16 @@ export const LoginModal: React.FC = () => {
                   <span>Signing In…</span>
                 </>
               ) : (
-                <span>Sign In to ERP</span>
+                <>
+                  <span>Sign In to ERP</span>
+                  <ArrowRight size={15} className="text-emerald-300" />
+                </>
               )}
             </button>
           </form>
 
           {/* Footer Controls: Live Connection State & Optional Server Config */}
-          <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-xs">
+          <div className="mt-7 pt-4 border-t border-slate-100 flex items-center justify-between text-xs">
             <div className="flex items-center gap-1.5">
               <span className={`w-2 h-2 rounded-full ${connState.dot}`} />
               <span className="text-[11px] font-medium text-slate-500">
@@ -478,12 +504,12 @@ export const LoginModal: React.FC = () => {
                 onChange={(e) => setCustomUrl(e.target.value)}
                 placeholder="https://kawad-swad-sales-dev.onrender.com"
                 required
-                className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-700 font-mono"
+                className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-[#0F2C23] font-mono"
               />
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="submit"
-                  className="px-3 py-1 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                  className="px-3 py-1 bg-[#0F2C23] hover:bg-[#153D31] text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
                 >
                   Apply URL
                 </button>
