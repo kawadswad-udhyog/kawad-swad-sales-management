@@ -35,6 +35,7 @@ import type {
   LotMovement,
   CustomerReturn,
   ComplaintRecall,
+} from '../types';
 import {
   FormLayout,
   FormField,
