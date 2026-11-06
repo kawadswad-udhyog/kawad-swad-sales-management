@@ -54,12 +54,14 @@ type WorkforceTab =
   | 'receipts'
   | 'audit';
 
+import { EmployeeRegistrationWizard } from '../components/workforce/EmployeeRegistrationWizard';
+
 interface WorkforceViewProps {
   onPreviewEmployeePortal?: () => void;
 }
 
 export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeePortal }) => {
-  const { currentUser } = useStore();
+  const { currentUser, users, createUser } = useStore();
   const token = getAuthToken();
   const [activeTab, setActiveTab] = useState<WorkforceTab>('overview');
   const [isLoading, setIsLoading] = useState(false);
@@ -436,14 +438,14 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       {/* 2. Sub-Tabs Bar */}
       <div className="border-b border-slate-200 flex items-center gap-1 overflow-x-auto pb-1 text-xs font-semibold">
         {[
-          { id: 'overview', label: 'Dashboard & Metrics', icon: <Users size={15} /> },
-          { id: 'employees', label: 'Employee Directory', icon: <Building size={15} /> },
-          { id: 'labour', label: 'Labour Master', icon: <Briefcase size={15} /> },
+          { id: 'overview', label: 'Team Overview', icon: <Users size={15} /> },
+          { id: 'employees', label: 'Staff Directory', icon: <Building size={15} /> },
+          { id: 'labour', label: 'Labour Register', icon: <Briefcase size={15} /> },
           { id: 'labour_attendance', label: 'Daily Labour Attendance', icon: <Clock size={15} /> },
           { id: 'tasks', label: 'Work Assignments', icon: <CheckSquare size={15} /> },
           { id: 'projects', label: 'Freelancer Projects', icon: <FileCheck size={15} /> },
-          { id: 'payroll', label: 'Payroll Engine', icon: <Coins size={15} /> },
-          { id: 'receipts', label: 'Salary Receipts', icon: <Download size={15} /> },
+          { id: 'payroll', label: 'Salary & Wages', icon: <Coins size={15} /> },
+          { id: 'receipts', label: 'Salary Slips', icon: <Download size={15} /> },
           { id: 'audit', label: 'Audit Register', icon: <Shield size={15} /> },
         ].map((tab) => (
           <button
@@ -538,7 +540,19 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                 className="text-xs p-1.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-600 w-64"
               />
             </div>
-            <span className="text-xs text-slate-500 font-semibold">{employees.length} registered staff</span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-500 font-semibold">{employees.length} registered staff</span>
+              {isOwner && (
+                <button
+                  type="button"
+                  onClick={() => setShowAddEmployeeModal(true)}
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <UserPlus size={14} />
+                  <span>Register Staff</span>
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -1272,6 +1286,24 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
             setActionSuccess(msg);
             loadProjects();
           }}
+        />
+      )}
+
+      {/* MODAL: 7-Step Guided Employee Registration Wizard */}
+      {showAddEmployeeModal && (
+        <EmployeeRegistrationWizard
+          existingUsers={users || []}
+          onClose={() => setShowAddEmployeeModal(false)}
+          onSubmit={async (payload) => {
+            const res = await createUser(payload);
+            if (res) {
+              await loadEmployees();
+              setActionSuccess(`Staff member ${payload.full_name} registered successfully.`);
+              return true;
+            }
+            return false;
+          }}
+          isOwner={isOwner}
         />
       )}
 

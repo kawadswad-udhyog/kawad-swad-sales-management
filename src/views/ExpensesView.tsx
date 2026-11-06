@@ -136,8 +136,8 @@ export const ExpensesView: React.FC = () => {
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       <PageHeader
-        title="Expenses & Claims"
-        subtitle="Submit field fuel, meals, delivery cartage, and review operational expense claims"
+        title="Daily Expenses"
+        subtitle="Submit travel fuel, tea, delivery cartage, and record daily operational expense claims"
         icon={<Receipt size={22} />}
       />
 

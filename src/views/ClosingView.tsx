@@ -109,8 +109,8 @@ export const ClosingView: React.FC = () => {
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       <PageHeader
-        title="Daily Cash Closing & Handover"
-        subtitle="Evening cash reconciliation: Opening float + Cash collected - Approved expenses"
+        title="Daily Cash Handover"
+        subtitle="End-of-day cash handover: Morning cash + Money received - Daily expenses = Cash to submit"
         icon={<Lock size={22} />}
       />
 
@@ -136,17 +136,17 @@ export const ClosingView: React.FC = () => {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs">
           <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            Opening Float
+            Morning Cash
           </span>
           <div className="text-2xl font-black text-slate-900 mt-1 font-mono">
             ₹{Number(openingCash).toFixed(2)}
           </div>
-          <div className="text-[11px] text-slate-400 mt-1">Morning starting cash</div>
+          <div className="text-[11px] text-slate-400 mt-1">Starting cash float</div>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs">
           <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            Cash Collected
+            Money Received
           </span>
           <div className="text-2xl font-black text-emerald-800 mt-1 font-mono">
             +₹{metrics.cash_collected.toFixed(2)}
@@ -156,22 +156,22 @@ export const ClosingView: React.FC = () => {
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs">
           <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            Approved Expenses
+            Daily Expenses
           </span>
           <div className="text-2xl font-black text-red-700 mt-1 font-mono">
             -₹{metrics.approved_cash_expenses.toFixed(2)}
           </div>
-          <div className="text-[11px] text-slate-400 mt-1">Cash claims subtracted</div>
+          <div className="text-[11px] text-slate-400 mt-1">Approved fuel & claims</div>
         </div>
 
         <div className="bg-emerald-50/80 border border-emerald-300 rounded-xl p-4 shadow-2xs">
           <span className="text-xs font-bold uppercase tracking-wider text-emerald-900">
-            Expected Return
+            Money to Hand Over
           </span>
           <div className="text-2xl font-black text-emerald-950 mt-1 font-mono">
             ₹{liveExpectedReturn.toFixed(2)}
           </div>
-          <div className="text-[11px] text-emerald-700 mt-1 font-semibold">Net due at handover</div>
+          <div className="text-[11px] text-emerald-700 mt-1 font-semibold">Net cash to submit</div>
         </div>
       </div>
 

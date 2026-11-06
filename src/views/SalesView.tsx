@@ -467,8 +467,8 @@ export const SalesView: React.FC = () => {
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       <PageHeader
-        title="Sales, Billing &amp; Invoicing"
-        subtitle="Rapid billing workspace · Direct spot sales, retailer orders &amp; instant invoice generation"
+        title="Orders & Bills"
+        subtitle="Customer order entry, wholesale invoice billing & instant payment receipts"
         actions={
           <button
             type="button"

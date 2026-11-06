@@ -324,10 +324,10 @@ export const StockView: React.FC = () => {
     <div className="space-y-6 max-w-7xl mx-auto">
       <div className="pb-4 border-b border-slate-200">
         <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight m-0">
-          Stock & Inventory Ledgers
+          Stock
         </h1>
         <p className="text-xs sm:text-sm text-slate-500 mt-1 mb-0 leading-relaxed">
-          Ready-to-sell packet inventory across Factory, Warehouse, Field Salesmen, and Channels
+          Ready-to-sell packet stock across Factory, Warehouse, Field Salesmen, and Channels
         </p>
       </div>
 
@@ -341,7 +341,7 @@ export const StockView: React.FC = () => {
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          Finished Goods Register
+          Ready Stock Register
         </button>
         <button
           type="button"
@@ -352,7 +352,7 @@ export const StockView: React.FC = () => {
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          Stock Movements &amp; Ledgers
+          Stock History
         </button>
         {isManager && (
           <button
@@ -364,7 +364,7 @@ export const StockView: React.FC = () => {
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            Physical Count &amp; Reconciliation
+            Physical Count &amp; Difference
           </button>
         )}
       </div>

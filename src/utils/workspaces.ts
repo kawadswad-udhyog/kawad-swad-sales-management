@@ -1,6 +1,7 @@
 import React from 'react';
 import { ViewType } from '../components/Navigation';
 import { UserRole } from '../types';
+import { resolveEmployeeCategory, EmployeeCategory } from './permissions';
 
 export type WorkspaceId =
   | 'owner'
@@ -20,6 +21,7 @@ export interface WorkspaceConfig {
   title: string;
   subtitle: string;
   roleBadge: string;
+  category: EmployeeCategory;
   allowedViews: ViewType[];
   defaultView: ViewType;
 }
@@ -27,147 +29,169 @@ export interface WorkspaceConfig {
 export interface NavItemConfig {
   view: ViewType;
   label: string;
+  hindiLabel?: string;
   description: string;
   group: 'main' | 'operations' | 'management' | 'system';
 }
 
 /**
- * Standard plain English navigation labels mandated by Section 2:
- * Home, My Work, Orders, Customers, Production, Stock, Attendance, Payments, Approvals, Reports, Team, Settings
+ * Standard plain business navigation labels translating legacy ERP terms
+ * into clear, operational everyday language.
  */
 export const ALL_NAV_ITEMS: Record<ViewType, NavItemConfig> = {
   dashboard: {
     view: 'dashboard',
     label: 'Home',
+    hindiLabel: 'Mukhya Page',
     description: 'Dashboard & daily priorities',
     group: 'main',
   },
   workforce: {
     view: 'workforce',
-    label: 'My Work',
-    description: 'Tasks, attendance & team',
+    label: 'Our Team',
+    hindiLabel: 'Hamari Team',
+    description: 'Staff, tasks & attendance',
     group: 'main',
   },
   sales: {
     view: 'sales',
-    label: 'Orders',
-    description: 'Sales orders & billing',
+    label: 'Orders & Bills',
+    hindiLabel: 'Order Aur Bill',
+    description: 'Sales orders & customer billing',
     group: 'operations',
   },
   customers: {
     view: 'customers',
     label: 'Customers',
+    hindiLabel: 'Grahak',
     description: 'Customer directory & balances',
     group: 'operations',
   },
   production: {
     view: 'production',
     label: 'Production',
-    description: 'Batches, recipes & milling',
+    hindiLabel: 'Utpadan',
+    description: 'Batches, recipes & output',
     group: 'operations',
   },
   stock: {
     view: 'stock',
     label: 'Stock',
-    description: 'Inventory & warehouse ledgers',
+    hindiLabel: 'Maal Ka Stock',
+    description: 'Inventory & warehouse items',
     group: 'operations',
   },
   attendance: {
     view: 'attendance',
     label: 'Attendance',
+    hindiLabel: 'Rozana Haaziri',
     description: 'Daily check-in & wages',
     group: 'operations',
   },
   accounting: {
     view: 'accounting',
-    label: 'Payments',
-    description: 'Accounts, expenses & ledger',
+    label: 'Money Records',
+    hindiLabel: 'Khata Vahi',
+    description: 'Accounts, payments & ledger',
     group: 'management',
   },
   approvals: {
     view: 'approvals',
     label: 'Approvals',
+    hindiLabel: 'Manzoori',
     description: 'Pending production & expenses',
     group: 'management',
   },
   reports: {
     view: 'reports',
     label: 'Reports',
+    hindiLabel: 'Report',
     description: 'Sales & production reports',
     group: 'management',
   },
   users: {
     view: 'users',
-    label: 'Team',
+    label: 'Team Access',
+    hindiLabel: 'Staff Permissions',
     description: 'Staff & permissions',
     group: 'management',
   },
   audit: {
     view: 'audit',
-    label: 'Settings',
+    label: 'System Settings',
+    hindiLabel: 'Settings',
     description: 'System health & diagnostics',
     group: 'system',
   },
-  // Sub-modules grouped within primary navigation:
+  // Sub-modules with plain-language labels
   purchasing: {
     view: 'purchasing',
-    label: 'Purchasing',
+    label: 'Buy Materials',
+    hindiLabel: 'Saaman Khareed',
     description: 'Raw materials & suppliers',
     group: 'operations',
   },
   packaging: {
     view: 'packaging',
     label: 'Packaging',
+    hindiLabel: 'Packing',
     description: 'Bulk to finished goods packing',
     group: 'operations',
   },
   quality: {
     view: 'quality',
-    label: 'Quality',
+    label: 'Quality Check',
+    hindiLabel: 'Gunvatta Jaanch',
     description: 'Quality checks & batch tests',
     group: 'operations',
   },
   expenses: {
     view: 'expenses',
-    label: 'Expenses',
+    label: 'Daily Expenses',
+    hindiLabel: 'Rozana Kharch',
     description: 'Claims & operational expenses',
     group: 'management',
   },
   visits: {
     view: 'visits',
     label: 'Shop Visits',
+    hindiLabel: 'Dukaan Visit',
     description: 'Store interaction register',
     group: 'operations',
   },
   closing: {
     view: 'closing',
-    label: 'Daily Closing',
-    description: 'Cash handover & closing',
+    label: 'Daily Cash Handover',
+    hindiLabel: 'Din Ka Cash Jama',
+    description: 'Cash handover & register closing',
     group: 'management',
   },
   products: {
     view: 'products',
-    label: 'Products',
+    label: 'Product Rates',
+    hindiLabel: 'Item Rate List',
     description: 'Product catalogue & wholesale rates',
     group: 'operations',
   },
   salary: {
     view: 'salary',
-    label: 'Payroll',
+    label: 'Salary & Wages',
+    hindiLabel: 'Tankhwah / Mazdoori',
     description: 'Salary calculations & payouts',
     group: 'management',
   },
 };
 
 /**
- * Workspace definitions mapping each backend role to its primary workspace
+ * Workspace definitions mapping each backend role & category to its primary workspace
  */
 export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
   owner: {
     id: 'owner',
     title: 'Business Overview',
     subtitle: 'Executive overview of sales, production, inventory & finances',
-    roleBadge: 'Owner / Admin',
+    roleBadge: 'Business Owner / MD',
+    category: 'ADMINISTRATIVE',
     allowedViews: [
       'dashboard',
       'sales',
@@ -188,14 +212,16 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
       'closing',
       'salary',
       'workforce',
+      'products',
     ],
     defaultView: 'dashboard',
   },
   pa: {
     id: 'pa',
     title: 'Daily Operations',
-    subtitle: 'Daily priorities, coordination, purchases & team workflow',
-    roleBadge: 'Personal Assistant',
+    subtitle: 'Daily priorities, billing, coordination, purchases & team workflow',
+    roleBadge: 'Personal Assistant (PA)',
+    category: 'OFFICE_STAFF',
     allowedViews: [
       'dashboard',
       'sales',
@@ -219,6 +245,7 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
     title: 'Operations & Approvals',
     subtitle: 'Production monitoring, inventory controls & pending reviews',
     roleBadge: 'Operations Manager',
+    category: 'OFFICE_STAFF',
     allowedViews: [
       'dashboard',
       'production',
@@ -236,8 +263,9 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
   salesman: {
     id: 'salesman',
     title: 'My Sales',
-    subtitle: 'Field orders, store visits, customer billing & cash closing',
+    subtitle: 'Field orders, store visits, customer billing & cash handover',
     roleBadge: 'Field Sales',
+    category: 'FIELD_STAFF',
     allowedViews: [
       'dashboard',
       'sales',
@@ -254,14 +282,15 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
     id: 'factory',
     title: 'Factory Work',
     subtitle: 'Production batches, packaging, materials & daily attendance',
-    roleBadge: 'Factory Operations',
+    roleBadge: 'Factory Worker',
+    category: 'FACTORY_WORKERS',
     allowedViews: [
       'dashboard',
+      'attendance',
       'production',
       'packaging',
       'quality',
       'stock',
-      'attendance',
     ],
     defaultView: 'dashboard',
   },
@@ -269,7 +298,8 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
     id: 'employee',
     title: 'My Work',
     subtitle: 'Personal attendance, assigned tasks, salary & profile',
-    roleBadge: 'Staff Member',
+    roleBadge: 'Office Staff',
+    category: 'OFFICE_STAFF',
     allowedViews: ['dashboard', 'workforce', 'attendance'],
     defaultView: 'dashboard',
   },
@@ -277,15 +307,17 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
     id: 'labour_supervisor',
     title: 'Labour & Attendance',
     subtitle: 'Labour muster roll, daily piecework & wage verification',
-    roleBadge: 'Labour Supervisor',
-    allowedViews: ['dashboard', 'attendance', 'workforce', 'production'],
+    roleBadge: 'Factory Supervisor',
+    category: 'FACTORY_WORKERS',
+    allowedViews: ['dashboard', 'attendance', 'workforce', 'production', 'packaging', 'stock'],
     defaultView: 'dashboard',
   },
   accountant: {
     id: 'accountant',
     title: 'Accounts & Payments',
-    subtitle: 'General ledger, payments, expenses, receivables & reconciliation',
-    roleBadge: 'Finance & Accounts',
+    subtitle: 'Money records, payments, expenses, receivables & reconciliation',
+    roleBadge: 'Accountant',
+    category: 'OFFICE_STAFF',
     allowedViews: [
       'dashboard',
       'accounting',
@@ -302,6 +334,7 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
     title: 'My Projects',
     subtitle: 'Assigned design projects, milestone deliveries & invoices',
     roleBadge: 'Freelance Partner',
+    category: 'FIELD_STAFF',
     allowedViews: ['dashboard', 'workforce'],
     defaultView: 'dashboard',
   },
@@ -309,8 +342,9 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
     id: 'marketing',
     title: 'Marketing Tasks',
     subtitle: 'Social media campaigns, promotions & marketing deliverables',
-    roleBadge: 'Social Media Manager',
-    allowedViews: ['dashboard', 'workforce'],
+    roleBadge: 'Marketing Representative',
+    category: 'FIELD_STAFF',
+    allowedViews: ['dashboard', 'workforce', 'visits', 'customers'],
     defaultView: 'dashboard',
   },
   ecommerce: {
@@ -318,6 +352,7 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
     title: 'Online Orders',
     subtitle: 'E-commerce marketplace orders, dispatches & customer queries',
     roleBadge: 'E-Commerce Manager',
+    category: 'OFFICE_STAFF',
     allowedViews: ['dashboard', 'sales', 'customers', 'stock', 'workforce'],
     defaultView: 'dashboard',
   },
@@ -380,7 +415,6 @@ export function getWorkspaceForRole(role?: string | null): WorkspaceConfig {
 
     case 'EMPLOYEE':
     default:
-      // Graceful default: My Work employee workspace
       return WORKSPACES.employee;
   }
 }
@@ -392,4 +426,22 @@ export function getNavItemsForWorkspace(config: WorkspaceConfig): NavItemConfig[
   return config.allowedViews
     .map((view) => ALL_NAV_ITEMS[view])
     .filter((item): item is NavItemConfig => Boolean(item));
+}
+
+/**
+ * Resolves human-readable category badge for display in headers and user badges
+ */
+export function getCategoryBadge(workspaceId: WorkspaceId): { label: string; bgClass: string } {
+  const ws = WORKSPACES[workspaceId];
+  const cat = ws?.category || 'OFFICE_STAFF';
+  switch (cat) {
+    case 'FACTORY_WORKERS':
+      return { label: 'Factory Worker', bgClass: 'bg-amber-100 text-amber-800 border-amber-200' };
+    case 'FIELD_STAFF':
+      return { label: 'Field Staff', bgClass: 'bg-blue-100 text-blue-800 border-blue-200' };
+    case 'OFFICE_STAFF':
+      return { label: 'Office Staff', bgClass: 'bg-emerald-100 text-emerald-800 border-emerald-200' };
+    case 'ADMINISTRATIVE':
+      return { label: 'Owner / Admin', bgClass: 'bg-purple-100 text-purple-800 border-purple-200' };
+  }
 }

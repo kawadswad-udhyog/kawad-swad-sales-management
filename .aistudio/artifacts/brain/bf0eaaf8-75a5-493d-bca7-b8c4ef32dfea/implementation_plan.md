@@ -1,260 +1,259 @@
-# Kawad Swad ERP: Simple Language, User Experience & Workforce Reorganization
-## Audit Report & Master Implementation Plan
+# Kawad Swad ERP: Final Usability Upgrade Architecture & Master Plan
 
 ---
 
-### Executive Summary
+## 1. Final Implementation Architecture
 
-Kawad Swad ERP is a manufacturing, inventory, and sales system designed to serve both factory-floor operators and executive decision-makers. The objective of this upgrade is to eliminate operational barriers for employees with limited formal education and no accounting background, while preserving 100% of the underlying backend business logic, double-entry accounting integrity, Google Sheets/MongoDB synchronisation, and API contracts.
+The architecture maintains a strict separation between the **Display & Interaction Layer** and the **Underlying Business & Data Integrity Layer**:
 
-This plan details the findings of our comprehensive frontend audit and establishes the concrete, phased implementation architecture.
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                   KAWAD SWAD ERP FRONTEND SHELL                        │
+├────────────────────────────────────────────────────────────────────────┤
+│  Top Bar & Workspace Switcher (Owner Preview / Exit Preview Banner)    │
+├───────────────────┬────────────────────────────────────────────────────┤
+│  Navigation Menu  │  Active Workspace Viewport                          │
+│  (Category-Aware, │  • Category-Specific Dashboards                    │
+│   Plain Language, │  • Simple Forms (Auto-Totals, Human IDs)           │
+│   Zero-Clutter)   │  • Unified Status Badges & Quick Action Hubs       │
+├───────────────────┴────────────────────────────────────────────────────┤
+│                 PRESENTATION TRANSLATION SERVICES                      │
+│  • Terminology Dictionary (`src/utils/terminology.ts`)                 │
+│  • Status Mapping Engine (`src/utils/statusLabels.ts`)                 │
+│  • Category & Role Resolver (`src/utils/workspaces.ts`)                │
+├────────────────────────────────────────────────────────────────────────┤
+│                 BUSINESS LOGIC & SECURITY GUARDS                       │
+│  • Client-Side Permission Matrix (`src/utils/permissions.ts`)          │
+│  • Double-Entry Bridge (Simplified Cash vs. Journal Ledgers)           │
+│  • Navigation Guards (Redirects unpermitted views to default view)     │
+├────────────────────────────────────────────────────────────────────────┤
+│                 AUTHENTICATION & BACKEND API LAYER                     │
+│  • Session Persistence (Bearer JWT / SessionStorage)                  │
+│  • Authoritative Backend Authorization Boundary (`/api/*`)             │
+│  • Google Sheets 49-Tab Persistence & MongoDB Engine                   │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
----
-
-### Phase 1: Comprehensive Language Audit & Centralized Vocabulary Dictionary
-
-#### 1. Audit Findings Across Current Frontend Views
-An audit across `/src/views/` (`AccountingView`, `AttendanceView`, `ClosingView`, `CustomersView`, `ExpensesView`, `ProductionView`, `ProductsView`, `PurchasingView`, `QualityView`, `StockView`, `UsersView`, `WorkforceView`, `ReportsView`, `AuditLogView`) revealed technical jargon and inconsistent labeling:
-- **Financial & Accounting Jargon**: Terms like *General Ledger*, *Trial Balance*, *Accounts Receivable*, *Accounts Payable*, *Reconciliation*, *Sundry Debtors*, *Contra Voucher*, and *Journal Voucher* are displayed uniformly across all user profiles, confusing shop-floor and field staff.
-- **Supply Chain & Manufacturing Terms**: Raw terms like *Procurement*, *Goods Receipt Note (GRN)*, *Variance*, *Milling Input-Output Ratio*, and *Batch Formulation* appear without contextual plain-language descriptions.
-- **HR & Workforce Jargon**: Terms like *Muster Roll*, *Workforce*, *Payroll Disbursal Engine*, *Milestone Sign-off*, and *Pro-rata Calculation* increase cognitive load.
-
-#### 2. Centralized Vocabulary Dictionary (`src/utils/terminology.ts`)
-A centralized terminology dictionary will translate technical concepts into simple, everyday operational language across the user interface, while retaining technical terms exclusively for authorized Owner and Accountant roles.
-
-| Technical / Internal Term | Plain Business Term (Everyday English) | Hindi / Hinglish Context | Scope of Change |
-| :--- | :--- | :--- | :--- |
-| **Procurement** | **Buy Materials** | Saaman Khareed | Navigation, Headers, Action Buttons |
-| **Goods Receipt Note (GRN)** | **Material Received** | Maal Aaya / Aamad | Slips, Tables, Form Modals |
-| **Purchase Order (PO)** | **Material Order** | Khareed Order | Forms, Registers, Status Badges |
-| **General Ledger** | **Money Records** | Khata Vahi / Hisab Kitab | Staff Views (Retain GL for Owner/Accountant) |
-| **Accounts Receivable (AR)** | **Money to Receive** | Aane Wala Paisa / Bakaya | Dashboard Cards, Summary Metrics |
-| **Accounts Payable (AP)** | **Money to Pay** | Dena Hai / Udhaar | Dashboard Cards, Summary Metrics |
-| **Payroll / Disbursal** | **Salary & Wages** | Tankhwah / Mazdoori | Navigation, Cards, Actions |
-| **Workforce** | **Our Team** | Hamari Team / Staff | Navigation, Section Headers |
-| **Reconciliation** | **Match & Check** | Milana Aur Jaanch | Actions, Logs, Audit Modals |
-| **Variance** | **Difference** | Farak / Anthar | Stock Audits, Production Yields |
-| **Inventory** | **Stock** | Maal Ka Stock | Navigation, Metrics, Tables |
-| **Sundry Debtors** | **Customer Balances (Due)** | Grahak Ka Dena | Customer Tables, Statements |
-| **Sundry Creditors** | **Supplier Dues** | Vyapari Ka Dena | Supplier Tables, Balances |
-| **Cash Handover / Closing** | **Daily Cash Handover** | Din Ka Cash Jama | Salesman & Shop Visit Views |
-| **Muster Roll** | **Daily Attendance** | Rozana Haaziri | Labour & Staff Registers |
-
-*Rule*: All internal backend enums (`SALE_TYPES`, `StockTxnType`, `UserRole`, `ApprovalStatus`, `PAYMENT_MODES`) will remain untouched on the wire. Only display labels, placeholders, card titles, and tooltips are transformed through formatting helpers.
+### Architectural Tenets:
+1. **Zero Wire Contamination**: Wire payloads (`/api/sales`, `/api/purchasing`, `/api/workforce/*`) retain 100% of their schema, enums, and calculation keys.
+2. **Display-Time Translation**: Technical terms are translated exclusively at the UI boundary.
+3. **Double-Entry Preservation**: Simple monetary inputs from staff are transformed into valid accounting vouchers before posting to the backend ledger.
 
 ---
 
-### Phase 2: Three Primary Employee Categories & Mapping Matrix
+## 2. Complete Employee Category & Designation Mapping
 
-Every staff member is classified into one of three operational categories, with the **OWNER** remaining an administrative tier.
+Every employee is classified into one of **Three Operational Categories**, with the **OWNER** serving as the administrative authority.
 
-#### 1. Category Definitions
-1. **FACTORY WORKERS**:
-   - Focus: Physical manufacturing, raw material intake, milling, roasting, manual packaging, machine operation, and daily attendance.
-   - User Experience: Large touch targets, immediate visual cues, numeric steppers, and zero financial clutter.
-2. **OFFICE STAFF**:
-   - Focus: Order billing, customer account upkeep, material purchasing, stock auditing, expense voucher entry, team attendance monitoring, and reporting.
-   - User Experience: Streamlined data entry tables, auto-complete dropdowns, live totals, and approval routing.
-3. **FIELD STAFF**:
-   - Focus: Route planning, retailer shop visits, on-spot order taking, retail stock checking, on-spot payment collection, and end-of-day cash handover.
-   - User Experience: Mobile-first viewport (390px–430px), single-column tap-friendly forms, one-tap payment recording, and clear daily commission/slab indicators.
-
-#### 2. Designation & Role Mapping Architecture
-
-| Employee Category | Common Designations | Department | Standard System Role (`UserRole`) | Assigned Workspace | Default Landing Page |
+| Category | Designation | Department | Primary System Role (`UserRole`) | Assigned Workspace | Default Landing View |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **FACTORY WORKERS** | Production Worker<br>Packaging Worker<br>Machine Operator<br>Helper<br>Factory Supervisor | Factory Floor / Packaging / Quality | `FACTORY_WORKER`<br>`OPERATOR`<br>`LABOUR_SUPERVISOR` | `factory` or `labour_supervisor` | `dashboard` (Factory Work Priority) |
-| **OFFICE STAFF** | Office Assistant<br>Billing Operator<br>Purchase Assistant<br>Stock Manager<br>Production Manager<br>Accountant<br>Personal Assistant (PA) | Admin / Accounts / Operations / Billing | `PA`<br>`ACCOUNTANT`<br>`MANAGER`<br>`ECOMMERCE_MANAGER`<br>`EMPLOYEE` | `pa`<br>`accountant`<br>`manager`<br>`ecommerce` | `dashboard` (Operational Checklist) |
-| **FIELD STAFF** | Salesman<br>Delivery Staff<br>Payment Collection Staff<br>Marketing Representative | Field Sales / Logistics / Marketing | `SALESMAN`<br>`SOCIAL_MEDIA_MANAGER`<br>`FREELANCER` | `salesman`<br>`marketing`<br>`freelancer` | `dashboard` (Today's Route & Orders) |
-| **OWNER / ADMIN** | Business Owner<br>Managing Director | Executive Management | `OWNER`<br>`OWNER_ADMIN` | `owner` | `dashboard` (Executive Overview) |
+| **FACTORY WORKERS** | **Production Worker** | Factory / Processing | `FACTORY_WORKER` | `factory` | `dashboard` (Today's Batches) |
+| | **Packaging Worker** | Packaging | `FACTORY_WORKER` | `factory` | `dashboard` (Packing Targets) |
+| | **Machine Operator** | Milling / Roasting | `OPERATOR` | `factory` | `dashboard` (Machine Jobs) |
+| | **Helper / General Labour** | Factory Floor | `WORKER` | `factory` | `dashboard` (Daily Attendance) |
+| | **Factory Supervisor** | Production Operations | `LABOUR_SUPERVISOR` | `labour_supervisor` | `dashboard` (Floor Muster & Output) |
+| **OFFICE STAFF** | **Office Assistant** | Administration | `EMPLOYEE` | `employee` | `dashboard` (Daily Tasks) |
+| | **Billing Operator** | Sales & Billing | `PA` | `pa` | `sales` (Orders & Bills) |
+| | **Purchase Assistant** | Raw Material Supply | `PA` | `pa` | `purchasing` (Buy Materials) |
+| | **Stock Manager** | Warehouse & Inventory | `MANAGER` | `manager` | `stock` (Stock Register) |
+| | **Production Manager** | Plant Operations | `MANAGER` | `manager` | `production` (Production Plan) |
+| | **Accountant** | Accounts & Finance | `ACCOUNTANT` | `accountant` | `accounting` (Money Records) |
+| | **Personal Assistant (PA)**| Executive Operations | `PA` | `pa` | `dashboard` (Daily Priorities) |
+| | **E-Commerce Manager** | Online Fulfillment | `ECOMMERCE_MANAGER`| `ecommerce` | `sales` (Online Orders) |
+| **FIELD STAFF** | **Field Salesman** | Field Sales | `SALESMAN` | `salesman` | `dashboard` (Today's Route & Orders) |
+| | **Delivery Staff** | Distribution | `SALESMAN` | `salesman` | `dashboard` (Delivery Queue) |
+| | **Payment Collector** | Field Collections | `SALESMAN` | `salesman` | `closing` (Money Received) |
+| | **Marketing Representative**| Promotions & Retail | `SOCIAL_MEDIA_MANAGER`| `marketing` | `visits` (Store Visits) |
+| | **Freelance Specialist** | Media / Packaging Design | `FREELANCER` | `freelancer` | `workforce` (My Projects) |
+| **ADMINISTRATIVE** | **Business Owner / MD** | Executive Management | `OWNER` / `OWNER_ADMIN` | `owner` | `dashboard` (Business Overview) |
 
 ---
 
-### Phase 3: Category-Specific Workspaces & Simplified Navigation
+## 3. Navigation Menus for Each Category
 
-Navigation is streamlined so users never see unnecessary or restricted modules.
+### 3.1 Factory Workers Navigation
+Designed for quick, error-free shop-floor interaction:
+- **Home** (`dashboard`): Today's shift status, daily production target, and quick check-in.
+- **My Attendance** (`attendance`): Punch in/out, view month's days worked, and overtime hours.
+- **My Work / Production** (`production` - *if authorized*): View active recipes, log raw materials consumed, record finished goods output.
+- **Packaging** (`packaging` - *if authorized*): Bulk-to-retail conversion counter, pouch sealing tally, batch sticker printing.
+- **Stock** (`stock` - *read-only*): Check available spices, packaging pouches, and bulk flour.
+- **My Salary** (`workforce`): Clean salary slip view showing basic rate, days present, and earned wages.
+- **My Profile** (`profile`): Personal information, emergency phone, and bank account on file.
 
-#### 1. Factory Worker Workspace (`factory`)
-- **Home** (`dashboard`): Today's assigned shift, attendance status, and production target.
-- **My Attendance** (`attendance`): One-tap check-in/out, hours logged, and month-to-date days worked.
-- **My Work / Production** (`production` - *when authorized*): Active batch recipes, input raw materials, and completed output entry.
-- **Packaging** (`packaging` - *when authorized*): Packet sealing counter, bulk-to-retail conversion, and batch stickers.
-- **Stock** (`stock` - *read-only*): Floor raw material and packing material levels.
-- **My Salary** (`workforce`): Clean salary slip view with days worked and earnings summary.
-- **My Profile** (`profile`): Emergency contact and worker details.
-
-#### 2. Office Staff Workspace (`office`)
-- **Home** (`dashboard`): Daily priorities, pending tasks, and urgent notifications.
+### 3.2 Office Staff Navigation
+Optimized for high-volume data entry, records tracking, and approvals:
+- **Home** (`dashboard`): Daily priorities, pending approvals, and operational metrics.
 - **Orders & Bills** (`sales`): Customer order entry, wholesale invoice generation, and tax-inclusive billing.
-- **Customers** (`customers`): Retailer/wholesaler phone directory, shop addresses, and outstanding balances.
+- **Customers** (`customers`): Retailer & distributor directory, balances due, and contact info.
 - **Production** (`production`): Milling yields, roasting batches, and finished goods transfers.
 - **Stock** (`stock`): Warehouse stock levels, batch tracking, and adjustment logs.
-- **Buy Materials** (`purchasing`): Material purchase orders, supplier delivery receipts, and quality approval.
+- **Buy Materials** (`purchasing`): Material purchase orders, delivery receipts, and quality inspection.
 - **Daily Expenses** (`expenses`): Operational expense entry, petrol/transport vouchers, and tea/office claims.
-- **Our Team** (`workforce` / `users`): Staff directory, attendance muster, and task assignments.
+- **Our Team** (`workforce`): Staff directory, attendance muster, and task assignments.
 - **Salary & Wages** (`salary` / `workforce`): Monthly attendance calculation, wage registers, and payment slips.
 - **Reports** (`reports`): Daily sales summaries, production output, and stock valuation reports.
 
-#### 3. Field Staff Workspace (`salesman`)
-- **Home** (`dashboard`): Daily shop targets, active orders count, and incentive meter.
-- **My Customers** (`customers`): Route shops, contact numbers, and payment status.
+### 3.3 Field Staff Navigation
+Optimized for mobile viewports (390px–430px) with large touch targets:
+- **Home** (`dashboard`): Daily shop targets, active orders count, and 100kg incentive meter.
+- **My Customers** (`customers`): Route shops, store addresses, and payment status.
 - **New Order** (`sales`): 3-step rapid order taker (Pick Customer → Add Packets → Save & Print).
 - **My Stock** (`stock`): Vehicle/van stock register and sample packets available.
 - **Shop Visits** (`visits`): Check-in at store, purpose of visit, note, and next visit date.
-- **Payments Received** (`accounting` / `closing`): Cash or UPI collected from retail stores.
+- **Payments Received** (`closing`): Cash or UPI collected from retail stores.
 - **My Expenses** (`expenses`): Fuel, parking, and daily travel allowance claims with receipt photo.
-- **Cash Handover** (`closing`): End-of-day cash handover to office with manager sign-off.
+- **Daily Cash Handover** (`closing`): End-of-day cash handover to office with manager sign-off.
 - **My Performance** (`workforce`): 100kg slab tracker, month-to-date sales, and commission earned.
 
-#### 4. Owner Workspace (`owner`)
-- Unrestricted access to all modules, including advanced double-entry accounting (General Ledger, Trial Balance, Journal Vouchers, Sundry Debtors/Creditors), system settings, audit registers, and workspace preview mode.
+---
+
+## 4. Permissions Matrix by Designation
+
+| View / Function | Factory Worker | Machine Operator | Factory Supervisor | Billing Operator | Stock Manager | Accountant | PA | Field Salesman | Owner |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Home Dashboard** | View (Floor) | View (Floor) | View (Floor) | View (Ops) | View (Ops) | View (Finance)| View (Ops) | View (Field) | Full (Exec) |
+| **Attendance (Self)** | Clock In/Out | Clock In/Out | Clock In/Out | Clock In/Out | Clock In/Out | Clock In/Out | Clock In/Out| Clock In/Out | View All |
+| **Attendance (Team)** | None | None | Record/Verify | View | View | View | Record/Verify| None | Full Control |
+| **Production Batches** | Log Output | Full Entry | Supervise | View | View | View | View/Edit | None | Full Control |
+| **Packaging Work** | Log Output | Log Output | Supervise | None | View | None | View | None | Full Control |
+| **Stock Levels** | View Floor | View Floor | View Floor | View All | Manage/Adjust | View All | View All | View Van | Full Control |
+| **Order Entry** | None | None | None | Create/Edit | View | View | Create/Edit | Create (Assigned)| Full Control |
+| **Customer Balances**| None | None | None | View/Edit | None | Full Access | View/Edit | View (Assigned)| Full Control |
+| **Buy Materials (PO)**| None | None | Request | Create | Create | View/Verify | Create/Edit | None | Full Control |
+| **Material Received** | None | Unload/Check | Inspect | Record | Record | Verify | Record | None | Full Control |
+| **Expense Filing** | None | None | Floor Expenses| Office Claims | None | Manage All | Review/File | Field Claims | Full Control |
+| **Daily Cash Handover**| None | None | None | Receive | None | Reconcile | Receive | Submit Handover| Full Control |
+| **Money Records (GL)** | None | None | None | None | None | Full Access | None | None | Full Control |
+| **Salary Calculation** | View Own | View Own | View Own | None | None | Prepare | Prepare | View Own | Full Control |
+| **Reports** | None | None | Floor Report | Sales Report | Stock Report | Financials | Operations | My Report | All Reports |
+| **Team Management** | None | None | View Team | None | None | None | Request Add | None | Full Admin |
 
 ---
 
-### Phase 4: Simple Form Design System
+## 5. Complete Existing-versus-New Vocabulary Dictionary
 
-Building on the existing `FormComponents.tsx` architecture, forms will adhere to the following principles:
-
-1. **Progressive Disclosure**:
-   - Primary required fields visible by default (3–5 fields maximum).
-   - Advanced options (GSTIN, tax splits, notes, vehicle numbers) tucked into an optional "Additional Details" collapsible section.
-2. **Clear Dropdowns & Autocomplete**:
-   - Replace manual text inputs with searchable dropdowns for Customers, Products, Suppliers, and Categories.
-3. **Automated Calculations**:
-   - Subtotal, GST, discounts, and net payable compute live on input without requiring manual calculation.
-   - Visual calculation preview card displays: `Items Total + GST (if any) - Discount = Net Total`.
-4. **Pre-filled Defaults**:
-   - Transaction dates default to today (`YYYY-MM-DD`).
-   - Logged-in user automatically set as creator/salesman.
-   - Payment mode defaults to `Cash` for retail and `Bank Transfer (NEFT/UPI)` for wholesale.
-5. **Human-Friendly Identification**:
-   - Never display raw database UUIDs or internal IDs (e.g. `672...`) to regular users.
-   - Show human labels: "Sharma Kirana Store (ORD-2026-0042)" instead of raw IDs.
-
----
-
-### Phase 5: Centralized Status System
-
-Create `src/utils/statusLabels.ts` with plain-language mappings and distinct visual badges:
-
-```typescript
-export interface StatusDisplay {
-  label: string;
-  hindiLabel?: string;
-  badgeClass: string;
-  iconName: string;
-}
-
-export const STATUS_MAP: Record<string, StatusDisplay> = {
-  PENDING: { label: 'Waiting', hindiLabel: 'Ruka Hua', badgeClass: 'bg-amber-50 text-amber-800 border-amber-200', iconName: 'Clock' },
-  APPROVED: { label: 'Approved', hindiLabel: 'Manzoor', badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200', iconName: 'CheckCircle2' },
-  REJECTED: { label: 'Not Approved', hindiLabel: 'Nakaara', badgeClass: 'bg-red-50 text-red-800 border-red-200', iconName: 'XCircle' },
-  PARTIAL: { label: 'Partial', hindiLabel: 'Aadha Hua', badgeClass: 'bg-sky-50 text-sky-800 border-sky-200', iconName: 'PieChart' },
-  COMPLETED: { label: 'Done', hindiLabel: 'Poora Hua', badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200', iconName: 'CheckCheck' },
-  IN_PROGRESS: { label: 'In Progress', hindiLabel: 'Kaam Chal Raha Hai', badgeClass: 'bg-blue-50 text-blue-800 border-blue-200', iconName: 'Play' },
-  CANCELLED: { label: 'Cancelled', hindiLabel: 'Radd Hua', badgeClass: 'bg-slate-100 text-slate-700 border-slate-300', iconName: 'Ban' },
-  DRAFT: { label: 'Draft', hindiLabel: 'Kaccha', badgeClass: 'bg-slate-50 text-slate-600 border-slate-200', iconName: 'FileText' },
-  OVERDUE: { label: 'Overdue', hindiLabel: 'Samay Beeta', badgeClass: 'bg-rose-50 text-rose-800 border-rose-200', iconName: 'AlertTriangle' },
-  PAID: { label: 'Paid', hindiLabel: 'Chukaya', badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200', iconName: 'Coins' },
-  UNPAID: { label: 'Unpaid', hindiLabel: 'Baaqi', badgeClass: 'bg-amber-50 text-amber-800 border-amber-200', iconName: 'AlertCircle' },
-};
-```
+| Category | Internal / Legacy ERP Term | Plain Everyday Business Term | Hindi / Hinglish Assistance | Context in UI |
+| :--- | :--- | :--- | :--- | :--- |
+| **Supply Chain** | Procurement | **Buy Materials** | Saaman Khareed | Navigation, Main Actions |
+| | Goods Receipt Note (GRN) | **Material Received** | Maal Aaya / Aamad Slip | Inward Records, Delivery Slips |
+| | Purchase Order (PO) | **Material Order** | Khareed Order | Order Entry, Status Badges |
+| | Supplier / Vendor | **Material Supplier** | Maal Dene Wala Vyapari | Dropdowns, Supplier Tables |
+| | Minimum Order Qty (MOQ) | **Minimum Order Limit** | Kam Se Kam Order | Purchasing Guidelines |
+| **Accounting** | General Ledger (GL) | **Money Records** | Khata Vahi / Hisab Kitab | Staff Views (GL for Accountant) |
+| | Accounts Receivable (AR) | **Money to Receive** | Aane Wala Paisa / Bakaya | Dashboard Summary Cards |
+| | Accounts Payable (AP) | **Money to Pay** | Dena Hai / Udhaar | Dashboard Summary Cards |
+| | Sundry Debtors | **Customer Balances** | Grahak Ka Dena | Customer Ledger, Balance Lists |
+| | Sundry Creditors | **Supplier Dues** | Vyapari Ka Dena | Supplier Outstanding Tables |
+| | Contra Voucher | **Bank & Cash Transfer** | Bank Aur Cash Ka Len-Den | Transaction Modals |
+| | Journal Voucher (JV) | **Adjustment Entry** | Hisab Sudhar Entry | Accounting Voucher Forms |
+| | Trial Balance | **Accounts Balance Check** | Khata Santulan Jaanch | Financial Reporting Hub |
+| | Reconciliation | **Match & Check** | Milana Aur Jaanch | Cash and Bank Verification |
+| **Inventory** | Inventory | **Stock** | Maal Ka Stock | Navigation, Cards, Tables |
+| | Variance | **Difference** | Farak / Anthar | Stock Audits, Production Yields |
+| | Batch Formulation / Recipe | **Mixture Recipe** | Banane Ka Formula | Production Batch Form |
+| | Stock Ledger | **Stock History** | Maal Aane Jane Ka Record | Item History Drawer |
+| **Workforce** | Workforce | **Our Team** | Hamari Team / Staff | Navigation, Section Headers |
+| | Muster Roll | **Daily Attendance** | Rozana Haaziri | Attendance Tables & Registers |
+| | Payroll Disbursal Engine | **Salary & Wages** | Tankhwah / Mazdoori | Salary Tab, Payment Vouchers |
+| | Pro-rata Calculation | **Per-Day Calculation** | Dino Ke Hisab Se | Salary Review Modal |
+| | Designation | **Job Role / Post** | Kaam Ka Pad | Staff Onboarding, Profiles |
+| **Sales & Cash** | Cash Reconciliation / Closing | **Daily Cash Handover** | Din Ka Cash Jama | Salesman & Counter Handover |
+| | Tax Invoice | **Bill / Invoice** | Pukka Bill | Order Billing, Customer Modal |
+| | Delivery Challan | **Delivery Slip** | Maal Bhejne Ki Parchi | Dispatch Modals |
 
 ---
 
-### Phase 6: Simple Money Experience for Staff vs. Double-Entry for Owner
+## 6. Connecting Simple Interfaces to Backend Accounting & Operations
 
-#### 1. Everyday Staff Interface
-Field staff and office operators interact with simple monetary cards:
-- **Money Received**: Total cash and UPI collected today.
-- **Money Paid**: Cash disbursed for raw materials, cartage, and daily expenses.
-- **Expenses**: Vouchers filed and approved.
-- **Money Remaining**: Cash in register / cash in hand awaiting handover.
+The upgrade introduces an **intelligent client-side adapter layer** so simplified inputs map cleanly to backend contracts:
 
-#### 2. Advanced Owner & Accountant Workspace
-The underlying double-entry ledger remains untouched:
-- Real-time Journal Vouchers with Debit (`Dr`) and Credit (`Cr`) balancing.
-- Trial Balance with Assets, Liabilities, Equity, Revenues, and Expenses.
-- Detailed Sundry Debtors and Creditors aging schedules.
-- Bank reconciliation and cash-flow statements.
-
----
-
-### Phase 7: Guided 7-Step Employee Registration Process
-
-To ensure error-free staff onboarding, the registration modal in `WorkforceView` and `UsersView` will be upgraded into a sequential 7-step wizard:
-
-```
-[ Step 1: Category & Designation ] ──▶ [ Step 2: Basic Information ] ──▶ [ Step 3: Department & Reporting ]
-                                                                                           │
-[ Step 6: Review & Confirm ] ◀── [ Step 5: System Access & Login ] ◀── [ Step 4: Salary & Wages ]
-            │
-            ▼
-[ Step 7: Success & Summary ]
-```
-
-- **Step 1: Category & Designation**: Select category (Factory Worker, Office Staff, Field Staff) and choose/enter designation.
-- **Step 2: Basic Information**: Full Name, Mobile Number, Emergency Contact, and Residential Address.
-- **Step 3: Department & Reporting**: Department assignment, Joining Date, and Reporting Manager selection.
-- **Step 4: Salary & Wages**: Pay structure (Monthly Fixed Salary, Daily Wage, or Piece-Rate per kg/packet), Base Rate, and Bank Details.
-- **Step 5: System Access & Login**: Username, initial secure password, system role mapping, and active status toggle.
-- **Step 6: Review & Confirm**: One-page clean summary card verifying all details before submission.
-- **Step 7: Success & Summary**: Account created successfully; offers one-click action to print/download welcome slip or view profile.
+1. **Daily Cash Handover to Accounting Voucher**:
+   - Field salesman enters simple inputs: `Cash Handed Over: ₹4,500`, `Received By: Office Cashier`.
+   - The frontend automatically transforms this into the exact `/api/accounting/vouchers` schema:
+     ```json
+     {
+       "voucher_type": "RECEIPT",
+       "debit_account": "CASH_IN_HAND",
+       "credit_account": "SALESMAN_CLEARING_ACCOUNT",
+       "amount": 4500,
+       "narration": "Daily counter cash handover by user_id",
+       "reference_id": "HANDOVER-2026-03-29"
+     }
+     ```
+2. **Simplified Order Entry to Multi-Tier Invoice**:
+   - Staff selects a customer and item quantities.
+   - The frontend computes wholesale rate, applies product tax rate (GST 5% or 12%), and submits the standard `/api/sales` payload with lines, discounts, and round-off intact.
+3. **Raw Material Intake (GRN) to Inventory & Creditor Ledger**:
+   - Staff clicks "Material Received", selects Supplier, enters Bags/Kg received.
+   - The backend creates the PO fulfillment record, triggers the stock increment transaction, and generates the Accounts Payable voucher simultaneously.
 
 ---
 
-### Phase 8: Centralized Permissions & Security Enforcement
+## 7. Component Reuse & Modification Plan
 
-1. **Client-Side View & Action Guards**:
-   - Navigation links for unpermitted views are not rendered.
-   - If an unauthorized view is entered via URL or `sessionStorage`, the workspace redirects to `defaultView` with a warning message.
-   - Action buttons (e.g., Approve Batch, Calculate Payroll, Delete Item) are disabled and hidden for non-permitted roles.
-2. **Owner Preview Mode**:
-   - Owner can inspect any of the category workspaces (`factory`, `salesman`, `office`, `accountant`) using the Workspace Switcher in the top bar.
-   - A distinct amber banner displays: *"Viewing workspace as [Role]. No security permissions are altered."*
-   - One-click "Exit Preview" button returns the Owner to the Executive Overview.
-3. **Backend As Final Boundary**:
-   - All backend endpoint authorization checks (`req.user.role`) remain intact.
-   - No mock data fallbacks: all calls route to real API handlers.
+### Reusable Components (Zero Re-architecting):
+- `src/components/common/FormComponents.tsx`: `FormLayout`, `FormSection`, `FormField`, `MoneyInput`, `QuantityInput`, `DateInput`, `CalculationPreview`, `SaveButton`, `CancelButton`.
+- `src/components/common/StatusBadge.tsx`: Enhanced to consume the new `statusLabels.ts` dictionary.
+- `src/components/common/PageHeader.tsx`: Preserved for standard titles and breadcrumbs.
+- `src/components/common/StatCard.tsx`: Reused across all category dashboards.
+- `src/components/common/ConfirmDialog.tsx`: Used for approvals and cancellations.
+- `src/components/LoginModal.tsx`: Recently verified modern login experience.
 
----
-
-### Phase 9: Execution Roadmap
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ MASTER IMPLEMENTATION PHASES                                                │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Phase A: Centralized Terminology & Status Mappings                          │
-│          Create `src/utils/terminology.ts` & `src/utils/statusLabels.ts`    │
-│                                                                             │
-│ Phase B: Workspace & Role Reorganization                                    │
-│          Update `src/utils/workspaces.ts` with the 3 categories & nav items │
-│                                                                             │
-│ Phase C: Navigation & Shell Updates                                         │
-│          Apply plain language to `Navigation.tsx`, `App.tsx`, and headers   │
-│                                                                             │
-│ Phase D: Guided 7-Step Employee Registration Wizard                         │
-│          Build `EmployeeRegistrationWizard.tsx` inside `WorkforceView.tsx`  │
-│                                                                             │
-│ Phase E: Views Modernization (Plain Language & Form Components)             │
-│          Apply simplified labels across Orders, Stock, Production, Expenses │
-│                                                                             │
-│ Phase F: Build, Lint & Automated Verification                               │
-│          Run `compile_applet`, `lint_applet`, and Playwright test suite     │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+### Files Requiring Targeted Modification:
+1. **New Modules to Create**:
+   - `src/utils/terminology.ts`: Central vocabulary dictionary and text helper functions.
+   - `src/utils/statusLabels.ts`: Central status mapping (English + Hindi tags + Lucide icons).
+   - `src/utils/permissions.ts`: Role and designation view-level guards.
+   - `src/components/workforce/EmployeeRegistrationWizard.tsx`: Guided 7-step staff onboarding wizard.
+2. **Existing Files to Update (Surgically)**:
+   - `src/utils/workspaces.ts`: Map the 3 categories (Factory, Office, Field) + Owner; define category-specific navigation arrays.
+   - `src/components/Navigation.tsx`: Render plain-language menu items based on active category workspace.
+   - `src/components/Header.tsx`: Display active category badge and clean Owner preview banner.
+   - `src/views/WorkforceView.tsx`: Integrate the 7-step onboarding wizard and apply plain language to registers.
+   - `src/views/UsersView.tsx`: Streamline user creation and permission profiles.
+   - `src/views/SalesView.tsx`, `PurchasingView.tsx`, `AccountingView.tsx`, `StockView.tsx`: Update headings, action labels, and table headers using `terminology.ts`.
 
 ---
 
-### Phase 10: Verification & Acceptance Test Matrix
+## 8. Potential Compatibility Risks with Existing Employee Records
 
-| Verification Target | Test Method | Acceptance Criteria |
+| Risk Area | Potential Failure Mode | Prevention Strategy |
 | :--- | :--- | :--- |
-| **Language Simplicity** | Text scan across all views | Technical terms replaced by plain language for standard staff; double-entry retained for Owner/Accountant. |
-| **Role Navigation Coverage** | Role-based login audit | Every role receives a populated navigation with zero empty states or broken views. |
-| **7-Step Registration** | End-to-end form completion | Step-by-step validation, back/next navigation, calculation preview, and clean API payload dispatch. |
-| **Status Consistency** | Inspection of all badges | Standardized status pill tags with uniform colors and icons across all tables. |
-| **Mobile Responsiveness** | Viewport audit (390x844) | Field Staff workspace and mobile navigation render without horizontal scroll or truncated text. |
-| **Security & Preview** | Direct view manipulation | Unauthorized views blocked; Owner preview mode works cleanly without privilege escalation. |
-| **Compilation & Linting** | `compile_applet` & `lint_applet` | 0 TypeScript errors, 0 ESLint warnings, successful production build. |
+| **Existing `User.role` Values** | Breaking authentication or permissions if backend enums are renamed. | **Never change enum strings** on the wire (`SALESMAN`, `PA`, `OWNER`, `FACTORY_WORKER`). Map them dynamically in `workspaces.ts`. |
+| **Legacy Users Missing Category** | Existing records in database without `employee_category` field. | Provide automatic fallback: if `employee_category` is undefined, infer category from `role` (e.g. `SALESMAN` &rarr; `FIELD_STAFF`, `FACTORY_WORKER` &rarr; `FACTORY_WORKER`, others &rarr; `OFFICE_STAFF`). |
+| **Unset Designations** | Older accounts with blank `designation`. | Fallback gracefully to displaying humanized role name (e.g. `SALESMAN` &rarr; `Field Salesman`) instead of empty string. |
+| **Salary Structure Variation** | Some workers on daily wage, others on monthly salary or piecework. | Ensure the 7-step wizard supports `MONTHLY_SALARY`, `DAILY_WAGE`, and `PIECE_RATE` without requiring all fields for every type. |
+| **Direct URL Bookmarking** | User navigating directly to an unpermitted view. | Implement automatic client-side redirection to `defaultView` with an informative toast rather than a broken page. |
+
+---
+
+## 9. Phased Implementation & Testing Sequence
+
+```
+Phase A: Foundations (Zero UI Impact)
+  ├── 1. Create `src/utils/terminology.ts` (Vocabulary dictionary)
+  ├── 2. Create `src/utils/statusLabels.ts` (Status mappings & icons)
+  └── 3. Create `src/utils/permissions.ts` (Designation & category guards)
+
+Phase B: Workspace & Navigation Reorganization
+  ├── 1. Refactor `src/utils/workspaces.ts` with 3 Categories + Owner
+  ├── 2. Update `src/components/Navigation.tsx` (Plain labels & category navs)
+  └── 3. Update `src/components/Header.tsx` (Owner preview switcher & banner)
+
+Phase C: Guided 7-Step Employee Registration Wizard
+  ├── 1. Build `EmployeeRegistrationWizard.tsx` using `FormComponents.tsx`
+  ├── 2. Wire into `src/views/WorkforceView.tsx` & `src/views/UsersView.tsx`
+  └── 3. Verify step validation, back/next navigation, and payload generation
+
+Phase D: View Terminology & Form Modernization
+  ├── 1. Sales & Purchasing views (Orders & Bills, Buy Materials, GRN)
+  ├── 2. Stock & Production views (Stock Register, Difference, Mixture Recipe)
+  └── 3. Accounting & Expenses views (Money Records, Daily Cash Handover)
+
+Phase E: Comprehensive Verification & Acceptance
+  ├── 1. Role-based navigation audit (Factory, Office, Field, Owner)
+  ├── 2. Form submission and calculation verification
+  ├── 3. Mobile responsiveness check (390px, 768px, 1440px)
+  └── 4. Build & Lint validation (`compile_applet` + `lint_applet`)
+```

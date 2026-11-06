@@ -341,10 +341,10 @@ export const PurchasingView: React.FC = () => {
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 flex items-center gap-2">
             <Truck className="text-emerald-700" size={26} />
-            Purchasing & Procurement Management
+            Buy Materials
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            End-to-end procurement: vendor registry, purchase orders, goods receipts (GRN), bills & payments.
+            Order raw materials, verify supplier deliveries (Material Received), and check supplier balances.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -369,7 +369,7 @@ export const PurchasingView: React.FC = () => {
               onClick={() => setShowOrderModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
             >
-              <Plus size={14} /> Create PO
+              <Plus size={14} /> New Material Order
             </button>
           )}
           {activeTab === 'receipts' && (
@@ -377,7 +377,7 @@ export const PurchasingView: React.FC = () => {
               onClick={() => setShowReceiptModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
             >
-              <Plus size={14} /> Inward GRN
+              <Plus size={14} /> Material Received (GRN)
             </button>
           )}
           {activeTab === 'bills' && (

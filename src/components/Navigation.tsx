@@ -269,8 +269,13 @@ export const Navigation: React.FC<NavigationProps> = ({
                 </span>
 
                 {!isCollapsed && (
-                  <span className="truncate flex-1 text-left">
-                    {item.label}
+                  <span className="truncate flex-1 text-left flex items-baseline justify-between gap-1">
+                    <span className="truncate">{item.label}</span>
+                    {item.hindiLabel && (
+                      <span className={`text-[10px] font-normal truncate opacity-70 ${isActive ? 'text-emerald-100' : 'text-slate-400'}`}>
+                        {item.hindiLabel}
+                      </span>
+                    )}
                   </span>
                 )}
 

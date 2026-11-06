@@ -199,10 +199,10 @@ export const AccountingView: React.FC = () => {
             </div>
             <div>
               <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-                General Ledger & Financial Accounts
+                Money Records &amp; Financial Accounts
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Authoritative double-entry bookkeeping, balanced trial balance, and real-time financial statements
+                Authoritative double-entry money records, balanced trial balance, and financial statements
               </p>
             </div>
           </div>
@@ -321,7 +321,7 @@ export const AccountingView: React.FC = () => {
           }`}
         >
           <Users size={15} />
-          Debtors (AR)
+          Customer Balances (AR)
         </button>
         <button
           onClick={() => setActiveTab('creditors')}
@@ -332,7 +332,7 @@ export const AccountingView: React.FC = () => {
           }`}
         >
           <Building size={15} />
-          Creditors (AP)
+          Supplier Dues (AP)
         </button>
         <button
           onClick={() => setActiveTab('cash-bank')}
@@ -365,7 +365,7 @@ export const AccountingView: React.FC = () => {
           }`}
         >
           <RotateCcw size={15} />
-          Audit & Reconciliation
+          Match & Check (Audit)
         </button>
       </div>
 

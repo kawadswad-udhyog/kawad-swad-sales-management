@@ -603,7 +603,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             tab === 'finished_goods' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          Finished Goods Register
+          Ready Stock Register
         </button>
         <button
           onClick={() => setTab('master_recipes')}
@@ -612,7 +612,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             tab === 'master_recipes' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          Recipe Master (v2.0)
+          Mixture Recipes
         </button>
         <button
           onClick={() => setTab('dispatch')}
