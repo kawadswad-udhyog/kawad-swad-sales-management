@@ -38,8 +38,8 @@ def validate_journal_lines(lines: List[Dict[str, Any]]) -> Tuple[Decimal, Decima
         if not code or code not in ACCOUNT_LOOKUP:
             raise ValueError(f"Line {idx + 1}: Unknown or unregistered account code '{code}'.")
 
-        deb = to_decimal(line.get("debit_amount", 0) or 0)
-        crd = to_decimal(line.get("credit_amount", 0) or 0)
+        deb = to_decimal(line.get("debit_amount", line.get("debit", 0)) or 0)
+        crd = to_decimal(line.get("credit_amount", line.get("credit", 0)) or 0)
 
         if deb < Decimal("0") or crd < Decimal("0"):
             raise ValueError(f"Line {idx + 1}: Negative amounts are not allowed. Debit={deb}, Credit={crd}.")
@@ -178,8 +178,8 @@ def post_journal_voucher(
                 "line_no": idx + 1,
                 "account_code": code,
                 "account_name": account_meta["account_name"],
-                "debit_amount": round_money(to_decimal(line.get("debit_amount", 0) or 0)),
-                "credit_amount": round_money(to_decimal(line.get("credit_amount", 0) or 0)),
+                "debit_amount": round_money(to_decimal(line.get("debit_amount", line.get("debit", 0)) or 0)),
+                "credit_amount": round_money(to_decimal(line.get("credit_amount", line.get("credit", 0)) or 0)),
                 "entity_type": str(line.get("entity_type", "")).strip(),
                 "entity_id": str(line.get("entity_id", "")).strip(),
                 "notes": str(line.get("notes", "")).strip(),
@@ -212,7 +212,50 @@ def post_journal_voucher(
         reason=f"Posted {voucher_type} voucher for {clean_ref_type} {clean_ref_id} (Total: ₹{total_debit:.2f})",
     )
 
-    return {**header_record, "lines": saved_lines, "is_replay": False}
+    return {
+        **header_record,
+        "voucher_no": header_record.get("journal_id", ""),
+        "total_amount": header_record.get("total_debit", 0),
+        "lines": saved_lines,
+        "is_replay": False,
+    }
+
+
+def append_journal_voucher(
+    voucher_type: str,
+    reference_type: str,
+    reference_id: str,
+    lines: List[Dict[str, Any]],
+    narration: str = "",
+    created_by: str = "SYSTEM",
+    posted_by: Optional[str] = None,
+    journal_date: Optional[str] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Standard journal voucher creation alias supporting legacy append semantics.
+    """
+    normalized_lines = []
+    for l in lines:
+        deb = l.get("debit_amount", l.get("debit", 0))
+        crd = l.get("credit_amount", l.get("credit", 0))
+        normalized_lines.append({
+            **l,
+            "debit_amount": deb,
+            "credit_amount": crd,
+        })
+    res = post_journal_voucher(
+        voucher_type=voucher_type,
+        reference_type=reference_type,
+        reference_id=reference_id,
+        narration=narration,
+        lines=normalized_lines,
+        posted_by=posted_by or created_by,
+        journal_date=journal_date,
+    )
+    res["voucher_no"] = res.get("journal_id", "")
+    res["total_amount"] = res.get("total_debit", 0)
+    return res
 
 
 
