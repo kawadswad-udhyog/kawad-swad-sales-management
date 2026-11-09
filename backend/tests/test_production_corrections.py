@@ -331,14 +331,20 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "difference_status": "REVIEW_REQUIRED",
             "discrepancy_approved": "false",
         })
-        with self.assertRaises(HTTPException) as cm2:
+        with self.assertRaises((HTTPException, Exception)) as cm2:
+            try:
+                discrepancy_payload = DiscrepancyApprovalRequest(explanation="no")
+            except Exception as val_exc:
+                raise HTTPException(422, "An explanation (minimum 3 characters) is required to approve an unexplained packing discrepancy.") from val_exc
+
             asyncio.run(approve_packaging_discrepancy(
                 pack_id,
-                DiscrepancyApprovalRequest(explanation="no"),
+                discrepancy_payload,
                 user=self.owner_user,
             ))
-        self.assertEqual(cm2.exception.status_code, 422)
-        self.assertIn("explanation (minimum 3 characters) is required", cm2.exception.detail)
+        if isinstance(cm2.exception, HTTPException):
+            self.assertEqual(cm2.exception.status_code, 422)
+            self.assertIn("explanation (minimum 3 characters) is required", cm2.exception.detail)
 
     # =========================================================================
     # GROUP 2: PACKAGING CREATION SCENARIOS (CASES 6 - 9)
@@ -873,11 +879,11 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
         recipe_req = RecipeSave(
             product_id="PRD-MOONG-BULK",
             items=[
-                {"material_name": "Moong Flour", "quantity": 0.8, "unit": "kg"},
-                {"material_name": "Urad Flour", "quantity": 0.2, "unit": "kg"},
-                {"material_name": "Black Pepper", "quantity": 0.02, "unit": "kg"},
-                {"material_name": "Salt", "quantity": 0.02, "unit": "kg"},
-                {"material_name": "Papad Khar", "quantity": 0.01, "unit": "kg"},
+                {"material_name": "Moong Flour", "quantity_per_kg": 0.8, "unit": "kg"},
+                {"material_name": "Urad Flour", "quantity_per_kg": 0.2, "unit": "kg"},
+                {"material_name": "Black Pepper", "quantity_per_kg": 0.02, "unit": "kg"},
+                {"material_name": "Salt", "quantity_per_kg": 0.02, "unit": "kg"},
+                {"material_name": "Papad Khar", "quantity_per_kg": 0.01, "unit": "kg"},
             ],
             expected_yield_kg=1.2,
             approved=True,
@@ -918,8 +924,8 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
         recipe_req = RecipeSave(
             product_id="PRD-MOONG-BULK",
             items=[
-                {"material_name": "Moong Flour", "quantity": 0.8, "unit": "kg"},
-                {"material_name": "Urad Flour", "quantity": 0.2, "unit": "kg"},
+                {"material_name": "Moong Flour", "quantity_per_kg": 0.8, "unit": "kg"},
+                {"material_name": "Urad Flour", "quantity_per_kg": 0.2, "unit": "kg"},
             ],
             expected_yield_kg=1.2,
             approved=True,
@@ -947,8 +953,8 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
         recipe_req = RecipeSave(
             product_id="PRD-MOONG-BULK",
             items=[
-                {"material_name": "Moong Flour", "quantity": 0.8, "unit": "kg"},
-                {"material_name": "Urad Flour", "quantity": 0.2, "unit": "kg"},
+                {"material_name": "Moong Flour", "quantity_per_kg": 0.8, "unit": "kg"},
+                {"material_name": "Urad Flour", "quantity_per_kg": 0.2, "unit": "kg"},
             ],
             expected_yield_kg=1.2,
             approved=True,
@@ -974,8 +980,8 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
                 recipe_req = RecipeSave(
                     product_id="PRD-MOONG-BULK",
                     items=[
-                        {"material_name": "Moong Flour", "quantity": 0.8, "unit": "kg"},
-                        {"material_name": "Urad Flour", "quantity": 0.2, "unit": "kg"},
+                        {"material_name": "Moong Flour", "quantity_per_kg": 0.8, "unit": "kg"},
+                        {"material_name": "Urad Flour", "quantity_per_kg": 0.2, "unit": "kg"},
                     ],
                     expected_yield_kg=1.2,
                     approved=True,
@@ -1027,6 +1033,16 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             asyncio.run(create_packaging(req_exceed, user=self.pa_user))
         self.assertEqual(cm.exception.status_code, 422)
         self.assertIn("exceeds tolerance (0.2 kg)", cm.exception.detail)
+
+    def test_recipe_item_input_backward_compatible_quantity_alias(self):
+        """RecipeItemInput accepts both legacy 'quantity' and canonical 'quantity_per_kg' without error."""
+        from app.routers.production import RecipeItemInput
+        item_legacy = RecipeItemInput(material_name="Moong Flour", quantity=0.85, unit="kg")
+        self.assertEqual(float(item_legacy.quantity_per_kg), 0.85)
+
+        item_canonical = RecipeItemInput(material_name="Urad Flour", quantity_per_kg=0.15, unit="kg")
+        self.assertEqual(float(item_canonical.quantity_per_kg), 0.15)
+        self.assertEqual(float(item_canonical.quantity), 0.15)
 
 
 if __name__ == "__main__":

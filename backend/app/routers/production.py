@@ -143,8 +143,21 @@ class AttendanceUpdate(BaseModel):
 
 class RecipeItemInput(BaseModel):
     material_name: str = Field(min_length=1, max_length=100)
-    quantity_per_kg: float = Field(gt=0, description="Material quantity required per 1 kg finished papad")
+    quantity_per_kg: Optional[float] = Field(None, gt=0, description="Material quantity required per 1 kg finished papad")
+    quantity: Optional[float] = Field(None, gt=0, description="Backward-compatible alias for quantity_per_kg")
     unit: str = "kg"
+
+    def __init__(self, **data):
+        if "quantity_per_kg" not in data or data.get("quantity_per_kg") is None:
+            if "quantity" in data and data.get("quantity") is not None:
+                data["quantity_per_kg"] = data["quantity"]
+        if "quantity" not in data or data.get("quantity") is None:
+            if "quantity_per_kg" in data and data.get("quantity_per_kg") is not None:
+                data["quantity"] = data["quantity_per_kg"]
+        super().__init__(**data)
+        if getattr(self, "quantity_per_kg", None) is None:
+            if getattr(self, "quantity", None) is not None:
+                self.quantity_per_kg = self.quantity
 
 
 class RecipeSave(BaseModel):

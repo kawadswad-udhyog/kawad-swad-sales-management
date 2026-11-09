@@ -356,6 +356,7 @@ class ExpenseCreate(BaseModel):
 class ExpenseApproveRequest(BaseModel):
     approved: bool
     notes: Optional[str] = ""
+    cash_reducing: Optional[bool] = None
 
 # Shop Visit Models
 class ShopVisit(BaseModel):

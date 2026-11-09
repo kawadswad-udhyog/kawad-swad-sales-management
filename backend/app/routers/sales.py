@@ -566,6 +566,9 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
             raise HTTPException(status_code=404, detail="Sale record not found.")
         if str(match.get("bill_status", "")).upper() == "CANCELLED":
             # Idempotency / reconciliation: Ensure any active journal voucher is reversed
+            accounting_status = "NO_VOUCHER"
+            reversal_journal_id = None
+            accounting_error = None
             try:
                 from app.accounting.journal_engine import reverse_journal_voucher
                 headers = db.get_records("JournalHeaders", fresh=True)
@@ -575,18 +578,67 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
                     and str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
                 ]
-                for v in active_sale_vouchers:
-                    orig_jid = str(v.get("journal_id", "")).strip()
-                    if orig_jid:
-                        reverse_journal_voucher(
-                            journal_id=orig_jid,
-                            reason=f"Sale {sale_id} cancelled (reconciled): {req.reason.strip() or 'Reconciliation'}",
-                            actor=user_id,
-                            reversed_by=user_id,
-                        )
+                already_reversed_vouchers = [
+                    h for h in headers
+                    if str(h.get("reference_id", "")).strip() == sale_id
+                    and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
+                    and str(h.get("status", "")).strip().upper() == "REVERSED"
+                ]
+                if active_sale_vouchers:
+                    for v in active_sale_vouchers:
+                        orig_jid = str(v.get("journal_id", "")).strip()
+                        if orig_jid:
+                            rev_res = reverse_journal_voucher(
+                                journal_id=orig_jid,
+                                reason=f"Sale {sale_id} cancelled (reconciled): {req.reason.strip() or 'Reconciliation'}",
+                                actor=user_id,
+                                reversed_by=user_id,
+                            )
+                            reversal_journal_id = rev_res.get("journal_id") if isinstance(rev_res, dict) else orig_jid
+                    accounting_status = "REVERSED"
+                elif already_reversed_vouchers:
+                    accounting_status = "ALREADY_REVERSED"
+                    reversals = [
+                        h for h in headers
+                        if str(h.get("reference_type", "")).strip().upper() == "JOURNAL_REVERSAL"
+                        and str(h.get("reference_id", "")).strip() in [str(av.get("journal_id", "")).strip() for av in already_reversed_vouchers]
+                    ]
+                    if reversals:
+                        reversal_journal_id = str(reversals[0].get("journal_id", ""))
+                else:
+                    accounting_status = "NO_VOUCHER"
             except Exception as acct_exc:
+                accounting_status = "FAILED"
+                accounting_error = str(acct_exc)
                 logging.warning("Accounting reversal check for already cancelled sale %s: %s", sale_id, acct_exc)
-            return {"ok": True, "message": f"Bill {match.get('bill_number')} has already been cancelled.", "already_cancelled": True}
+                try:
+                    import json
+                    db.append_record("IncompleteTransactions", {
+                        "transaction_id": db.generate_id("IncompleteTransactions"),
+                        "transaction_type": "ACCOUNTING_REVERSAL_PENDING",
+                        "idempotency_key": f"acct-rev-sale-{sale_id}",
+                        "status": "REVERSAL_FAILED",
+                        "payload_json": json.dumps({"sale_id": sale_id, "reason": req.reason.strip(), "user_id": user_id}),
+                        "error_details": str(acct_exc),
+                        "error_message": str(acct_exc),
+                        "created_at": now_iso(),
+                        "resolved_by": "",
+                        "resolved_at": "",
+                    })
+                except Exception:
+                    pass
+
+            return {
+                "ok": True,
+                "sale_id": sale_id,
+                "bill_number": match.get("bill_number"),
+                "bill_status": "CANCELLED",
+                "already_cancelled": True,
+                "accounting_status": accounting_status,
+                "reversal_journal_id": reversal_journal_id,
+                "accounting_error": accounting_error,
+                "message": f"Bill {match.get('bill_number')} has already been cancelled. (Accounting status: {accounting_status})",
+            }
 
         salesman_id = str(match.get("salesman_user_id", ""))
         if not is_manager(current_user) and salesman_id != user_id:
@@ -677,6 +729,9 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
         db.log_audit(user_id, "CANCEL_BILL", "Sales", sale_id, reason=f"Cancelled bill {bill_number} for ₹{bill_total:.2f}. Reason: {reason_text}")
 
         # Double-Entry Accounting Compensating Reversal Voucher
+        accounting_status = "NO_VOUCHER"
+        reversal_journal_id = None
+        accounting_error = None
         try:
             from app.accounting.journal_engine import reverse_journal_voucher
             headers = db.get_records("JournalHeaders", fresh=True)
@@ -686,16 +741,38 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                 and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
                 and str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
             ]
-            for v in active_sale_vouchers:
-                orig_jid = str(v.get("journal_id", "")).strip()
-                if orig_jid:
-                    reverse_journal_voucher(
-                        journal_id=orig_jid,
-                        reason=f"Sale {sale_id} cancelled: {reason_text}",
-                        actor=user_id,
-                        reversed_by=user_id,
-                    )
+            already_reversed_vouchers = [
+                h for h in headers
+                if str(h.get("reference_id", "")).strip() == sale_id
+                and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
+                and str(h.get("status", "")).strip().upper() == "REVERSED"
+            ]
+            if active_sale_vouchers:
+                for v in active_sale_vouchers:
+                    orig_jid = str(v.get("journal_id", "")).strip()
+                    if orig_jid:
+                        rev_res = reverse_journal_voucher(
+                            journal_id=orig_jid,
+                            reason=f"Sale {sale_id} cancelled: {reason_text}",
+                            actor=user_id,
+                            reversed_by=user_id,
+                        )
+                        reversal_journal_id = rev_res.get("journal_id") if isinstance(rev_res, dict) else orig_jid
+                accounting_status = "REVERSED"
+            elif already_reversed_vouchers:
+                accounting_status = "ALREADY_REVERSED"
+                reversals = [
+                    h for h in headers
+                    if str(h.get("reference_type", "")).strip().upper() == "JOURNAL_REVERSAL"
+                    and str(h.get("reference_id", "")).strip() in [str(av.get("journal_id", "")).strip() for av in already_reversed_vouchers]
+                ]
+                if reversals:
+                    reversal_journal_id = str(reversals[0].get("journal_id", ""))
+            else:
+                accounting_status = "NO_VOUCHER"
         except Exception as acct_exc:
+            accounting_status = "FAILED"
+            accounting_error = str(acct_exc)
             logging.error("Accounting reversal for sale %s failed: %s", sale_id, acct_exc)
             try:
                 import json
@@ -705,6 +782,7 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     "idempotency_key": f"acct-rev-sale-{sale_id}",
                     "status": "REVERSAL_FAILED",
                     "payload_json": json.dumps({"sale_id": sale_id, "reason": reason_text, "user_id": user_id}),
+                    "error_details": str(acct_exc),
                     "error_message": str(acct_exc),
                     "created_at": now,
                     "resolved_by": "",
@@ -713,7 +791,26 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
             except Exception as inc_exc:
                 logging.error("Could not record incomplete reversal transaction: %s", inc_exc)
 
-        return {"ok": True, "message": f"Bill {bill_number} cancelled and stock/payment reversed successfully."}
+        msg = (
+            f"Bill {bill_number} cancelled and stock/payment reversed successfully. Accounting voucher reversed ({reversal_journal_id})."
+            if accounting_status == "REVERSED"
+            else f"Bill {bill_number} cancelled. Accounting voucher was already reversed."
+            if accounting_status == "ALREADY_REVERSED"
+            else f"Bill {bill_number} cancelled. No accounting voucher found to reverse."
+            if accounting_status == "NO_VOUCHER"
+            else f"Bill {bill_number} cancelled, but accounting reversal failed: {accounting_error}. Logged to IncompleteTransactions for recovery."
+        )
+
+        return {
+            "ok": True,
+            "sale_id": sale_id,
+            "bill_number": bill_number,
+            "bill_status": "CANCELLED",
+            "accounting_status": accounting_status,
+            "reversal_journal_id": reversal_journal_id,
+            "accounting_error": accounting_error,
+            "message": msg,
+        }
 
 
 @router.post("/{sale_id}/payments", dependencies=[Depends(require_sheets_connection)])

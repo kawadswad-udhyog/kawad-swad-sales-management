@@ -370,6 +370,125 @@ class TestPhase1Fixes(unittest.TestCase):
         ]
         self.assertEqual(len(unclaimed_approved), 0)
 
+    # =========================================================================
+    # PHASE 1.1 RELIABILITY TESTS
+    # =========================================================================
+
+    def test_phase1_1_sales_cancellation_explicit_accounting_status(self):
+        """Phase 1.1: Sales cancellation returns explicit accounting_status, reversal_journal_id, and preserves idempotency."""
+        sale_id = "SALE-103"
+        bill_no = "BILL-103"
+
+        db.append_record("Sales", {
+            "sale_id": sale_id,
+            "bill_number": bill_no,
+            "sale_datetime": "2026-11-06T10:00:00",
+            "customer_id": "CUST-002",
+            "customer_name_snapshot": "Test Mart",
+            "salesman_user_id": self.salesman_user["user_id"],
+            "bill_total": 4500.0,
+            "payment_method": "CASH",
+            "bill_status": "COMPLETED",
+        })
+
+        sale_data = {
+            "sale_id": sale_id,
+            "bill_number": bill_no,
+            "bill_total": 4500.0,
+            "customer_name_snapshot": "Test Mart",
+            "payment_method": "CASH",
+            "sale_datetime": "2026-11-06",
+        }
+        orig_journal = post_sale_journal(sale_data, estimated_cogs=Decimal("3000.00"), actor=self.salesman_user["user_id"])
+        orig_jid = orig_journal["journal_id"]
+
+        # Cancel sale and assert explicit accounting fields in response
+        cancel_req = SaleCancelRequest(reason="Customer returned goods")
+        res1 = asyncio.run(cancel_sale(sale_id, cancel_req, current_user=self.owner_user))
+
+        self.assertTrue(res1.get("ok"))
+        self.assertEqual(res1.get("accounting_status"), "REVERSED")
+        self.assertTrue(bool(res1.get("reversal_journal_id")))
+        self.assertIsNone(res1.get("accounting_error"))
+        self.assertIn("Accounting voucher reversed", res1.get("message", ""))
+
+        # Retry cancellation (idempotent replay)
+        res2 = asyncio.run(cancel_sale(sale_id, cancel_req, current_user=self.owner_user))
+        self.assertTrue(res2.get("ok"))
+        self.assertTrue(res2.get("already_cancelled"))
+        self.assertEqual(res2.get("accounting_status"), "ALREADY_REVERSED")
+        self.assertEqual(res2.get("reversal_journal_id"), res1.get("reversal_journal_id"))
+        self.assertIsNone(res2.get("accounting_error"))
+
+    def test_phase1_1_daily_closing_expense_stamping_failure_recovery(self):
+        """Phase 1.1: If expense stamping fails during closing, it is recorded in IncompleteTransactions and recovered on retry."""
+        salesman_id = self.salesman_user["user_id"]
+        from app.timeutil import now_iso
+
+        # 1. Create approved cash-reducing expense
+        exp_req = ExpenseCreate(
+            category="Travel",
+            amount=250.0,
+            description="Taxi to market",
+            salesman_user_id=salesman_id,
+        )
+        exp_res = asyncio.run(submit_expense(exp_req, current_user=self.salesman_user))
+        exp_id = exp_res.expense_id
+        asyncio.run(review_expense(exp_id, ExpenseApproveRequest(approved=True, cash_reducing=True), current_user=self.owner_user))
+
+        # Seed payment
+        db.append_record("Sales", {"sale_id": "SALE-TODAY-02", "salesman_user_id": salesman_id, "txn_status": "COMPLETE"})
+        db.append_record("Payments", {
+            "payment_id": "PAY-TODAY-02",
+            "sale_id": "SALE-TODAY-02",
+            "payment_datetime": now_iso(),
+            "amount": 2000.0,
+            "payment_method": "CASH",
+        })
+
+        # Intercept update_record to simulate partial failure on stamping this expense
+        orig_update = db.update_record
+        fail_target = exp_id
+
+        def mock_update(tab, key_col, key_val, updates, **kwargs):
+            if tab == "Expenses" and key_val == fail_target and "related_closing_id" in updates:
+                return False  # Simulate storage failure on expense stamping
+            return orig_update(tab, key_col, key_val, updates, **kwargs)
+
+        db.update_record = mock_update
+
+        try:
+            closing_req = DailyClosingCreate(
+                opening_cash=500.0,
+                physical_cash_returned=2250.0,  # 500 + 2000 - 250 = 2250
+                idempotency_key="CLOSE-FAIL-RECOVER-01",
+            )
+            closing = asyncio.run(submit_daily_closing(closing_req, current_user=self.salesman_user))
+            self.assertEqual(closing.approved_cash_expenses, 250.0)
+            self.assertIn("EXPENSE_LINK_PENDING", closing.notes)
+
+            # Verify IncompleteTransactions has recorded the failure
+            incomp = db.get_records("IncompleteTransactions", fresh=True)
+            pending_stamp = next((t for t in incomp if t.get("transaction_type") == "CLOSING_EXPENSE_LINK_PENDING"), None)
+            self.assertIsNotNone(pending_stamp)
+            self.assertEqual(pending_stamp.get("status"), "LINK_FAILED")
+        finally:
+            db.update_record = orig_update
+
+        # Retry with the same idempotency key (simulating network or client retry after recovery)
+        retry_res = asyncio.run(submit_daily_closing(closing_req, current_user=self.salesman_user))
+        self.assertEqual(retry_res.closing_id, closing.closing_id)
+
+        # Verify expense is now stamped
+        exp_after = next(e for e in db.get_records("Expenses", fresh=True) if e["expense_id"] == exp_id)
+        self.assertEqual(exp_after.get("related_closing_id"), closing.closing_id)
+
+        # Verify IncompleteTransactions record is RESOLVED
+        incomp_after = db.get_records("IncompleteTransactions", fresh=True)
+        resolved_stamp = next((t for t in incomp_after if t.get("transaction_type") == "CLOSING_EXPENSE_LINK_PENDING"), None)
+        self.assertEqual(resolved_stamp.get("status"), "RESOLVED")
+
 
 if __name__ == "__main__":
     unittest.main()
+

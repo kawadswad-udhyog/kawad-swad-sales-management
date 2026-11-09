@@ -63,6 +63,30 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
     if idem:
         prior = next((r for r in existing_rows if str(r.get("idempotency_key", "")) == idem), None)
         if prior:
+            prior_closing_id = str(prior.get("closing_id", ""))
+            # Recover any pending expense links for this closing session
+            try:
+                import json
+                pending_links = [
+                    row for row in db.get_records("IncompleteTransactions", fresh=True)
+                    if str(row.get("transaction_type", "")) == "CLOSING_EXPENSE_LINK_PENDING"
+                    and str(row.get("status", "")).upper() == "LINK_FAILED"
+                ]
+                for plink in pending_links:
+                    try:
+                        p_data = json.loads(plink.get("payload_json", "{}"))
+                        if str(p_data.get("closing_id", "")) == prior_closing_id:
+                            target_exp_id = str(p_data.get("expense_id", ""))
+                            if target_exp_id and db.update_record("Expenses", "expense_id", target_exp_id, {"related_closing_id": prior_closing_id}):
+                                db.update_record("IncompleteTransactions", "transaction_id", plink["transaction_id"], {
+                                    "status": "RESOLVED",
+                                    "resolved_at": now_iso(),
+                                    "resolved_by": user_id,
+                                })
+                    except Exception as sub_rec_err:
+                        logger.warning("Error resolving pending expense link on retry: %s", sub_rec_err)
+            except Exception as rec_err:
+                logger.warning("Could not reconcile pending expense links for closing %s: %s", prior_closing_id, rec_err)
             return _closing_from(prior)
     if any(str(r.get("salesman_user_id")) == user_id and str(r.get("closing_date")) == today_str and str(r.get("closing_status", "")).upper() != "CANCELLED" for r in existing_rows):
         raise HTTPException(status_code=409, detail=f"A closing for {today_str} is already submitted. Open the existing closing instead of creating another.")
@@ -160,11 +184,46 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
         raise HTTPException(status_code=503, detail="The daily closing was not saved.")
 
     # Tag qualifying expenses with related_closing_id to prevent duplicate deductions
+    failed_expense_stamps = []
     for exp_id in qualifying_expense_ids:
         try:
-            db.update_record("Expenses", "expense_id", exp_id, {"related_closing_id": closing_id})
+            if not db.update_record("Expenses", "expense_id", exp_id, {"related_closing_id": closing_id}):
+                raise RuntimeError(f"Database update returned false for expense {exp_id}")
         except Exception as upd_err:
-            logger.warning("Could not stamp related_closing_id on expense %s: %s", exp_id, upd_err)
+            logger.error("Could not stamp related_closing_id on expense %s: %s", exp_id, upd_err)
+            failed_expense_stamps.append(exp_id)
+            try:
+                import json
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": db.generate_id("IncompleteTransactions"),
+                    "transaction_type": "CLOSING_EXPENSE_LINK_PENDING",
+                    "idempotency_key": f"closing-exp-link-{closing_id}-{exp_id}",
+                    "status": "LINK_FAILED",
+                    "payload_json": json.dumps({
+                        "closing_id": closing_id,
+                        "expense_id": exp_id,
+                        "salesman_user_id": user_id,
+                        "date": today_str,
+                    }),
+                    "error_details": str(upd_err),
+                    "error_message": str(upd_err),
+                    "created_at": stamped,
+                    "updated_at": stamped,
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception as inc_err:
+                logger.error("Failed to log incomplete closing expense link: %s", inc_err)
+
+    if failed_expense_stamps:
+        try:
+            curr_notes = str(record.get("notes", ""))
+            warn_note = f"[EXPENSE_LINK_PENDING:{','.join(failed_expense_stamps)}]"
+            updated_notes = f"{curr_notes} {warn_note}".strip()
+            db.update_record("DailyClosing", "closing_id", closing_id, {"notes": updated_notes})
+            record["notes"] = updated_notes
+        except Exception:
+            pass
 
     db.log_audit(
         actor=user_id,

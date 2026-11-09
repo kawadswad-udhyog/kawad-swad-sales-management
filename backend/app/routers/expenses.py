@@ -90,12 +90,13 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
     now_iso = datetime.now(timezone.utc).isoformat()
     status_str = "APPROVED" if req.approved else "REJECTED"
 
+    is_cash_red = req.cash_reducing if getattr(req, "cash_reducing", None) is not None else req.approved
     updates = {
         "approval_status": status_str,
         "approved_by_user_id": user_id,
         "approval_datetime": now_iso,
         "approved_datetime": now_iso,
-        "cash_reducing_expense": "true" if req.approved else "false",
+        "cash_reducing_expense": "true" if is_cash_red else "false",
         "notes": req.notes or "",
     }
     if not db.update_record("Expenses", "expense_id", expense_id, updates):
