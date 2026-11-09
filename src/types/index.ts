@@ -711,3 +711,12 @@ export interface AccountingPeriod {
   closed_at?: string;
 }
 
+export interface SalesmanStockItem {
+  salesman_user_id: string;
+  salesman_name: string;
+  product_id: string;
+  sku: string;
+  product_name: string;
+  quantity: number;
+}
+

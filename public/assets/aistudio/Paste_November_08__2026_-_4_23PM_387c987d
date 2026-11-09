@@ -1,0 +1,1984 @@
+# KAWAD SWAD ERP
+## Complete Issue Resolution & Implementation Master Plan
+
+**Project:** Kawad Swad Sales Management ERP  
+**Phase:** Production Stabilization and Release Certification  
+**Scope:** KS-001 to KS-018  
+**Objective:** Resolve all identified technical, database, manufacturing, inventory, accounting, security, performance and operational issues.
+
+---
+
+# PART 1: IMPLEMENTATION RULES
+
+Before resolving individual issues, establish the following mandatory rules.
+
+### 1.1 Data protection
+
+1. Never delete existing spreadsheet records.
+2. Never delete existing worksheets.
+3. Never rename existing columns without a verified migration.
+4. Never overwrite historical transactions.
+5. Never silently adjust stock.
+6. Never change approved historical production batches.
+7. Never change existing product formulations or prices without authorization.
+8. Never reset ID allocation sequences.
+9. Never generate duplicate transaction IDs.
+10. Never deploy an unverified migration to the live spreadsheet.
+
+### 1.2 Development rules
+
+- Inspect existing implementation before modifying it.
+- Reuse existing services and components wherever possible.
+- Avoid creating duplicate modules or parallel business logic.
+- Keep frontend and backend calculations consistent.
+- Implement business calculations on the backend.
+- Keep Google Sheets as the existing system of record unless a separately approved migration changes this architecture.
+- Use transactions, idempotency and recovery mechanisms for multi-sheet operations.
+- Maintain backward compatibility during migrations.
+
+### 1.3 Mandatory implementation cycle
+
+Every issue must follow:
+
+**Inspect → Reproduce → Identify Root Cause → Design Fix → Implement → Test → Verify → Document**
+
+Each issue must have:
+
+- Root cause.
+- Affected files.
+- Affected worksheets.
+- Proposed changes.
+- Data migration requirements.
+- Automated tests.
+- Failure-injection tests.
+- Acceptance criteria.
+- Rollback procedure.
+
+---
+
+# PART 2: P0 ISSUES
+
+# KS-001: Backend and Google Sheets Schema Reconciliation
+
+**Priority: P0 | Release blocker**
+
+### Problem
+
+The backend defines 65 managed worksheet schemas, while the uploaded workbook contains 78 worksheets.
+
+The previous audit identified:
+
+- 36 worksheets with missing canonical fields.
+- 223 missing canonical columns.
+- 41 worksheets with additional columns.
+- Different names for fields representing potentially identical business information.
+
+Examples:
+
+| Existing field | Backend field |
+|---|---|
+| purchase_order_id | po_id |
+| purchase_order_item_id | po_item_id |
+| goods_receipt_id | receipt_id |
+| supplier_bill_id | bill_id |
+| supplier_return_id | return_id |
+| base_salary | basic_salary |
+| gross_pay | gross_amount |
+
+These differences can cause incorrect record retrieval, incomplete reports and broken relationships.
+
+### Resolution A: Create a central schema registry
+
+Create one authoritative schema definition.
+
+Recommended file:
+
+`backend/app/schema_registry.py`
+
+Each worksheet definition must contain:
+
+- Worksheet name.
+- Canonical column names.
+- Column types.
+- Required fields.
+- Optional fields.
+- Primary identifier.
+- Foreign identifiers.
+- Default values.
+- Deprecated aliases.
+- Migration rules.
+- Validation rules.
+
+Example:
+
+```python
+PURCHASE_ORDERS = {
+    "sheet": "PurchaseOrders",
+    "primary_key": "po_id",
+    "columns": [
+        "po_id",
+        "supplier_id",
+        "order_date",
+        "status",
+        "total_amount",
+        "created_at",
+        "updated_at",
+    ],
+    "aliases": {
+        "po_id": ["purchase_order_id"],
+    },
+}
+```
+
+This is an illustrative schema definition. The final registry must be derived from the actual application models and existing workbook.
+
+### Resolution B: Implement a schema compatibility layer
+
+Create:
+
+`backend/app/schema_compatibility.py`
+
+Responsibilities:
+
+1. Read existing worksheet headers.
+2. Identify canonical fields.
+3. Identify legacy aliases.
+4. Determine whether multiple columns represent the same logical field.
+5. Read records using canonical names.
+6. Translate legacy values into canonical representations.
+7. Detect conflicting values.
+8. Report unresolved mappings.
+
+Example:
+
+If both `po_id` and `purchase_order_id` exist:
+
+- If only one has a value, use the populated value.
+- If both contain identical values, accept the mapping.
+- If both contain different values, flag a conflict.
+- Never silently choose one.
+
+### Resolution C: Controlled migration engine
+
+Create:
+
+`backend/app/migrations/`
+
+Every migration should have:
+
+- Unique migration ID.
+- Version.
+- Description.
+- Execution timestamp.
+- Previous schema version.
+- New schema version.
+- Affected worksheet names.
+- Records examined.
+- Records migrated.
+- Conflicts.
+- Errors.
+- Completion status.
+
+Migration operations must be idempotent.
+
+Running the same successful migration again must not duplicate data or modify already migrated records.
+
+### Resolution D: Preserve historical compatibility
+
+Do not immediately remove legacy columns.
+
+For the transition period:
+
+- Read canonical and legacy fields.
+- Write canonical fields.
+- Maintain legacy compatibility where existing modules require it.
+- Verify all consumers have migrated.
+- Remove legacy dependencies only through a separately approved migration.
+
+### Acceptance criteria
+
+- All 65 managed worksheets match the approved schema.
+- All 223 missing fields are reconciled.
+- All 302 additional fields are classified.
+- No historical records are lost.
+- No conflicting identifiers are silently accepted.
+- All foreign-key relationships are validated.
+- All existing business reports continue working.
+- Migration can be safely rerun.
+- Rollback is demonstrated on a copy of the workbook.
+
+---
+
+# KS-002: Packaging Stock Discrepancies
+
+**Priority: P0 | Release blocker**
+
+### Problem
+
+Two packaging batches contain unexplained differences.
+
+| Batch | Bulk used | Expected output | Recorded difference |
+|---|---:|---:|---:|
+| Moong Master | 75 kg | 20 kg | 55 kg |
+| Chana Chotu | 22 kg | 19.6 kg | 2.4 kg |
+
+The system must not treat these differences as ordinary packaging loss without investigation.
+
+### Resolution A: Establish a packaging calculation engine
+
+Create or upgrade:
+
+`backend/app/services/packaging_calculation_service.py`
+
+The calculation should distinguish:
+
+1. Bulk stock issued.
+2. Actual quantity packed.
+3. Rejected quantity.
+4. Damaged quantity.
+5. Returned bulk material.
+6. Process loss.
+7. Unexplained variance.
+
+Core calculation:
+
+```text
+Bulk Issued
+=
+Saleable Packed Quantity
++ Rejected Quantity
++ Returned Bulk
++ Process Loss
++ Unexplained Variance
+```
+
+For packet-based packaging:
+
+```text
+Saleable Packed Quantity
+=
+Packet Count × Net Weight Per Packet
+```
+
+Use decimal arithmetic rather than floating-point arithmetic for financial and quantity calculations.
+
+### Resolution B: Add packaging verification
+
+Before a packaging batch is approved, require:
+
+- Product.
+- Production batch.
+- Bulk quantity issued.
+- Packet size.
+- Packet count.
+- Actual packed weight.
+- Rejected packets.
+- Damaged packets.
+- Remaining bulk.
+- Process loss.
+- Explanation for variance.
+- Operator.
+- Supervisor.
+- Approval status.
+
+### Resolution C: Introduce discrepancy thresholds
+
+Use configurable thresholds.
+
+Suggested initial rules:
+
+| Variance | Action |
+|---|---|
+| Within approved tolerance | Normal approval |
+| Above tolerance | Supervisor review |
+| Unexplained variance | Block approval |
+| Large discrepancy | Owner approval |
+| Negative remaining stock | Block transaction |
+
+Do not hardcode a universal acceptable manufacturing loss.
+
+The owner must approve product-specific tolerances based on actual production data.
+
+### Resolution D: Investigate existing batches
+
+For the two existing packaging batches:
+
+1. Freeze their current records.
+2. Check original production output.
+3. Check physical packet counts.
+4. Check weighing records.
+5. Check rejected material.
+6. Check returned bulk material.
+7. Identify actual process loss.
+8. Obtain supervisor confirmation.
+9. Record an approved correction if necessary.
+
+Never rewrite historical records to make the calculation appear correct.
+
+### Acceptance criteria
+
+- Packaging quantities reconcile.
+- Unexplained differences cannot enter saleable stock.
+- Packaging approval requires verification.
+- Packaging cannot consume more bulk than available.
+- Duplicate packaging submissions are prevented.
+- Historical discrepancies remain traceable.
+
+---
+
+# KS-003: Recipe and Product Identifier Compatibility
+
+**Priority: P0 | Release blocker**
+
+### Problem
+
+Product IDs in Products and Recipes do not directly match.
+
+Example:
+
+Product master:
+
+`PRD-0001`
+
+Recipe master:
+
+`PRD-MOONG-MASTER`
+
+This creates uncertainty in product-to-recipe relationships.
+
+### Resolution A: Establish canonical product relationships
+
+The Products worksheet must remain the master source for product identity.
+
+Each recipe should contain:
+
+- recipe_id
+- product_id
+- recipe_version
+- effective_from
+- effective_to
+- approval_status
+- created_at
+- updated_at
+
+Example:
+
+```text
+Product:
+PRD-0001
+
+Recipe:
+REC-MOONG-MASTER-V1
+
+Relationship:
+REC-MOONG-MASTER-V1 → PRD-0001
+```
+
+These identifiers are illustrative.
+
+Actual relationships must be established from the existing product and recipe records.
+
+### Resolution B: Build a product mapping table
+
+Create:
+
+`ProductIdentifierMap`
+
+Recommended fields:
+
+- mapping_id
+- product_id
+- legacy_product_id
+- legacy_product_name
+- mapping_status
+- verified_by
+- verified_at
+
+### Resolution C: Recipe version control
+
+Once a recipe is used in an approved production batch, its historical version must remain immutable.
+
+If the formulation changes:
+
+- Create a new recipe version.
+- Obtain approval.
+- Set its effective date.
+- Use the new version for future batches.
+- Retain the original recipe for historical costing.
+
+### Resolution D: Validate production references
+
+Before creating a production batch:
+
+1. Verify product exists.
+2. Verify approved recipe exists.
+3. Verify recipe belongs to the product.
+4. Verify recipe is effective.
+5. Verify required ingredients exist.
+6. Verify ingredient stock.
+7. Save the exact recipe version in the batch.
+
+### Acceptance criteria
+
+- Every active product has a valid recipe relationship where required.
+- Every production batch references a valid product.
+- Every production batch references an approved recipe version.
+- Historical batches retain their original recipe references.
+- No automatic fuzzy matching is used for financial or production-critical relationships.
+
+---
+
+# KS-004: Production and Inventory Reconciliation
+
+**Priority: P0 | Release blocker**
+
+### Problem
+
+The ERP must maintain accurate inventory across:
+
+- Raw materials.
+- Production.
+- Bulk papad.
+- Packaging.
+- Finished goods.
+- Dispatch.
+- Sales.
+
+The previous audit could not certify this complete lifecycle.
+
+### Resolution A: Establish a unified stock ledger
+
+All stock movements must pass through a central inventory service.
+
+Recommended:
+
+`backend/app/services/inventory_service.py`
+
+Every movement must contain:
+
+- Transaction ID.
+- Product or material ID.
+- Batch ID.
+- Movement type.
+- Quantity in.
+- Quantity out.
+- Unit.
+- Source transaction.
+- Destination.
+- Timestamp.
+- User.
+- Approval status.
+- Reversal reference.
+
+### Resolution B: Define stock calculation rules
+
+**Raw material**
+
+```text
+Closing Stock
+=
+Opening Stock
++ Purchases Received
++ Approved Returns
+- Production Consumption
+- Other Approved Issues
+```
+
+**Bulk production stock**
+
+```text
+Closing Bulk Stock
+=
+Opening Bulk Stock
++ Approved Production Output
+- Packaging Consumption
+- Approved Adjustments
+```
+
+**Finished goods**
+
+```text
+Closing Finished Stock
+=
+Opening Finished Stock
++ Saleable Packaging Output
++ Approved Sale Returns
+- Sales
+- Dispatch
+- Approved Write-offs
+```
+
+Prevent double deduction when dispatch and sales are separate steps.
+
+A dispatch to a salesman should transfer stock ownership or location, not automatically count as a customer sale.
+
+### Resolution C: Stock movement state management
+
+Every transaction should have a clear lifecycle:
+
+```text
+DRAFT
+  ↓
+SUBMITTED
+  ↓
+APPROVED
+  ↓
+POSTED
+  ↓
+RECONCILED
+```
+
+Only posted movements affect available stock.
+
+### Resolution D: Negative stock protection
+
+The backend must:
+
+- Check available quantity.
+- Reserve stock where required.
+- Prevent overselling.
+- Prevent duplicate deductions.
+- Release reservations when transactions are cancelled.
+- Record reversals rather than deleting posted movements.
+
+### Resolution E: Stock reconciliation tool
+
+Create a reconciliation screen that compares:
+
+1. Ledger quantity.
+2. Physical quantity.
+3. Difference.
+4. Reason.
+5. Supporting evidence.
+6. Approval.
+7. Adjustment transaction.
+
+Physical stock corrections must require authorization.
+
+### Acceptance criteria
+
+- Every stock movement has a source transaction.
+- No duplicate deductions.
+- No unauthorized negative stock.
+- Physical and ledger stock can be reconciled.
+- Production, packaging, dispatch and sales agree.
+- Historical movements remain immutable.
+
+---
+
+# KS-005: Multi-Sheet Transaction Recovery
+
+**Priority: P0 | Release blocker**
+
+### Problem
+
+Google Sheets does not provide database-style atomic transactions across multiple worksheets.
+
+A sales transaction can involve:
+
+- Sales.
+- SaleItems.
+- Payments.
+- SalesmanStockLedger.
+- CashLedger.
+- AuditLog.
+
+A failure midway can leave incomplete records.
+
+### Resolution A: Implement a transaction coordinator
+
+Create:
+
+`backend/app/services/transaction_coordinator.py`
+
+Every multi-sheet transaction should have a unique transaction ID.
+
+Recommended lifecycle:
+
+```text
+INITIATED
+    ↓
+VALIDATED
+    ↓
+PREPARED
+    ↓
+POSTING
+    ↓
+COMPLETED
+```
+
+Failure:
+
+```text
+POSTING
+    ↓
+RECOVERY_REQUIRED
+    ↓
+RECOVERING
+    ↓
+COMPLETED / REVERSED
+```
+
+### Resolution B: Maintain transaction manifests
+
+Create a transaction manifest worksheet.
+
+Recommended fields:
+
+- transaction_id
+- transaction_type
+- idempotency_key
+- affected_worksheets
+- expected_operations
+- completed_operations
+- transaction_status
+- created_at
+- completed_at
+- recovery_status
+- error_details
+
+### Resolution C: Use idempotent operations
+
+Every financial or stock-changing request must have an idempotency key.
+
+If the same request is submitted twice:
+
+- Return the original result.
+- Do not create another sale.
+- Do not deduct stock again.
+- Do not create another payment.
+- Do not duplicate journal entries.
+
+### Resolution D: Recovery service
+
+Create:
+
+`backend/app/services/transaction_recovery_service.py`
+
+On application startup and scheduled intervals:
+
+1. Find incomplete transactions.
+2. Read the transaction manifest.
+3. Check actual worksheet records.
+4. Identify completed operations.
+5. Verify their identifiers.
+6. Complete safe missing operations.
+7. Reverse operations when completion is unsafe.
+8. Record the recovery result.
+
+Never blindly replay every operation.
+
+### Resolution E: Concurrency protection
+
+Google Sheets does not provide reliable row-level transactional locking.
+
+Use a shared coordination mechanism for concurrent writers.
+
+Do not rely only on Python process-local locks.
+
+If multiple backend instances can write simultaneously, use a shared lock or transaction coordinator.
+
+### Acceptance criteria
+
+Run failure-injection tests after every write step.
+
+For example:
+
+- Fail after Sales write.
+- Fail after SaleItems write.
+- Fail after Payments write.
+- Fail after StockLedger write.
+- Fail after CashLedger write.
+- Restart backend.
+- Retry original request.
+
+The result must be exactly one complete transaction or a fully reconciled reversal.
+
+---
+
+# PART 3: P1 ISSUES
+
+# KS-006: Health Endpoint Accuracy
+
+**Priority: P1**
+
+### Problem
+
+The health response contains hardcoded status information.
+
+The `/health/verify-tabs` endpoint reads worksheet headers but does not perform actual write verification.
+
+### Resolution
+
+Separate health into four categories.
+
+**1. Liveness**
+
+Is the backend process running?
+
+**2. Readiness**
+
+Can the application accept business requests?
+
+**3. Storage health**
+
+Can the application connect to and read the intended spreadsheet?
+
+**4. Persistence health**
+
+Can a controlled write be performed and verified?
+
+Recommended endpoints:
+
+```text
+/health/live
+/health/ready
+/health/storage
+/health/schema
+/health/persistence
+```
+
+### Requirements
+
+- Remove hardcoded connection statuses.
+- Identify the actual service environment.
+- Identify the configured spreadsheet using a safe non-secret identifier.
+- Verify required worksheets.
+- Verify canonical headers.
+- Verify spreadsheet read permissions.
+- Verify write capability through a dedicated health-check mechanism.
+- Never write arbitrary test transactions into business worksheets.
+
+A persistence test should use a dedicated health-check worksheet or an approved isolated test environment.
+
+### Acceptance criteria
+
+A backend process that is running but disconnected from Google Sheets must report:
+
+```text
+Liveness: HEALTHY
+Readiness: UNHEALTHY
+Storage: DISCONNECTED
+Persistence: NOT_VERIFIED
+```
+
+---
+
+# KS-007: Backup and Restore Verification
+
+**Priority: P1**
+
+### Problem
+
+The current backup endpoint generates a JSON snapshot but does not establish reliable recovery.
+
+### Resolution A: Automated backups
+
+Implement a scheduled backup service.
+
+Recommended frequency:
+
+- Daily full backup.
+- Additional backups before schema migrations.
+- Additional backups before major deployments.
+- Optional more frequent backups based on business transaction volume.
+
+### Resolution B: Backup contents
+
+Include:
+
+- All 78 worksheets.
+- Complete headers.
+- All business records.
+- ID allocation state.
+- Schema version.
+- Backup timestamp.
+- Record counts.
+- Worksheet metadata.
+- Audit history.
+
+Do not include exposed credentials, JWT secrets or service-account private keys.
+
+### Resolution C: Integrity verification
+
+Generate a backup manifest containing:
+
+- Worksheet name.
+- Record count.
+- Column count.
+- Schema version.
+- Content checksum.
+- Backup timestamp.
+
+### Resolution D: Restore procedure
+
+Create:
+
+`backend/app/services/backup_restore_service.py`
+
+Restoration must support:
+
+1. Selecting a backup.
+2. Verifying its checksum.
+3. Validating worksheet completeness.
+4. Checking schema compatibility.
+5. Restoring into a separate test spreadsheet.
+6. Running integrity checks.
+7. Comparing restored records.
+8. Obtaining authorization before live restoration.
+
+### Recommended recovery objectives
+
+Initial targets, subject to operational approval:
+
+- Recovery Point Objective: 24 hours maximum.
+- Recovery Time Objective: 4 hours maximum.
+
+These are proposed targets, not currently verified capabilities.
+
+### Acceptance criteria
+
+- Automated backup completes.
+- Backup manifest validates.
+- Restoration into a separate spreadsheet succeeds.
+- All record counts match.
+- Critical transaction relationships remain intact.
+- The restored application passes regression tests.
+
+---
+
+# KS-008: Sales Lifecycle Verification
+
+**Priority: P1**
+
+### Problem
+
+The uploaded workbook contains no actual Sales, SaleItems or Payments records.
+
+Therefore, the complete sales lifecycle remains unverified.
+
+### Resolution A: Central sales service
+
+Use one backend sales service for all sales channels.
+
+Recommended:
+
+`backend/app/services/sales_service.py`
+
+All sales channels should use the same transaction logic:
+
+- Retail counter.
+- Salesman.
+- Distributor.
+- Hotel.
+- Direct orders.
+- Online orders.
+
+### Resolution B: Sale creation
+
+Validate:
+
+- Customer.
+- Product.
+- SKU.
+- Quantity.
+- Selling price.
+- Discount.
+- Tax treatment.
+- Payment terms.
+- Stock availability.
+- Salesperson.
+- Sales channel.
+
+### Resolution C: Payment handling
+
+Support:
+
+- Cash.
+- UPI.
+- Bank transfer.
+- Credit.
+- Partial payment.
+- Multiple payments.
+- Outstanding balance.
+
+Calculation:
+
+```text
+Outstanding
+=
+Net Sale Amount
+- Total Confirmed Payments
+```
+
+Payment amounts must not exceed the permissible outstanding amount unless the application explicitly supports customer advances.
+
+### Resolution D: Sales cancellation
+
+A posted sale must never simply disappear.
+
+Cancellation must:
+
+- Create a reversal.
+- Restore applicable stock.
+- Reverse accounting entries.
+- Reverse cash or payment allocation where appropriate.
+- Record the reason.
+- Record approving user.
+
+### Resolution E: Sales return
+
+Separate sales returns from sales cancellation.
+
+Returns require:
+
+- Original sale reference.
+- Returned product.
+- Quantity.
+- Physical inspection.
+- Saleable or damaged classification.
+- Refund or credit-note treatment.
+
+### Acceptance criteria
+
+Test cash, UPI, credit, partial payment, multiple payment, cancellation and returns.
+
+Verify all stock, payment and accounting relationships.
+
+---
+
+# KS-009: Accounting Lifecycle Verification
+
+**Priority: P1**
+
+### Problem
+
+The uploaded workbook has two balanced journals, but no populated ChartOfAccounts or AccountingPeriods records.
+
+### Resolution A: Initialize chart of accounts
+
+Create a verified chart of accounts.
+
+Suggested structure:
+
+**Assets**
+- Cash.
+- Bank.
+- Inventory.
+- Accounts Receivable.
+- Advances.
+
+**Liabilities**
+- Accounts Payable.
+- Outstanding Expenses.
+- Employee Payables.
+- Tax Payables.
+
+**Income**
+- Papad Sales.
+- Masala Sales.
+- Other Income.
+
+**Expenses**
+- Raw Material Consumption.
+- Packaging.
+- Labour.
+- Electricity.
+- Factory Overheads.
+- Freight.
+- Administrative Expenses.
+
+**Cost of Goods Sold**
+- Finished Goods Cost.
+- Other Direct Manufacturing Costs.
+
+Account codes must be approved before implementation.
+
+### Resolution B: Automated accounting events
+
+Every approved business transaction must generate the appropriate accounting event.
+
+Examples:
+
+**Credit sale**
+
+Debit: Accounts Receivable
+
+Credit: Sales Revenue
+
+**Cash collection**
+
+Debit: Cash
+
+Credit: Accounts Receivable
+
+**Purchase on credit**
+
+Debit: Inventory or applicable expense
+
+Credit: Accounts Payable
+
+**Supplier payment**
+
+Debit: Accounts Payable
+
+Credit: Bank or Cash
+
+**Production consumption**
+
+Debit: Work in Progress
+
+Credit: Raw Material Inventory
+
+**Finished goods completion**
+
+Debit: Finished Goods Inventory
+
+Credit: Work in Progress
+
+The actual accounting policy must determine the appropriate treatment of production overhead and losses.
+
+### Resolution C: Journal engine
+
+Enforce:
+
+```text
+Total Debits = Total Credits
+```
+
+Additional controls:
+
+- Posted journals are immutable.
+- Corrections use reversal entries.
+- Closed periods cannot accept unauthorized postings.
+- Every journal has a source transaction.
+- Duplicate source transactions cannot create duplicate journals.
+
+### Acceptance criteria
+
+- Chart of Accounts populated and verified.
+- Opening balances approved.
+- Sales journals balanced.
+- Purchase journals balanced.
+- Inventory journals balanced.
+- Expense journals balanced.
+- Reversals verified.
+- Trial balance reconciles.
+
+---
+
+# KS-010: Payroll Schema Reconciliation
+
+**Priority: P1**
+
+### Problem
+
+Payroll field names differ between the backend and workbook.
+
+This can create incomplete salary calculations.
+
+### Resolution A: Standard payroll model
+
+Establish canonical fields:
+
+```text
+payroll_item_id
+payroll_run_id
+employee_id
+basic_salary
+attendance_days
+working_days
+allowances
+overtime_amount
+incentives
+gross_amount
+deductions
+net_amount
+payment_status
+payment_id
+```
+
+Keep legacy aliases during migration.
+
+### Resolution B: Separate workforce categories
+
+Maintain separate calculation methods for:
+
+1. Monthly employees.
+2. Daily wage workers.
+3. Piece-rate labour.
+4. Salesman incentives.
+5. Freelancers.
+
+### Resolution C: Salary calculation
+
+Monthly employee:
+
+```text
+Earned Basic
+=
+Monthly Basic Salary
+×
+Eligible Paid Days
+/
+Approved Working Days
+```
+
+Net salary:
+
+```text
+Net Salary
+=
+Earned Basic
++ Allowances
++ Overtime
++ Incentives
+- Deductions
+```
+
+Piece-rate labour:
+
+```text
+Labour Payment
+=
+Approved Production Quantity
+×
+Approved Rate Per Unit
+```
+
+The application must distinguish paid leave, unpaid leave, overtime and approved holidays.
+
+### Resolution D: Payroll approval
+
+Workflow:
+
+```text
+Attendance Verification
+        ↓
+Payroll Calculation
+        ↓
+Supervisor Review
+        ↓
+Owner Approval
+        ↓
+Payment
+        ↓
+Receipt
+```
+
+### Acceptance criteria
+
+- Payroll fields are reconciled.
+- No duplicate salary payments.
+- Attendance is linked to payroll.
+- Salary calculations are reproducible.
+- Payment records reconcile with CashLedger or Bank records.
+- Historical payroll remains unchanged.
+
+---
+
+# KS-011: Browser Session Security
+
+**Priority: P1**
+
+### Problem
+
+The frontend stores JWT tokens in localStorage.
+
+This increases exposure to token theft if malicious JavaScript executes.
+
+### Resolution
+
+Evaluate migration to:
+
+- HttpOnly cookies.
+- Secure cookies.
+- SameSite protection.
+- Appropriate CSRF protection.
+- Short-lived access sessions.
+- Server-side refresh-token management.
+
+### Additional requirements
+
+1. Password changes invalidate old sessions.
+2. User deactivation invalidates existing sessions.
+3. Role changes take effect immediately.
+4. Expired sessions cannot perform operations.
+5. Revoked tokens remain revoked after backend restart.
+6. Sensitive actions require fresh authorization.
+7. Authentication secrets never appear in logs.
+
+If the existing authentication architecture cannot safely support cookie-based sessions without a broader change, implement a documented interim mitigation rather than introducing an incomplete security migration.
+
+### Acceptance criteria
+
+Test:
+
+- Login.
+- Logout.
+- Expired session.
+- Revoked session.
+- Password change.
+- Role change.
+- Account deactivation.
+- CSRF attempts.
+- Multiple browser sessions.
+
+---
+
+# KS-012: Spreadsheet Formula Injection Protection
+
+**Priority: P1**
+
+### Problem
+
+The application uses:
+
+```python
+value_input_option="USER_ENTERED"
+```
+
+This can interpret user-supplied strings as spreadsheet formulas.
+
+### Resolution
+
+Create:
+
+`backend/app/services/sheets_input_sanitizer.py`
+
+Classify every field into:
+
+1. Numeric.
+2. Date.
+3. Boolean.
+4. Controlled identifier.
+5. User-supplied text.
+6. Formula-controlled system field.
+
+For ordinary user-supplied text, use RAW input where appropriate.
+
+For fields that genuinely require formulas, use separately controlled formula-writing operations.
+
+Do not indiscriminately modify legitimate numeric values or dates.
+
+### Acceptance criteria
+
+Test strings beginning with:
+
+```text
+=
++
+-
+@
+```
+
+Verify that user-supplied text is stored as text rather than executed as a formula.
+
+Verify that legitimate negative numbers and system-generated formulas continue working correctly.
+
+---
+
+# KS-013: Purchasing Lifecycle Verification
+
+**Priority: P1**
+
+### Problem
+
+Purchasing worksheet identifiers differ from backend canonical identifiers.
+
+The purchasing lifecycle has not been verified against real transactions.
+
+### Resolution A: Purchasing workflow
+
+Implement and verify:
+
+```text
+Purchase Request
+      ↓
+Purchase Order
+      ↓
+Supplier Confirmation
+      ↓
+Goods Receipt
+      ↓
+Quality Inspection
+      ↓
+Stock Entry
+      ↓
+Supplier Bill
+      ↓
+Payment
+```
+
+### Resolution B: Document relationships
+
+Every document must reference its parent:
+
+- Purchase Order → Supplier.
+- Purchase Order Item → Purchase Order.
+- Goods Receipt → Purchase Order.
+- Goods Receipt Item → Goods Receipt and PO Item.
+- Supplier Bill → Supplier and applicable receipt.
+- Supplier Return → Original receipt.
+- Supplier Payment → Supplier Bill.
+
+### Resolution C: Quantity validation
+
+```text
+Received Quantity
+=
+Accepted Quantity
++ Rejected Quantity
+```
+
+Do not add rejected goods to usable stock.
+
+### Resolution D: Duplicate prevention
+
+Prevent:
+
+- Duplicate goods receipt.
+- Duplicate supplier invoice.
+- Duplicate supplier payment.
+- Receipt quantity exceeding approved purchase quantity without authorization.
+
+Support approved partial receipts.
+
+### Acceptance criteria
+
+Complete a test purchase from supplier order through payment and stock reconciliation.
+
+---
+
+# KS-014: Quality Management Verification
+
+**Priority: P1**
+
+### Problem
+
+The QualityChecks worksheet has schema differences and no sufficient inspection history to certify the workflow.
+
+### Resolution A: Quality inspection system
+
+Create a standardized inspection model:
+
+- inspection_id
+- product_id
+- batch_id
+- inspection_stage
+- inspection_date
+- inspected_quantity
+- accepted_quantity
+- rejected_quantity
+- defect_type
+- corrective_action
+- inspector_id
+- approval_status
+
+### Resolution B: Manufacturing quality stages
+
+Include:
+
+1. Raw material inspection.
+2. Dough preparation inspection.
+3. Drying inspection.
+4. Finished papad inspection.
+5. Packaging inspection.
+6. Final dispatch inspection.
+7. Customer complaint investigation.
+
+### Resolution C: Product holds
+
+A failed inspection should place the affected batch or quantity on HOLD.
+
+Held stock must not be available for sale.
+
+### Resolution D: Spoilage and rejection tracking
+
+Provide:
+
+- Defect classification.
+- Batch identification.
+- Quantity affected.
+- Photographic evidence where available.
+- Corrective action.
+- Disposal or reprocessing approval.
+
+For Kawad Swad, fungal spoilage must have its own quality classification and traceability.
+
+### Acceptance criteria
+
+- Failed batches cannot enter saleable stock.
+- Inspection records are traceable.
+- Rejected quantity reconciles with inventory.
+- Quality release requires authorization.
+- Customer complaints can be traced to production batches.
+
+---
+
+# KS-015: Frontend Production Build
+
+**Priority: P1**
+
+### Problem
+
+The frontend contains approximately 48 TSX files.
+
+The production build was not independently verified.
+
+### Resolution A: Build verification
+
+Run:
+
+```bash
+npm ci
+npm run build
+```
+
+Use the project's actual lockfile and documented Node version.
+
+### Resolution B: TypeScript validation
+
+Run the configured TypeScript compiler.
+
+Resolve:
+
+- Type errors.
+- Missing imports.
+- Invalid component properties.
+- Incorrect API response types.
+- Unused or obsolete components.
+- Incompatible module imports.
+
+### Resolution C: Frontend-backend contract validation
+
+Compare every API request with its backend endpoint.
+
+Verify:
+
+- Request schema.
+- Response schema.
+- Error response.
+- Authentication.
+- Permissions.
+- Loading states.
+- Empty states.
+
+### Resolution D: UI testing
+
+Test all primary screens:
+
+- Dashboard.
+- Products.
+- Purchasing.
+- Raw Materials.
+- Production.
+- Packaging.
+- Inventory.
+- Sales.
+- Payments.
+- Expenses.
+- Workforce.
+- Attendance.
+- Payroll.
+- Accounting.
+- Approvals.
+- Reports.
+
+### Acceptance criteria
+
+- Production build succeeds.
+- No blocking TypeScript errors.
+- No missing API endpoints.
+- No broken navigation.
+- No critical browser console errors.
+- All primary forms pass validation.
+
+---
+
+# KS-016: Performance Optimization
+
+**Priority: P2**
+
+### Problem
+
+Google Sheets API operations can become slower as records increase.
+
+Frontend rendering may also become slower with larger datasets.
+
+### Resolution A: Backend performance
+
+Introduce:
+
+- Efficient batch reads.
+- Batch updates where safe.
+- Pagination.
+- Indexed in-memory lookup maps.
+- Reduced unnecessary worksheet reads.
+- Request-level caching.
+- Cache invalidation after writes.
+- API timeouts.
+- Controlled retries with exponential backoff.
+
+Do not cache financial balances indefinitely.
+
+### Resolution B: Frontend performance
+
+Implement:
+
+- Lazy loading.
+- Route-level code splitting.
+- Table pagination.
+- Virtualized large tables.
+- Debounced search.
+- Reduced unnecessary re-rendering.
+- Optimized API calls.
+- Skeleton loading states.
+
+### Resolution C: Performance monitoring
+
+Measure:
+
+- API response time.
+- Google Sheets API calls per operation.
+- Dashboard load time.
+- Sales form submission time.
+- Inventory loading time.
+- Production form submission time.
+- Failed API requests.
+
+### Proposed targets
+
+| Operation | Target |
+|---|---:|
+| Dashboard initial load | Under 3 seconds |
+| Standard API response | Under 1 second where practical |
+| Search response | Under 1 second |
+| Standard form submission | Under 2 seconds |
+| Large report | Under 5 seconds where practical |
+
+These are engineering targets, not guarantees.
+
+### Acceptance criteria
+
+Benchmark with realistic business data and concurrent users.
+
+No optimization may compromise transaction integrity.
+
+---
+
+# KS-017: Audit Report Regeneration
+
+**Priority: P2**
+
+### Problem
+
+The existing ID audit report covers only 22 worksheets.
+
+It is not a complete audit of the current 78-sheet workbook.
+
+### Resolution
+
+Create a complete audit engine.
+
+Recommended:
+
+`backend/app/services/full_system_audit_service.py`
+
+It should inspect:
+
+**A. Worksheet integrity**
+- Missing worksheets.
+- Unexpected worksheets.
+- Missing headers.
+- Duplicate headers.
+- Additional headers.
+
+**B. Record integrity**
+- Blank primary IDs.
+- Duplicate primary IDs.
+- Invalid foreign IDs.
+- Duplicate business identifiers.
+- Invalid status values.
+
+**C. Transaction integrity**
+- Incomplete sales.
+- Incomplete purchases.
+- Missing payment references.
+- Missing stock movements.
+- Unbalanced journals.
+
+**D. Manufacturing integrity**
+- Missing recipes.
+- Invalid batch references.
+- Unapproved production.
+- Packaging discrepancies.
+- Negative stock.
+
+**E. Workforce integrity**
+- Missing employees.
+- Invalid attendance references.
+- Payroll discrepancies.
+- Duplicate payments.
+
+### Report format
+
+Generate:
+
+1. Executive summary.
+2. Worksheet-level audit.
+3. Schema comparison.
+4. Duplicate ID report.
+5. Foreign-key report.
+6. Inventory reconciliation.
+7. Financial reconciliation.
+8. Manufacturing reconciliation.
+9. Security findings.
+10. Recommended corrections.
+
+Every finding must include:
+
+- Issue ID.
+- Severity.
+- Worksheet.
+- Record ID.
+- Expected value.
+- Actual value.
+- Recommended action.
+
+### Acceptance criteria
+
+All 78 worksheets are inspected.
+
+Audit reports are timestamped and reproducible.
+
+Historical audit reports are retained.
+
+---
+
+# KS-018: Mobile UX Verification
+
+**Priority: P2**
+
+### Problem
+
+The frontend needs complete verification on mobile devices.
+
+Daily ERP users may access the system from factory floors, shops and warehouses.
+
+### Resolution A: Mobile-first layout
+
+Optimize:
+
+- Dashboard.
+- Production entry.
+- Packaging entry.
+- Stock checking.
+- Sales billing.
+- Payment collection.
+- Attendance.
+- Approvals.
+
+### Resolution B: Simplify daily operations
+
+Prefer:
+
+- Large buttons.
+- Simple Hindi-friendly terminology where appropriate.
+- Fewer mandatory fields.
+- Clear product search.
+- Barcode/SKU search where supported.
+- Visible stock availability.
+- Clear approval status.
+- Confirmation before irreversible actions.
+
+### Resolution C: Role-based navigation
+
+Users should only see the modules relevant to their responsibilities.
+
+Example:
+
+**Factory worker**
+- My Work.
+- Production Entry.
+- Attendance.
+
+**Production supervisor**
+- Production.
+- Packaging.
+- Quality.
+- Approvals.
+
+**Salesperson**
+- My Stock.
+- New Sale.
+- Payments.
+- Outstanding Customers.
+
+**Owner**
+- Dashboard.
+- Production.
+- Sales.
+- Stock.
+- Accounts.
+- Workforce.
+- Reports.
+- Approvals.
+
+Actual access must be enforced by backend permissions, not just hidden menu items.
+
+### Acceptance criteria
+
+Test on:
+
+- Small Android phone.
+- Standard Android phone.
+- Tablet.
+- Desktop.
+
+All critical daily workflows must be usable without horizontal scrolling or hidden action buttons.
+
+---
+
+# PART 4: CROSS-MODULE BUSINESS WORKFLOW VERIFICATION
+
+After resolving all 18 issues, run the following complete business simulation.
+
+## Scenario: One complete Kawad Swad manufacturing and sales day
+
+### Step 1: Purchasing
+
+- Create supplier.
+- Create purchase order.
+- Receive raw material.
+- Record accepted and rejected quantities.
+- Approve receipt.
+- Update raw material inventory.
+
+Expected result: Raw material stock increases only by accepted quantity.
+
+### Step 2: Production
+
+- Select Moong Master Papad.
+- Select approved recipe.
+- Verify raw material availability.
+- Create production batch.
+- Record material consumption.
+- Record production output.
+- Record process loss.
+- Obtain approval.
+
+Expected result: Raw material decreases correctly and bulk stock increases correctly.
+
+### Step 3: Packaging
+
+- Select production batch.
+- Issue bulk papad.
+- Select packet size.
+- Enter packet count.
+- Record rejected packets.
+- Record process loss.
+- Reconcile remaining bulk.
+- Obtain approval.
+
+Expected result: Saleable finished stock increases only by approved packed quantity.
+
+### Step 4: Finished inventory
+
+- Verify SKU.
+- Verify packet size.
+- Verify quantity.
+- Verify batch traceability.
+- Verify inventory valuation.
+
+Expected result: Finished goods inventory matches packaging output.
+
+### Step 5: Dispatch
+
+- Select salesperson or distributor.
+- Issue approved finished stock.
+- Record dispatch.
+- Verify stock transfer.
+
+Expected result: Warehouse stock decreases and salesperson/distributor stock increases by exactly the same quantity.
+
+### Step 6: Sales
+
+- Select customer.
+- Select products.
+- Enter quantity.
+- Apply approved selling price.
+- Calculate discount and applicable tax.
+- Generate invoice.
+
+Expected result: Sale record and sale items are created exactly once.
+
+### Step 7: Payment
+
+- Record cash or UPI payment.
+- Record partial payment if applicable.
+- Calculate outstanding balance.
+
+Expected result: Payment ledger and customer balance agree.
+
+### Step 8: Expenses
+
+- Record labour.
+- Record electricity.
+- Record factory overhead.
+- Record other expenses.
+
+Expected result: Expenses are recorded once and reflected in accounting.
+
+### Step 9: Workforce
+
+- Verify attendance.
+- Verify assigned work.
+- Calculate wages.
+- Approve salary or labour payment.
+
+Expected result: Workforce payments match approved calculations.
+
+### Step 10: Daily closing
+
+Reconcile:
+
+- Opening cash.
+- Cash sales.
+- Cash collections.
+- Expenses paid.
+- Other cash movements.
+- Closing physical cash.
+
+Expected result: Cash ledger and physical closing balance agree.
+
+### Step 11: Final accounting
+
+Generate:
+
+- Sales report.
+- Purchase report.
+- Production report.
+- Stock report.
+- Cash report.
+- Outstanding report.
+- Expense report.
+- Trial balance.
+
+Expected result: All reports agree with the underlying transactions.
+
+---
+
+# PART 5: IMPLEMENTATION ORDER
+
+The implementation must follow this sequence.
+
+| Phase | Issues | Deliverable |
+|---|---|---|
+| Phase 0 | Backup and safety preparation | Verified recovery point |
+| Phase 1 | KS-001, KS-003 | Schema and product mapping |
+| Phase 2 | KS-002, KS-004 | Production and stock integrity |
+| Phase 3 | KS-005 | Transaction recovery |
+| Phase 4 | KS-006, KS-007, KS-011, KS-012 | Infrastructure and security |
+| Phase 5 | KS-008, KS-013 | Sales and purchasing |
+| Phase 6 | KS-009, KS-010 | Accounting and workforce |
+| Phase 7 | KS-014 | Quality management |
+| Phase 8 | KS-015, KS-016, KS-018 | Frontend, performance and UX |
+| Phase 9 | KS-017 | Complete system audit |
+| Phase 10 | All issues | Production release certification |
+
+Dependencies must be respected. For example, sales and accounting should not be certified before the underlying transaction and stock services are reliable.
+
+---
+
+# PART 6: FINAL RELEASE ACCEPTANCE CRITERIA
+
+The ERP cannot be declared production-ready until all conditions below are met.
+
+| Requirement | Mandatory |
+|---|---|
+| All 65 managed worksheet schemas verified | Yes |
+| All schema conflicts resolved | Yes |
+| Historical data preserved | Yes |
+| All product-recipe relationships verified | Yes |
+| Packaging discrepancies investigated | Yes |
+| Production stock reconciled | Yes |
+| Finished goods stock reconciled | Yes |
+| Multi-sheet recovery tested | Yes |
+| Duplicate transactions prevented | Yes |
+| Sales lifecycle verified | Yes |
+| Payment lifecycle verified | Yes |
+| Purchasing lifecycle verified | Yes |
+| Accounting lifecycle verified | Yes |
+| Payroll calculations verified | Yes |
+| Quality holds verified | Yes |
+| Backup restoration tested | Yes |
+| Security tests passed | Yes |
+| Frontend production build passed | Yes |
+| Backend tests passed | Yes |
+| Mobile workflows verified | Yes |
+| Live Render configuration verified | Yes |
+| Live Google Sheets connection verified | Yes |
+| Full business-day simulation passed | Yes |
+
+## Release classification
+
+**GREEN: Production Ready**
+
+All mandatory acceptance criteria pass.
+
+**YELLOW: Controlled Operations**
+
+No critical data-integrity issue remains, but some noncritical functionality requires monitoring. Only approved workflows may be used.
+
+**RED: Not Ready**
+
+Any unresolved critical issue involving stock, payments, accounting, data integrity, security or transaction recovery.
+
+---
+
+# PART 7: FINAL IMPLEMENTATION DELIVERABLES
+
+The implementation team must produce these deliverables:
+
+1. `ERP_FULL_AUDIT_REPORT.md`
+2. `SCHEMA_RECONCILIATION_REPORT.md`
+3. `DATA_MIGRATION_PLAN.md`
+4. `DATA_MIGRATION_LOG.md`
+5. `PRODUCTION_INVENTORY_AUDIT.md`
+6. `PACKAGING_DISCREPANCY_REPORT.md`
+7. `SALES_TRANSACTION_AUDIT.md`
+8. `ACCOUNTING_RECONCILIATION_REPORT.md`
+9. `WORKFORCE_PAYROLL_AUDIT.md`
+10. `SECURITY_AUDIT_REPORT.md`
+11. `BACKUP_RESTORE_VERIFICATION.md`
+12. `FRONTEND_BUILD_REPORT.md`
+13. `PERFORMANCE_BENCHMARK_REPORT.md`
+14. `FULL_REGRESSION_TEST_REPORT.md`
+15. `LIVE_DEPLOYMENT_VERIFICATION.md`
+16. `PRODUCTION_RELEASE_CERTIFICATE.md`
+
+Each report must contain actual evidence, not just a statement that the task is complete.
+
+---
+
+# FINAL PROJECT OBJECTIVE
+
+The finished Kawad Swad ERP must provide one dependable operational system.
+
+**One product master.  
+One recipe source of truth.  
+One inventory ledger.  
+One production calculation engine.  
+One packaging calculation engine.  
+One sales transaction engine.  
+One accounting source of truth.  
+One workforce calculation system.  
+One approval mechanism.  
+One complete audit trail.**
+
+The same transaction must never produce different results in different modules.
+
+The owner should be able to open the dashboard and trust the numbers without manually checking multiple spreadsheets.
+
+**Final engineering principle: No data loss, no duplicate transactions, no unexplained stock differences, no incorrect costing, no unbalanced accounts and no unverified deployment.**

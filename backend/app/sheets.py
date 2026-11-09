@@ -172,6 +172,7 @@ REQUIRED_TABS = {
         "expected_kg", "difference_kg", "difference_status", "status", "notes",
         "created_at", "created_by",
         "batch_allocations_json", "bulk_cost", "bulk_cost_per_kg", "packaging_material_cost", "packaging_labor_cost", "total_finished_cost",
+        "packing_loss_kg", "loss_reason", "discrepancy_approved", "discrepancy_explanation", "discrepancy_approved_by", "discrepancy_approved_at", "reference", "cost_status",
     ],
     "ProductionStockLedger": [
         "movement_id", "txn_datetime", "movement_type", "product_id", "bulk_product_key",

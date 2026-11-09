@@ -357,8 +357,7 @@ def resolve_packaging_batch_allocations(
                 except Exception:
                     unit_cost = Decimal("0")
                     cost_status = "MISSING"
-                    cost_source = "NONE"
-
+            unit_cost = to_decimal(unit_cost)
             line_cost = take * unit_cost
             total_cost += line_cost
             needed -= take
