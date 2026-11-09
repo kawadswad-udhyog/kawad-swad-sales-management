@@ -159,7 +159,7 @@ async def submit_my_task(task_id: str, req: WorkAssignmentSubmit, current_user: 
     }
     db.update_record("WorkAssignments", "task_id", task_id, updates)
     _log_workforce_audit("SUBMIT_TASK", "WorkAssignments", task_id, uid, f"Task {task_id} submitted for review")
-    return {"ok": True, "message": "Task submitted successfully for review.", "task_id": task_id}
+    return {"ok": True, "message": "Task submitted successfully for review.", "task_id": task_id, "status": "SUBMITTED"}
 
 
 @router.get("/my-attendance")
@@ -187,6 +187,8 @@ async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, current_user: d
             "ok": True,
             "already_checked_in": True,
             "message": f"Already checked in today at {existing.get('check_in_time')}.",
+            "attendance_id": existing.get("attendance_id"),
+            "status": existing.get("status", "PRESENT"),
             "record": existing,
         }
 
@@ -206,7 +208,7 @@ async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, current_user: d
     }
     db.append_record("EmployeeAttendance", new_record)
     _log_workforce_audit("CHECK_IN", "EmployeeAttendance", att_id, uid, f"Check in on {today} at {now_time}")
-    return {"ok": True, "message": f"Checked in successfully at {now_time}.", "record": new_record}
+    return {"ok": True, "message": f"Checked in successfully at {now_time}.", "attendance_id": att_id, "status": "PRESENT", "record": new_record}
 
 
 @router.post("/my-attendance/check-out")
@@ -243,7 +245,14 @@ async def check_out_my_attendance(req: EmployeeAttendanceCheckOut, current_user:
     }
     db.update_record("EmployeeAttendance", "attendance_id", existing.get("attendance_id"), updates)
     _log_workforce_audit("CHECK_OUT", "EmployeeAttendance", existing.get("attendance_id"), uid, f"Check out on {today} at {now_time} ({total_hours} hrs)")
-    return {"ok": True, "message": f"Checked out successfully at {now_time}. Total hours: {total_hours}.", "total_hours": total_hours}
+    return {
+        "ok": True,
+        "message": f"Checked out successfully at {now_time}. Total hours: {total_hours}.",
+        "attendance_id": existing.get("attendance_id"),
+        "status": "COMPLETED",
+        "total_hours": total_hours,
+        "record": {**existing, **updates},
+    }
 
 
 @router.get("/my-salary")
@@ -351,7 +360,7 @@ async def submit_my_milestone(milestone_id: str, req: FreelancerMilestoneSubmit,
     }
     db.update_record("FreelancerMilestones", "milestone_id", milestone_id, updates)
     _log_workforce_audit("SUBMIT_MILESTONE", "FreelancerMilestones", milestone_id, uid, f"Submitted milestone {milestone_id}")
-    return {"ok": True, "message": "Milestone submitted successfully for Owner review.", "milestone_id": milestone_id}
+    return {"ok": True, "message": "Milestone submitted successfully for Owner review.", "milestone_id": milestone_id, "status": "SUBMITTED"}
 
 
 # ============================================================================
@@ -533,7 +542,7 @@ async def create_labour(req: LabourCreate, current_user: dict = Depends(get_curr
     }
     db.append_record("LabourMaster", new_labour)
     _log_workforce_audit("CREATE_LABOUR", "LabourMaster", labour_id, actor_id, f"Created labour {req.full_name}")
-    return {"ok": True, "message": f"Labour worker {req.full_name} registered successfully.", "labour": new_labour}
+    return {"ok": True, "message": f"Labour worker {req.full_name} registered successfully.", "labour": new_labour, "labour_id": labour_id}
 
 
 @router.put("/labour/{labour_id}")
@@ -723,7 +732,7 @@ async def create_labour_work_entry(req: LabourWorkEntryCreate, current_user: dic
     }
     db.append_record("LabourWorkEntries", entry)
     _log_workforce_audit("CREATE_WORK_ENTRY", "LabourWorkEntries", entry_id, actor_id, f"Work entry {entry_id} for {req.labour_id} (Rs {total_amount})")
-    return {"ok": True, "message": f"Work entry recorded. Total: Rs {total_amount}.", "entry": entry}
+    return {"ok": True, "message": f"Work entry recorded. Total: Rs {total_amount}.", "entry": entry, "entry_id": entry_id, "status": "APPROVED"}
 
 
 # --- Work Tasks & Assignments ---
@@ -1188,6 +1197,11 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
         "ok": True,
         "message": f"Draft payroll calculated for {run_month} ({len(items_to_save)} employees).",
         "payroll_run": payroll_run_record,
+        "payroll_run_id": run_id,
+        "total_employees": len(items_to_save),
+        "total_net": round(total_net, 2),
+        "total_gross": round(total_gross, 2),
+        "status": "DRAFT",
         "items": items_to_save,
     }
 
@@ -1270,7 +1284,7 @@ async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(
         raise HTTPException(status_code=404, detail="Payroll run not found.")
 
     if str(target.get("status") or "").upper() == "APPROVED":
-        return {"ok": True, "message": "Payroll run is already approved."}
+        return {"ok": True, "message": "Payroll run is already approved.", "status": "APPROVED"}
 
     # Ensure totals are verified and synced with all items
     all_items = db.get_records("PayrollItems", fresh=True) or []
@@ -1289,7 +1303,7 @@ async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(
     }
     db.update_record("PayrollRuns", "payroll_run_id", payroll_run_id, updates)
     _log_workforce_audit("APPROVE_PAYROLL", "PayrollRuns", payroll_run_id, actor_id, f"Owner approved payroll {payroll_run_id}")
-    return {"ok": True, "message": f"Payroll run {payroll_run_id} approved successfully."}
+    return {"ok": True, "message": f"Payroll run {payroll_run_id} approved successfully.", "status": "APPROVED", **updates}
 
 
 # --- Payments & Salary Receipts ---
@@ -1456,6 +1470,10 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
         "message": f"Payment of Rs {pay_amount} recorded for {req.recipient_name}.",
         "payment": payment_record,
         "receipt": receipt_record,
+        "payment_id": pay_id,
+        "receipt_id": receipt_id,
+        "amount": pay_amount,
+        "status": "COMPLETED",
         "accounting_journal_ref": journal_ref,
     }
 
@@ -1505,3 +1523,16 @@ list_labour_workers = list_labour
 get_payroll_items = get_payroll_run_items
 list_audit_logs = list_workforce_audit_logs
 list_workforce_employees = list_employees
+check_in_attendance = check_in_my_attendance
+check_out_attendance = check_out_my_attendance
+create_work_assignment = create_task
+submit_work_assignment = submit_my_task
+review_work_assignment = review_task
+create_freelancer_project = create_project
+create_freelancer_milestone = create_project_milestone
+submit_freelancer_milestone = submit_my_milestone
+review_freelancer_milestone = review_project_milestone
+record_labour_attendance = save_labour_attendance_bulk
+record_labour_work_entry = create_labour_work_entry
+upsert_salary_structure = create_or_update_salary_structure
+generate_payroll_run = calculate_payroll_run

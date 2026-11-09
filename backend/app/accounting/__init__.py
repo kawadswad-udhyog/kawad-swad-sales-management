@@ -5,6 +5,7 @@ from app.accounting.chart_of_accounts import CHART_OF_ACCOUNTS, ACCOUNT_LOOKUP
 from app.accounting.journal_engine import (
     validate_journal_lines,
     post_journal_voucher,
+    append_journal_voucher,
     reverse_journal_voucher,
     calculate_trial_balance,
     calculate_profit_and_loss,
@@ -24,6 +25,7 @@ __all__ = [
     "ACCOUNT_LOOKUP",
     "validate_journal_lines",
     "post_journal_voucher",
+    "append_journal_voucher",
     "reverse_journal_voucher",
     "calculate_trial_balance",
     "calculate_profit_and_loss",

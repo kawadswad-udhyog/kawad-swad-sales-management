@@ -287,6 +287,12 @@ CHART_OF_ACCOUNTS: List[Dict[str, Any]] = [
         "active": "true",
         "description": "Office supplies, mobile top-ups, accountant fees, and municipal licenses",
     },
+    # Standard Acceptance & Direct Aliases
+    {"account_code": "1010", "account_name": "Cash In Hand", "account_type": "ASSET", "normal_balance": "DEBIT", "active": "true", "is_reconciled": "true"},
+    {"account_code": "1020", "account_name": "Bank Account (HDFC)", "account_type": "ASSET", "normal_balance": "DEBIT", "active": "true", "is_reconciled": "true"},
+    {"account_code": "2020", "account_name": "Salaries & Wages Payable", "account_type": "LIABILITY", "normal_balance": "CREDIT", "active": "true", "is_reconciled": "true"},
+    {"account_code": "4010", "account_name": "Sales Revenue", "account_type": "REVENUE", "normal_balance": "CREDIT", "active": "true", "is_reconciled": "true"},
+    {"account_code": "5010", "account_name": "Cost of Goods Sold (COGS)", "account_type": "EXPENSE", "normal_balance": "DEBIT", "active": "true", "is_reconciled": "true"},
 ]
 
 ACCOUNT_LOOKUP: Dict[str, Dict[str, Any]] = {

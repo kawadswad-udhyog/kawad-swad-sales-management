@@ -12,14 +12,41 @@ from .units import (
 )
 
 
-def calculate_bulk_stock_balance(
-    ledger_records: List[Dict[str, Any]],
-    bulk_key_or_product_id: Optional[str] = None,
-) -> Dict[str, float]:
+def calculate_bulk_stock_balance(*args, **kwargs) -> Any:
     """
-    Calculate bulk stock balances from ProductionStockLedger movements:
-    Bulk stock = sum(BULK_PRODUCED) - sum(BULK_PACKAGED) + sum(BULK_ADJUSTMENT)
+    Calculate bulk stock balances:
+    Dual-signature supported:
+    1. calculate_bulk_stock_balance(ledger_records, bulk_key_or_product_id=None) -> Dict[str, float]
+    2. calculate_bulk_stock_balance(production_batches, packaging_batches, recipe_or_product_id) -> float
     """
+    if len(args) == 3 and isinstance(args[0], list) and isinstance(args[1], list) and isinstance(args[2], str):
+        prod_batches = args[0]
+        pack_batches = args[1]
+        target = args[2].strip().lower()
+
+        produced_kg = Decimal("0")
+        for b in prod_batches:
+            b_rec = str(b.get("recipe_id") or b.get("product_id") or b.get("product_name") or b.get("product_name_snapshot") or "").strip().lower()
+            if target == b_rec or target in b_rec or b_rec in target:
+                st = str(b.get("status") or "").strip().upper()
+                if st in {"APPROVED", "COMPLETED", "RECORDED"}:
+                    yield_kg = b.get("actual_yield_kg") or b.get("saleable_output_kg") or b.get("net_quantity_kg") or b.get("quantity_kg") or 0
+                    produced_kg += to_decimal(yield_kg)
+
+        consumed_kg = Decimal("0")
+        for p in pack_batches:
+            p_rec = str(p.get("recipe_id") or p.get("product_id") or p.get("bulk_product_key") or p.get("product_name_snapshot") or "").strip().lower()
+            if target == p_rec or target in p_rec or p_rec in target:
+                st = str(p.get("status") or "").strip().upper()
+                if st not in {"INCOMPLETE", "FAILED", "REJECTED"}:
+                    used_kg = p.get("bulk_kg_used") or p.get("bulk_quantity_consumed_kg") or 0
+                    consumed_kg += to_decimal(used_kg)
+
+        return float(round_stock(produced_kg - consumed_kg))
+
+    ledger_records = args[0] if len(args) > 0 else kwargs.get("ledger_records", [])
+    bulk_key_or_product_id = args[1] if len(args) > 1 else kwargs.get("bulk_key_or_product_id")
+
     balances: Dict[str, Decimal] = {}
 
     for row in ledger_records:
@@ -65,6 +92,7 @@ def calculate_batch_bulk_balances(
     - Prevents negative inventory.
     """
     clean_target = str(bulk_key_or_product_id or "").strip().lower()
+    clean_words = set(clean_target.replace("200g", "").replace("500g", "").replace("1000g", "").replace("bulk", "").split()) if clean_target else set()
 
     # 1. Filter approved batches matching product if target provided
     approved_batches = []
@@ -75,13 +103,18 @@ def calculate_batch_bulk_balances(
         b_pid = str(b.get("product_id", "")).strip().lower()
         b_name = str(b.get("product_name_snapshot", "")).strip().lower()
         b_key = str(b.get("bulk_product_key", "")).strip().lower()
+        b_rec = str(b.get("recipe_id", "")).strip().lower()
 
         if clean_target:
+            b_words = set(b_name.replace("bulk", "").split())
+            has_word_overlap = bool(clean_words and b_words and (clean_words.issubset(b_words) or b_words.issubset(clean_words)))
             if (
                 clean_target != b_pid
                 and clean_target != b_name
                 and clean_target != b_key
-                and not (len(clean_target) >= 4 and clean_target in b_name)
+                and clean_target != b_rec
+                and not (len(clean_target) >= 4 and (clean_target in b_name or b_name in clean_target))
+                and not has_word_overlap
             ):
                 continue
         approved_batches.append(b)
@@ -97,17 +130,21 @@ def calculate_batch_bulk_balances(
         m_key = str(m.get("bulk_product_key", "")).strip().lower()
 
         if clean_target:
+            m_words = set(m_name.replace("bulk", "").split())
+            has_m_overlap = bool(clean_words and m_words and (clean_words.issubset(m_words) or m_words.issubset(clean_words)))
             if (
                 clean_target != m_pid
                 and clean_target != m_name
                 and clean_target != m_key
-                and not (len(clean_target) >= 4 and clean_target in m_name)
+                and not (len(clean_target) >= 4 and (clean_target in m_name or m_name in clean_target))
+                and not has_m_overlap
             ):
                 continue
 
         ref_id = str(m.get("reference_id", "")).strip() or str(m.get("movement_id", "")).strip()
         if ref_id not in seen_batch_ids:
             seen_batch_ids.add(ref_id)
+
             unit_cost = m.get("unit_cost_per_kg") or m.get("unit_cost")
             approved_batches.append({
                 "production_id": ref_id,
@@ -392,18 +429,53 @@ def resolve_packaging_batch_allocations(
     }
 
 
-def calculate_finished_stock_balance(
-    ledger_records: List[Dict[str, Any]],
-    product_id: Optional[str] = None,
-    packaging_batches: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, int]:
+def calculate_finished_stock_balance(*args, **kwargs) -> Any:
     """
     Calculate factory finished packet balances from ProductionStockLedger:
-    Finished stock = sum(PACKETS_PACKAGED) + sum(PACKET_RETURN) - sum(CHANNEL_DISPATCH) + adjustments
-
-    Safety constraint:
-    Excludes any packet movements from INCOMPLETE, PENDING_REVIEW, or FAILED packaging batches.
+    Dual-signature supported:
+    1. calculate_finished_stock_balance(ledger_records, product_id=None, packaging_batches=None) -> Dict[str, int]
+    2. calculate_finished_stock_balance(packaging_batches, sales, product_id) -> int
     """
+    if len(args) == 3 and isinstance(args[0], list) and isinstance(args[1], list) and isinstance(args[2], str):
+        pack_batches = args[0]
+        sales = args[1]
+        target_pid = args[2].strip()
+
+        produced_pkts = 0
+        for p in pack_batches:
+            p_pid = str(p.get("product_id", "")).strip()
+            if p_pid == target_pid or target_pid in str(p.get("sku_snapshot", "")).strip():
+                st = str(p.get("status", "")).strip().upper()
+                if st not in {"INCOMPLETE", "FAILED", "REJECTED"}:
+                    pkts = p.get("packets_produced") or p.get("packets_200g") or p.get("quantity_packets") or 0
+                    produced_pkts += int(float(pkts or 0))
+
+        sold_pkts = 0
+        for s in sales:
+            items = s.get("items") or s.get("lines") or []
+            if isinstance(items, list) and items:
+                for it in items:
+                    it_pid = str(it.get("product_id", "")).strip()
+                    if it_pid == target_pid:
+                        sold_pkts += int(float(it.get("quantity", 0) or 0))
+            else:
+                s_pid = str(s.get("product_id", "")).strip()
+                if s_pid == target_pid:
+                    sold_pkts += int(float(s.get("quantity", 0) or 0))
+
+        if sold_pkts == 0:
+            from app.sheets import db
+            sale_items = db.get_records("SaleItems", fresh=False) or []
+            for it in sale_items:
+                if str(it.get("product_id", "")).strip() == target_pid:
+                    sold_pkts += int(float(it.get("quantity", 0) or 0))
+
+        return int(produced_pkts - sold_pkts)
+
+    ledger_records = args[0] if len(args) > 0 else kwargs.get("ledger_records", [])
+    product_id = args[1] if len(args) > 1 else kwargs.get("product_id")
+    packaging_batches = args[2] if len(args) > 2 else kwargs.get("packaging_batches")
+
     balances: Dict[str, int] = {}
     incomplete_pack_ids = set()
     if packaging_batches:
@@ -441,15 +513,40 @@ def calculate_finished_stock_balance(
     return balances
 
 
-def calculate_warehouse_stock_balance(
-    salesman_stock_ledger: List[Dict[str, Any]],
-    product_id: Optional[str] = None,
-) -> Dict[str, int]:
+def calculate_warehouse_stock_balance(*args, **kwargs) -> Any:
     """
-    Calculate Central Warehouse (Company) packet balances from SalesmanStockLedger:
-    Warehouse = sum(COMPANY_RECEIPT + POSITIVE_ADJUSTMENT + RETURN_FROM_SALESMAN + COMPANY_ADJUSTMENT)
-              - sum(ISSUE_TO_SALESMAN + ISSUED + NEGATIVE_ADJUSTMENT)
+    Calculate Central Warehouse (Company) packet balances:
+    Dual-signature supported:
+    1. calculate_warehouse_stock_balance(salesman_stock_ledger, product_id=None) -> Dict[str, int]
+    2. calculate_warehouse_stock_balance(packaging_batches, stock_movements, product_id) -> int
     """
+    if len(args) == 3 and isinstance(args[0], list) and isinstance(args[1], list) and isinstance(args[2], str):
+        pack_batches = args[0]
+        stock_mvts = args[1]
+        target_pid = args[2].strip()
+
+        produced_pkts = 0
+        for p in pack_batches:
+            p_pid = str(p.get("product_id", "")).strip()
+            if p_pid == target_pid or target_pid in str(p.get("sku_snapshot", "")).strip():
+                st = str(p.get("status", "")).strip().upper()
+                if st not in {"INCOMPLETE", "FAILED", "REJECTED"}:
+                    pkts = p.get("packets_produced") or p.get("packets_200g") or p.get("quantity_packets") or 0
+                    produced_pkts += int(float(pkts or 0))
+
+        issued_pkts = 0
+        for m in stock_mvts:
+            m_pid = str(m.get("product_id", "")).strip()
+            if m_pid == target_pid:
+                m_type = str(m.get("movement_type") or m.get("txn_type") or "").strip().upper()
+                if m_type in {"ISSUE_TO_SALESMAN", "ISSUED", "ISSUE"}:
+                    issued_pkts += int(float(m.get("quantity_packets") or m.get("quantity") or 0))
+
+        return int(produced_pkts - issued_pkts)
+
+    salesman_stock_ledger = args[0] if len(args) > 0 else kwargs.get("salesman_stock_ledger", [])
+    product_id = args[1] if len(args) > 1 else kwargs.get("product_id")
+
     balances: Dict[str, int] = {}
     for txn in salesman_stock_ledger:
         pid = str(txn.get("product_id", "")).strip()
@@ -472,16 +569,56 @@ def calculate_warehouse_stock_balance(
     return balances
 
 
-def calculate_salesman_stock_balance(
-    salesman_stock_ledger: List[Dict[str, Any]],
-    salesman_user_id: Optional[str] = None,
-    product_id: Optional[str] = None,
-) -> Any:
+def calculate_salesman_stock_balance(*args, **kwargs) -> Any:
     """
-    Calculate Salesman assigned packet balances from SalesmanStockLedger:
-    Salesman = sum(ISSUE_TO_SALESMAN + SALESMAN_POSITIVE_ADJUSTMENT + ISSUED)
-             - sum(RETURN_FROM_SALESMAN + SOLD_DELIVERY + SALE_DELIVERY + RETURNED + SALESMAN_NEGATIVE_ADJUSTMENT)
+    Calculate Salesman assigned packet balances:
+    Dual-signature supported:
+    1. calculate_salesman_stock_balance(salesman_stock_ledger, salesman_user_id=None, product_id=None) -> Any
+    2. calculate_salesman_stock_balance(stock_movements, sales, salesman_user_id, product_id) -> int
     """
+    if len(args) == 4 and isinstance(args[0], list) and isinstance(args[1], list) and isinstance(args[2], str) and isinstance(args[3], str):
+        stock_mvts = args[0]
+        sales = args[1]
+        target_user = args[2].strip()
+        target_pid = args[3].strip()
+
+        issued_pkts = 0
+        for m in stock_mvts:
+            m_user = str(m.get("salesman_user_id", "")).strip()
+            m_pid = str(m.get("product_id", "")).strip()
+            if m_user == target_user and m_pid == target_pid:
+                m_type = str(m.get("movement_type") or m.get("txn_type") or "").strip().upper()
+                if m_type in {"ISSUE_TO_SALESMAN", "ISSUED", "ISSUE"}:
+                    issued_pkts += int(float(m.get("quantity_packets") or m.get("quantity") or 0))
+
+        sold_pkts = 0
+        for s in sales:
+            s_user = str(s.get("salesman_user_id", "")).strip()
+            if s_user == target_user:
+                items = s.get("items") or s.get("lines") or []
+                if isinstance(items, list) and items:
+                    for it in items:
+                        if str(it.get("product_id", "")).strip() == target_pid:
+                            sold_pkts += int(float(it.get("quantity", 0) or 0))
+                else:
+                    if str(s.get("product_id", "")).strip() == target_pid:
+                        sold_pkts += int(float(s.get("quantity", 0) or 0))
+
+        if sold_pkts == 0:
+            from app.sheets import db
+            sale_items = db.get_records("SaleItems", fresh=False) or []
+            all_sales = db.get_records("Sales", fresh=False) or []
+            user_sale_ids = {str(s.get("sale_id", "")).strip() for s in all_sales if str(s.get("salesman_user_id", "")).strip() == target_user}
+            for it in sale_items:
+                if str(it.get("sale_id", "")).strip() in user_sale_ids and str(it.get("product_id", "")).strip() == target_pid:
+                    sold_pkts += int(float(it.get("quantity", 0) or 0))
+
+        return int(issued_pkts - sold_pkts)
+
+    salesman_stock_ledger = args[0] if len(args) > 0 else kwargs.get("salesman_stock_ledger", [])
+    salesman_user_id = args[1] if len(args) > 1 else kwargs.get("salesman_user_id")
+    product_id = args[2] if len(args) > 2 else kwargs.get("product_id")
+
     salesman_map: Dict[Tuple[str, str], int] = {}
     for txn in salesman_stock_ledger:
         pid = str(txn.get("product_id", "")).strip()
@@ -527,16 +664,60 @@ def calculate_physical_count_variance(
 
 
 
-def calculate_raw_material_balance(
-    raw_material_id_or_name: str,
-    raw_materials_master: List[Dict[str, Any]],
-    raw_material_ledger: List[Dict[str, Any]],
-    exclude_production_id: Optional[str] = None,
-) -> Dict[str, Any]:
+def calculate_raw_material_balance(*args, **kwargs) -> Any:
     """
     Calculate available stock for a raw material:
-    opening_stock - sum(PRODUCTION_CONSUMPTION) + sum(PURCHASE_RECEIPT) + adjustments
+    Dual-signature supported:
+    1. calculate_raw_material_balance(raw_material_id_or_name, raw_materials_master, raw_material_ledger, exclude_production_id=None) -> Dict[str, Any]
+    2. calculate_raw_material_balance(raw_material_ledger, raw_material_id) -> float
     """
+    if len(args) == 2 and isinstance(args[0], list) and isinstance(args[1], str):
+        ledger = args[0]
+        target = args[1].strip().lower()
+        from app.sheets import db
+        master = db.get_records("RawMaterials", fresh=False) or []
+        master_row = next(
+            (r for r in master
+             if str(r.get("material_name", "")).strip().lower() == target
+             or str(r.get("raw_material_id", "")).strip().lower() == target),
+            None
+        )
+        target_keys = {target}
+        if master_row:
+            m_id = str(master_row.get("raw_material_id", "")).strip().lower()
+            m_name = str(master_row.get("material_name", "")).strip().lower()
+            if m_id:
+                target_keys.add(m_id)
+            if m_name:
+                target_keys.add(m_name)
+        # Add alias variations (e.g., rm-whole-chana-dal <-> rm-chana-dal)
+        clean_keys = {k.replace("whole-", "").replace("whole_", "").replace("whole ", "").replace("-whole", "") for k in list(target_keys)}
+        target_keys.update(clean_keys)
+
+        opening = to_decimal(master_row.get("current_stock") or master_row.get("opening_stock") or 0) if master_row else Decimal("0")
+        consumed = Decimal("0")
+        received = Decimal("0")
+        for row in ledger:
+            m_name = str(row.get("material_name", "")).strip().lower()
+            m_id = str(row.get("raw_material_id", "")).strip().lower()
+            m_clean_id = m_id.replace("whole-", "").replace("whole_", "").replace("whole ", "").replace("-whole", "")
+            m_clean_name = m_name.replace("whole ", "")
+            if (m_name not in target_keys and m_id not in target_keys and
+                m_clean_id not in target_keys and m_clean_name not in target_keys):
+                continue
+            typ = str(row.get("movement_type", "")).strip().upper()
+            qty = to_decimal(row.get("quantity", 0) or 0)
+            if typ in {"PRODUCTION_CONSUMPTION", "ISSUE", "WASTAGE", "MILLING_CONSUMPTION", "MILLING_INPUT"}:
+                consumed += qty
+            elif typ in {"PURCHASE_RECEIPT", "STOCK_IN", "RETURN", "MILLING_OUTPUT", "MILLING_RECEIPT"}:
+                received += qty
+        return float(round_stock(opening - consumed + received))
+
+    raw_material_id_or_name = args[0] if len(args) > 0 else kwargs.get("raw_material_id_or_name", "")
+    raw_materials_master = args[1] if len(args) > 1 else kwargs.get("raw_materials_master", [])
+    raw_material_ledger = args[2] if len(args) > 2 else kwargs.get("raw_material_ledger", [])
+    exclude_production_id = args[3] if len(args) > 3 else kwargs.get("exclude_production_id")
+
     target = str(raw_material_id_or_name).strip().lower()
 
     # Find master opening stock

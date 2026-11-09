@@ -195,15 +195,27 @@ class CustomerCreate(BaseModel):
 class SaleItemCreate(BaseModel):
     product_id: str
     product_name_snapshot: Optional[str] = ""
+    product_name: Optional[str] = ""
     sku_snapshot: Optional[str] = ""
     pack_weight_g: Optional[int] = 500
     unit: Optional[str] = "PACKET"
     quantity: int = 1
-    actual_unit_price: float
+    actual_unit_price: Optional[float] = None
+    unit_price: Optional[float] = None
     discount_amount: Optional[float] = 0.0
     line_total: Optional[float] = None
+    total_amount: Optional[float] = None
     qualifying_kg: Optional[float] = 0.0
     notes: Optional[str] = ""
+
+    def __init__(self, **data):
+        if "unit_price" in data and ("actual_unit_price" not in data or data["actual_unit_price"] is None):
+            data["actual_unit_price"] = data["unit_price"]
+        if "total_amount" in data and ("line_total" not in data or data["line_total"] is None):
+            data["line_total"] = data["total_amount"]
+        if "product_name" in data and not data.get("product_name_snapshot"):
+            data["product_name_snapshot"] = data["product_name"]
+        super().__init__(**data)
 
 class SaleCreate(BaseModel):
     idempotency_key: Optional[str] = Field(None, description="Client idempotency key for preventing duplicate billing")
@@ -217,7 +229,11 @@ class SaleCreate(BaseModel):
     salesman_user_id: Optional[str] = ""
     delivery_status: Optional[str] = "DELIVERED"
     payment_method: Optional[str] = "CASH"
+    payment_mode: Optional[str] = None
     payment_status: Optional[str] = "PAID"
+    cash_collected: Optional[float] = None
+    credit_amount: Optional[float] = None
+    sale_date: Optional[str] = None
     subtotal: Optional[float] = None
     discount_amount: Optional[float] = 0.0
     tax_amount: Optional[float] = 0.0
@@ -269,6 +285,9 @@ class Sale(BaseModel):
     txn_status: Optional[str] = "COMPLETE"
     payment_method: Optional[str] = ""
     payment_reference: Optional[str] = ""
+    total_amount: Optional[float] = None
+    cash_collected: Optional[float] = None
+    credit_amount: Optional[float] = None
 
 class SalePaymentCreate(BaseModel):
     amount: float = Field(..., gt=0)
@@ -313,6 +332,8 @@ class StockTransaction(BaseModel):
     quantity: int
     unit: str
     pack_weight_g: int
+    movement_id: Optional[str] = None
+    quantity_packets: Optional[int] = None
     related_sale_id: Optional[str] = ""
     issued_by_user_id: Optional[str] = ""
     received_by_user_id: Optional[str] = ""
@@ -320,13 +341,27 @@ class StockTransaction(BaseModel):
     reference_id: Optional[str] = ""
     notes: Optional[str] = ""
 
+    def __init__(self, **data):
+        if "movement_id" not in data or not data["movement_id"]:
+            data["movement_id"] = data.get("stock_txn_id")
+        if "quantity_packets" not in data or data["quantity_packets"] is None:
+            data["quantity_packets"] = data.get("quantity")
+        super().__init__(**data)
+
 class StockIssueCreate(BaseModel):
     product_id: str
     salesman_user_id: str
     txn_type: str = "ISSUE_TO_SALESMAN"
-    quantity: int = Field(..., gt=0)
+    quantity: Optional[int] = None
+    quantity_packets: Optional[int] = None
+    issue_date: Optional[str] = None
     notes: Optional[str] = ""
     reference_id: Optional[str] = ""
+
+    def __init__(self, **data):
+        if ("quantity" not in data or data["quantity"] is None) and "quantity_packets" in data:
+            data["quantity"] = data["quantity_packets"]
+        super().__init__(**data)
 
 # Expense Models
 class Expense(BaseModel):
