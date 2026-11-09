@@ -128,9 +128,10 @@ REQUIRED_TABS = {
         "received_by_user_id", "confirmed_by_user_id", "reference_id", "notes",
     ],
     "Expenses": [
-        "expense_id", "expense_datetime", "salesman_user_id", "category", "amount",
-        "payment_mode", "description", "receipt_image_url", "approval_status",
-        "approved_by_user_id", "approved_datetime", "rejection_reason", "created_at", "notes",
+        "expense_id", "expense_datetime", "salesman_user_id", "submitted_by_user_id", "category", "amount",
+        "payment_mode", "description", "receipt_image_url", "receipt_link_or_file_ref", "approval_status",
+        "approved_by_user_id", "approval_datetime", "approved_datetime", "cash_reducing_expense", "related_closing_id",
+        "rejection_reason", "created_at", "notes",
     ],
     "ShopVisits": [
         "visit_id", "visit_datetime", "salesman_user_id", "customer_id", "customer_name_snapshot",

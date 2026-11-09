@@ -1036,7 +1036,7 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
 
     users = db.get_records("Users", fresh=True) or []
     structures = db.get_records("SalaryStructures", fresh=True) or []
-    struct_map = {str(s.get("user_id") or "").strip(): s for s in structures}
+    struct_map = {str(s.get("user_id") or s.get("employee_id") or "").strip(): s for s in structures}
 
     attendances = db.get_records("EmployeeAttendance", fresh=True) or []
     sales = db.get_records("Sales", fresh=True) or []
@@ -1097,9 +1097,13 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
         if role in {"SALESMAN", "FIELD_SALESMAN"}:
             emp_sales = [
                 s for s in sales
-                if str(s.get("salesman_user_id") or "").strip() == uid
-                and str(s.get("date") or "").startswith(month_prefix)
-                and str(s.get("bill_status", "")).upper() != "CANCELLED"
+                if (str(s.get("salesman_user_id") or s.get("salesman_id") or s.get("created_by") or "").strip() == uid)
+                and (
+                    str(s.get("sale_datetime") or s.get("date") or s.get("created_at") or "").strip().startswith(month_prefix)
+                    or str(s.get("sale_datetime") or s.get("date") or s.get("created_at") or "").strip().startswith(run_month)
+                )
+                and str(s.get("bill_status", "")).upper() not in {"CANCELLED", "VOID"}
+                and str(s.get("txn_status", "COMPLETE")).upper() != "INCOMPLETE"
                 and str(s.get("payment_status", "")).upper() == "PAID"
                 and str(s.get("delivery_status", "")).upper() == "DELIVERED"
             ]
@@ -1131,6 +1135,7 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
             "item_id": item_id,
             "payroll_run_id": run_id,
             "user_id": uid,
+            "employee_id": uid,
             "employee_name": uname,
             "role": role,
             "base_salary": base_monthly,

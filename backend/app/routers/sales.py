@@ -565,6 +565,27 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
         if not match:
             raise HTTPException(status_code=404, detail="Sale record not found.")
         if str(match.get("bill_status", "")).upper() == "CANCELLED":
+            # Idempotency / reconciliation: Ensure any active journal voucher is reversed
+            try:
+                from app.accounting.journal_engine import reverse_journal_voucher
+                headers = db.get_records("JournalHeaders", fresh=True)
+                active_sale_vouchers = [
+                    h for h in headers
+                    if str(h.get("reference_id", "")).strip() == sale_id
+                    and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
+                    and str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
+                ]
+                for v in active_sale_vouchers:
+                    orig_jid = str(v.get("journal_id", "")).strip()
+                    if orig_jid:
+                        reverse_journal_voucher(
+                            journal_id=orig_jid,
+                            reason=f"Sale {sale_id} cancelled (reconciled): {req.reason.strip() or 'Reconciliation'}",
+                            actor=user_id,
+                            reversed_by=user_id,
+                        )
+            except Exception as acct_exc:
+                logging.warning("Accounting reversal check for already cancelled sale %s: %s", sale_id, acct_exc)
             return {"ok": True, "message": f"Bill {match.get('bill_number')} has already been cancelled.", "already_cancelled": True}
 
         salesman_id = str(match.get("salesman_user_id", ""))
@@ -658,15 +679,39 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
         # Double-Entry Accounting Compensating Reversal Voucher
         try:
             from app.accounting.journal_engine import reverse_journal_voucher
-            reverse_journal_voucher(
-                voucher_type="SALES_REVERSAL",
-                reference_type="SALE_INVOICE",
-                reference_id=sale_id,
-                reason=reason_text,
-                reversed_by=user_id,
-            )
-        except Exception:
-            pass
+            headers = db.get_records("JournalHeaders", fresh=True)
+            active_sale_vouchers = [
+                h for h in headers
+                if str(h.get("reference_id", "")).strip() == sale_id
+                and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
+                and str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
+            ]
+            for v in active_sale_vouchers:
+                orig_jid = str(v.get("journal_id", "")).strip()
+                if orig_jid:
+                    reverse_journal_voucher(
+                        journal_id=orig_jid,
+                        reason=f"Sale {sale_id} cancelled: {reason_text}",
+                        actor=user_id,
+                        reversed_by=user_id,
+                    )
+        except Exception as acct_exc:
+            logging.error("Accounting reversal for sale %s failed: %s", sale_id, acct_exc)
+            try:
+                import json
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": db.generate_id("IncompleteTransactions"),
+                    "transaction_type": "ACCOUNTING_REVERSAL_PENDING",
+                    "idempotency_key": f"acct-rev-sale-{sale_id}",
+                    "status": "REVERSAL_FAILED",
+                    "payload_json": json.dumps({"sale_id": sale_id, "reason": reason_text, "user_id": user_id}),
+                    "error_message": str(acct_exc),
+                    "created_at": now,
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception as inc_exc:
+                logging.error("Could not record incomplete reversal transaction: %s", inc_exc)
 
         return {"ok": True, "message": f"Bill {bill_number} cancelled and stock/payment reversed successfully."}
 

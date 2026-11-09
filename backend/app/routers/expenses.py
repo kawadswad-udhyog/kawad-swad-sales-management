@@ -17,8 +17,8 @@ async def list_expenses(current_user: dict = Depends(get_current_user)):
     records = db.get_records("Expenses")
     expenses = []
     for r in records:
-        s_user = str(r.get("salesman_user_id", ""))
-        sub_user = str(r.get("submitted_by_user_id", ""))
+        s_user = str(r.get("salesman_user_id") or r.get("submitted_by_user_id") or "")
+        sub_user = str(r.get("submitted_by_user_id") or r.get("salesman_user_id") or "")
         if role not in ["OWNER", "OWNER_ADMIN", "PA"] and user_id not in [s_user, sub_user]:
             continue
         expenses.append(Expense(
@@ -29,11 +29,11 @@ async def list_expenses(current_user: dict = Depends(get_current_user)):
             category=str(r.get("category", "Petrol / Travel")),
             amount=parse_currency_amount(r.get("amount", 0.0)),
             description=str(r.get("description", "")),
-            receipt_link_or_file_ref=str(r.get("receipt_link_or_file_ref", "")),
+            receipt_link_or_file_ref=str(r.get("receipt_link_or_file_ref") or r.get("receipt_image_url") or ""),
             approval_status=str(r.get("approval_status", "PENDING")),
             approved_by_user_id=str(r.get("approved_by_user_id", "")),
-            approval_datetime=str(r.get("approval_datetime", "")),
-            cash_reducing_expense=str(r.get("cash_reducing_expense", "false")).lower() == "true",
+            approval_datetime=str(r.get("approval_datetime") or r.get("approved_datetime") or ""),
+            cash_reducing_expense=str(r.get("cash_reducing_expense", "false")).strip().lower() in {"true", "1", "yes"},
             related_closing_id=str(r.get("related_closing_id", "")),
             notes=str(r.get("notes", "")),
         ))
@@ -58,9 +58,11 @@ async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_cu
         "amount": req.amount,
         "description": req.description,
         "receipt_link_or_file_ref": req.receipt_link_or_file_ref or "",
+        "receipt_image_url": req.receipt_link_or_file_ref or "",
         "approval_status": "PENDING",
         "approved_by_user_id": "",
         "approval_datetime": "",
+        "approved_datetime": "",
         "cash_reducing_expense": "false",
         "related_closing_id": "",
         "notes": req.notes or "",
@@ -76,7 +78,7 @@ async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_cu
         reason=f"Submitted expense ₹{req.amount} under {req.category}"
     )
 
-    return Expense(**record, cash_reducing_expense=False)
+    return Expense(**{**record, "cash_reducing_expense": False})
 
 @router.post("/{expense_id}/approve", response_model=Expense, dependencies=[Depends(require_sheets_connection)])
 async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_user: dict = Depends(get_current_user)):
@@ -92,6 +94,7 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
         "approval_status": status_str,
         "approved_by_user_id": user_id,
         "approval_datetime": now_iso,
+        "approved_datetime": now_iso,
         "cash_reducing_expense": "true" if req.approved else "false",
         "notes": req.notes or "",
     }
@@ -120,15 +123,15 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
     return Expense(
         expense_id=expense_id,
         expense_datetime=str(matched.get("expense_datetime", now_iso)),
-        submitted_by_user_id=str(matched.get("submitted_by_user_id", "")),
-        salesman_user_id=str(matched.get("salesman_user_id", "")),
+        submitted_by_user_id=str(matched.get("submitted_by_user_id") or matched.get("salesman_user_id") or ""),
+        salesman_user_id=str(matched.get("salesman_user_id") or matched.get("submitted_by_user_id") or ""),
         category=str(matched.get("category", "")),
         amount=parse_currency_amount(matched.get("amount", 0.0)),
         description=str(matched.get("description", "")),
-        receipt_link_or_file_ref=str(matched.get("receipt_link_or_file_ref", "")),
+        receipt_link_or_file_ref=str(matched.get("receipt_link_or_file_ref") or matched.get("receipt_image_url") or ""),
         approval_status=status_str,
         approved_by_user_id=user_id,
-        approval_datetime=now_iso,
+        approval_datetime=str(matched.get("approval_datetime") or matched.get("approved_datetime") or now_iso),
         cash_reducing_expense=req.approved,
         related_closing_id=str(matched.get("related_closing_id", "")),
         notes=req.notes or "",

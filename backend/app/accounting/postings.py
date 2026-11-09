@@ -272,6 +272,23 @@ def post_packaging_batch_journal(
     p_name = str(pack_data.get("product_name_snapshot", "Papad"))
     bulk_kg = to_decimal(pack_data.get("bulk_kg_used", 0) or 0)
 
+    # Normalize incoming cost arguments to Decimal
+    if bulk_cost is not None:
+        try:
+            bulk_cost = to_decimal(bulk_cost)
+        except Exception:
+            bulk_cost = None
+    if packing_material_cost is not None:
+        try:
+            packing_material_cost = to_decimal(packing_material_cost)
+        except Exception:
+            packing_material_cost = None
+    if packing_labor_cost is not None:
+        try:
+            packing_labor_cost = to_decimal(packing_labor_cost)
+        except Exception:
+            packing_labor_cost = None
+
     # Detect estimated cost status
     is_estimated = (
         str(pack_data.get("cost_status", "")).strip().upper() == "ESTIMATED"
@@ -332,7 +349,7 @@ def post_packaging_batch_journal(
             stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
             rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
             bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(p_name, batches, recipes, stock_ledger, rm_master)
-            bulk_cost = bulk_kg * bulk_cost_per_kg
+            bulk_cost = bulk_kg * to_decimal(bulk_cost_per_kg)
             is_estimated = True
             if require_actual_cost:
                 raise ValueError(f"Estimated cost rejected for actual-cost accounting. Authoritative actual cost required for packaging {pack_id}.")
@@ -342,9 +359,9 @@ def post_packaging_batch_journal(
     if packing_labor_cost is None:
         packing_labor_cost = to_decimal(pack_data.get("packaging_labor_cost") or pack_data.get("packing_labor_cost") or 0)
 
-    r_bulk = round_money(bulk_cost)
-    r_mat = round_money(packing_material_cost)
-    r_lab = round_money(packing_labor_cost)
+    r_bulk = round_money(to_decimal(bulk_cost))
+    r_mat = round_money(to_decimal(packing_material_cost))
+    r_lab = round_money(to_decimal(packing_labor_cost))
     r_finished = r_bulk + r_mat + r_lab
 
     if r_finished <= Decimal("0"):

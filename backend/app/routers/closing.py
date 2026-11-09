@@ -1,3 +1,4 @@
+import logging
 from typing import List
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import DailyClosing, DailyClosingCreate, ClosingReviewRequest
@@ -7,6 +8,8 @@ from app.permissions import is_manager
 from app.stock_math import salesman_available
 from app.timeutil import business_today, business_date_of, now_iso
 from app.calculations.units import parse_currency_amount
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/closing", tags=["Daily Closing"])
 
@@ -88,13 +91,30 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
 
     expense_records = db.get_records("Expenses", fresh=True)
     approved_expenses = 0.0
+    qualifying_expense_ids = []
     for expense in expense_records:
-        if str(expense.get("salesman_user_id")) != user_id:
+        s_user = str(expense.get("salesman_user_id") or expense.get("submitted_by_user_id") or "").strip()
+        if s_user != user_id:
             continue
-        if business_date_of(str(expense.get("expense_datetime", ""))) != today_str:
+        exp_dt = str(expense.get("expense_datetime") or expense.get("created_at") or "").strip()
+        if business_date_of(exp_dt) != today_str:
             continue
-        if str(expense.get("approval_status", "")).upper() == "APPROVED" and str(expense.get("cash_reducing_expense", "")).lower() == "true":
-            approved_expenses += parse_currency_amount(expense.get("amount", 0))
+        # Prevent an expense from being deducted across multiple daily closing sessions
+        existing_rel_closing = str(expense.get("related_closing_id", "")).strip()
+        if existing_rel_closing:
+            continue
+        is_approved = str(expense.get("approval_status", "")).strip().upper() == "APPROVED"
+        is_cash_reducing = str(expense.get("cash_reducing_expense", "")).strip().lower() in {"true", "1", "yes"}
+        if is_approved and is_cash_reducing:
+            try:
+                amt = parse_currency_amount(expense.get("amount", 0))
+                if amt > 0:
+                    approved_expenses += amt
+                    exp_id = str(expense.get("expense_id", "")).strip()
+                    if exp_id:
+                        qualifying_expense_ids.append(exp_id)
+            except Exception as exp_err:
+                logger.warning("Could not parse expense amount for record %s: %s", expense.get("expense_id"), exp_err)
 
     expected_cash = float(req.opening_cash) + cash_collected - approved_expenses
     diff = float(req.physical_cash_returned) - expected_cash
@@ -138,6 +158,13 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
     }
     if not db.append_record("DailyClosing", record, raise_on_error=True):
         raise HTTPException(status_code=503, detail="The daily closing was not saved.")
+
+    # Tag qualifying expenses with related_closing_id to prevent duplicate deductions
+    for exp_id in qualifying_expense_ids:
+        try:
+            db.update_record("Expenses", "expense_id", exp_id, {"related_closing_id": closing_id})
+        except Exception as upd_err:
+            logger.warning("Could not stamp related_closing_id on expense %s: %s", exp_id, upd_err)
 
     db.log_audit(
         actor=user_id,
