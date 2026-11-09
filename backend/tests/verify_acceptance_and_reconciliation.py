@@ -386,6 +386,7 @@ def run_acceptance_and_reconciliation():
     proj_id = proj_res["project"]["project_id"]
 
     ms_res = asyncio.run(workforce.create_project_milestone(proj_id, FreelancerMilestoneCreate(
+        project_id=proj_id,
         title="Initial Box Layouts",
         description="3 draft concepts submitted",
         amount=5000.0,
