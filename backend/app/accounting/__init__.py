@@ -24,9 +24,11 @@ from app.accounting.customer_ledger import (
     CustomerTxnType,
     get_customer_transactions,
     calculate_customer_outstanding,
+    get_customer_balance_breakdown,
     get_customer_overdue_invoices,
     get_invoice_settlement_status,
     check_credit_control,
+    mark_approval_consumed,
 )
 
 __all__ = [
@@ -49,7 +51,9 @@ __all__ = [
     "CustomerTxnType",
     "get_customer_transactions",
     "calculate_customer_outstanding",
+    "get_customer_balance_breakdown",
     "get_customer_overdue_invoices",
     "get_invoice_settlement_status",
     "check_credit_control",
+    "mark_approval_consumed",
 ]

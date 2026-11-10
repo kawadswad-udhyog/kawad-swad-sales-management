@@ -85,7 +85,33 @@ Phase 1.4 has been completed and verified against all strict operational and arc
 
 ---
 
-## 5. Remaining Risks & Safeguards
 
-1. **Google Sheets Formula Pre-computation**: The customer ledger is computed dynamically in code using authoritative transactions from `Sales`, `Payments`, and `CustomerReturns`, ensuring 100% adherence to the canonical 65-tab schema without requiring unapproved schema changes.
-2. **Salesman Route Sync**: If network disconnection occurs during van sales, the existing idempotency key mechanisms and `IncompleteTransactions` table guarantee that retried requests do not create duplicate payment rows or duplicate cash debits.
+---
+
+## 6. Phase 1.4.1 Corrections & Verification
+
+### Tasks Completed:
+1. **Cancellation After Multiple Collections**:
+   - Reverses original invoice journal and all associated `PAYMENT_COLLECTION` journal vouchers.
+   - Prevents duplicate reversals and refunds only actual collected amounts per payment method.
+   - Balances cash, bank, and receivable GL accounts to ₹0.00.
+   - Supports interrupted cancellation recovery.
+2. **Cancelled Invoice Settlement Status**:
+   - Returns explicit `CANCELLED` state with `remaining_balance: 0.0`, `final_outstanding: 0.0`, and `is_cancelled: True`.
+3. **Customer Ledger Reconciliation & Balance Breakdown**:
+   - Reconciled invoices, cancellations, collections, and refunds with zero orphan credits.
+   - Preserves true customer advance/credit negative balances in `calculate_customer_outstanding`.
+   - Exposes `get_customer_balance_breakdown` with separate debit and credit balances.
+4. **Owner Credit Authorization Security**:
+   - Strictly validates `is_owner(current_user)`. Rejects Personal Assistant and Salesman direct authorizations (HTTP 400).
+   - Strictly validates `ApprovalRequests` (status, active Owner decider, customer match, limit, expiry, revocation, single-use consumption).
+   - Marks approval requests consumed on completed sale.
+5. **Credit Limit Concurrency**:
+   - Moved `check_credit_control` inside `_sales_lock` strictly after idempotency check to serialize credit allocation and allow idempotency retries.
+6. **Testing Verification**:
+   - 15 dedicated Phase 1.4.1 unit tests in `test_phase1_4_1_sales_payment.py` (100% pass).
+   - All 344 backend tests pass.
+   - Full Acceptance & Reconciliation verification passes (Trial balance variance ₹0.00).
+   - Staging Canary 15-Step Walkthrough passes (100%).
+   - Applet compiles with zero errors (`compile_applet` & `lint_applet` passed).
+

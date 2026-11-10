@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 from typing import List, Optional
 
@@ -384,17 +385,6 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
     else:
         calc_payment_status = "UNPAID"
 
-    # Credit control enforcement
-    if credit_amount > 0:
-        from app.accounting.customer_ledger import check_credit_control
-        approval_id = getattr(req, "owner_credit_approval_id", None)
-        check_credit_control(
-            customer_id=customer_id,
-            requested_credit=credit_amount,
-            current_user=current_user,
-            approval_request_id=approval_id,
-        )
-
     async with _sales_lock:
         if clean_key:
             existing = _find_sale_by_key(db.get_records("Sales", fresh=True), clean_key)
@@ -416,6 +406,25 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
                     items = [_to_item(row) for row in _items_for(sale_id)]
                     return _to_sale(existing, items, clean_key)
                 return await _resume_sale(existing, validated, method, reference, bill_total, user_id, clean_key)
+
+        # Credit control enforcement inside _sales_lock:
+        # Evaluated strictly AFTER the idempotency check so idempotent retries do not re-evaluate or fail
+        # credit checks on already completed transactions. Also serializes concurrent requests to prevent
+        # race conditions from concurrently consuming the same customer credit limit.
+        # NOTE ON CONCURRENCY ARCHITECTURE:
+        # This lock is an in-process asyncio.Lock (_sales_lock). In multi-worker deployments (e.g. multiple
+        # Gunicorn / Uvicorn workers on Render or container replicas), an in-process lock only serializes
+        # coroutines within the same worker. True distributed cross-process concurrency control requires
+        # a distributed lock (e.g. Redis Redlock or Postgres row locks via SELECT ... FOR UPDATE).
+        if credit_amount > 0:
+            from app.accounting.customer_ledger import check_credit_control
+            approval_id = getattr(req, "owner_credit_approval_id", None)
+            check_credit_control(
+                customer_id=customer_id,
+                requested_credit=credit_amount,
+                current_user=current_user,
+                approval_request_id=approval_id,
+            )
 
         ledger = db.get_records("SalesmanStockLedger", fresh=True)
         for product_id, qty in demand.items():
@@ -473,6 +482,13 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
         if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE", "notes": notes.replace("[txn:INCOMPLETE]", "[txn:COMPLETE]")}):
             raise HTTPException(status_code=503, detail=f"Sale {sale_id} rows were written but completion could not be marked. Retry the same idempotency key.")
         sale_record["txn_status"] = "COMPLETE"
+        if getattr(req, "owner_credit_approval_id", None):
+            try:
+                from app.accounting.customer_ledger import mark_approval_consumed
+                mark_approval_consumed(req.owner_credit_approval_id, sale_id)
+            except Exception as app_err:
+                logging.warning("Could not mark credit approval %s as consumed: %s", req.owner_credit_approval_id, app_err)
+
         db.log_audit(user_id, "ISSUE_BILL", "Sales", sale_id, reason=f"Issued bill {bill_number} for ₹{bill_total:.2f} to {customer_name}")
 
         # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
@@ -642,24 +658,33 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
             raise HTTPException(status_code=404, detail="Sale record not found.")
         if str(match.get("bill_status", "")).upper() == "CANCELLED":
             # Idempotency / reconciliation: Ensure any active journal voucher is reversed
+            # and any interrupted cancellation is recovered safely.
             accounting_status = "NO_VOUCHER"
-            reversal_journal_id = None
+            reversal_journal_ids = []
             accounting_error = None
             try:
                 from app.accounting.journal_engine import reverse_journal_voucher
                 headers = db.get_records("JournalHeaders", fresh=True)
+                sale_payments = [p for p in db.get_records("Payments", fresh=True) if str(p.get("sale_id", "")).strip() == sale_id]
+                sale_payment_ids = {str(p.get("payment_id", "")).strip() for p in sale_payments if str(p.get("payment_id", "")).strip()}
+
+                # Active vouchers: sale invoice vouchers and any payment collection vouchers
                 active_sale_vouchers = [
                     h for h in headers
-                    if str(h.get("reference_id", "")).strip() == sale_id
-                    and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
+                    if ((str(h.get("reference_id", "")).strip() == sale_id and str(h.get("reference_type", "")).strip().upper() in {"SALE_INVOICE", "SALE"})
+                        or (str(h.get("reference_id", "")).strip() in sale_payment_ids and str(h.get("reference_type", "")).strip().upper() == "PAYMENT_COLLECTION"))
                     and str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
                 ]
+                # Order invoice vouchers first, then payment collection vouchers
+                active_sale_vouchers.sort(key=lambda h: 0 if str(h.get("reference_type", "")).strip().upper() in {"SALE_INVOICE", "SALE"} else 1)
+
                 already_reversed_vouchers = [
                     h for h in headers
-                    if str(h.get("reference_id", "")).strip() == sale_id
-                    and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
+                    if ((str(h.get("reference_id", "")).strip() == sale_id and str(h.get("reference_type", "")).strip().upper() in {"SALE_INVOICE", "SALE"})
+                        or (str(h.get("reference_id", "")).strip() in sale_payment_ids and str(h.get("reference_type", "")).strip().upper() == "PAYMENT_COLLECTION"))
                     and str(h.get("status", "")).strip().upper() == "REVERSED"
                 ]
+
                 if active_sale_vouchers:
                     for v in active_sale_vouchers:
                         orig_jid = str(v.get("journal_id", "")).strip()
@@ -670,17 +695,18 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                                 actor=user_id,
                                 reversed_by=user_id,
                             )
-                            reversal_journal_id = rev_res.get("journal_id") if isinstance(rev_res, dict) else orig_jid
+                            rev_id = rev_res.get("journal_id") if isinstance(rev_res, dict) else orig_jid
+                            reversal_journal_ids.append(rev_id)
                     accounting_status = "REVERSED"
                 elif already_reversed_vouchers:
                     accounting_status = "ALREADY_REVERSED"
+                    rev_parent_ids = {str(av.get("journal_id", "")).strip() for av in already_reversed_vouchers}
                     reversals = [
                         h for h in headers
                         if str(h.get("reference_type", "")).strip().upper() == "JOURNAL_REVERSAL"
-                        and str(h.get("reference_id", "")).strip() in [str(av.get("journal_id", "")).strip() for av in already_reversed_vouchers]
+                        and str(h.get("reference_id", "")).strip() in rev_parent_ids
                     ]
-                    if reversals:
-                        reversal_journal_id = str(reversals[0].get("journal_id", ""))
+                    reversal_journal_ids = [str(r.get("journal_id", "")) for r in reversals if str(r.get("journal_id", ""))]
                 else:
                     accounting_status = "NO_VOUCHER"
             except Exception as acct_exc:
@@ -711,7 +737,8 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                 "bill_status": "CANCELLED",
                 "already_cancelled": True,
                 "accounting_status": accounting_status,
-                "reversal_journal_id": reversal_journal_id,
+                "reversal_journal_id": reversal_journal_ids[0] if reversal_journal_ids else None,
+                "reversal_journal_ids": reversal_journal_ids,
                 "accounting_error": accounting_error,
                 "message": f"Bill {match.get('bill_number')} has already been cancelled. (Accounting status: {accounting_status})",
             }
@@ -752,74 +779,106 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     "notes": f"Stock reversal for cancelled bill {bill_number}: {reason_text}",
                 }, raise_on_error=True)
 
-        # 2. Reverse payments in Payments / CashLedger (refund only what was actually collected)
+        # 2. Reverse payments in Payments / CashLedger (refund only actual collected amounts)
         bill_total = float(match.get("bill_total", 0) or 0)
         method = str(match.get("payment_method", "CASH")).upper()
 
-        # Calculate actual amount collected from active payments
-        sale_payments = [
+        all_sale_payments = [
             p for p in db.get_records("Payments", fresh=True)
-            if str(p.get("sale_id")) == sale_id and str(p.get("payment_status", "")).upper() != "REFUNDED"
+            if str(p.get("sale_id", "")).strip() == sale_id
         ]
-        if sale_payments:
-            total_collected = round(sum(float(p.get("amount", 0) or 0) for p in sale_payments), 2)
+        sale_payment_ids = {str(p.get("payment_id", "")).strip() for p in all_sale_payments if str(p.get("payment_id", "")).strip()}
+        positive_payments = [
+            p for p in all_sale_payments
+            if float(p.get("amount", 0) or 0) > 0 and str(p.get("payment_status", "")).upper() not in {"REFUNDED", "CANCELLED"}
+        ]
+        existing_refunds = [
+            p for p in all_sale_payments
+            if float(p.get("amount", 0) or 0) < 0 or str(p.get("payment_status", "")).upper() == "REFUNDED"
+        ]
+        existing_refund_refs = {str(r.get("reference_number", "")).strip() for r in existing_refunds}
+
+        if positive_payments:
+            # Refund every individual collection so method and amount match accurately
+            for p in positive_payments:
+                p_id = str(p.get("payment_id", "")).strip()
+                p_amt = round(float(p.get("amount", 0) or 0), 2)
+                p_method = str(p.get("payment_method", "CASH")).upper()
+                ref_refund = f"REFUND-{p_id}"
+                if ref_refund not in existing_refund_refs and not any(p_id in str(r.get("notes", "")) for r in existing_refunds):
+                    db.append_record("Payments", {
+                        "payment_id": db.generate_id("Payments"),
+                        "sale_id": sale_id,
+                        "payment_datetime": now,
+                        "payment_method": p_method,
+                        "amount": -p_amt,
+                        "reference_number": ref_refund,
+                        "received_by_user_id": salesman_id,
+                        "payment_status": "REFUNDED",
+                        "notes": f"Payment reversal for collection {p_id} of cancelled bill {bill_number}: {reason_text}",
+                    }, raise_on_error=True)
+
+                if p_method == "CASH":
+                    existing_cash_refunds = [
+                        c for c in db.get_records("CashLedger", fresh=True)
+                        if str(c.get("related_sale_id")) == sale_id and str(c.get("reference_id", "")).strip() in {f"CANCEL-{bill_number}-{p_id}", f"CANCEL-{bill_number}"}
+                    ]
+                    if not existing_cash_refunds:
+                        db.append_record("CashLedger", {
+                            "cash_txn_id": db.generate_id("CashLedger"),
+                            "txn_datetime": now,
+                            "salesman_user_id": salesman_id,
+                            "txn_type": "SALE_REFUND",
+                            "amount": -p_amt,
+                            "payment_method": "CASH",
+                            "related_sale_id": sale_id,
+                            "related_expense_id": "",
+                            "issued_by_user_id": salesman_id,
+                            "received_by_user_id": str(match.get("customer_id", "")),
+                            "confirmed_by_user_id": user_id,
+                            "reference_id": f"CANCEL-{bill_number}-{p_id}",
+                            "notes": f"Cash refund reversal for collection {p_id} of cancelled bill {bill_number}",
+                        }, raise_on_error=True)
         else:
+            # Legacy fallback if no individual Payments records exist
             p_status = str(match.get("payment_status", "")).upper()
             if p_status != "UNPAID" and method != "CREDIT":
-                total_collected = float(match.get("cash_collected") if match.get("cash_collected") is not None else bill_total)
+                leg_collected = float(match.get("cash_collected") if match.get("cash_collected") is not None else bill_total)
             else:
-                total_collected = float(match.get("cash_collected", 0) or 0)
-
-        # Calculate actual physical cash collected from CashLedger
-        sale_cash_entries = [
-            c for c in db.get_records("CashLedger", fresh=True)
-            if str(c.get("related_sale_id")) == sale_id and str(c.get("txn_type", "")).upper() == "SALE_COLLECTION"
-        ]
-        if sale_cash_entries:
-            total_cash_collected = round(sum(float(c.get("amount", 0) or 0) for c in sale_cash_entries), 2)
-        elif method == "CASH":
-            total_cash_collected = total_collected
-        else:
-            total_cash_collected = 0.0
-
-        existing_payments = [
-            p for p in db.get_records("Payments", fresh=True)
-            if str(p.get("sale_id")) == sale_id and str(p.get("payment_status", "")).upper() == "REFUNDED"
-        ]
-        if total_collected > 0 and not existing_payments:
-            db.append_record("Payments", {
-                "payment_id": db.generate_id("Payments"),
-                "sale_id": sale_id,
-                "payment_datetime": now,
-                "payment_method": method,
-                "amount": -total_collected,
-                "reference_number": f"REFUND-{bill_number}",
-                "received_by_user_id": salesman_id,
-                "payment_status": "REFUNDED",
-                "notes": f"Payment reversal for cancelled bill {bill_number}: {reason_text}",
-            }, raise_on_error=True)
-
-        if total_cash_collected > 0:
-            existing_cash_refunds = [
-                c for c in db.get_records("CashLedger", fresh=True)
-                if str(c.get("related_sale_id")) == sale_id and str(c.get("txn_type", "")).upper() == "SALE_REFUND"
-            ]
-            if not existing_cash_refunds:
-                db.append_record("CashLedger", {
-                    "cash_txn_id": db.generate_id("CashLedger"),
-                    "txn_datetime": now,
-                    "salesman_user_id": salesman_id,
-                    "txn_type": "SALE_REFUND",
-                    "amount": -total_cash_collected,
-                    "payment_method": "CASH",
-                    "related_sale_id": sale_id,
-                    "related_expense_id": "",
-                    "issued_by_user_id": salesman_id,
-                    "received_by_user_id": str(match.get("customer_id", "")),
-                    "confirmed_by_user_id": user_id,
-                    "reference_id": f"CANCEL-{bill_number}",
-                    "notes": f"Cash refund reversal for cancelled bill {bill_number}",
+                leg_collected = float(match.get("cash_collected", 0) or 0)
+            if leg_collected > 0 and not existing_refunds:
+                db.append_record("Payments", {
+                    "payment_id": db.generate_id("Payments"),
+                    "sale_id": sale_id,
+                    "payment_datetime": now,
+                    "payment_method": method,
+                    "amount": -leg_collected,
+                    "reference_number": f"REFUND-{bill_number}",
+                    "received_by_user_id": salesman_id,
+                    "payment_status": "REFUNDED",
+                    "notes": f"Payment reversal for cancelled bill {bill_number}: {reason_text}",
                 }, raise_on_error=True)
+                if method == "CASH":
+                    existing_cash_refunds = [
+                        c for c in db.get_records("CashLedger", fresh=True)
+                        if str(c.get("related_sale_id")) == sale_id and str(c.get("txn_type", "")).upper() == "SALE_REFUND"
+                    ]
+                    if not existing_cash_refunds:
+                        db.append_record("CashLedger", {
+                            "cash_txn_id": db.generate_id("CashLedger"),
+                            "txn_datetime": now,
+                            "salesman_user_id": salesman_id,
+                            "txn_type": "SALE_REFUND",
+                            "amount": -leg_collected,
+                            "payment_method": "CASH",
+                            "related_sale_id": sale_id,
+                            "related_expense_id": "",
+                            "issued_by_user_id": salesman_id,
+                            "received_by_user_id": str(match.get("customer_id", "")),
+                            "confirmed_by_user_id": user_id,
+                            "reference_id": f"CANCEL-{bill_number}",
+                            "notes": f"Cash refund reversal for cancelled bill {bill_number}",
+                        }, raise_on_error=True)
 
         # 3. Update Sales record status
         updated = db.update_record("Sales", "sale_id", sale_id, {
@@ -831,27 +890,33 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
 
         db.log_audit(user_id, "CANCEL_BILL", "Sales", sale_id, reason=f"Cancelled bill {bill_number} for ₹{bill_total:.2f}. Reason: {reason_text}")
 
-        # Double-Entry Accounting Compensating Reversal Voucher
+        # 4. Double-Entry Accounting Compensating Reversal Vouchers (Reverses Invoice and all Collection Vouchers)
         accounting_status = "NO_VOUCHER"
-        reversal_journal_id = None
+        reversal_journal_ids = []
         accounting_error = None
         try:
             from app.accounting.journal_engine import reverse_journal_voucher
             headers = db.get_records("JournalHeaders", fresh=True)
-            active_sale_vouchers = [
+            # Find all vouchers for this sale: SALE_INVOICE and PAYMENT_COLLECTION
+            all_sale_vouchers = [
                 h for h in headers
-                if str(h.get("reference_id", "")).strip() == sale_id
-                and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
-                and str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
+                if ((str(h.get("reference_id", "")).strip() == sale_id and str(h.get("reference_type", "")).strip().upper() in {"SALE_INVOICE", "SALE"})
+                    or (str(h.get("reference_id", "")).strip() in sale_payment_ids and str(h.get("reference_type", "")).strip().upper() == "PAYMENT_COLLECTION"))
             ]
+            active_vouchers = [
+                h for h in all_sale_vouchers
+                if str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
+            ]
+            # Order invoice vouchers first, then payment collection vouchers
+            active_vouchers.sort(key=lambda h: 0 if str(h.get("reference_type", "")).strip().upper() in {"SALE_INVOICE", "SALE"} else 1)
+
             already_reversed_vouchers = [
-                h for h in headers
-                if str(h.get("reference_id", "")).strip() == sale_id
-                and str(h.get("reference_type", "")).strip().upper() == "SALE_INVOICE"
-                and str(h.get("status", "")).strip().upper() == "REVERSED"
+                h for h in all_sale_vouchers
+                if str(h.get("status", "")).strip().upper() == "REVERSED"
             ]
-            if active_sale_vouchers:
-                for v in active_sale_vouchers:
+
+            if active_vouchers:
+                for v in active_vouchers:
                     orig_jid = str(v.get("journal_id", "")).strip()
                     if orig_jid:
                         rev_res = reverse_journal_voucher(
@@ -860,17 +925,18 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                             actor=user_id,
                             reversed_by=user_id,
                         )
-                        reversal_journal_id = rev_res.get("journal_id") if isinstance(rev_res, dict) else orig_jid
+                        rev_id = rev_res.get("journal_id") if isinstance(rev_res, dict) else orig_jid
+                        reversal_journal_ids.append(rev_id)
                 accounting_status = "REVERSED"
             elif already_reversed_vouchers:
                 accounting_status = "ALREADY_REVERSED"
+                rev_parent_ids = {str(av.get("journal_id", "")).strip() for av in already_reversed_vouchers}
                 reversals = [
                     h for h in headers
                     if str(h.get("reference_type", "")).strip().upper() == "JOURNAL_REVERSAL"
-                    and str(h.get("reference_id", "")).strip() in [str(av.get("journal_id", "")).strip() for av in already_reversed_vouchers]
+                    and str(h.get("reference_id", "")).strip() in rev_parent_ids
                 ]
-                if reversals:
-                    reversal_journal_id = str(reversals[0].get("journal_id", ""))
+                reversal_journal_ids = [str(r.get("journal_id", "")) for r in reversals if str(r.get("journal_id", ""))]
             else:
                 accounting_status = "NO_VOUCHER"
         except Exception as acct_exc:
@@ -895,7 +961,7 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                 logging.error("Could not record incomplete reversal transaction: %s", inc_exc)
 
         msg = (
-            f"Bill {bill_number} cancelled and stock/payment reversed successfully. Accounting voucher reversed ({reversal_journal_id})."
+            f"Bill {bill_number} cancelled and stock/payment reversed successfully. Accounting voucher reversed ({', '.join(reversal_journal_ids)})."
             if accounting_status == "REVERSED"
             else f"Bill {bill_number} cancelled. Accounting voucher was already reversed."
             if accounting_status == "ALREADY_REVERSED"
@@ -910,7 +976,8 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
             "bill_number": bill_number,
             "bill_status": "CANCELLED",
             "accounting_status": accounting_status,
-            "reversal_journal_id": reversal_journal_id,
+            "reversal_journal_id": reversal_journal_ids[0] if reversal_journal_ids else None,
+            "reversal_journal_ids": reversal_journal_ids,
             "accounting_error": accounting_error,
             "message": msg,
         }
@@ -1089,6 +1156,14 @@ async def get_customer_outstanding_summary(customer_id: str, current_user: dict 
         "overdue_invoices": overdue,
         "is_overdue": len(overdue) > 0,
     }
+
+
+@router.get("/customers/{customer_id}/breakdown")
+async def get_customer_balance_breakdown_endpoint(customer_id: str, current_user: dict = Depends(get_current_user)):
+    """Customer debit vs credit balance breakdown (exposing customer credit balances clearly)."""
+    from app.accounting.customer_ledger import get_customer_balance_breakdown
+    return get_customer_balance_breakdown(customer_id)
+
 
 
 @router.get("/{sale_id}/settlement")

@@ -6,9 +6,12 @@ Authoritative transaction ledger for debtor management, credit limits, and aging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, date, timedelta
 from decimal import Decimal
+import json
+import logging
 from fastapi import HTTPException
 
 from app.sheets import db
+from app.timeutil import now_iso
 from app.accounting.journal_engine import to_decimal, round_money
 from app.permissions import is_owner, is_manager, is_salesman
 
@@ -16,15 +19,19 @@ from app.permissions import is_owner, is_manager, is_salesman
 class CustomerTxnType:
     INVOICE = "INVOICE"
     COLLECTION = "COLLECTION"
+    REFUND = "REFUND"
     CREDIT_NOTE = "CREDIT_NOTE"
     DEBIT_NOTE = "DEBIT_NOTE"
+    INVOICE_CANCELLATION = "INVOICE_CANCELLATION"
 
 
 def get_customer_transactions(customer_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Returns unified chronological customer ledger transactions:
-    - INVOICE: From non-cancelled Sales records (debit / increases receivable)
-    - COLLECTION: From non-refunded Payments records (credit / decreases receivable)
+    - INVOICE: From Sales records (debit / increases receivable)
+    - INVOICE_CANCELLATION: For cancelled Sales records (credit / offsets cancelled invoice)
+    - COLLECTION: From positive Payments records (credit / decreases receivable)
+    - REFUND: From refund Payments records (debit / reverses collection credit)
     - CREDIT_NOTE: From authorized CustomerReturns (credit / decreases receivable)
     - DEBIT_NOTE: Debit adjustments (debit / increases receivable)
     """
@@ -37,14 +44,12 @@ def get_customer_transactions(customer_id: Optional[str] = None) -> List[Dict[st
 
     transactions: List[Dict[str, Any]] = []
 
-    # 1. Invoices
+    # 1. Invoices & Invoice Cancellations
     for s in sales:
         s_cid = str(s.get("customer_id") or "").strip()
         if clean_cid and s_cid != clean_cid:
             continue
         if not s_cid or s_cid in {"CUS-WALKIN", "WALK-IN"}:
-            continue
-        if str(s.get("bill_status", "")).upper() in {"CANCELLED", "VOID"}:
             continue
         if str(s.get("txn_status", "")).upper() == "INCOMPLETE":
             continue
@@ -53,57 +58,108 @@ def get_customer_transactions(customer_id: Optional[str] = None) -> List[Dict[st
         sale_id = str(s.get("sale_id", ""))
         bill_no = str(s.get("bill_number", "") or sale_id)
         s_date = str(s.get("sale_datetime") or s.get("created_at") or "")[:10]
+        bill_status = str(s.get("bill_status", "ISSUED")).upper()
 
-        transactions.append({
-            "txn_id": f"INV-{bill_no}",
-            "txn_date": s_date,
-            "txn_type": CustomerTxnType.INVOICE,
-            "customer_id": s_cid,
-            "customer_name": str(s.get("customer_name_snapshot") or ""),
-            "sale_id": sale_id,
-            "bill_number": bill_no,
-            "reference_id": bill_no,
-            "debit_amount": bill_total,
-            "credit_amount": 0.0,
-            "payment_status": str(s.get("payment_status") or "UNPAID"),
-            "notes": f"Sales Invoice #{bill_no}",
-        })
+        if bill_status in {"CANCELLED", "VOID"}:
+            # Reconcile cancelled invoice: show invoice and its cancellation credit offset
+            transactions.append({
+                "txn_id": f"INV-{bill_no}",
+                "txn_date": s_date,
+                "txn_type": CustomerTxnType.INVOICE,
+                "customer_id": s_cid,
+                "customer_name": str(s.get("customer_name_snapshot") or ""),
+                "sale_id": sale_id,
+                "bill_number": bill_no,
+                "reference_id": bill_no,
+                "debit_amount": bill_total,
+                "credit_amount": 0.0,
+                "payment_status": "CANCELLED",
+                "notes": f"Sales Invoice #{bill_no} (Cancelled)",
+            })
+            transactions.append({
+                "txn_id": f"REV-{bill_no}",
+                "txn_date": s_date,
+                "txn_type": CustomerTxnType.INVOICE_CANCELLATION,
+                "customer_id": s_cid,
+                "customer_name": str(s.get("customer_name_snapshot") or ""),
+                "sale_id": sale_id,
+                "bill_number": bill_no,
+                "reference_id": f"CANCEL-{bill_no}",
+                "debit_amount": 0.0,
+                "credit_amount": bill_total,
+                "payment_status": "CANCELLED",
+                "notes": f"Cancellation Reversal for Invoice #{bill_no}",
+            })
+        else:
+            transactions.append({
+                "txn_id": f"INV-{bill_no}",
+                "txn_date": s_date,
+                "txn_type": CustomerTxnType.INVOICE,
+                "customer_id": s_cid,
+                "customer_name": str(s.get("customer_name_snapshot") or ""),
+                "sale_id": sale_id,
+                "bill_number": bill_no,
+                "reference_id": bill_no,
+                "debit_amount": bill_total,
+                "credit_amount": 0.0,
+                "payment_status": str(s.get("payment_status") or "UNPAID"),
+                "notes": f"Sales Invoice #{bill_no}",
+            })
 
-    # 2. Collections (Payments against invoices)
+    # 2. Collections and Refunds
     for p in payments:
-        if str(p.get("payment_status", "")).upper() in {"REFUNDED", "FAILED"}:
+        if str(p.get("payment_status", "")).upper() == "FAILED":
             continue
         sid = str(p.get("sale_id") or "").strip()
         target_sale = sales_map.get(sid, {})
-        p_cid = str(target_sale.get("customer_id") or "").strip()
+        p_cid = str(target_sale.get("customer_id") or p.get("customer_id") or "").strip()
         if clean_cid and p_cid != clean_cid:
             continue
         if not p_cid or p_cid in {"CUS-WALKIN", "WALK-IN"}:
             continue
 
-        amt = float(p.get("amount", 0) or 0)
-        if amt <= 0:
+        raw_amt = float(p.get("amount", 0) or 0)
+        if raw_amt == 0:
             continue
 
         pay_id = str(p.get("payment_id", ""))
         p_date = str(p.get("payment_datetime") or "")[:10]
         pay_method = str(p.get("payment_method", "CASH")).upper()
         ref_no = str(p.get("reference_number") or pay_id)
+        p_status = str(p.get("payment_status", "")).upper()
 
-        transactions.append({
-            "txn_id": pay_id,
-            "txn_date": p_date,
-            "txn_type": CustomerTxnType.COLLECTION,
-            "customer_id": p_cid,
-            "customer_name": str(target_sale.get("customer_name_snapshot") or ""),
-            "sale_id": sid,
-            "bill_number": str(target_sale.get("bill_number") or sid),
-            "reference_id": ref_no,
-            "debit_amount": 0.0,
-            "credit_amount": amt,
-            "payment_method": pay_method,
-            "notes": f"Payment collection via {pay_method} (Ref: {ref_no})",
-        })
+        if raw_amt < 0 or p_status == "REFUNDED":
+            # Refund reverses previous collection credit (debit / increases receivable back)
+            refund_val = abs(raw_amt)
+            transactions.append({
+                "txn_id": pay_id,
+                "txn_date": p_date,
+                "txn_type": CustomerTxnType.REFUND,
+                "customer_id": p_cid,
+                "customer_name": str(target_sale.get("customer_name_snapshot") or ""),
+                "sale_id": sid,
+                "bill_number": str(target_sale.get("bill_number") or sid),
+                "reference_id": ref_no,
+                "debit_amount": refund_val,
+                "credit_amount": 0.0,
+                "payment_method": pay_method,
+                "notes": f"Refund via {pay_method} (Ref: {ref_no})",
+            })
+        else:
+            transactions.append({
+                "txn_id": pay_id,
+                "txn_date": p_date,
+                "txn_type": CustomerTxnType.COLLECTION,
+                "customer_id": p_cid,
+                "customer_name": str(target_sale.get("customer_name_snapshot") or ""),
+                "sale_id": sid,
+                "bill_number": str(target_sale.get("bill_number") or sid),
+                "reference_id": ref_no,
+                "debit_amount": 0.0,
+                "credit_amount": raw_amt,
+                "payment_method": pay_method,
+                "notes": f"Payment collection via {pay_method} (Ref: {ref_no})",
+            })
 
     # 3. Credit Notes from Customer Returns
     for r in returns:
@@ -137,7 +193,8 @@ def get_customer_transactions(customer_id: Optional[str] = None) -> List[Dict[st
 def calculate_customer_outstanding(customer_id: str) -> float:
     """
     Authoritative customer outstanding balance calculated from ledger transactions:
-    Outstanding = Sum(Debits / Invoices + Debit Notes) - Sum(Credits / Collections + Credit Notes)
+    Outstanding = Sum(Debits: Invoices + Refunds + Debit Notes) - Sum(Credits: Collections + Credit Notes + Cancellations)
+    Note: Preserves negative credit balances (genuine customer advances/credits).
     """
     cid = str(customer_id or "").strip()
     if not cid or cid in {"CUS-WALKIN", "WALK-IN"}:
@@ -146,12 +203,34 @@ def calculate_customer_outstanding(customer_id: str) -> float:
     txns = get_customer_transactions(customer_id=cid)
     tot_debits = sum(float(t.get("debit_amount", 0) or 0) for t in txns)
     tot_credits = sum(float(t.get("credit_amount", 0) or 0) for t in txns)
-    return max(0.0, round(tot_debits - tot_credits, 2))
+    return round(tot_debits - tot_credits, 2)
+
+
+def get_customer_balance_breakdown(customer_id: str) -> Dict[str, Any]:
+    """
+    Exposes debit balance and credit balance separately so customer credits are never masked.
+    """
+    cid = str(customer_id or "").strip()
+    txns = get_customer_transactions(customer_id=cid)
+    tot_debits = sum(float(t.get("debit_amount", 0) or 0) for t in txns)
+    tot_credits = sum(float(t.get("credit_amount", 0) or 0) for t in txns)
+    net_bal = round(tot_debits - tot_credits, 2)
+    return {
+        "customer_id": cid,
+        "total_debits": round(tot_debits, 2),
+        "total_credits": round(tot_credits, 2),
+        "net_balance": net_bal,
+        "debit_balance": max(0.0, net_bal),
+        "credit_balance": abs(min(0.0, net_bal)),
+        "customer_credit_balance": abs(min(0.0, net_bal)),
+        "has_credit_balance": net_bal < 0,
+    }
 
 
 def get_customer_overdue_invoices(customer_id: str, max_overdue_days: int = 30) -> List[Dict[str, Any]]:
     """
     Identify unpaid or partially paid customer invoices where the credit period has expired.
+    Excludes cancelled and void invoices.
     """
     cid = str(customer_id or "").strip()
     if not cid or cid in {"CUS-WALKIN", "WALK-IN"}:
@@ -160,13 +239,14 @@ def get_customer_overdue_invoices(customer_id: str, max_overdue_days: int = 30) 
     sales = db.get_records("Sales", fresh=True) or []
     payments = db.get_records("Payments", fresh=True) or []
 
-    # Map collections per sale
-    collections_by_sale: Dict[str, float] = {}
+    # Map net collections per sale (collections minus refunds)
+    net_collections_by_sale: Dict[str, float] = {}
     for p in payments:
-        if str(p.get("payment_status", "")).upper() in {"REFUNDED", "FAILED"}:
+        if str(p.get("payment_status", "")).upper() == "FAILED":
             continue
         sid = str(p.get("sale_id") or "").strip()
-        collections_by_sale[sid] = collections_by_sale.get(sid, 0.0) + float(p.get("amount", 0) or 0)
+        amt = float(p.get("amount", 0) or 0)
+        net_collections_by_sale[sid] = net_collections_by_sale.get(sid, 0.0) + amt
 
     today = date.today()
     overdue: List[Dict[str, Any]] = []
@@ -182,7 +262,7 @@ def get_customer_overdue_invoices(customer_id: str, max_overdue_days: int = 30) 
 
         sid = str(s.get("sale_id", ""))
         bill_tot = float(s.get("bill_total", 0) or 0)
-        paid = collections_by_sale.get(sid, 0.0)
+        paid = max(0.0, net_collections_by_sale.get(sid, 0.0))
         unpaid = max(0.0, round(bill_tot - paid, 2))
         if unpaid <= 0.05:
             continue
@@ -211,7 +291,8 @@ def get_customer_overdue_invoices(customer_id: str, max_overdue_days: int = 30) 
 def get_invoice_settlement_status(sale_id: str) -> Dict[str, Any]:
     """
     Authoritative settlement status of an individual invoice calculated from Payments:
-    Returns {bill_total, total_collected, remaining_balance, payment_status}
+    Returns {bill_total, original_invoice_amount, total_collected, total_refunded, net_collected,
+             remaining_balance, final_outstanding, payment_status, bill_status, cancellation_status, is_cancelled}
     """
     clean_sid = str(sale_id or "").strip()
     sales = db.get_records("Sales", fresh=True) or []
@@ -220,17 +301,44 @@ def get_invoice_settlement_status(sale_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Sale invoice {sale_id} not found.")
 
     bill_total = round(float(sale.get("bill_total", 0) or 0), 2)
-    payments = [
+    bill_status = str(sale.get("bill_status", "ISSUED")).upper()
+    is_cancelled = bill_status in {"CANCELLED", "VOID"}
+
+    all_payments = [
         p for p in db.get_records("Payments", fresh=True)
         if str(p.get("sale_id", "")).strip() == clean_sid
-        and str(p.get("payment_status", "")).upper() not in {"REFUNDED", "FAILED"}
+        and str(p.get("payment_status", "")).upper() != "FAILED"
     ]
-    total_collected = round(sum(float(p.get("amount", 0) or 0) for p in payments), 2)
-    remaining_balance = max(0.0, round(bill_total - total_collected, 2))
+    positive_payments = [p for p in all_payments if float(p.get("amount", 0) or 0) > 0 and str(p.get("payment_status", "")).upper() != "REFUNDED"]
+    refund_payments = [p for p in all_payments if float(p.get("amount", 0) or 0) < 0 or str(p.get("payment_status", "")).upper() == "REFUNDED"]
 
+    total_collected = round(sum(float(p.get("amount", 0) or 0) for p in positive_payments), 2)
+    total_refunded = round(sum(abs(float(p.get("amount", 0) or 0)) for p in refund_payments), 2)
+    net_collected = round(total_collected - total_refunded, 2)
+
+    if is_cancelled:
+        return {
+            "sale_id": clean_sid,
+            "bill_number": str(sale.get("bill_number") or clean_sid),
+            "bill_total": bill_total,
+            "original_invoice_amount": bill_total,
+            "total_collected": total_collected,
+            "total_refunded": total_refunded,
+            "net_collected": net_collected,
+            "remaining_balance": 0.0,
+            "final_outstanding": 0.0,
+            "payment_status": "CANCELLED",
+            "bill_status": "CANCELLED",
+            "cancellation_status": "CANCELLED",
+            "is_cancelled": True,
+            "payment_count": len(all_payments),
+            "payments": all_payments,
+        }
+
+    remaining_balance = max(0.0, round(bill_total - net_collected, 2))
     if remaining_balance <= 0.05:
         p_status = "PAID"
-    elif total_collected > 0.0:
+    elif net_collected > 0.0:
         p_status = "PARTIAL"
     else:
         p_status = "UNPAID"
@@ -239,11 +347,18 @@ def get_invoice_settlement_status(sale_id: str) -> Dict[str, Any]:
         "sale_id": clean_sid,
         "bill_number": str(sale.get("bill_number") or clean_sid),
         "bill_total": bill_total,
+        "original_invoice_amount": bill_total,
         "total_collected": total_collected,
+        "total_refunded": total_refunded,
+        "net_collected": net_collected,
         "remaining_balance": remaining_balance,
+        "final_outstanding": remaining_balance,
         "payment_status": p_status,
-        "payment_count": len(payments),
-        "payments": payments,
+        "bill_status": bill_status,
+        "cancellation_status": "ACTIVE",
+        "is_cancelled": False,
+        "payment_count": len(all_payments),
+        "payments": all_payments,
     }
 
 
@@ -259,8 +374,17 @@ def check_credit_control(
     - Customer must be registered and active.
     - Outstanding + requested credit must not exceed customer's credit_limit.
     - Customer must not have invoices exceeding max_overdue_days.
-    - Salesmen CANNOT independently approve credit exceptions.
-    - Owner can approve directly or via an approved ApprovalRequest.
+    - Salesmen and Personal Assistants CANNOT independently approve credit exceptions.
+    - Only an authenticated Owner may directly authorize a credit exception.
+    - ApprovalRequests must be strictly verified:
+        1. APPROVED status
+        2. Authorized Owner identity
+        3. Correct request type (CREDIT_EXCEPTION, CUSTOMER_CREDIT, SALE_CREDIT)
+        4. Matching customer
+        5. Approved amount limit
+        6. Request validity and expiry
+        7. Not revoked
+        8. Not already consumed by an unrelated transaction
     """
     req_credit = round(float(requested_credit or 0.0), 2)
     if req_credit <= 0:
@@ -316,8 +440,8 @@ def check_credit_control(
 
     violation_text = "; ".join(violation_reasons)
 
-    # 1. Direct Owner Authorization
-    if is_owner(current_user) or is_manager(current_user):
+    # 1. Direct Owner Authorization: ONLY OWNER (PA and Salesman cannot directly authorize)
+    if is_owner(current_user):
         return {
             "approved": True,
             "credit_exception": True,
@@ -333,25 +457,118 @@ def check_credit_control(
     if clean_app_id:
         approvals = db.get_records("ApprovalRequests", fresh=True) or []
         appr = next((a for a in approvals if str(a.get("request_id", "")).strip() == clean_app_id), None)
-        if appr:
-            app_status = str(appr.get("status", "")).upper()
-            app_type = str(appr.get("request_type", "")).upper()
-            app_by = str(appr.get("decided_by") or appr.get("approved_by") or "")
-            if app_status == "APPROVED" and app_type in {"CREDIT_EXCEPTION", "CUSTOMER_CREDIT", "SALE_CREDIT"} and app_by:
-                return {
-                    "approved": True,
-                    "credit_exception": True,
-                    "approved_by_owner": True,
-                    "approval_request_id": clean_app_id,
-                    "authorized_by": app_by,
-                    "current_outstanding": current_outstanding,
-                    "new_total_exposure": new_total_exposure,
-                    "reason": f"Authorized via approved Owner request {clean_app_id}: {violation_text}",
-                }
+        if not appr:
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' not found.")
 
-    # Salesman blocked
+        # Check status
+        app_status = str(appr.get("status", "")).upper()
+        if app_status != "APPROVED":
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has status '{app_status}' (must be APPROVED).")
+
+        # Check not revoked
+        if str(appr.get("revoked", "")).lower() in {"true", "1", "yes"} or app_status == "REVOKED":
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has been revoked.")
+
+        # Check request type
+        app_type = str(appr.get("request_type", "")).upper()
+        if app_type not in {"CREDIT_EXCEPTION", "CUSTOMER_CREDIT", "SALE_CREDIT"}:
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has invalid type '{app_type}' for credit exception.")
+
+        # Check authorized Owner identity
+        decided_by = str(appr.get("decided_by") or appr.get("approved_by") or "").strip()
+        if not decided_by:
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' lacks authorized Owner identity.")
+        users = db.get_records("Users", fresh=True) or []
+        decider = next((u for u in users if str(u.get("user_id", "")).strip() == decided_by), None)
+        if not decider or not is_owner(decider) or str(decider.get("active", "true")).lower() in {"false", "0", "no", "inactive"}:
+            raise HTTPException(status_code=400, detail=f"Approver '{decided_by}' is not an active Owner.")
+
+        # Parse payload_json if present
+        payload = {}
+        if appr.get("payload_json"):
+            try:
+                payload = json.loads(str(appr["payload_json"])) if isinstance(appr["payload_json"], str) else appr["payload_json"]
+            except Exception:
+                payload = {}
+
+        # Check matching customer
+        target_cid = str(appr.get("customer_id") or payload.get("customer_id") or payload.get("target_customer_id") or "").strip()
+        if target_cid and target_cid != cid:
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' is for customer '{target_cid}', does not match current customer '{cid}'.")
+
+        # Check approved amount limit
+        raw_approved_amt = (
+            appr.get("approved_amount")
+            or appr.get("amount")
+            or payload.get("approved_amount")
+            or payload.get("amount")
+            or payload.get("credit_limit")
+        )
+        if raw_approved_amt is not None and str(raw_approved_amt).strip() not in {"", "0", "null"}:
+            try:
+                app_amt = float(raw_approved_amt)
+                if app_amt > 0 and req_credit > app_amt + 0.05:
+                    raise HTTPException(status_code=400, detail=f"Requested credit ₹{req_credit:.2f} exceeds approved limit of ₹{app_amt:.2f} in approval request '{clean_app_id}'.")
+            except (ValueError, TypeError):
+                pass
+
+        # Check request validity and expiry
+        raw_expiry = (
+            appr.get("expires_at")
+            or appr.get("valid_until")
+            or appr.get("expiry_date")
+            or payload.get("expires_at")
+            or payload.get("valid_until")
+        )
+        if raw_expiry and str(raw_expiry).strip():
+            try:
+                exp_str = str(raw_expiry).strip()[:10]
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                if date.today() > exp_date:
+                    raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' expired on {exp_str}.")
+            except (ValueError, TypeError):
+                pass
+
+        # Check not already consumed by an unrelated transaction
+        consumed_sale = str(appr.get("consumed_by_sale_id") or payload.get("consumed_by_sale_id") or "").strip()
+        is_consumed = bool(appr.get("is_consumed") or payload.get("is_consumed"))
+        if is_consumed or consumed_sale:
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has already been consumed by sale '{consumed_sale or 'ANOTHER_SALE'}'.")
+
+        return {
+            "approved": True,
+            "credit_exception": True,
+            "approved_by_owner": True,
+            "approval_request_id": clean_app_id,
+            "authorized_by": decided_by,
+            "current_outstanding": current_outstanding,
+            "new_total_exposure": new_total_exposure,
+            "reason": f"Authorized via approved Owner request {clean_app_id}: {violation_text}",
+        }
+
+    # PA or Salesman blocked without valid Owner approval
+    role_name = "Personal Assistant" if is_manager(current_user) else "Salesman"
     raise HTTPException(
         status_code=400,
         detail=f"Credit sale rejected for {customer.get('shop_name') or cid}: {violation_text}. "
-               f"Salesmen cannot independently approve credit. Owner approval is required."
+               f"{role_name} cannot independently approve credit. Owner approval is required."
     )
+
+
+def mark_approval_consumed(approval_request_id: str, sale_id: str) -> bool:
+    """Marks an approval request as consumed by a specific completed sale transaction."""
+    if not approval_request_id:
+        return False
+    clean_id = str(approval_request_id).strip()
+    now = now_iso()
+    try:
+        updated = db.update_record("ApprovalRequests", "request_id", clean_id, {
+            "is_consumed": True,
+            "consumed_by_sale_id": sale_id,
+            "consumed_at": now,
+        })
+        return bool(updated)
+    except Exception as e:
+        logging.warning("Failed to mark approval request %s as consumed: %s", clean_id, e)
+        return False
+

@@ -397,6 +397,7 @@ def calculate_trial_balance(
         "total_debits": round_money(grand_total_debit),
         "total_credits": round_money(grand_total_credit),
         "difference": round_money(abs(grand_total_debit - grand_total_credit)),
+        "variance": round_money(abs(grand_total_debit - grand_total_credit)),
         "rows": rows,
         "lines": rows,
     }
