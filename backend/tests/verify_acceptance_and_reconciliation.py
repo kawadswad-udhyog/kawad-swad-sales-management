@@ -10,6 +10,7 @@ import unittest
 import asyncio
 from decimal import Decimal
 from datetime import datetime, date, timezone
+from unittest.mock import patch
 
 os.environ["SALES_TESTING"] = "1"
 os.environ["SALES_JWT_SECRET"] = "test-only-secret-do-not-use-for-deployment-32"
@@ -52,7 +53,11 @@ from app.routers.production import (
 from app.routers import sales
 from app.routers import stock
 from app.routers import workforce
-from app.accounting.journal_engine import append_journal_voucher
+from app.accounting.journal_engine import (
+    append_journal_voucher,
+    calculate_trial_balance,
+    to_decimal,
+)
 from app.models import (
     StockIssueCreate,
     SaleCreate,
@@ -350,11 +355,28 @@ def run_acceptance_and_reconciliation():
     print("\n--- STEP 6: WORKFORCE & PAYROLL LIFECYCLE ---")
     today = date.today().isoformat()
 
-    # 6a. Employee Attendance Check-in & Check-out
-    att_in = asyncio.run(workforce.check_in_my_attendance(EmployeeAttendanceCheckIn(notes="On-time shift arrival"), current_user=salesman))
-    att_id = att_in["record"]["attendance_id"]
-    att_out = asyncio.run(workforce.check_out_my_attendance(EmployeeAttendanceCheckOut(notes="Completed evening delivery rounds"), current_user=salesman))
-    print(f"Employee Attendance: {att_id} | Hours: {att_out.get('total_hours', 8.0)} | Status: PRESENT")
+    # 6a. Employee Attendance Check-in & Check-out (mocked 8.0-hour shift from 09:00:00 to 17:00:00)
+    class MockAttendanceClock(datetime):
+        _current = datetime(2026, 10, 20, 9, 0, 0)
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz:
+                return cls._current.replace(tzinfo=tz)
+            return cls._current
+
+    with patch("app.routers.workforce.datetime", MockAttendanceClock):
+        # Clock in at 09:00:00
+        att_in = asyncio.run(workforce.check_in_my_attendance(EmployeeAttendanceCheckIn(notes="On-time shift arrival"), current_user=salesman))
+        att_id = att_in["record"]["attendance_id"]
+        assert att_in["record"]["check_in_time"] == "09:00:00"
+
+        # Advance clock to 17:00:00 (8.0-hour shift duration) and clock out
+        MockAttendanceClock._current = datetime(2026, 10, 20, 17, 0, 0)
+        att_out = asyncio.run(workforce.check_out_my_attendance(EmployeeAttendanceCheckOut(notes="Completed evening delivery rounds"), current_user=salesman))
+        assert att_out["total_hours"] == 8.0
+        assert att_out["record"]["check_out_time"] == "17:00:00"
+        print(f"Employee Attendance: {att_id} | In: {att_in['record']['check_in_time']} | Out: {att_out['record']['check_out_time']} | Hours: {att_out['total_hours']} | Status: {att_out.get('status', 'COMPLETED')}")
 
     # 6b. Work Assignment Lifecycle
     task_res = asyncio.run(workforce.create_task(WorkAssignmentCreate(
@@ -421,7 +443,7 @@ def run_acceptance_and_reconciliation():
     # Labour Attendance & Work Entry
     att_bulk = asyncio.run(workforce.save_labour_attendance_bulk(LabourAttendanceBulk(
         attendance_date=today,
-        records=[LabourAttendanceItem(labour_id=labour_id, status="PRESENT", hours_worked=8.0, overtime_hours=1.0)]
+        records=[LabourAttendanceItem(labour_id=labour_id, attendance_date=today, status="PRESENT", hours_worked=8.0, overtime_hours=1.0)]
     ), current_user=owner))
 
     w_entry = asyncio.run(workforce.create_labour_work_entry(LabourWorkEntryCreate(
@@ -520,36 +542,82 @@ def run_acceptance_and_reconciliation():
     assert stock_van == 40
     assert stock_warehouse + stock_van == stock_fg_total
 
-    # 2. Financial Trial Balance Reconciliation
-    j_lines = db.get_records("JournalLines")
-    total_debits = sum(Decimal(str(line.get("debit", 0) or 0)) for line in j_lines)
-    total_credits = sum(Decimal(str(line.get("credit", 0) or 0)) for line in j_lines)
-    trial_balance_diff = total_debits - total_credits
+    # 2. Financial General Ledger & Trial Balance Reconciliation Audit
+    headers = db.get_records("JournalHeaders", fresh=True)
+    all_lines = db.get_records("JournalLines", fresh=True)
+
+    # Validate and filter posted journal headers
+    VALID_STATUSES = {"POSTED", "VALID", "REVERSED"}
+    posted_headers = [h for h in headers if str(h.get("status", "")).strip().upper() in VALID_STATUSES]
+    posted_header_ids = {str(h.get("journal_id")) for h in posted_headers}
+
+    # Ensure no incomplete or failed vouchers corrupt the ledger
+    invalid_headers = [h for h in headers if str(h.get("status", "")).strip().upper() not in VALID_STATUSES]
+    assert len(invalid_headers) == 0, f"Found unexpected incomplete/failed journal headers: {invalid_headers}"
+
+    # Join lines to headers by journal_id
+    posted_lines = [l for l in all_lines if str(l.get("journal_id")) in posted_header_ids]
+
+    # Verify voucher count & line count
+    assert len(posted_headers) >= 7, f"Expected at least 7 posted journal vouchers, found {len(posted_headers)}"
+    assert len(posted_lines) >= 20, f"Expected at least 20 journal lines, found {len(posted_lines)}"
+
+    # Verify each posted voucher independently balances (sum debits == sum credits)
+    for hdr in posted_headers:
+        jid = str(hdr.get("journal_id"))
+        vtype = hdr.get("voucher_type", "")
+        v_lines = [l for l in posted_lines if str(l.get("journal_id")) == jid]
+        assert len(v_lines) >= 2, f"Voucher {jid} must have at least 2 lines, found {len(v_lines)}"
+        v_deb = sum(to_decimal(l.get("debit_amount", 0) or 0) for l in v_lines)
+        v_crd = sum(to_decimal(l.get("credit_amount", 0) or 0) for l in v_lines)
+        v_diff = abs(v_deb - v_crd)
+        assert v_diff == Decimal("0.00"), f"Voucher {jid} ({vtype}) is unbalanced: DR Rs {v_deb} != CR Rs {v_crd}"
+        assert v_deb > Decimal("0.00"), f"Voucher {jid} ({vtype}) must have non-zero debit amount"
+
+    # Compute GL Totals using canonical debit_amount and credit_amount fields
+    total_debits = sum(to_decimal(l.get("debit_amount", 0) or 0) for l in posted_lines)
+    total_credits = sum(to_decimal(l.get("credit_amount", 0) or 0) for l in posted_lines)
+    trial_balance_diff = abs(total_debits - total_credits)
+
+    # Strictly verify non-zero debits and credits (strictly forbid zero-versus-zero false positive comparison)
+    assert total_debits > Decimal("0.00"), "Total debits must be strictly positive (zero-versus-zero comparison forbidden)"
+    assert total_credits > Decimal("0.00"), "Total credits must be strictly positive (zero-versus-zero comparison forbidden)"
+    assert total_debits == total_credits, f"General Ledger unbalanced: DR Rs {total_debits} != CR Rs {total_credits}"
+    assert trial_balance_diff == Decimal("0.00")
+
+    # Cross-check / compare with calculate_trial_balance()
+    tb = calculate_trial_balance()
+    assert tb["is_balanced"] is True, "calculate_trial_balance() reports unbalanced ledger"
+    assert tb["difference"] == Decimal("0.00"), f"Trial balance difference must be 0, got {tb['difference']}"
+    assert to_decimal(tb["grand_total_debit"]) > Decimal("0.00"), "Trial balance grand total debit must be > 0"
+    assert to_decimal(tb["grand_total_credit"]) > Decimal("0.00"), "Trial balance grand total credit must be > 0"
+    assert to_decimal(tb["grand_total_debit"]) == to_decimal(tb["grand_total_credit"])
 
     print(f"\n--- TRIAL BALANCE & GENERAL LEDGER RECONCILIATION ---")
-    print(f"Total Journal Lines Count: {len(j_lines)}")
+    print(f"Total Posted Vouchers:        {len(posted_headers)}")
+    print(f"Total Journal Lines Count:    {len(posted_lines)}")
     print(f"Total General Ledger Debits:  Rs {total_debits:,.2f}")
     print(f"Total General Ledger Credits: Rs {total_credits:,.2f}")
     print(f"Trial Balance Variance:       Rs {trial_balance_diff:,.2f} -> PERFECT ZERO VARIANCE")
-    assert trial_balance_diff == Decimal("0.00")
+    print(f"Trial Balance Net DR / CR:    Rs {tb['grand_total_debit']:,.2f} / Rs {tb['grand_total_credit']:,.2f} (Balanced: {tb['is_balanced']})")
 
     # Account breakdowns
     acc_balances = {}
-    for l in j_lines:
+    for l in posted_lines:
         code = l["account_code"]
         name = l["account_name"]
-        deb = Decimal(str(l.get("debit", 0) or 0))
-        crd = Decimal(str(l.get("credit", 0) or 0))
+        deb = to_decimal(l.get("debit_amount", 0) or 0)
+        crd = to_decimal(l.get("credit_amount", 0) or 0)
         if code not in acc_balances:
             acc_balances[code] = {"name": name, "debit": Decimal("0.00"), "credit": Decimal("0.00")}
         acc_balances[code]["debit"] += deb
         acc_balances[code]["credit"] += crd
 
-    print("\nAccount Ledger Summary:")
+    print("\nAccount Ledger Summary (Posted Journal Activity):")
     for code in sorted(acc_balances.keys()):
         acc = acc_balances[code]
         net = acc["debit"] - acc["credit"]
-        print(f"  [{code}] {acc['name']:<35} DR: Rs {acc['debit']:>10,.2f} | CR: Rs {acc['credit']:>10,.2f} | Net: Rs {net:>10,.2f}")
+        print(f"  [{code}] {acc['name']:<42} DR: Rs {acc['debit']:>10,.2f} | CR: Rs {acc['credit']:>10,.2f} | Net: Rs {net:>10,.2f}")
 
     print("\n" + "=" * 80)
     print("ALL ACCEPTANCE & RECONCILIATION CRITERIA VERIFIED AND FULLY PASSED")
