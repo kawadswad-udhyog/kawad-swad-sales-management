@@ -175,6 +175,9 @@ class Customer(BaseModel):
     gstin: Optional[str] = ""
     map_location: Optional[str] = ""
     active: bool = True
+    credit_limit: Optional[float] = 0.0
+    max_overdue_days: Optional[int] = 30
+    current_balance: Optional[float] = 0.0
     created_at: Optional[str] = ""
     notes: Optional[str] = ""
 
@@ -189,6 +192,8 @@ class CustomerCreate(BaseModel):
     city: Optional[str] = "Bhilwara"
     gstin: Optional[str] = ""
     map_location: Optional[str] = ""
+    credit_limit: Optional[float] = 0.0
+    max_overdue_days: Optional[int] = 30
     notes: Optional[str] = ""
 
 # Sales Models
@@ -233,6 +238,7 @@ class SaleCreate(BaseModel):
     payment_status: Optional[str] = "PAID"
     cash_collected: Optional[float] = None
     credit_amount: Optional[float] = None
+    owner_credit_approval_id: Optional[str] = None
     sale_date: Optional[str] = None
     subtotal: Optional[float] = None
     discount_amount: Optional[float] = 0.0

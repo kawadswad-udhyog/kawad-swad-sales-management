@@ -453,17 +453,51 @@ def post_sale_journal(
     tax_amt = to_decimal(sale_data.get("tax_amount", 0) or 0)
     pay_method = str(sale_data.get("payment_method", "CASH")).upper()
 
-    # Cash collected on van delivery routes is held as Van Cash (1115) until daily closing
-    debtor_or_cash_code = "1115" if pay_method == "CASH" else "1120" if pay_method in {"UPI", "BANK_TRANSFER"} else "1130"
+    # Authoritative settlement split: actual payment received vs accounts receivable
+    cash_collected = to_decimal(sale_data.get("cash_collected", 0) or 0)
+    credit_amount = to_decimal(sale_data.get("credit_amount", 0) or 0)
+    payment_status = str(sale_data.get("payment_status", "PAID")).upper()
 
-    lines = [
-        # Revenue Entry
-        {
-            "account_code": debtor_or_cash_code,
+    if cash_collected == Decimal("0") and credit_amount == Decimal("0"):
+        if payment_status == "UNPAID" or pay_method in {"CREDIT", "NONE"}:
+            credit_amount = bill_total
+            cash_collected = Decimal("0")
+        else:
+            cash_collected = bill_total
+            credit_amount = Decimal("0")
+    else:
+        # Reconcile if sum differs slightly due to rounding
+        if abs((cash_collected + credit_amount) - bill_total) > Decimal("0.05"):
+            credit_amount = bill_total - cash_collected
+
+    cash_collected = max(Decimal("0"), min(bill_total, cash_collected))
+    credit_amount = max(Decimal("0"), min(bill_total, credit_amount))
+
+    lines = []
+    # 1. Cash / Bank receipt line (only for actual money collected)
+    if cash_collected > Decimal("0"):
+        cash_or_bank_code = "1115" if pay_method == "CASH" else "1120"
+        lines.append({
+            "account_code": cash_or_bank_code,
+            "debit_amount": round_money(cash_collected),
+            "notes": f"Payment collected via {pay_method} for bill {bill_no}",
+        })
+
+    # 2. Accounts Receivable line (for unpaid credit balance)
+    if credit_amount > Decimal("0"):
+        lines.append({
+            "account_code": "1130",
+            "debit_amount": round_money(credit_amount),
+            "notes": f"Accounts Receivable for bill {bill_no} to {sale_data.get('customer_name_snapshot', 'Customer')}",
+        })
+
+    # Fallback safety: if total debit is 0, default to 1130
+    if not lines:
+        lines.append({
+            "account_code": "1130",
             "debit_amount": round_money(bill_total),
-            "notes": f"Sale settlement via {pay_method} for bill {bill_no}",
-        },
-    ]
+            "notes": f"Receivable for bill {bill_no}",
+        })
 
     cgst_input = sale_data.get("cgst_amount")
     sgst_input = sale_data.get("sgst_amount")

@@ -88,6 +88,9 @@ def _to_sale(row: dict, items: List[SaleItem], key: str = "") -> Sale:
         reference = _clean(payment[0].get("reference_number"))
         if reference == str(row.get("bill_number", "")):
             reference = _clean(payment[0].get("notes")) if "ref:" in str(payment[0].get("notes", "")) else reference
+    bill_total_val = float(row.get("bill_total", 0) or 0)
+    cash_coll = float(row.get("cash_collected", 0) if row.get("cash_collected") is not None else (bill_total_val if method != "CREDIT" else 0.0))
+    cred_amt = float(row.get("credit_amount", 0) if row.get("credit_amount") is not None else (0.0 if method != "CREDIT" else bill_total_val))
     return Sale(
         sale_id=str(row.get("sale_id", "")),
         bill_number=str(row.get("bill_number", "")),
@@ -105,7 +108,7 @@ def _to_sale(row: dict, items: List[SaleItem], key: str = "") -> Sale:
         subtotal=float(row.get("subtotal", 0) or 0),
         discount_amount=float(row.get("discount_amount", 0) or 0),
         tax_amount=float(row.get("tax_amount", 0) or 0),
-        bill_total=float(row.get("bill_total", 0) or 0),
+        bill_total=bill_total_val,
         bill_status=str(row.get("bill_status", "ISSUED")),
         created_at=str(row.get("created_at", "")),
         notes=_clean(notes),
@@ -114,6 +117,9 @@ def _to_sale(row: dict, items: List[SaleItem], key: str = "") -> Sale:
         payment_method=method,
         payment_reference=reference if reference != str(row.get("bill_number", "")) else _clean(row.get("payment_reference")),
         lines=items,
+        total_amount=bill_total_val,
+        cash_collected=cash_coll,
+        credit_amount=cred_amt,
     )
 
 
@@ -122,14 +128,14 @@ def _must_write(tab: str, record: dict):
         raise HTTPException(status_code=503, detail=f"Could not save {tab}. The sale is incomplete and can be retried with the same idempotency key.")
 
 
-def _sale_is_complete(sale_id: str, line_count: int, payment_method: str) -> bool:
+def _sale_is_complete(sale_id: str, line_count: int, payment_method: str, is_unpaid: bool = False, is_cash: bool = True) -> bool:
     if len(_items_for(sale_id)) < line_count:
         return False
     if len(_stock_for(sale_id)) < line_count:
         return False
-    if not _payments_for(sale_id):
+    if not is_unpaid and not _payments_for(sale_id):
         return False
-    if payment_method == "CASH" and not _cash_for(sale_id):
+    if is_cash and not _cash_for(sale_id):
         return False
     return True
 
@@ -254,14 +260,6 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
             raise HTTPException(status_code=422, detail="idempotency_key contains invalid control characters.")
 
     payment_mode_raw = str(getattr(req, "payment_mode", "") or req.payment_method or "CASH").upper()
-    if payment_mode_raw in {"PARTIAL", "CREDIT"}:
-        method = "CASH" if (getattr(req, "cash_collected", 0) or 0) > 0 else "OTHER"
-    else:
-        method = _clean(req.payment_method or "CASH").upper() or "CASH"
-        if method not in {"CASH", "UPI", "BANK_TRANSFER", "OTHER"}:
-            raise HTTPException(status_code=422, detail="Payment method must be CASH, UPI, BANK_TRANSFER, or OTHER.")
-    if str(req.payment_status or "PAID").upper() not in {"PAID", "RECEIVED", "PARTIAL", "CREDIT"}:
-        raise HTTPException(status_code=422, detail="Only a fully paid sale can be issued. Credit and partial payment are not enabled.")
 
     products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
     validated = []
@@ -337,6 +335,66 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
         customer_name = customer_name or "Walk-in Customer"
 
     reference = _clean(getattr(req, "payment_reference", "") or "")
+
+    # Authoritative settlement split: cash collected vs credit extended
+    req_collected = getattr(req, "cash_collected", None)
+    req_credit = getattr(req, "credit_amount", None)
+
+    if req_collected is not None and req_credit is not None:
+        cash_collected = _money(float(req_collected))
+        credit_amount = _money(float(req_credit))
+        if abs(cash_collected + credit_amount - bill_total) > 0.05:
+            raise HTTPException(status_code=422, detail=f"Sum of cash_collected (₹{cash_collected:.2f}) and credit_amount (₹{credit_amount:.2f}) does not match bill total (₹{bill_total:.2f}).")
+    elif req_collected is not None:
+        cash_collected = _money(float(req_collected))
+        if cash_collected > bill_total + 0.05:
+            raise HTTPException(status_code=422, detail=f"cash_collected (₹{cash_collected:.2f}) cannot exceed bill total (₹{bill_total:.2f}).")
+        credit_amount = _money(max(0.0, bill_total - cash_collected))
+    elif req_credit is not None:
+        credit_amount = _money(float(req_credit))
+        if credit_amount > bill_total + 0.05:
+            raise HTTPException(status_code=422, detail=f"credit_amount (₹{credit_amount:.2f}) cannot exceed bill total (₹{bill_total:.2f}).")
+        cash_collected = _money(max(0.0, bill_total - credit_amount))
+    elif payment_mode_raw in {"CREDIT", "UNPAID"}:
+        cash_collected = 0.0
+        credit_amount = bill_total
+    elif payment_mode_raw == "PARTIAL":
+        cash_collected = 0.0
+        credit_amount = bill_total
+    else:
+        # Full immediate payment
+        cash_collected = bill_total
+        credit_amount = 0.0
+
+    # Determine payment method for collected portion
+    if cash_collected > 0:
+        method = _clean(req.payment_method or "CASH").upper() or "CASH"
+        if method in {"CREDIT", "NONE", "UNPAID"}:
+            method = "CASH"
+        elif method not in {"CASH", "UPI", "BANK_TRANSFER", "OTHER"}:
+            method = "CASH"
+    else:
+        method = "CREDIT"
+
+    # Canonical status calculation from actual receipts
+    if cash_collected >= bill_total - 0.01:
+        calc_payment_status = "PAID"
+    elif cash_collected > 0.0:
+        calc_payment_status = "PARTIAL"
+    else:
+        calc_payment_status = "UNPAID"
+
+    # Credit control enforcement
+    if credit_amount > 0:
+        from app.accounting.customer_ledger import check_credit_control
+        approval_id = getattr(req, "owner_credit_approval_id", None)
+        check_credit_control(
+            customer_id=customer_id,
+            requested_credit=credit_amount,
+            current_user=current_user,
+            approval_request_id=approval_id,
+        )
+
     async with _sales_lock:
         if clean_key:
             existing = _find_sale_by_key(db.get_records("Sales", fresh=True), clean_key)
@@ -346,7 +404,11 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
                 if not is_manager(current_user) and user_id not in {owner, entered}:
                     raise HTTPException(status_code=409, detail="This idempotency key already belongs to another user.")
                 sale_id = str(existing.get("sale_id"))
-                if _sale_is_complete(sale_id, len(validated), method) or _sale_is_complete(sale_id, len(_items_for(sale_id)) or len(validated), str(existing.get("payment_method") or method).upper()):
+                existing_status = str(existing.get("payment_status", "")).upper()
+                existing_collected = float(existing.get("cash_collected", 0) or 0)
+                is_unpaid = existing_status == "UNPAID" or existing_collected <= 0
+                is_cash = (str(existing.get("payment_method") or method).upper() == "CASH") and (existing_collected > 0)
+                if _sale_is_complete(sale_id, len(validated), method, is_unpaid=is_unpaid, is_cash=is_cash) or _sale_is_complete(sale_id, len(_items_for(sale_id)) or len(validated), str(existing.get("payment_method") or method).upper(), is_unpaid=is_unpaid, is_cash=is_cash):
                     if str(existing.get("txn_status", "")).upper() != "COMPLETE":
                         if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE"}):
                             raise HTTPException(status_code=503, detail="The sale rows exist but the completion flag could not be saved. Retry the same request.")
@@ -385,9 +447,11 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
             "entered_by_user_id": user_id,
             "salesman_user_id": requested_salesman,
             "delivery_status": req.delivery_status or "DELIVERED",
-            "payment_status": "PAID",
+            "payment_status": calc_payment_status,
             "payment_method": method,
             "payment_reference": reference,
+            "cash_collected": cash_collected,
+            "credit_amount": credit_amount,
             "subtotal": subtotal,
             "discount_amount": discount_amount,
             "tax_amount": tax_amount,
@@ -436,8 +500,8 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
         items = [_to_item(row) for row in _items_for(sale_id)]
         res_sale = _to_sale(sale_record, items, clean_key)
         res_sale.total_amount = float(bill_total)
-        res_sale.cash_collected = float(getattr(req, "cash_collected", None) if getattr(req, "cash_collected", None) is not None else bill_total)
-        res_sale.credit_amount = float(getattr(req, "credit_amount", None) if getattr(req, "credit_amount", None) is not None else 0.0)
+        res_sale.cash_collected = float(cash_collected)
+        res_sale.credit_amount = float(credit_amount)
         return res_sale
 
 
@@ -513,25 +577,27 @@ def _write_children(sale: dict, validated: list, method: str, reference: str, us
                 "reference_id": f"{bill_number}#{line['line_no']}",
                 "notes": f"{marker} Sale delivery against bill {bill_number}",
             })
-    if not _payments_for(sale_id):
+    collected = float(sale.get("cash_collected", 0) if sale.get("cash_collected") is not None else (sale.get("bill_total", 0) if method != "CREDIT" else 0.0))
+    if collected > 0 and not _payments_for(sale_id):
+        p_status = "PAID" if collected >= float(sale.get("bill_total", 0) or 0) - 0.01 else "PARTIAL"
         _must_write("Payments", {
             "payment_id": db.generate_id("Payments"),
             "sale_id": sale_id,
             "payment_datetime": now,
             "payment_method": method,
-            "amount": _money(sale.get("bill_total")),
+            "amount": _money(collected),
             "reference_number": reference or bill_number,
             "received_by_user_id": salesman_id,
-            "payment_status": "PAID",
-            "notes": f"ref:{reference}" if reference else f"Full payment for bill {bill_number}",
+            "payment_status": p_status,
+            "notes": f"ref:{reference}" if reference else f"Payment for bill {bill_number}",
         })
-    if method == "CASH" and not _cash_for(sale_id):
+    if method == "CASH" and collected > 0 and not _cash_for(sale_id):
         _must_write("CashLedger", {
             "cash_txn_id": db.generate_id("CashLedger"),
             "txn_datetime": now,
             "salesman_user_id": salesman_id,
             "txn_type": "SALE_COLLECTION",
-            "amount": _money(sale.get("bill_total")),
+            "amount": _money(collected),
             "payment_method": "CASH",
             "related_sale_id": sale_id,
             "related_expense_id": "",
@@ -686,27 +752,54 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     "notes": f"Stock reversal for cancelled bill {bill_number}: {reason_text}",
                 }, raise_on_error=True)
 
-        # 2. Reverse payments in Payments / CashLedger (check if refund line already appended)
+        # 2. Reverse payments in Payments / CashLedger (refund only what was actually collected)
         bill_total = float(match.get("bill_total", 0) or 0)
         method = str(match.get("payment_method", "CASH")).upper()
+
+        # Calculate actual amount collected from active payments
+        sale_payments = [
+            p for p in db.get_records("Payments", fresh=True)
+            if str(p.get("sale_id")) == sale_id and str(p.get("payment_status", "")).upper() != "REFUNDED"
+        ]
+        if sale_payments:
+            total_collected = round(sum(float(p.get("amount", 0) or 0) for p in sale_payments), 2)
+        else:
+            p_status = str(match.get("payment_status", "")).upper()
+            if p_status != "UNPAID" and method != "CREDIT":
+                total_collected = float(match.get("cash_collected") if match.get("cash_collected") is not None else bill_total)
+            else:
+                total_collected = float(match.get("cash_collected", 0) or 0)
+
+        # Calculate actual physical cash collected from CashLedger
+        sale_cash_entries = [
+            c for c in db.get_records("CashLedger", fresh=True)
+            if str(c.get("related_sale_id")) == sale_id and str(c.get("txn_type", "")).upper() == "SALE_COLLECTION"
+        ]
+        if sale_cash_entries:
+            total_cash_collected = round(sum(float(c.get("amount", 0) or 0) for c in sale_cash_entries), 2)
+        elif method == "CASH":
+            total_cash_collected = total_collected
+        else:
+            total_cash_collected = 0.0
+
         existing_payments = [
             p for p in db.get_records("Payments", fresh=True)
             if str(p.get("sale_id")) == sale_id and str(p.get("payment_status", "")).upper() == "REFUNDED"
         ]
-        if not existing_payments:
+        if total_collected > 0 and not existing_payments:
             db.append_record("Payments", {
                 "payment_id": db.generate_id("Payments"),
                 "sale_id": sale_id,
                 "payment_datetime": now,
                 "payment_method": method,
-                "amount": -bill_total,
+                "amount": -total_collected,
                 "reference_number": f"REFUND-{bill_number}",
                 "received_by_user_id": salesman_id,
                 "payment_status": "REFUNDED",
                 "notes": f"Payment reversal for cancelled bill {bill_number}: {reason_text}",
             }, raise_on_error=True)
 
-        if method == "CASH":
+        if total_cash_collected > 0:
             existing_cash_refunds = [
                 c for c in db.get_records("CashLedger", fresh=True)
                 if str(c.get("related_sale_id")) == sale_id and str(c.get("txn_type", "")).upper() == "SALE_REFUND"
@@ -717,7 +810,7 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     "txn_datetime": now,
                     "salesman_user_id": salesman_id,
                     "txn_type": "SALE_REFUND",
-                    "amount": -bill_total,
+                    "amount": -total_cash_collected,
                     "payment_method": "CASH",
                     "related_sale_id": sale_id,
                     "related_expense_id": "",
@@ -930,7 +1023,7 @@ async def record_sale_payment(
 
         new_total_paid = round(total_paid_so_far + payload.amount, 2)
         new_balance = max(0.0, round(bill_total - new_total_paid, 2))
-        new_status = "PAID" if new_balance <= 0.05 else "PARTIALLY_PAID"
+        new_status = "PAID" if new_balance <= 0.05 else "PARTIAL"
 
         db.update_record("Sales", "sale_id", sale_id, {
             "payment_status": new_status,
@@ -975,6 +1068,34 @@ async def record_sale_payment(
             "payment_status": new_status,
             "journal_result": journal_res,
         }
+
+
+@router.get("/customers/{customer_id}/ledger")
+async def get_customer_ledger(customer_id: str, current_user: dict = Depends(get_current_user)):
+    """Authoritative chronological customer ledger transactions (invoices, collections, credit notes)."""
+    from app.accounting.customer_ledger import get_customer_transactions
+    return get_customer_transactions(customer_id)
+
+
+@router.get("/customers/{customer_id}/outstanding")
+async def get_customer_outstanding_summary(customer_id: str, current_user: dict = Depends(get_current_user)):
+    """Customer outstanding balance and overdue aging breakdown."""
+    from app.accounting.customer_ledger import calculate_customer_outstanding, get_customer_overdue_invoices
+    outstanding = calculate_customer_outstanding(customer_id)
+    overdue = get_customer_overdue_invoices(customer_id)
+    return {
+        "customer_id": customer_id,
+        "outstanding_balance": outstanding,
+        "overdue_invoices": overdue,
+        "is_overdue": len(overdue) > 0,
+    }
+
+
+@router.get("/{sale_id}/settlement")
+async def get_sale_settlement(sale_id: str, current_user: dict = Depends(get_current_user)):
+    """Invoice settlement status (bill_total, total_collected, remaining_balance, payment_status)."""
+    from app.accounting.customer_ledger import get_invoice_settlement_status
+    return get_invoice_settlement_status(sale_id)
 
 
 @router.get("/orders")
