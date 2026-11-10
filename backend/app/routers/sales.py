@@ -400,6 +400,22 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
                 is_cash = (str(existing.get("payment_method") or method).upper() == "CASH") and (existing_collected > 0)
                 if _sale_is_complete(sale_id, len(validated), method, is_unpaid=is_unpaid, is_cash=is_cash) or _sale_is_complete(sale_id, len(_items_for(sale_id)) or len(validated), str(existing.get("payment_method") or method).upper(), is_unpaid=is_unpaid, is_cash=is_cash):
                     if str(existing.get("txn_status", "")).upper() != "COMPLETE":
+                        app_id_res = _clean(existing.get("owner_credit_approval_id"))
+                        if app_id_res:
+                            from app.accounting.customer_ledger import consume_credit_approval
+                            if not consume_credit_approval(app_id_res, sale_id):
+                                raise HTTPException(status_code=503, detail="The sale rows exist but approval consumption could not be saved. Retry the same request.")
+                            try:
+                                inc_records = db.get_records("IncompleteTransactions", fresh=True)
+                                for inc in inc_records:
+                                    if str(inc.get("idempotency_key", "")).strip() == f"appr-cons-{sale_id}" and str(inc.get("status", "")).upper() in {"CONSUMPTION_FAILED", "PENDING"}:
+                                        db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
+                                            "status": "RESOLVED",
+                                            "resolved_by": user_id,
+                                            "resolved_at": now_iso(),
+                                        })
+                            except Exception:
+                                pass
                         if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE"}):
                             raise HTTPException(status_code=503, detail="The sale rows exist but the completion flag could not be saved. Retry the same request.")
                         existing["txn_status"] = "COMPLETE"
@@ -416,9 +432,9 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
         # Gunicorn / Uvicorn workers on Render or container replicas), an in-process lock only serializes
         # coroutines within the same worker. True distributed cross-process concurrency control requires
         # a distributed lock (e.g. Redis Redlock or Postgres row locks via SELECT ... FOR UPDATE).
-        if credit_amount > 0:
+        approval_id = _clean(getattr(req, "owner_credit_approval_id", None))
+        if credit_amount > 0 or approval_id:
             from app.accounting.customer_ledger import check_credit_control
-            approval_id = getattr(req, "owner_credit_approval_id", None)
             check_credit_control(
                 customer_id=customer_id,
                 requested_credit=credit_amount,
@@ -442,6 +458,12 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
         notes = _clean(req.notes)
         if clean_key:
             notes = f"[idemp:{clean_key}] [txn:INCOMPLETE] {notes}".strip()
+
+        # Atomic reservation of credit approval before writing sale header
+        if approval_id:
+            from app.accounting.customer_ledger import reserve_credit_approval
+            reserve_credit_approval(approval_id, sale_id, customer_id, credit_amount)
+
         sale_record = {
             "sale_id": sale_id,
             "bill_number": bill_number,
@@ -468,26 +490,55 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
             "bill_status": "ISSUED",
             "created_at": now,
             "notes": notes,
+            "owner_credit_approval_id": approval_id or "",
         }
+        header_written = False
         try:
             _must_write("Sales", sale_record)
+            header_written = True
             _write_children(sale_record, validated, method, reference, user_id, now)
-        except HTTPException:
-            raise
         except Exception as exc:
+            if not header_written and approval_id:
+                try:
+                    from app.accounting.customer_ledger import release_credit_approval
+                    release_credit_approval(approval_id, sale_id)
+                except Exception:
+                    pass
+            if isinstance(exc, HTTPException):
+                raise exc
             raise HTTPException(
                 status_code=503,
                 detail=f"Sale {sale_id} is incomplete and was not issued. Retry the same idempotency key. {exc}",
             ) from exc
+
+        # Fail-closed approval consumption: must consume approval before marking COMPLETE
+        if approval_id:
+            from app.accounting.customer_ledger import consume_credit_approval
+            consumed = consume_credit_approval(approval_id, sale_id)
+            if not consumed:
+                try:
+                    db.append_record("IncompleteTransactions", {
+                        "transaction_id": db.generate_id("IncompleteTransactions"),
+                        "transaction_type": "APPROVAL_CONSUMPTION_PENDING",
+                        "idempotency_key": f"appr-cons-{sale_id}",
+                        "status": "CONSUMPTION_FAILED",
+                        "payload_json": f'{{"sale_id": "{sale_id}", "approval_id": "{approval_id}"}}',
+                        "error_details": f"Failed to mark credit approval {approval_id} as consumed for sale {sale_id}",
+                        "created_at": now_iso(),
+                        "updated_at": now_iso(),
+                        "resolved_by": "",
+                        "resolved_at": "",
+                    })
+                except Exception:
+                    pass
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Sale {sale_id} rows were written but credit approval consumption could not be saved. Retry the same idempotency key.",
+                )
+
         if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE", "notes": notes.replace("[txn:INCOMPLETE]", "[txn:COMPLETE]")}):
             raise HTTPException(status_code=503, detail=f"Sale {sale_id} rows were written but completion could not be marked. Retry the same idempotency key.")
         sale_record["txn_status"] = "COMPLETE"
-        if getattr(req, "owner_credit_approval_id", None):
-            try:
-                from app.accounting.customer_ledger import mark_approval_consumed
-                mark_approval_consumed(req.owner_credit_approval_id, sale_id)
-            except Exception as app_err:
-                logging.warning("Could not mark credit approval %s as consumed: %s", req.owner_credit_approval_id, app_err)
 
         db.log_audit(user_id, "ISSUE_BILL", "Sales", sale_id, reason=f"Issued bill {bill_number} for ₹{bill_total:.2f} to {customer_name}")
 
@@ -530,6 +581,42 @@ async def _resume_sale(existing: dict, validated: list, method: str, reference: 
         _write_children(existing, validated, method or str(existing.get("payment_method") or "CASH"), reference or _clean(existing.get("payment_reference")), user_id, now)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Recovery of sale {sale_id} is still incomplete. Retry the same idempotency key. {exc}") from exc
+
+    approval_id = _clean(existing.get("owner_credit_approval_id"))
+    if approval_id:
+        from app.accounting.customer_ledger import consume_credit_approval
+        consumed = consume_credit_approval(approval_id, sale_id)
+        if not consumed:
+            try:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": db.generate_id("IncompleteTransactions"),
+                    "transaction_type": "APPROVAL_CONSUMPTION_PENDING",
+                    "idempotency_key": f"appr-cons-{sale_id}",
+                    "status": "CONSUMPTION_FAILED",
+                    "payload_json": f'{{"sale_id": "{sale_id}", "approval_id": "{approval_id}"}}',
+                    "error_details": f"Failed to mark credit approval {approval_id} as consumed on resume for sale {sale_id}",
+                    "created_at": now_iso(),
+                    "updated_at": now_iso(),
+                    "resolved_by": "",
+                    "resolved_at": "",
+                })
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail=f"Sale {sale_id} was recovered but credit approval consumption could not be saved. Retry.")
+
+        # If previously logged to IncompleteTransactions, resolve it
+        try:
+            inc_records = db.get_records("IncompleteTransactions", fresh=True)
+            for inc in inc_records:
+                if str(inc.get("idempotency_key", "")).strip() == f"appr-cons-{sale_id}" and str(inc.get("status", "")).upper() in {"CONSUMPTION_FAILED", "PENDING"}:
+                    db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
+                        "status": "RESOLVED",
+                        "resolved_by": user_id,
+                        "resolved_at": now_iso(),
+                    })
+        except Exception:
+            pass
+
     notes = str(existing.get("notes", "")).replace("[txn:INCOMPLETE]", "[txn:COMPLETE]")
     if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE", "notes": notes}):
         raise HTTPException(status_code=503, detail=f"Sale {sale_id} was recovered but completion could not be marked. Retry.")
@@ -709,6 +796,19 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     reversal_journal_ids = [str(r.get("journal_id", "")) for r in reversals if str(r.get("journal_id", ""))]
                 else:
                     accounting_status = "NO_VOUCHER"
+
+                if accounting_status in {"REVERSED", "ALREADY_REVERSED"}:
+                    try:
+                        inc_records = db.get_records("IncompleteTransactions", fresh=True)
+                        for inc in inc_records:
+                            if str(inc.get("idempotency_key", "")).strip() == f"acct-rev-sale-{sale_id}" and str(inc.get("status", "")).upper() in {"REVERSAL_FAILED", "PENDING"}:
+                                db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
+                                    "status": "RESOLVED",
+                                    "resolved_by": user_id,
+                                    "resolved_at": now_iso(),
+                                })
+                    except Exception:
+                        pass
             except Exception as acct_exc:
                 accounting_status = "FAILED"
                 accounting_error = str(acct_exc)
@@ -939,6 +1039,19 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                 reversal_journal_ids = [str(r.get("journal_id", "")) for r in reversals if str(r.get("journal_id", ""))]
             else:
                 accounting_status = "NO_VOUCHER"
+
+            if accounting_status in {"REVERSED", "ALREADY_REVERSED"}:
+                try:
+                    inc_records = db.get_records("IncompleteTransactions", fresh=True)
+                    for inc in inc_records:
+                        if str(inc.get("idempotency_key", "")).strip() == f"acct-rev-sale-{sale_id}" and str(inc.get("status", "")).upper() in {"REVERSAL_FAILED", "PENDING"}:
+                            db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
+                                "status": "RESOLVED",
+                                "resolved_by": user_id,
+                                "resolved_at": now,
+                            })
+                except Exception:
+                    pass
         except Exception as acct_exc:
             accounting_status = "FAILED"
             accounting_error = str(acct_exc)

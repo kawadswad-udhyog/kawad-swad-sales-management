@@ -473,6 +473,9 @@ class TestPhase14SalesPayment(unittest.TestCase):
             "status": "APPROVED",
             "approved_by": "USR-OWNER-01",
             "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TEST-01",
+            "approved_amount": 5000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
             "notes": "Authorized credit exception for regular customer",
         })
         req_salesman_app = self._create_sale_req(

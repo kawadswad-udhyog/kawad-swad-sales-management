@@ -367,6 +367,7 @@ def check_credit_control(
     requested_credit: float,
     current_user: dict,
     approval_request_id: Optional[str] = None,
+    current_sale_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Enforces business credit rules:
@@ -384,7 +385,7 @@ def check_credit_control(
         5. Approved amount limit
         6. Request validity and expiry
         7. Not revoked
-        8. Not already consumed by an unrelated transaction
+        8. Not already consumed or reserved by an unrelated transaction
     """
     req_credit = round(float(requested_credit or 0.0), 2)
     if req_credit <= 0:
@@ -414,6 +415,32 @@ def check_credit_control(
 
     limit_exceeded = (credit_limit > 0 and new_total_exposure > credit_limit) or (credit_limit <= 0 and req_credit > 0)
     overdue_invoices = get_customer_overdue_invoices(cid, max_overdue_days=max_overdue_days)
+
+    clean_app_id = str(approval_request_id or "").strip()
+    if clean_app_id:
+        approvals = db.get_records("ApprovalRequests", fresh=True) or []
+        appr = next((a for a in approvals if str(a.get("request_id", "")).strip() == clean_app_id), None)
+        if not appr:
+            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' not found.")
+
+        validation_result = validate_credit_approval_request(
+            appr=appr,
+            approval_id=clean_app_id,
+            customer_id=cid,
+            requested_credit=req_credit,
+            current_sale_id=current_sale_id,
+        )
+
+        return {
+            "approved": True,
+            "credit_exception": True,
+            "approved_by_owner": True,
+            "approval_request_id": clean_app_id,
+            "authorized_by": validation_result.get("decided_by"),
+            "current_outstanding": current_outstanding,
+            "new_total_exposure": new_total_exposure,
+            "reason": f"Authorized via approved Owner request {clean_app_id}",
+        }
 
     if not limit_exceeded and not overdue_invoices:
         return {
@@ -452,100 +479,6 @@ def check_credit_control(
             "reason": f"Owner authorized credit exception: {violation_text}",
         }
 
-    # 2. Verified Pre-Approved ApprovalRequest by Owner
-    clean_app_id = str(approval_request_id or "").strip()
-    if clean_app_id:
-        approvals = db.get_records("ApprovalRequests", fresh=True) or []
-        appr = next((a for a in approvals if str(a.get("request_id", "")).strip() == clean_app_id), None)
-        if not appr:
-            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' not found.")
-
-        # Check status
-        app_status = str(appr.get("status", "")).upper()
-        if app_status != "APPROVED":
-            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has status '{app_status}' (must be APPROVED).")
-
-        # Check not revoked
-        if str(appr.get("revoked", "")).lower() in {"true", "1", "yes"} or app_status == "REVOKED":
-            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has been revoked.")
-
-        # Check request type
-        app_type = str(appr.get("request_type", "")).upper()
-        if app_type not in {"CREDIT_EXCEPTION", "CUSTOMER_CREDIT", "SALE_CREDIT"}:
-            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has invalid type '{app_type}' for credit exception.")
-
-        # Check authorized Owner identity
-        decided_by = str(appr.get("decided_by") or appr.get("approved_by") or "").strip()
-        if not decided_by:
-            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' lacks authorized Owner identity.")
-        users = db.get_records("Users", fresh=True) or []
-        decider = next((u for u in users if str(u.get("user_id", "")).strip() == decided_by), None)
-        if not decider or not is_owner(decider) or str(decider.get("active", "true")).lower() in {"false", "0", "no", "inactive"}:
-            raise HTTPException(status_code=400, detail=f"Approver '{decided_by}' is not an active Owner.")
-
-        # Parse payload_json if present
-        payload = {}
-        if appr.get("payload_json"):
-            try:
-                payload = json.loads(str(appr["payload_json"])) if isinstance(appr["payload_json"], str) else appr["payload_json"]
-            except Exception:
-                payload = {}
-
-        # Check matching customer
-        target_cid = str(appr.get("customer_id") or payload.get("customer_id") or payload.get("target_customer_id") or "").strip()
-        if target_cid and target_cid != cid:
-            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' is for customer '{target_cid}', does not match current customer '{cid}'.")
-
-        # Check approved amount limit
-        raw_approved_amt = (
-            appr.get("approved_amount")
-            or appr.get("amount")
-            or payload.get("approved_amount")
-            or payload.get("amount")
-            or payload.get("credit_limit")
-        )
-        if raw_approved_amt is not None and str(raw_approved_amt).strip() not in {"", "0", "null"}:
-            try:
-                app_amt = float(raw_approved_amt)
-                if app_amt > 0 and req_credit > app_amt + 0.05:
-                    raise HTTPException(status_code=400, detail=f"Requested credit ₹{req_credit:.2f} exceeds approved limit of ₹{app_amt:.2f} in approval request '{clean_app_id}'.")
-            except (ValueError, TypeError):
-                pass
-
-        # Check request validity and expiry
-        raw_expiry = (
-            appr.get("expires_at")
-            or appr.get("valid_until")
-            or appr.get("expiry_date")
-            or payload.get("expires_at")
-            or payload.get("valid_until")
-        )
-        if raw_expiry and str(raw_expiry).strip():
-            try:
-                exp_str = str(raw_expiry).strip()[:10]
-                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
-                if date.today() > exp_date:
-                    raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' expired on {exp_str}.")
-            except (ValueError, TypeError):
-                pass
-
-        # Check not already consumed by an unrelated transaction
-        consumed_sale = str(appr.get("consumed_by_sale_id") or payload.get("consumed_by_sale_id") or "").strip()
-        is_consumed = bool(appr.get("is_consumed") or payload.get("is_consumed"))
-        if is_consumed or consumed_sale:
-            raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has already been consumed by sale '{consumed_sale or 'ANOTHER_SALE'}'.")
-
-        return {
-            "approved": True,
-            "credit_exception": True,
-            "approved_by_owner": True,
-            "approval_request_id": clean_app_id,
-            "authorized_by": decided_by,
-            "current_outstanding": current_outstanding,
-            "new_total_exposure": new_total_exposure,
-            "reason": f"Authorized via approved Owner request {clean_app_id}: {violation_text}",
-        }
-
     # PA or Salesman blocked without valid Owner approval
     role_name = "Personal Assistant" if is_manager(current_user) else "Salesman"
     raise HTTPException(
@@ -555,20 +488,276 @@ def check_credit_control(
     )
 
 
-def mark_approval_consumed(approval_request_id: str, sale_id: str) -> bool:
-    """Marks an approval request as consumed by a specific completed sale transaction."""
+def validate_credit_approval_request(
+    appr: Dict[str, Any],
+    approval_id: str,
+    customer_id: str,
+    requested_credit: float,
+    current_sale_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Strict validation of ApprovalRequest for credit exception.
+    Enforces all mandatory fields:
+    - Status must be APPROVED.
+    - Approval must not be revoked.
+    - Request type must be a valid credit approval type.
+    - Decider must be an active Owner in Users.
+    - Customer ID must be present and exactly match customer_id.
+    - Approved amount must be present, valid, > 0, and >= requested_credit.
+    - Expiry date must be present, valid YYYY-MM-DD, and not expired.
+    - Not already consumed or reserved by another sale.
+    Missing or malformed fields raise HTTPException(400).
+    """
+    clean_app_id = str(approval_id or "").strip()
+
+    # 1. Status check
+    app_status = str(appr.get("status", "")).upper()
+    if app_status != "APPROVED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval request '{clean_app_id}' has status '{app_status}' (must be APPROVED).",
+        )
+
+    # 2. Revocation check
+    if str(appr.get("revoked", "")).lower() in {"true", "1", "yes"} or app_status == "REVOKED":
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has been revoked.")
+
+    # 3. Request type check
+    app_type = str(appr.get("request_type", "")).upper()
+    if app_type not in {"CREDIT_EXCEPTION", "CUSTOMER_CREDIT", "SALE_CREDIT"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval request '{clean_app_id}' has invalid type '{app_type}' for credit exception.",
+        )
+
+    # 4. Decider (active Owner) check
+    decided_by = str(appr.get("decided_by") or appr.get("approved_by") or "").strip()
+    if not decided_by:
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' lacks authorized Owner identity.")
+    users = db.get_records("Users", fresh=True) or []
+    decider = next((u for u in users if str(u.get("user_id", "")).strip() == decided_by), None)
+    if not decider or not is_owner(decider) or str(decider.get("active", "true")).lower() in {"false", "0", "no", "inactive"}:
+        raise HTTPException(status_code=400, detail=f"Approver '{decided_by}' is not an active Owner.")
+
+    # Parse payload_json if present
+    payload = {}
+    if appr.get("payload_json"):
+        try:
+            payload = json.loads(str(appr["payload_json"])) if isinstance(appr["payload_json"], str) else appr["payload_json"]
+        except Exception:
+            payload = {}
+
+    # 5. Customer ID check: MANDATORY & EXACT MATCH
+    target_cid = str(appr.get("customer_id") or payload.get("customer_id") or payload.get("target_customer_id") or "").strip()
+    if not target_cid:
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has missing customer ID.")
+    if target_cid != customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval request '{clean_app_id}' is for customer '{target_cid}', does not match current customer '{customer_id}'.",
+        )
+
+    # 6. Approved amount check: MANDATORY, VALID FLOAT, > 0, >= requested_credit
+    raw_approved_amt = (
+        appr.get("approved_amount")
+        if appr.get("approved_amount") is not None and str(appr.get("approved_amount")).strip() != ""
+        else (
+            appr.get("amount")
+            if appr.get("amount") is not None and str(appr.get("amount")).strip() != ""
+            else (
+                payload.get("approved_amount")
+                if payload.get("approved_amount") is not None and str(payload.get("approved_amount")).strip() != ""
+                else (
+                    payload.get("amount")
+                    if payload.get("amount") is not None and str(payload.get("amount")).strip() != ""
+                    else payload.get("credit_limit")
+                )
+            )
+        )
+    )
+    if raw_approved_amt is None or str(raw_approved_amt).strip() in {"", "null", "none"}:
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has missing approved amount.")
+    try:
+        app_amt = float(raw_approved_amt)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval request '{clean_app_id}' has invalid approved amount '{raw_approved_amt}'.",
+        )
+    if app_amt <= 0:
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has approved amount <= 0 (must be > 0).")
+    if requested_credit > app_amt + 0.05:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Requested credit ₹{requested_credit:.2f} exceeds approved limit of ₹{app_amt:.2f} in approval request '{clean_app_id}'.",
+        )
+
+    # 7. Expiry date check: MANDATORY, VALID YYYY-MM-DD, NOT EXPIRED
+    raw_expiry = (
+        appr.get("expires_at")
+        or appr.get("valid_until")
+        or appr.get("expiry_date")
+        or payload.get("expires_at")
+        or payload.get("valid_until")
+    )
+    if not raw_expiry or str(raw_expiry).strip() in {"", "null", "none"}:
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has missing expiry date.")
+    try:
+        exp_str = str(raw_expiry).strip()[:10]
+        exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval request '{clean_app_id}' has malformed expiry date '{raw_expiry}'.",
+        )
+    if date.today() > exp_date:
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' expired on {exp_str}.")
+
+    # 8. Consumed check: Cannot be consumed by another transaction
+    consumed_sale = str(appr.get("consumed_by_sale_id") or payload.get("consumed_by_sale_id") or "").strip()
+    is_consumed = bool(appr.get("is_consumed") or payload.get("is_consumed"))
+    if is_consumed or consumed_sale:
+        if current_sale_id and consumed_sale == current_sale_id:
+            pass  # Idempotent retry by the same sale
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval request '{clean_app_id}' has already been consumed by sale '{consumed_sale or 'ANOTHER_SALE'}'.",
+            )
+
+    # 9. Reserved check: Cannot be reserved by another transaction
+    reserved_sale = str(appr.get("reserved_by_sale_id") or payload.get("reserved_by_sale_id") or "").strip()
+    if reserved_sale:
+        if current_sale_id and reserved_sale == current_sale_id:
+            pass  # Re-entrant by the same sale
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval request '{clean_app_id}' is already reserved by sale '{reserved_sale}'.",
+            )
+
+    return {
+        "approved_amount": app_amt,
+        "expiry_date": exp_date,
+        "decided_by": decided_by,
+        "customer_id": target_cid,
+    }
+
+
+def reserve_credit_approval(
+    approval_request_id: str,
+    sale_id: str,
+    customer_id: str,
+    requested_credit: float,
+) -> bool:
+    """
+    Atomically reserves an approval request for a specific sale ID.
+    Enforces validation, rejects if consumed or reserved by another sale,
+    and performs Compare-And-Swap update.
+    """
+    if not approval_request_id:
+        return False
+    clean_id = str(approval_request_id).strip()
+    approvals = db.get_records("ApprovalRequests", fresh=True) or []
+    appr = next((a for a in approvals if str(a.get("request_id", "")).strip() == clean_id), None)
+    if not appr:
+        raise HTTPException(status_code=400, detail=f"Approval request '{clean_id}' not found.")
+
+    # Validate approval constraints with intended sale ID
+    validate_credit_approval_request(
+        appr=appr,
+        approval_id=clean_id,
+        customer_id=customer_id,
+        requested_credit=requested_credit,
+        current_sale_id=sale_id,
+    )
+
+    current_reserved = str(appr.get("reserved_by_sale_id", "")).strip()
+    if current_reserved == sale_id:
+        return True  # Idempotent retry
+
+    now = now_iso()
+    # Atomic reservation with expected condition
+    updated = db.update_record(
+        tab_name="ApprovalRequests",
+        id_field="request_id",
+        id_value=clean_id,
+        updates={
+            "reserved_by_sale_id": sale_id,
+            "reserved_at": now,
+        },
+        expected_conditions={
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        },
+    )
+    if not updated:
+        # Check if another sale raced and reserved it
+        fresh_apprs = db.get_records("ApprovalRequests", fresh=True) or []
+        fresh_appr = next((a for a in fresh_apprs if str(a.get("request_id", "")).strip() == clean_id), None)
+        other_holder = str(fresh_appr.get("reserved_by_sale_id", "") if fresh_appr else "").strip()
+        if other_holder and other_holder != sale_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval request '{clean_id}' was concurrently reserved by sale '{other_holder}'.",
+            )
+        raise HTTPException(status_code=503, detail=f"Failed to reserve approval request '{clean_id}' for sale {sale_id}. Retry.")
+    return True
+
+
+def consume_credit_approval(approval_request_id: str, sale_id: str) -> bool:
+    """
+    Marks an approval request as permanently consumed by a completed sale.
+    Returns True on success, False on failure.
+    """
     if not approval_request_id:
         return False
     clean_id = str(approval_request_id).strip()
     now = now_iso()
     try:
-        updated = db.update_record("ApprovalRequests", "request_id", clean_id, {
-            "is_consumed": True,
-            "consumed_by_sale_id": sale_id,
-            "consumed_at": now,
-        })
+        updated = db.update_record(
+            tab_name="ApprovalRequests",
+            id_field="request_id",
+            id_value=clean_id,
+            updates={
+                "is_consumed": True,
+                "consumed_by_sale_id": sale_id,
+                "consumed_at": now,
+                "reserved_by_sale_id": sale_id,
+            },
+        )
         return bool(updated)
     except Exception as e:
-        logging.warning("Failed to mark approval request %s as consumed: %s", clean_id, e)
+        logging.error("Failed to mark approval request %s as consumed by sale %s: %s", clean_id, sale_id, e)
         return False
+
+
+def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
+    """
+    Releases an approval reservation if a sale failed prior to completion.
+    Only releases if the approval was reserved by this sale and has NOT been consumed.
+    """
+    if not approval_request_id:
+        return False
+    clean_id = str(approval_request_id).strip()
+    try:
+        apprs = db.get_records("ApprovalRequests", fresh=True) or []
+        appr = next((a for a in apprs if str(a.get("request_id", "")).strip() == clean_id), None)
+        if appr:
+            is_consumed = bool(appr.get("is_consumed"))
+            holder = str(appr.get("reserved_by_sale_id", "")).strip()
+            if not is_consumed and holder == sale_id:
+                db.update_record("ApprovalRequests", "request_id", clean_id, {
+                    "reserved_by_sale_id": "",
+                    "reserved_at": "",
+                })
+                return True
+    except Exception as e:
+        logging.warning("Failed to release approval reservation %s: %s", clean_id, e)
+    return False
+
+
+def mark_approval_consumed(approval_request_id: str, sale_id: str) -> bool:
+    """Backward-compatible wrapper for consume_credit_approval."""
+    return consume_credit_approval(approval_request_id, sale_id)
 

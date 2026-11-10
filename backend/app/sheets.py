@@ -658,7 +658,33 @@ class SheetsDatabase:
             raise RuntimeError(err_msg)
         return False
 
-    def update_record(self, tab_name: str, id_field: str, id_value: str, updates: Dict[str, Any], raise_on_error: bool = False) -> bool:
+    @staticmethod
+    def _matches_conditions(row: Dict[str, Any], conditions: Dict[str, Any]) -> bool:
+        for k, expected in conditions.items():
+            curr = row.get(k)
+            if expected is None or expected == "":
+                if str(curr or "").strip() not in {"", "0", "false", "none", "null"}:
+                    return False
+            elif expected is False:
+                if str(curr or "").strip().lower() in {"true", "1", "yes"}:
+                    return False
+            elif expected is True:
+                if str(curr or "").strip().lower() not in {"true", "1", "yes"}:
+                    return False
+            else:
+                if str(curr or "").strip() != str(expected).strip():
+                    return False
+        return True
+
+    def update_record(
+        self,
+        tab_name: str,
+        id_field: str,
+        id_value: str,
+        updates: Dict[str, Any],
+        raise_on_error: bool = False,
+        expected_conditions: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         self._invalidate_records_cache(tab_name)
         failures = self._fail_once.get(tab_name, 0)
         if failures > 0:
@@ -672,6 +698,8 @@ class SheetsDatabase:
                 found = False
                 for item in self.memory_store.get(tab_name, []):
                     if str(item.get(id_field)) == str(id_value):
+                        if expected_conditions and not self._matches_conditions(item, expected_conditions):
+                            return False
                         item.update(updates)
                         found = True
                         break
@@ -698,6 +726,8 @@ class SheetsDatabase:
             for idx, row in enumerate(records, start=2):
                 if str(row.get(id_field)) != str(id_value):
                     continue
+                if expected_conditions and not self._matches_conditions(row, expected_conditions):
+                    return False
                 cells = []
                 for key, value in updates.items():
                     col = header_map.get(key)

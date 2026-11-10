@@ -29,6 +29,10 @@ from app.accounting.customer_ledger import (
     get_invoice_settlement_status,
     check_credit_control,
     mark_approval_consumed,
+    validate_credit_approval_request,
+    reserve_credit_approval,
+    consume_credit_approval,
+    release_credit_approval,
 )
 
 __all__ = [
@@ -56,4 +60,8 @@ __all__ = [
     "get_invoice_settlement_status",
     "check_credit_control",
     "mark_approval_consumed",
+    "validate_credit_approval_request",
+    "reserve_credit_approval",
+    "consume_credit_approval",
+    "release_credit_approval",
 ]
