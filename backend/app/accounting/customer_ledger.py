@@ -32,45 +32,84 @@ class CrossProcessLock:
     """
     POSIX advisory file lock (fcntl.flock) for cross-process synchronization.
     Guarantees mutual exclusion between separate worker processes on the same system.
+    Fails closed on any locking error (503 Service Unavailable).
     """
     def __init__(self, resource_type: str, resource_id: str, timeout: float = 10.0):
         self.resource_type = resource_type
         self.resource_id = str(resource_id).strip()
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in self.resource_id)
-        os.makedirs(_LOCK_DIR, exist_ok=True)
-        self.lock_path = os.path.join(_LOCK_DIR, f"{resource_type}_{safe_id}.lock")
+        self.lock_dir = _LOCK_DIR
+        self.lock_path = os.path.join(self.lock_dir, f"{resource_type}_{safe_id}.lock")
         self.timeout = timeout
         self.fd = None
+        self.is_locked = False
 
-    def __enter__(self):
-        if self.resource_type == "noop" or not HAS_FCNTL:
-            return self
-        try:
-            self.fd = open(self.lock_path, "w+")
-            start = time.monotonic()
-            while True:
-                try:
-                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    return self
-                except (BlockingIOError, OSError):
-                    if time.monotonic() - start > self.timeout:
-                        raise HTTPException(
-                            status_code=503,
-                            detail=f"Resource {self.resource_type}:{self.resource_id} is currently locked by another worker. Retry."
-                        )
-                    time.sleep(0.01)
-        except Exception as e:
-            if isinstance(e, HTTPException):
-                raise e
-            return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.fd and HAS_FCNTL:
+    def _close_fd(self) -> None:
+        if self.fd is not None:
             try:
-                fcntl.flock(self.fd, fcntl.LOCK_UN)
                 self.fd.close()
             except Exception:
                 pass
+            self.fd = None
+
+    def __enter__(self):
+        if self.resource_type == "noop":
+            return self
+
+        if not HAS_FCNTL:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cross-process locking unavailable (fcntl missing). Cannot safely process {self.resource_type}:{self.resource_id}."
+            )
+
+        try:
+            os.makedirs(self.lock_dir, exist_ok=True)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Lock directory creation failure for {self.resource_type}:{self.resource_id}: {exc}"
+            ) from exc
+
+        try:
+            self.fd = open(self.lock_path, "w+")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Lock file open failure for {self.lock_path}: {exc}"
+            ) from exc
+
+        start = time.monotonic()
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.is_locked = True
+                return self
+            except (BlockingIOError, OSError):
+                if time.monotonic() - start > self.timeout:
+                    self._close_fd()
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Lock timeout: Resource {self.resource_type}:{self.resource_id} is currently locked by another worker. Retry."
+                    )
+                time.sleep(0.01)
+            except Exception as exc:
+                self._close_fd()
+                if isinstance(exc, HTTPException):
+                    raise exc
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Unexpected locking error for {self.resource_type}:{self.resource_id}: {exc}"
+                ) from exc
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.fd is not None:
+            if self.is_locked and HAS_FCNTL:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                self.is_locked = False
+            self._close_fd()
 
 
 def get_cross_process_reservation(approval_id: str) -> Optional[Dict[str, Any]]:
@@ -81,32 +120,58 @@ def get_cross_process_reservation(approval_id: str) -> Optional[Dict[str, Any]]:
         with open(_STATE_FILE, "r") as f:
             data = json.load(f)
             return data.get("approvals", {}).get(clean_id)
-    except Exception:
-        return None
+    except json.JSONDecodeError as exc:
+        logging.error("Corrupted cross-process state file: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cross-process reservation state is corrupted: {exc}"
+        ) from exc
+    except Exception as exc:
+        logging.error("Error reading cross-process reservation for %s: %s", clean_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Error accessing cross-process reservation state: {exc}"
+        ) from exc
 
 
 def set_cross_process_reservation(approval_id: str, state: Optional[Dict[str, Any]]) -> None:
     clean_id = str(approval_id).strip()
     try:
-        os.makedirs(os.path.dirname(_STATE_FILE) or ".", exist_ok=True)
+        state_dir = os.path.dirname(_STATE_FILE) or "."
+        os.makedirs(state_dir, exist_ok=True)
         data = {}
         if os.path.exists(_STATE_FILE):
             try:
                 with open(_STATE_FILE, "r") as f:
                     data = json.load(f)
-            except Exception:
-                data = {}
+            except json.JSONDecodeError as exc:
+                logging.error("Corrupted cross-process state file during write: %s", exc)
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Cross-process reservation state is corrupted: {exc}"
+                ) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Could not read cross-process state file: {exc}"
+                ) from exc
         approvals = data.setdefault("approvals", {})
         if state is None:
             approvals.pop(clean_id, None)
         else:
             approvals[clean_id] = state
-        tmp_file = f"{_STATE_FILE}.tmp.{os.getpid()}"
+        tmp_file = f"{_STATE_FILE}.tmp.{os.getpid()}_{time.time_ns()}"
         with open(tmp_file, "w") as f:
             json.dump(data, f)
         os.replace(tmp_file, _STATE_FILE)
+    except HTTPException:
+        raise
     except Exception as exc:
-        logging.warning("Could not persist cross-process reservation for %s: %s", clean_id, exc)
+        logging.error("Could not persist cross-process reservation for %s: %s", clean_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to persist cross-process reservation for approval {clean_id}: {exc}"
+        ) from exc
 
 
 def reset_cross_process_state() -> None:
@@ -114,8 +179,8 @@ def reset_cross_process_state() -> None:
     try:
         if os.path.exists(_STATE_FILE):
             os.remove(_STATE_FILE)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.warning("Error resetting cross-process state: %s", exc)
 
 
 _APPROVAL_LOCKS: Dict[str, threading.RLock] = {}
@@ -876,11 +941,33 @@ def reserve_credit_approval(
                     )
                 raise HTTPException(status_code=503, detail=f"Failed to reserve approval request '{clean_id}' for sale {clean_sale_id}. Retry.")
 
-            set_cross_process_reservation(clean_id, {
-                "reserved_by_sale_id": clean_sale_id,
-                "is_consumed": False,
-                "reserved_at": now,
-            })
+            try:
+                set_cross_process_reservation(clean_id, {
+                    "reserved_by_sale_id": clean_sale_id,
+                    "is_consumed": False,
+                    "reserved_at": now,
+                })
+            except Exception as exc:
+                # Rollback database reservation to prevent leaving an orphaned reservation
+                db.update_record(
+                    tab_name="ApprovalRequests",
+                    id_field="request_id",
+                    id_value=clean_id,
+                    updates={
+                        "reserved_by_sale_id": "",
+                        "reserved_at": "",
+                    },
+                    expected_conditions={
+                        "reserved_by_sale_id": clean_sale_id,
+                        "is_consumed": False,
+                    },
+                )
+                if isinstance(exc, HTTPException):
+                    raise exc
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Failed to persist cross-process reservation for approval {clean_id}: {exc}"
+                ) from exc
             return True
 
 
@@ -954,11 +1041,20 @@ def consume_credit_approval(approval_request_id: str, sale_id: str) -> bool:
                 },
             )
             if updated:
-                set_cross_process_reservation(clean_id, {
-                    "reserved_by_sale_id": clean_sale_id,
-                    "is_consumed": True,
-                    "consumed_at": now,
-                })
+                try:
+                    set_cross_process_reservation(clean_id, {
+                        "reserved_by_sale_id": clean_sale_id,
+                        "is_consumed": True,
+                        "consumed_at": now,
+                    })
+                except Exception as exc:
+                    logging.error("Failed to persist cross-process state for consumed approval %s: %s", clean_id, exc)
+                    if isinstance(exc, HTTPException):
+                        raise exc
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Failed to persist cross-process consumption state for approval {clean_id}: {exc}"
+                    ) from exc
             return bool(updated)
 
 
@@ -1019,7 +1115,10 @@ def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
                 return bool(updated)
             except Exception as e:
                 logging.warning("Failed to release approval reservation %s: %s", clean_id, e)
+                if isinstance(e, HTTPException):
+                    raise e
                 return False
+    return False
     return False
 
 

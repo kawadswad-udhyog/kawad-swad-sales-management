@@ -6,11 +6,14 @@ CAS / multi-worker credit protection, and resilient journal reversal recovery.
 """
 
 import asyncio
+import builtins
 import multiprocessing
 import os
 import threading
+import time
 import unittest
 from datetime import date, timedelta
+from unittest.mock import patch
 from fastapi import HTTPException
 
 # Configure test environment
@@ -784,9 +787,10 @@ class TestPhase141FailureInjection(unittest.TestCase):
         """
         Failure Injection 16:
         Two separate OS processes attempting to reserve the same approval request.
-        Uses multiprocessing.Process to execute genuine cross-process competition.
-        Verifies that cross-process synchronization ensures exactly one process reserves
-        the approval, and the other is rejected with HTTP 400.
+        Uses multiprocessing.Barrier(2) to synchronize both processes at the exact same moment.
+        Verifies that cross-process filesystem locking ensures exactly one process reserves
+        the approval, the other is rejected with HTTP 400, the reservation registry records
+        the winner, and the filesystem lock was actually created and exercised.
         """
         db.append_record("ApprovalRequests", {
             "request_id": "APP-PROC-16",
@@ -800,18 +804,21 @@ class TestPhase141FailureInjection(unittest.TestCase):
             "reserved_by_sale_id": "",
         })
 
-        def process_worker(appr_id, sale_id, q):
-            try:
-                ok = reserve_credit_approval(appr_id, sale_id, "CUS-TIGHT-01", 1500.0)
-                q.put(("SUCCESS", sale_id))
-            except HTTPException as exc:
-                q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
-            except Exception as e:
-                q.put(("ERR", str(e)))
-
+        barrier = multiprocessing.Barrier(2)
         q = multiprocessing.Queue()
-        p1 = multiprocessing.Process(target=process_worker, args=("APP-PROC-16", "SALE-P1", q))
-        p2 = multiprocessing.Process(target=process_worker, args=("APP-PROC-16", "SALE-P2", q))
+
+        def process_worker(appr_id, sale_id, b, out_q):
+            try:
+                b.wait(timeout=5)
+                ok = reserve_credit_approval(appr_id, sale_id, "CUS-TIGHT-01", 1500.0)
+                out_q.put(("SUCCESS", sale_id))
+            except HTTPException as exc:
+                out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
+            except Exception as e:
+                out_q.put(("ERR", str(e)))
+
+        p1 = multiprocessing.Process(target=process_worker, args=("APP-PROC-16", "SALE-P1", barrier, q))
+        p2 = multiprocessing.Process(target=process_worker, args=("APP-PROC-16", "SALE-P2", barrier, q))
         p1.start()
         p2.start()
         p1.join(timeout=10)
@@ -823,10 +830,21 @@ class TestPhase141FailureInjection(unittest.TestCase):
         successes = [o for o in outcomes if o[0] == "SUCCESS"]
         http_errors = [o for o in outcomes if o[0] == "HTTP_ERR"]
 
+        # 1. Exactly one process must succeed, one must fail with 400
         self.assertEqual(len(successes), 1, f"Expected 1 process to succeed, got: {outcomes}")
         self.assertEqual(len(http_errors), 1, f"Expected 1 process to fail with HTTP error, got: {outcomes}")
         self.assertEqual(http_errors[0][1], 400)
         self.assertIn("reserved", http_errors[0][2].lower())
+
+        # 2. Verify the final reservation belongs to the successful sale
+        winning_sale_id = successes[0][1]
+        xp_res = cl.get_cross_process_reservation("APP-PROC-16")
+        self.assertIsNotNone(xp_res, "Cross-process reservation state must exist")
+        self.assertEqual(str(xp_res.get("reserved_by_sale_id")), winning_sale_id)
+
+        # 3. Verify the test actually exercised the shared filesystem lock
+        lock_file = os.path.join(cl._LOCK_DIR, "approval_APP-PROC-16.lock")
+        self.assertTrue(os.path.exists(lock_file), f"Expected filesystem lock file {lock_file} to exist")
 
     def test_17_two_simultaneous_sales_attempting_to_exceed_customer_credit_limit(self):
         """
@@ -1231,6 +1249,205 @@ class TestPhase141FailureInjection(unittest.TestCase):
         # Verify approval is NOT marked consumed
         appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-REV-24")
         self.assertFalse(appr.get("is_consumed"))
+
+    def test_25_cross_process_lock_directory_creation_failure_raises_503(self):
+        """
+        Failure Injection 25:
+        Lock directory creation failure must fail closed with HTTP 503.
+        Never silently continue without acquiring a required lock.
+        """
+        with patch("os.makedirs", side_effect=PermissionError("Permission denied creating lock dir")):
+            with self.assertRaises(HTTPException) as ctx:
+                with cl.CrossProcessLock("approval", "APP-DIR-25"):
+                    pass
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("Lock directory creation failure", ctx.exception.detail)
+
+    def test_26_cross_process_lock_file_open_failure_raises_503(self):
+        """
+        Failure Injection 26:
+        Lock file opening failure must fail closed with HTTP 503.
+        Never silently continue without acquiring a required lock.
+        """
+        orig_open = builtins.open
+        def mock_open(*args, **kwargs):
+            path_str = str(args[0]) if args else ""
+            if path_str.endswith("approval_APP-FILE-26.lock"):
+                raise PermissionError("Permission denied opening lock file")
+            return orig_open(*args, **kwargs)
+
+        with patch("builtins.open", side_effect=mock_open):
+            with self.assertRaises(HTTPException) as ctx:
+                with cl.CrossProcessLock("approval", "APP-FILE-26"):
+                    pass
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("Lock file open failure", ctx.exception.detail)
+
+    def test_27_cross_process_lock_acquisition_timeout_raises_503(self):
+        """
+        Failure Injection 27:
+        Lock acquisition timeout when another process holds the lock must fail closed with HTTP 503.
+        Never silently continue without acquiring a required lock.
+        """
+        import fcntl
+        lock_path = os.path.join(cl._LOCK_DIR, "approval_APP-TIMEOUT-27.lock")
+        os.makedirs(cl._LOCK_DIR, exist_ok=True)
+        with open(lock_path, "w+") as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with self.assertRaises(HTTPException) as ctx:
+                    with cl.CrossProcessLock("approval", "APP-TIMEOUT-27", timeout=0.05):
+                        pass
+                self.assertEqual(ctx.exception.status_code, 503)
+                self.assertIn("Lock timeout", ctx.exception.detail)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def test_28_cross_process_lock_fcntl_unavailable_raises_503(self):
+        """
+        Failure Injection 28:
+        When fcntl is unavailable, operations requiring cross-process protection must fail closed with HTTP 503.
+        No-op resource locks are permitted to continue.
+        """
+        with patch.object(cl, "HAS_FCNTL", False):
+            with self.assertRaises(HTTPException) as ctx:
+                with cl.CrossProcessLock("approval", "APP-NOFCNTL-28"):
+                    pass
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("fcntl missing", ctx.exception.detail)
+
+            # No-op resource lock should not raise
+            with cl.CrossProcessLock("noop", "none") as lock:
+                self.assertIsNotNone(lock)
+
+    def test_29_reservation_state_write_failure_raises_503_and_rolls_back(self):
+        """
+        Failure Injection 29:
+        Reservation state write failure during credit approval reservation:
+        - Must fail closed with HTTP 503.
+        - Must roll back the database reservation to prevent dangling lock state.
+        - Approval remains available/unreserved for subsequent valid transactions.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-FAIL-29",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
+        with patch.object(cl, "set_cross_process_reservation", side_effect=RuntimeError("Simulated disk I/O failure")):
+            with self.assertRaises(HTTPException) as ctx:
+                reserve_credit_approval("APP-FAIL-29", "SALE-FAIL-29", "CUS-TIGHT-01", 1500.0)
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("Failed to persist cross-process reservation", ctx.exception.detail)
+
+        # Database rollback verification: ApprovalRequest must NOT remain reserved by SALE-FAIL-29
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-29")
+        self.assertEqual(str(appr.get("reserved_by_sale_id", "")), "")
+        self.assertFalse(appr.get("is_consumed"))
+
+    def test_30_customer_credit_limit_competition_across_separate_processes(self):
+        """
+        Failure Injection 30:
+        Customer credit-limit competition across separate OS processes.
+        Two processes synchronize on multiprocessing.Barrier(2) and compete on
+        CrossProcessLock("customer", "CUS-PROC-30").
+        The first process acquires the exclusive lock and holds it while processing;
+        the competing process is locked out and fails closed with HTTP 503.
+        Verifies mutual exclusion on the shared filesystem lock across OS processes.
+        """
+        barrier = multiprocessing.Barrier(2)
+        q = multiprocessing.Queue()
+
+        def proc_worker(cid, proc_name, b, out_q):
+            try:
+                b.wait(timeout=5)
+                # Attempt to acquire customer credit lock with a small timeout
+                with cl.CrossProcessLock("customer", cid, timeout=0.1):
+                    out_q.put(("ACQUIRED", proc_name))
+                    time.sleep(0.25)  # Hold lock during critical financial check
+                out_q.put(("RELEASED", proc_name))
+            except HTTPException as exc:
+                out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
+            except Exception as e:
+                out_q.put(("ERR", str(e)))
+
+        p1 = multiprocessing.Process(target=proc_worker, args=("CUS-PROC-30", "P1", barrier, q))
+        p2 = multiprocessing.Process(target=proc_worker, args=("CUS-PROC-30", "P2", barrier, q))
+        p1.start()
+        p2.start()
+        p1.join(timeout=10)
+        p2.join(timeout=10)
+
+        events = []
+        while not q.empty():
+            events.append(q.get())
+
+        acquired_events = [e for e in events if e[0] == "ACQUIRED"]
+        http_errors = [e for e in events if e[0] == "HTTP_ERR"]
+
+        # Exactly one process acquired the lock during concurrency window
+        self.assertEqual(len(acquired_events), 1, f"Expected exactly 1 process to acquire lock, got: {events}")
+        self.assertEqual(len(http_errors), 1, f"Expected 1 process to fail closed with HTTP error, got: {events}")
+        self.assertEqual(http_errors[0][1], 503)
+        self.assertIn("Lock timeout", http_errors[0][2])
+
+        # Verify filesystem lock file exists and was exercised
+        lock_file = os.path.join(cl._LOCK_DIR, "customer_CUS-PROC-30.lock")
+        self.assertTrue(os.path.exists(lock_file), f"Expected customer lock file {lock_file} to exist")
+
+    def test_31_idempotent_sale_requests_across_separate_processes(self):
+        """
+        Failure Injection 31:
+        Simultaneous requests with the same idempotency key across separate OS processes.
+        Two processes synchronize on multiprocessing.Barrier(2) and compete on
+        CrossProcessLock("idemp", "idemp-proc-31").
+        Verifies mutual exclusion on the idempotency key lock: one process locks and enters
+        the transaction, and the competing concurrent process fails closed with HTTP 503
+        rather than creating duplicate transactions.
+        """
+        barrier = multiprocessing.Barrier(2)
+        q = multiprocessing.Queue()
+
+        def proc_worker(key, proc_name, b, out_q):
+            try:
+                b.wait(timeout=5)
+                with cl.CrossProcessLock("idemp", key, timeout=0.1):
+                    out_q.put(("ACQUIRED", proc_name))
+                    time.sleep(0.25)  # Simulate atomic transaction write
+                out_q.put(("RELEASED", proc_name))
+            except HTTPException as exc:
+                out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
+            except Exception as e:
+                out_q.put(("ERR", str(e)))
+
+        p1 = multiprocessing.Process(target=proc_worker, args=("idemp-proc-31", "P1", barrier, q))
+        p2 = multiprocessing.Process(target=proc_worker, args=("idemp-proc-31", "P2", barrier, q))
+        p1.start()
+        p2.start()
+        p1.join(timeout=10)
+        p2.join(timeout=10)
+
+        events = []
+        while not q.empty():
+            events.append(q.get())
+
+        acquired_events = [e for e in events if e[0] == "ACQUIRED"]
+        http_errors = [e for e in events if e[0] == "HTTP_ERR"]
+
+        self.assertEqual(len(acquired_events), 1, f"Expected exactly 1 process to acquire idempotency lock, got: {events}")
+        self.assertEqual(len(http_errors), 1, f"Expected 1 process to fail closed with HTTP 503, got: {events}")
+        self.assertEqual(http_errors[0][1], 503)
+        self.assertIn("Lock timeout", http_errors[0][2])
+
+        # Verify filesystem lock file exists and was exercised
+        lock_file = os.path.join(cl._LOCK_DIR, "idemp_idemp-proc-31.lock")
+        self.assertTrue(os.path.exists(lock_file), f"Expected idempotency lock file {lock_file} to exist")
 
 
 if __name__ == "__main__":
