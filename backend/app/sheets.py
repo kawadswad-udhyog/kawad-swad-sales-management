@@ -450,10 +450,7 @@ class SheetsDatabase:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(records, f)
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
+                os.fsync(f.fileno())
         except PermissionError as exc:
             if os.path.exists(tmp_path):
                 try:

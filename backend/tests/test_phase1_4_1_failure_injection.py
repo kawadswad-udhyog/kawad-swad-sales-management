@@ -1884,6 +1884,40 @@ class TestPhase141FailureInjection(unittest.TestCase):
             db.disable_shared_file_store()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_39_shared_storage_failed_fsync_raises_storage_io_error_and_cleans_up(self):
+        """Failure Injection 39: Failed os.fsync raises StorageIOError, cleans up temp file, and verifies recovery on retry."""
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_fsync_")
+        try:
+            db.memory_store = {tab: [] for tab in db.memory_store}
+            db.enable_shared_file_store(temp_dir)
+            db.append_record("Customers", {"customer_id": "CUS-FSYNC-ORIG", "shop_name": "Original Fsync Store"})
+
+            # Invalidate write by simulating disk/I/O failure during os.fsync
+            with patch("os.fsync", side_effect=OSError(5, "Input/output error")):
+                with self.assertRaises(StorageIOError):
+                    db.append_record("Customers", {"customer_id": "CUS-FSYNC-FAIL"}, raise_on_error=True)
+
+            # 1. Original file remains completely intact
+            records = db.get_records("Customers")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["customer_id"], "CUS-FSYNC-ORIG")
+
+            # 2. Verify temporary file was cleaned up (no orphan .tmp.* files)
+            tmp_files = [f for f in os.listdir(temp_dir) if ".tmp." in f]
+            self.assertEqual(len(tmp_files), 0, f"Found orphan temp files after fsync failure: {tmp_files}")
+
+            # 3. Verify successful recovery on retry
+            ok = db.append_record("Customers", {"customer_id": "CUS-FSYNC-RETRY", "shop_name": "Retried Fsync Store"}, raise_on_error=True)
+            self.assertTrue(ok)
+
+            records_after = db.get_records("Customers")
+            self.assertEqual(len(records_after), 2)
+            self.assertEqual(records_after[0]["customer_id"], "CUS-FSYNC-ORIG")
+            self.assertEqual(records_after[1]["customer_id"], "CUS-FSYNC-RETRY")
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
