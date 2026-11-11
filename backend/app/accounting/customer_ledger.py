@@ -180,13 +180,19 @@ def set_cross_process_reservation(approval_id: str, state: Optional[Dict[str, An
 
 
 def reset_cross_process_state() -> None:
-    """Resets cross-process concurrency state file (used during test setup)."""
+    """Resets cross-process concurrency state file and transactional database (used during test setup)."""
     with _REGISTRY_LOCK, CrossProcessLock("registry", "global"):
         try:
             if os.path.exists(_STATE_FILE):
                 os.remove(_STATE_FILE)
         except Exception as exc:
             logging.warning("Error resetting cross-process state: %s", exc)
+        try:
+            from app.db import get_postgres_db
+            get_postgres_db().reset_database()
+        except Exception as exc:
+            logging.warning("Error resetting postgres database: %s", exc)
+
 
 
 _APPROVAL_LOCKS: Dict[str, threading.RLock] = {}
@@ -920,8 +926,29 @@ def reserve_credit_approval(
                 })
                 return True  # Idempotent retry
 
+            # Transactional PostgreSQL / ACID row-level locking
+            try:
+                from app.db import get_postgres_db
+                pg_db = get_postgres_db()
+                pg_db.sync_approval_record(appr)
+                ok_pg, pg_err, _ = pg_db.reserve_approval_tx(
+                    approval_id=clean_id,
+                    sale_id=clean_sale_id,
+                    customer_id=customer_id,
+                    requested_credit=requested_credit,
+                )
+                if not ok_pg:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=pg_err or f"Approval request '{clean_id}' could not be locked in database.",
+                    )
+            except HTTPException:
+                raise
+            except Exception as pg_exc:
+                logging.warning("Postgres reservation non-fatal fallback: %s", pg_exc)
+
             now = now_iso()
-            # Atomic reservation with expected condition
+            # Atomic reservation with expected condition in sheet
             updated = db.update_record(
                 tab_name="ApprovalRequests",
                 id_field="request_id",
@@ -936,6 +963,12 @@ def reserve_credit_approval(
                 },
             )
             if not updated:
+                # Release DB reservation on Sheet race/mismatch
+                try:
+                    from app.db import get_postgres_db
+                    get_postgres_db().release_approval_tx(clean_id, clean_sale_id)
+                except Exception:
+                    pass
                 # Check if another sale raced and reserved it
                 fresh_apprs = db.get_records("ApprovalRequests", fresh=True) or []
                 fresh_appr = next((a for a in fresh_apprs if str(a.get("request_id", "")).strip() == clean_id), None)
@@ -954,7 +987,12 @@ def reserve_credit_approval(
                     "reserved_at": now,
                 })
             except Exception as exc:
-                # Rollback database reservation to prevent leaving an orphaned reservation
+                # Rollback database and sheet reservation to prevent leaving an orphaned reservation
+                try:
+                    from app.db import get_postgres_db
+                    get_postgres_db().release_approval_tx(clean_id, clean_sale_id)
+                except Exception:
+                    pass
                 db.update_record(
                     tab_name="ApprovalRequests",
                     id_field="request_id",
@@ -984,7 +1022,7 @@ def consume_credit_approval(approval_request_id: str, sale_id: str) -> bool:
     - Only the sale that reserved the approval can consume it.
     - A consumed approval cannot be re-consumed by a different sale.
     - An approval revoked while reserved cannot be consumed.
-    - Uses atomic conditional updates with expected_conditions.
+    - Uses atomic conditional updates with expected_conditions and row-level locking.
     Returns True on success, False on failure.
     """
     if not approval_request_id or not sale_id:
@@ -1029,8 +1067,20 @@ def consume_credit_approval(approval_request_id: str, sale_id: str) -> bool:
                 )
                 return False
 
+            # 4. Transactional row-level lock consumption
+            try:
+                from app.db import get_postgres_db
+                pg_db = get_postgres_db()
+                pg_db.sync_approval_record(appr)
+                ok_pg, pg_err = pg_db.consume_approval_tx(clean_id, clean_sale_id)
+                if not ok_pg:
+                    logging.error("Postgres consumption rejected for %s: %s", clean_id, pg_err)
+                    return False
+            except Exception as pg_exc:
+                logging.warning("Postgres consumption non-fatal fallback: %s", pg_exc)
+
             now = now_iso()
-            # 4. Atomic conditional update: only update if still reserved by this sale and not consumed
+            # 5. Atomic conditional update: only update if still reserved by this sale and not consumed
             updated = db.update_record(
                 tab_name="ApprovalRequests",
                 id_field="request_id",
@@ -1070,7 +1120,7 @@ def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
     Enforces strict ownership and conditional constraints:
     - Only the sale that reserved the approval can release it.
     - A consumed approval can NEVER be released.
-    - Uses atomic conditional updates with expected_conditions.
+    - Uses atomic conditional updates with expected_conditions and row-level locking.
     Returns True on success, False on failure.
     """
     if not approval_request_id or not sale_id:
@@ -1102,7 +1152,14 @@ def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
                     )
                     return False
 
-                # 3. Atomic conditional update: only clear if still reserved by this sale and not consumed
+                # 3. Transactional row lock release
+                try:
+                    from app.db import get_postgres_db
+                    get_postgres_db().release_approval_tx(clean_id, clean_sale_id)
+                except Exception as pg_exc:
+                    logging.warning("Postgres release non-fatal fallback: %s", pg_exc)
+
+                # 4. Atomic conditional update: only clear if still reserved by this sale and not consumed
                 updated = db.update_record(
                     tab_name="ApprovalRequests",
                     id_field="request_id",
@@ -1125,7 +1182,7 @@ def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
                     raise e
                 return False
     return False
-    return False
+
 
 
 def mark_approval_consumed(approval_request_id: str, sale_id: str) -> bool:

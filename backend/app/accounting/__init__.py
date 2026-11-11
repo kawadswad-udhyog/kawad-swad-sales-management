@@ -35,6 +35,8 @@ from app.accounting.customer_ledger import (
     release_credit_approval,
 )
 
+from app.accounting.transaction_coordinator import TransactionCoordinator, tx_coordinator
+
 __all__ = [
     "CHART_OF_ACCOUNTS",
     "ACCOUNT_LOOKUP",
@@ -64,4 +66,6 @@ __all__ = [
     "reserve_credit_approval",
     "consume_credit_approval",
     "release_credit_approval",
+    "TransactionCoordinator",
+    "tx_coordinator",
 ]
