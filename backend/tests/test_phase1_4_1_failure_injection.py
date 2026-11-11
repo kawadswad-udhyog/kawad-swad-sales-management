@@ -10,6 +10,7 @@ import builtins
 import multiprocessing
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -18,11 +19,21 @@ from datetime import date, timedelta
 from unittest.mock import patch
 from fastapi import HTTPException
 
+# Configure path and spawn environment
+tests_dir = os.path.dirname(os.path.abspath(__file__))
+backend_dir = os.path.abspath(os.path.join(tests_dir, ".."))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+if tests_dir not in sys.path:
+    sys.path.insert(0, tests_dir)
+os.environ["PYTHONPATH"] = f"{backend_dir}:{tests_dir}:{os.environ.get('PYTHONPATH', '')}"
+
 # Configure test environment
 os.environ["SALES_TESTING"] = "1"
 os.environ["SALES_AUTH_MOCK"] = "1"
 
-from app.sheets import db
+from app.sheets import db, StorageCorruptionError, StorageIOError
+from unittest.mock import patch
 from app.timeutil import now_iso
 from app.models import SaleCreate, SaleItemCreate, SalePaymentCreate
 from app.routers.sales import (
@@ -112,7 +123,13 @@ def _mp_idemp_sale_worker(req_dict, user_dict, shared_dir, barrier, out_q):
         loop.close()
 
 
-def _mp_reservation_worker(approval_id, sale_id, customer_id, credit_amt, barrier, out_q):
+def _mp_reservation_worker(approval_id, sale_id, customer_id, credit_amt, shared_dir, barrier, out_q):
+    os.environ["SALES_TESTING"] = "1"
+    os.environ["SALES_AUTH_MOCK"] = "1"
+    if shared_dir:
+        os.environ["SALES_SHARED_TEST_DIR"] = shared_dir
+        from app.sheets import db
+        db.enable_shared_file_store(shared_dir)
     try:
         barrier.wait(timeout=5)
         ok = reserve_credit_approval(approval_id, sale_id, customer_id, credit_amt)
@@ -1476,14 +1493,15 @@ class TestPhase141FailureInjection(unittest.TestCase):
                 "idempotency_key": "credit-race-sale-2",
             }
 
-            barrier = multiprocessing.Barrier(2)
-            q = multiprocessing.Queue()
+            ctx = multiprocessing.get_context("fork")
+            barrier = ctx.Barrier(2)
+            q = ctx.Queue()
 
-            p1 = multiprocessing.Process(
+            p1 = ctx.Process(
                 target=_mp_credit_sale_worker,
                 args=(req1_dict, self.salesman_user, temp_dir, barrier, q),
             )
-            p2 = multiprocessing.Process(
+            p2 = ctx.Process(
                 target=_mp_credit_sale_worker,
                 args=(req2_dict, self.salesman_user, temp_dir, barrier, q),
             )
@@ -1491,6 +1509,12 @@ class TestPhase141FailureInjection(unittest.TestCase):
             p2.start()
             p1.join(timeout=10)
             p2.join(timeout=10)
+            if p1.is_alive():
+                p1.terminate()
+                p1.join(timeout=2)
+            if p2.is_alive():
+                p2.terminate()
+                p2.join(timeout=2)
 
             results = []
             while not q.empty():
@@ -1582,14 +1606,15 @@ class TestPhase141FailureInjection(unittest.TestCase):
                 "idempotency_key": "idemp-race-shared-key-31",
             }
 
-            barrier = multiprocessing.Barrier(2)
-            q = multiprocessing.Queue()
+            ctx = multiprocessing.get_context("fork")
+            barrier = ctx.Barrier(2)
+            q = ctx.Queue()
 
-            p1 = multiprocessing.Process(
+            p1 = ctx.Process(
                 target=_mp_idemp_sale_worker,
                 args=(req_dict, self.salesman_user, temp_dir, barrier, q),
             )
-            p2 = multiprocessing.Process(
+            p2 = ctx.Process(
                 target=_mp_idemp_sale_worker,
                 args=(req_dict, self.salesman_user, temp_dir, barrier, q),
             )
@@ -1597,6 +1622,12 @@ class TestPhase141FailureInjection(unittest.TestCase):
             p2.start()
             p1.join(timeout=10)
             p2.join(timeout=10)
+            if p1.is_alive():
+                p1.terminate()
+                p1.join(timeout=2)
+            if p2.is_alive():
+                p2.terminate()
+                p2.join(timeout=2)
 
             results = []
             while not q.empty():
@@ -1657,61 +1688,201 @@ class TestPhase141FailureInjection(unittest.TestCase):
         Verifies that when different processes reserve different approval IDs simultaneously,
         both entries survive intact in the global reservation registry.
         """
-        db.append_record("ApprovalRequests", {
-            "request_id": "APP-SURVIVE-32A",
-            "request_type": "CREDIT_EXCEPTION",
-            "status": "APPROVED",
-            "decided_by": "USR-OWNER-01",
-            "customer_id": "CUS-REG-01",
-            "approved_amount": 2000.0,
-            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
-            "is_consumed": False,
-            "reserved_by_sale_id": "",
-        })
-        db.append_record("ApprovalRequests", {
-            "request_id": "APP-SURVIVE-32B",
-            "request_type": "CREDIT_EXCEPTION",
-            "status": "APPROVED",
-            "decided_by": "USR-OWNER-01",
-            "customer_id": "CUS-TIGHT-01",
-            "approved_amount": 2000.0,
-            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
-            "is_consumed": False,
-            "reserved_by_sale_id": "",
-        })
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_res_shared_")
+        try:
+            db.append_record("ApprovalRequests", {
+                "request_id": "APP-SURVIVE-32A",
+                "request_type": "CREDIT_EXCEPTION",
+                "status": "APPROVED",
+                "decided_by": "USR-OWNER-01",
+                "customer_id": "CUS-REG-01",
+                "approved_amount": 2000.0,
+                "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+                "is_consumed": False,
+                "reserved_by_sale_id": "",
+            })
+            db.append_record("ApprovalRequests", {
+                "request_id": "APP-SURVIVE-32B",
+                "request_type": "CREDIT_EXCEPTION",
+                "status": "APPROVED",
+                "decided_by": "USR-OWNER-01",
+                "customer_id": "CUS-TIGHT-01",
+                "approved_amount": 2000.0,
+                "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+                "is_consumed": False,
+                "reserved_by_sale_id": "",
+            })
+            db.enable_shared_file_store(temp_dir)
 
-        barrier = multiprocessing.Barrier(2)
-        q = multiprocessing.Queue()
+            ctx = multiprocessing.get_context("fork")
+            barrier = ctx.Barrier(2)
+            q = ctx.Queue()
 
-        p1 = multiprocessing.Process(
-            target=_mp_reservation_worker,
-            args=("APP-SURVIVE-32A", "SALE-32A", "CUS-REG-01", 1000.0, barrier, q),
-        )
-        p2 = multiprocessing.Process(
-            target=_mp_reservation_worker,
-            args=("APP-SURVIVE-32B", "SALE-32B", "CUS-TIGHT-01", 1000.0, barrier, q),
-        )
-        p1.start()
-        p2.start()
-        p1.join(timeout=10)
-        p2.join(timeout=10)
+            p1 = ctx.Process(
+                target=_mp_reservation_worker,
+                args=("APP-SURVIVE-32A", "SALE-32A", "CUS-REG-01", 1000.0, temp_dir, barrier, q),
+            )
+            p2 = ctx.Process(
+                target=_mp_reservation_worker,
+                args=("APP-SURVIVE-32B", "SALE-32B", "CUS-TIGHT-01", 1000.0, temp_dir, barrier, q),
+            )
+            p1.start()
+            p2.start()
+            p1.join(timeout=10)
+            p2.join(timeout=10)
+            if p1.is_alive():
+                p1.terminate()
+                p1.join(timeout=2)
+            if p2.is_alive():
+                p2.terminate()
+                p2.join(timeout=2)
 
-        results = []
-        while not q.empty():
-            results.append(q.get())
+            results = []
+            while not q.empty():
+                results.append(q.get())
 
-        successes = [r for r in results if r[0] == "SUCCESS"]
-        self.assertEqual(len(successes), 2, f"Expected both reservations to succeed, got: {results}")
+            successes = [r for r in results if r[0] == "SUCCESS"]
+            self.assertEqual(len(successes), 2, f"Expected both reservations to succeed, got: {results}")
 
-        # Verify BOTH entries survive in the global reservation registry
-        res_a = cl.get_cross_process_reservation("APP-SURVIVE-32A")
-        res_b = cl.get_cross_process_reservation("APP-SURVIVE-32B")
+            # Verify BOTH entries survive in the global reservation registry
+            res_a = cl.get_cross_process_reservation("APP-SURVIVE-32A")
+            res_b = cl.get_cross_process_reservation("APP-SURVIVE-32B")
 
-        self.assertIsNotNone(res_a, "APP-SURVIVE-32A must survive in registry")
-        self.assertEqual(str(res_a.get("reserved_by_sale_id")), "SALE-32A")
+            self.assertIsNotNone(res_a, "APP-SURVIVE-32A must survive in registry")
+            self.assertEqual(str(res_a.get("reserved_by_sale_id")), "SALE-32A")
 
-        self.assertIsNotNone(res_b, "APP-SURVIVE-32B must survive in registry")
-        self.assertEqual(str(res_b.get("reserved_by_sale_id")), "SALE-32B")
+            self.assertIsNotNone(res_b, "APP-SURVIVE-32B must survive in registry")
+            self.assertEqual(str(res_b.get("reserved_by_sale_id")), "SALE-32B")
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_33_shared_storage_missing_file_initializes_as_empty_table(self):
+        """Failure Injection 33: Genuinely missing file initializes cleanly as an empty table."""
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_missing_")
+        try:
+            db.memory_store["IncompleteTransactions"] = []
+            db.enable_shared_file_store(temp_dir)
+            missing_tab_file = os.path.join(temp_dir, "IncompleteTransactions.json")
+            self.assertFalse(os.path.exists(missing_tab_file))
+            rows = db.get_records("IncompleteTransactions")
+            self.assertEqual(rows, [])
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_34_shared_storage_corrupted_json_raises_storage_corruption_error(self):
+        """Failure Injection 34: Corrupted JSON file raises explicit StorageCorruptionError and never overwrites data."""
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_corrupt_")
+        try:
+            db.enable_shared_file_store(temp_dir)
+            corrupt_file = os.path.join(temp_dir, "Customers.json")
+            with open(corrupt_file, "w", encoding="utf-8") as f:
+                f.write("{corrupt_json: [invalid syntax")
+
+            # 1. get_records raises StorageCorruptionError
+            with self.assertRaises(StorageCorruptionError):
+                db.get_records("Customers")
+
+            # 2. append_record with raise_on_error=True raises StorageCorruptionError
+            with self.assertRaises(StorageCorruptionError):
+                db.append_record("Customers", {"customer_id": "CUS-BAD"}, raise_on_error=True)
+
+            # 3. File content is preserved; never replaced with an empty table
+            with open(corrupt_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertEqual(content, "{corrupt_json: [invalid syntax")
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_35_shared_storage_permission_denied_raises_storage_io_error(self):
+        """Failure Injection 35: Permission denied during read raises explicit StorageIOError."""
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_perm_")
+        try:
+            db.enable_shared_file_store(temp_dir)
+            db.append_record("Customers", {"customer_id": "CUS-PERM-01", "shop_name": "Perm Shop"})
+
+            with patch("builtins.open", side_effect=PermissionError("Permission denied [Errno 13]")):
+                with self.assertRaises(StorageIOError):
+                    db._read_shared_records("Customers")
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_36_shared_storage_failed_temp_file_write_preserves_original_file(self):
+        """Failure Injection 36: Failed temporary-file write cleans up temp file and preserves original data."""
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_tempfail_")
+        try:
+            db.memory_store = {tab: [] for tab in db.memory_store}
+            db.enable_shared_file_store(temp_dir)
+            db.append_record("Customers", {"customer_id": "CUS-ORIG-01", "shop_name": "Original Store"})
+
+            # Invalidate write by simulating disk full / I/O error on json.dump
+            with patch("json.dump", side_effect=OSError(28, "No space left on device")):
+                with self.assertRaises(StorageIOError):
+                    db.append_record("Customers", {"customer_id": "CUS-FAIL-01"}, raise_on_error=True)
+
+            # Original records remain completely intact
+            records = db.get_records("Customers")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["customer_id"], "CUS-ORIG-01")
+
+            # Verify no orphan .tmp.* files remain in storage directory
+            tmp_files = [f for f in os.listdir(temp_dir) if ".tmp." in f]
+            self.assertEqual(len(tmp_files), 0, f"Found orphan temp files: {tmp_files}")
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_37_shared_storage_failed_atomic_replacement_cleans_up_temp_file(self):
+        """Failure Injection 37: Failed atomic replacement (os.replace) raises StorageIOError, cleans up, and preserves data."""
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_replacefail_")
+        try:
+            db.memory_store = {tab: [] for tab in db.memory_store}
+            db.enable_shared_file_store(temp_dir)
+            db.append_record("Customers", {"customer_id": "CUS-ORIG-02", "shop_name": "Original Store 2"})
+
+            with patch("os.replace", side_effect=OSError(18, "Invalid cross-device link")):
+                with self.assertRaises(StorageIOError):
+                    db.append_record("Customers", {"customer_id": "CUS-FAIL-02"}, raise_on_error=True)
+
+            # Original file remains completely intact
+            records = db.get_records("Customers")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["customer_id"], "CUS-ORIG-02")
+
+            # Verify no orphan .tmp.* files left behind
+            tmp_files = [f for f in os.listdir(temp_dir) if ".tmp." in f]
+            self.assertEqual(len(tmp_files), 0, f"Found orphan temp files: {tmp_files}")
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_38_shared_storage_recovery_after_failed_write(self):
+        """Failure Injection 38: Subsequent writes succeed cleanly following a failed write attempt."""
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_recov_")
+        try:
+            db.memory_store = {tab: [] for tab in db.memory_store}
+            db.enable_shared_file_store(temp_dir)
+            db.append_record("Customers", {"customer_id": "CUS-REC-01", "shop_name": "Recovery Store 1"})
+
+            # Injected failure
+            with patch("os.replace", side_effect=OSError(5, "Input/output error")):
+                with self.assertRaises(StorageIOError):
+                    db.append_record("Customers", {"customer_id": "CUS-FAIL-03"}, raise_on_error=True)
+
+            # Subsequent write recovers and succeeds cleanly
+            ok = db.append_record("Customers", {"customer_id": "CUS-REC-02", "shop_name": "Recovery Store 2"}, raise_on_error=True)
+            self.assertTrue(ok)
+
+            records = db.get_records("Customers")
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["customer_id"], "CUS-REC-01")
+            self.assertEqual(records[1]["customer_id"], "CUS-REC-02")
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,16 @@ from app.timeutil import now_iso
 
 logger = logging.getLogger("kawad_swad.sheets")
 
+
+class StorageCorruptionError(RuntimeError):
+    """Raised when shared persistent storage data is corrupted or invalid."""
+    pass
+
+
+class StorageIOError(RuntimeError):
+    """Raised when shared persistent storage encounters an I/O or permission error."""
+    pass
+
 ID_PREFIXES = {
     "Users": "USR",
     "Products": "PRD",
@@ -385,23 +395,103 @@ class SheetsDatabase:
         path = self._tab_file_path(tab_name)
         if not os.path.exists(path):
             return []
+
+        last_exc: Optional[Exception] = None
         for _ in range(5):
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, FileNotFoundError):
+                    data = json.load(f)
+                    if not isinstance(data, list):
+                        raise StorageCorruptionError(
+                            f"Corrupted storage data for tab '{tab_name}' at {path}: expected list, got {type(data).__name__}"
+                        )
+                    return data
+            except FileNotFoundError as exc:
+                last_exc = exc
+                if not os.path.exists(path):
+                    return []
                 time.sleep(0.005)
-            except Exception as exc:
-                logger.warning("Error reading shared test file %s: %s", path, exc)
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+                # Transient retry in case file was being atomically replaced
+                time.sleep(0.005)
+            except PermissionError as exc:
+                logger.error("Permission denied reading shared storage file %s: %s", path, exc)
+                raise StorageIOError(f"Permission denied reading storage file for tab '{tab_name}' at {path}: {exc}") from exc
+            except OSError as exc:
+                last_exc = exc
+                time.sleep(0.005)
+
+        if isinstance(last_exc, json.JSONDecodeError):
+            logger.error("Corrupted JSON in shared storage file %s: %s", path, last_exc)
+            raise StorageCorruptionError(
+                f"Corrupted JSON in storage file for tab '{tab_name}' at {path}: {last_exc}"
+            ) from last_exc
+        if isinstance(last_exc, FileNotFoundError):
+            if not os.path.exists(path):
                 return []
+            raise StorageIOError(f"File unavailable for tab '{tab_name}' at {path}: {last_exc}") from last_exc
+        if last_exc is not None:
+            raise StorageIOError(f"I/O error reading storage file for tab '{tab_name}' at {path}: {last_exc}") from last_exc
         return []
 
     def _write_shared_records(self, tab_name: str, records: List[Dict[str, Any]]) -> None:
         path = self._tab_file_path(tab_name)
+        s_dir = os.path.dirname(path) or "."
+        try:
+            os.makedirs(s_dir, exist_ok=True)
+        except PermissionError as exc:
+            raise StorageIOError(f"Permission denied creating storage directory {s_dir}: {exc}") from exc
+        except OSError as exc:
+            raise StorageIOError(f"Failed creating storage directory {s_dir}: {exc}") from exc
+
         tmp_path = f"{path}.tmp.{os.getpid()}_{time.time_ns()}"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(records, f)
-        os.replace(tmp_path, path)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(records, f)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+        except PermissionError as exc:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            raise StorageIOError(f"Permission denied writing temporary storage file {tmp_path}: {exc}") from exc
+        except OSError as exc:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            raise StorageIOError(f"I/O or disk failure writing temporary storage file {tmp_path}: {exc}") from exc
+        except Exception as exc:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            raise StorageIOError(f"Unexpected error writing temporary storage file {tmp_path}: {exc}") from exc
+
+        try:
+            os.replace(tmp_path, path)
+        except PermissionError as exc:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            raise StorageIOError(f"Permission denied replacing storage file {path}: {exc}") from exc
+        except OSError as exc:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            raise StorageIOError(f"Atomic replacement failed for storage file {path}: {exc}") from exc
 
     def init_connection(self) -> bool:
         """Attempt to connect to Google Sheets using configured service account credentials."""
@@ -720,6 +810,11 @@ class SheetsDatabase:
                     self._write_shared_records(tab_name, rows)
                     self.memory_store[tab_name] = rows
                     return True
+                except Exception as exc:
+                    logger.error("Error in shared file append for %s: %s", tab_name, exc)
+                    if raise_on_error:
+                        raise
+                    return False
                 finally:
                     if HAS_FCNTL:
                         fcntl.flock(lk, fcntl.LOCK_UN)
@@ -812,6 +907,11 @@ class SheetsDatabase:
                                 self._write_shared_records(tab_name, rows)
                                 self.memory_store[tab_name] = rows
                             return found
+                        except Exception as exc:
+                            logger.error("Error in shared file update for %s: %s", tab_name, exc)
+                            if raise_on_error:
+                                raise
+                            return False
                         finally:
                             if HAS_FCNTL:
                                 fcntl.flock(lk, fcntl.LOCK_UN)
@@ -886,6 +986,11 @@ class SheetsDatabase:
                             self._write_shared_records(tab_name, rows)
                             self.memory_store[tab_name] = rows
                             return True
+                        return False
+                    except Exception as exc:
+                        logger.error("Error in shared file delete for %s: %s", tab_name, exc)
+                        if raise_on_error:
+                            raise
                         return False
                     finally:
                         if HAS_FCNTL:
