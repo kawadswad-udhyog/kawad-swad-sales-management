@@ -98,6 +98,7 @@ ID_PREFIXES = {
     "WorkforcePayments": "WPAY",
     "SalaryReceipts": "RCPT",
     "WorkforceAuditLogs": "WAUD",
+    "VanLoadingPasses": "VLP",
 }
 
 REQUIRED_TABS = {
@@ -343,6 +344,13 @@ REQUIRED_TABS = {
     ],
     "WorkforceAuditLogs": [
         "audit_id", "action", "entity_type", "entity_id", "actor_id", "details", "created_at",
+    ],
+    "VanLoadingPasses": [
+        "pass_id", "pass_number", "loading_date", "van_number", "salesman_user_id",
+        "salesman_name", "created_by_user_id", "created_by_name", "status",
+        "total_skus", "total_packets", "total_weight_kg", "items_json",
+        "created_at", "accepted_at", "accepted_by_user_id", "discrepancy_notes",
+        "idempotency_key", "notes",
     ],
 }
 

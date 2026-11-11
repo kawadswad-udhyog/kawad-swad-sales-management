@@ -1,8 +1,29 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { StockTxnType, FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
-import { apiRequest } from '../services/api';
+import { StockTxnType, FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary, VanLoadingPass, VanLoadingItem } from '../types';
+import {
+  apiRequest,
+  getVanLoadingPasses,
+  createVanLoadingPass,
+  acceptVanLoadingPass,
+  reportVanLoadingDiscrepancy,
+  cancelVanLoadingPass,
+} from '../services/api';
 import { exportSheetToExcel } from '../utils/exportToExcel';
+import {
+  Truck,
+  CheckCircle2,
+  AlertTriangle,
+  Clock,
+  Plus,
+  X,
+  FileText,
+  Package,
+  ShieldCheck,
+  AlertCircle,
+  ArrowRight,
+  Info,
+} from 'lucide-react';
 import {
   FormLayout,
   FormSection,
@@ -36,7 +57,7 @@ export const StockView: React.FC = () => {
   const activeProducts = products.filter((p) => p.active);
   const activeSalesmen = users.filter((u) => u.role === 'SALESMAN' && u.active);
 
-  const [stockTab, setStockTab] = useState<'register' | 'movements' | 'physical'>('register');
+  const [stockTab, setStockTab] = useState<'register' | 'movements' | 'physical' | 'van_loading'>('register');
   const [registerItems, setRegisterItems] = useState<FinishedGoodsRegisterItem[]>([]);
   const [registerSummary, setRegisterSummary] = useState<FinishedGoodsRegisterSummary | null>(null);
   const [registerLoading, setRegisterLoading] = useState(false);
@@ -95,6 +116,197 @@ export const StockView: React.FC = () => {
   const [resolveStatus, setResolveStatus] = useState<'ACTUAL' | 'ESTIMATED'>('ACTUAL');
   const [resolveNotes, setResolveNotes] = useState('');
   const [resolvingLoading, setResolvingLoading] = useState(false);
+
+  // --------------------------------------------------------------------------
+  // Phase 2A.1: Morning Van Loading Pass State
+  // --------------------------------------------------------------------------
+  const [loadingPasses, setLoadingPasses] = useState<VanLoadingPass[]>([]);
+  const [loadingPassesLoading, setLoadingPassesLoading] = useState(false);
+  const [loadingPassFilterStatus, setLoadingPassFilterStatus] = useState<string>('ALL');
+  const [loadingPassNotice, setLoadingPassNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+
+  // New Loading Pass Form State (Warehouse Keeper)
+  const [passDate, setPassDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [passVan, setPassVan] = useState<string>('Van 1');
+  const [passSalesmanId, setPassSalesmanId] = useState<string>(activeSalesmen[0]?.user_id || '');
+  const [passQuantities, setPassQuantities] = useState<Record<string, number>>({});
+  const [passNotes, setPassNotes] = useState<string>('');
+  const [isCreatingPass, setIsCreatingPass] = useState(false);
+
+  // Detail / Verification Modal
+  const [viewingPass, setViewingPass] = useState<VanLoadingPass | null>(null);
+
+  // Discrepancy Reporting Modal
+  const [discrepancyModalPass, setDiscrepancyModalPass] = useState<VanLoadingPass | null>(null);
+  const [discrepancyNotes, setDiscrepancyNotes] = useState<string>('');
+  const [isSubmittingDiscrepancy, setIsSubmittingDiscrepancy] = useState(false);
+
+  // Accept Loading Action State
+  const [acceptingPassId, setAcceptingPassId] = useState<string | null>(null);
+
+  const loadLoadingPasses = async () => {
+    try {
+      setLoadingPassesLoading(true);
+      const res = await getVanLoadingPasses();
+      setLoadingPasses(res || []);
+    } catch (err: any) {
+      console.error('Failed to load van loading passes:', err);
+    } finally {
+      setLoadingPassesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLoadingPasses();
+  }, []);
+
+  const warehouseStockMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    activeProducts.forEach((p) => {
+      const match = companyStockSummary.find((c) => c.product_id === p.product_id);
+      map[p.product_id] = match?.company_quantity ?? 0;
+    });
+    return map;
+  }, [activeProducts, companyStockSummary]);
+
+  const passSummary = useMemo(() => {
+    let totalSkus = 0;
+    let totalPackets = 0;
+    let totalWeightKg = 0;
+    let hasExceededStock = false;
+
+    activeProducts.forEach((p) => {
+      const qty = passQuantities[p.product_id] || 0;
+      if (qty > 0) {
+        totalSkus += 1;
+        totalPackets += qty;
+        const packWeight = p.pack_weight_g || 500;
+        totalWeightKg += (qty * packWeight) / 1000.0;
+        const available = warehouseStockMap[p.product_id] || 0;
+        if (qty > available) {
+          hasExceededStock = true;
+        }
+      }
+    });
+
+    return { totalSkus, totalPackets, totalWeightKg, hasExceededStock };
+  }, [activeProducts, passQuantities, warehouseStockMap]);
+
+  const pendingSalesmanPasses = useMemo(() => {
+    return loadingPasses.filter(
+      (p) => p.status === 'PENDING_ACCEPTANCE' && (currentUser?.role !== 'SALESMAN' || p.salesman_user_id === currentUser?.user_id)
+    );
+  }, [loadingPasses, currentUser]);
+
+  const handleCreateLoadingPass = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoadingPassNotice(null);
+
+    if (passSummary.totalPackets <= 0) {
+      setLoadingPassNotice({ msg: 'Please enter packet quantities for at least one product.', error: true });
+      return;
+    }
+    if (passSummary.hasExceededStock) {
+      setLoadingPassNotice({ msg: 'Cannot load more packets than available warehouse stock.', error: true });
+      return;
+    }
+    if (!passSalesmanId) {
+      setLoadingPassNotice({ msg: 'Please select an assigned salesman.', error: true });
+      return;
+    }
+
+    try {
+      setIsCreatingPass(true);
+      const itemsToLoad = activeProducts
+        .filter((p) => (passQuantities[p.product_id] || 0) > 0)
+        .map((p) => ({
+          product_id: p.product_id,
+          quantity: passQuantities[p.product_id],
+        }));
+
+      const created = await createVanLoadingPass({
+        loading_date: passDate,
+        van_number: passVan,
+        salesman_user_id: passSalesmanId,
+        items: itemsToLoad,
+        notes: passNotes,
+      });
+
+      setLoadingPassNotice({
+        msg: `Loading Pass ${created.pass_number} created successfully! Waiting for salesman verification and acceptance.`,
+      });
+      setPassQuantities({});
+      setPassNotes('');
+      await loadLoadingPasses();
+      await refreshData();
+    } catch (err: any) {
+      setLoadingPassNotice({ msg: err?.message || 'Failed to create van loading pass', error: true });
+    } finally {
+      setIsCreatingPass(false);
+    }
+  };
+
+  const handleAcceptPass = async (passIdOrNumber: string) => {
+    try {
+      setAcceptingPassId(passIdOrNumber);
+      setLoadingPassNotice(null);
+      const accepted = await acceptVanLoadingPass(passIdOrNumber);
+      setLoadingPassNotice({
+        msg: `Stock loading pass ${accepted.pass_number} verified and accepted! Van inventory has been credited and warehouse inventory deducted.`,
+      });
+      await loadLoadingPasses();
+      await refreshData();
+      if (viewingPass?.pass_id === accepted.pass_id) {
+        setViewingPass(accepted);
+      }
+    } catch (err: any) {
+      setLoadingPassNotice({ msg: err?.message || 'Failed to accept loading pass', error: true });
+    } finally {
+      setAcceptingPassId(null);
+    }
+  };
+
+  const handleReportDiscrepancy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!discrepancyModalPass) return;
+    if (!discrepancyNotes.trim()) {
+      alert('Please describe the physical count discrepancy.');
+      return;
+    }
+
+    try {
+      setIsSubmittingDiscrepancy(true);
+      const updated = await reportVanLoadingDiscrepancy(discrepancyModalPass.pass_id, discrepancyNotes);
+      setLoadingPassNotice({
+        msg: `Discrepancy on ${updated.pass_number} recorded. The warehouse manager has been notified for resolution.`,
+      });
+      setDiscrepancyModalPass(null);
+      setDiscrepancyNotes('');
+      await loadLoadingPasses();
+      await refreshData();
+    } catch (err: any) {
+      alert(`Failed to report discrepancy: ${err?.message || err}`);
+    } finally {
+      setIsSubmittingDiscrepancy(false);
+    }
+  };
+
+  const handleCancelPass = async (passIdOrNumber: string) => {
+    if (!confirm('Are you sure you want to cancel this pending loading pass?')) return;
+    try {
+      setLoadingPassNotice(null);
+      const cancelled = await cancelVanLoadingPass(passIdOrNumber, 'Cancelled from management dashboard');
+      setLoadingPassNotice({ msg: `Loading pass ${cancelled.pass_number} cancelled.` });
+      await loadLoadingPasses();
+      await refreshData();
+      if (viewingPass?.pass_id === cancelled.pass_id) {
+        setViewingPass(cancelled);
+      }
+    } catch (err: any) {
+      setLoadingPassNotice({ msg: err?.message || 'Failed to cancel loading pass', error: true });
+    }
+  };
+
 
   const loadBulkBatches = async () => {
     try {
@@ -367,6 +579,23 @@ export const StockView: React.FC = () => {
             Physical Count &amp; Difference
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => setStockTab('van_loading')}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+            stockTab === 'van_loading'
+              ? 'bg-emerald-800 text-white shadow-2xs font-bold'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Truck className="w-3.5 h-3.5" />
+          <span>Van Loading / गाड़ी में माल</span>
+          {pendingSalesmanPasses.length > 0 && (
+            <span className="bg-amber-500 text-white text-[10px] font-extrabold px-1.5 py-0.2 rounded-full animate-pulse">
+              {pendingSalesmanPasses.length}
+            </span>
+          )}
+        </button>
       </div>
 
       {notice && (
@@ -1315,7 +1544,745 @@ export const StockView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* ================================================================= */}
+      {/* PHASE 2A.1: MORNING VAN LOADING PASS TAB                          */}
+      {/* ================================================================= */}
+      {stockTab === 'van_loading' && (
+        <div className="space-y-6">
+          {loadingPassNotice && (
+            <div className={`p-4 rounded-xl text-sm font-medium flex items-center justify-between border ${
+              loadingPassNotice.error
+                ? 'bg-rose-50 text-rose-800 border-rose-200'
+                : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+            }`}>
+              <div className="flex items-center gap-2.5">
+                {loadingPassNotice.error ? (
+                  <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                )}
+                <span>{loadingPassNotice.msg}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLoadingPassNotice(null)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {/* SALESMAN ACTION BANNER: PENDING LOADING PASSES */}
+          {pendingSalesmanPasses.length > 0 && (
+            <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-5 shadow-xs space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold shadow-xs">
+                    <Truck className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-base sm:text-lg font-bold text-amber-950 m-0">
+                      Your Van Loading is Ready / आपकी गाड़ी का माल तैयार है
+                    </h2>
+                    <p className="text-xs sm:text-sm text-amber-800 mt-0.5 mb-0">
+                      Please verify physical packet counts in the van and accept stock to begin daily sales.
+                    </p>
+                  </div>
+                </div>
+                <span className="bg-amber-200 text-amber-900 text-xs font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider">
+                  {pendingSalesmanPasses.length} Pending
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4">
+                {pendingSalesmanPasses.map((pass) => (
+                  <div key={pass.pass_id} className="bg-white rounded-xl border border-amber-200 p-4 shadow-2xs space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                      <div>
+                        <span className="text-xs font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                          {pass.pass_number}
+                        </span>
+                        <span className="ml-2 font-bold text-slate-800 text-sm">
+                          {pass.van_number}
+                        </span>
+                        <span className="text-xs text-slate-500 ml-2">
+                          ({pass.loading_date})
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-600">
+                        Loaded by: <span className="font-semibold text-slate-800">{pass.created_by_name}</span>
+                      </div>
+                    </div>
+
+                    {/* Loaded Items Table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead className="bg-slate-50 text-slate-600">
+                          <tr>
+                            <th className="py-2 px-3">Product Name / Item</th>
+                            <th className="py-2 px-3 text-center">Pack Size</th>
+                            <th className="py-2 px-3 text-right">Quantity (Packets)</th>
+                            <th className="py-2 px-3 text-right">Weight (kg)</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {pass.items.map((it, idx) => (
+                            <tr key={idx} className="hover:bg-slate-50/50">
+                              <td className="py-2 px-3 font-medium text-slate-900">
+                                {it.product_name || it.sku}
+                              </td>
+                              <td className="py-2 px-3 text-center text-slate-600">
+                                {it.pack_weight_g}g
+                              </td>
+                              <td className="py-2 px-3 text-right font-bold text-emerald-700">
+                                {it.quantity} pkts
+                              </td>
+                              <td className="py-2 px-3 text-right text-slate-600">
+                                {it.weight_kg ? Number(it.weight_kg).toFixed(2) : '-'} kg
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-slate-50 font-bold border-t border-slate-200 text-slate-900">
+                          <tr>
+                            <td className="py-2 px-3" colSpan={2}>Total Loaded</td>
+                            <td className="py-2 px-3 text-right text-emerald-800">{pass.total_packets} pkts</td>
+                            <td className="py-2 px-3 text-right text-slate-800">{Number(pass.total_weight_kg).toFixed(2)} kg</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+
+                    {pass.notes && (
+                      <div className="text-xs text-slate-500 bg-slate-50 p-2 rounded border border-slate-100">
+                        <span className="font-semibold">Notes:</span> {pass.notes}
+                      </div>
+                    )}
+
+                    {/* Salesman Verification Action Buttons */}
+                    <div className="flex flex-col sm:flex-row items-center justify-end gap-2.5 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDiscrepancyModalPass(pass);
+                          setDiscrepancyNotes('');
+                        }}
+                        className="w-full sm:w-auto px-4 py-2.5 text-xs font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <AlertTriangle className="w-4 h-4 text-amber-700" />
+                        <span>Report Discrepancy / गड़बड़ी दर्ज करें</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={acceptingPassId === pass.pass_id}
+                        onClick={() => handleAcceptPass(pass.pass_id)}
+                        className="w-full sm:w-auto px-6 py-2.5 text-xs font-extrabold text-white bg-emerald-700 hover:bg-emerald-800 shadow-sm hover:shadow rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {acceptingPassId === pass.pass_id ? (
+                          <>
+                            <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            <span>Confirming Transfer...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>Confirm Physical Count &amp; Accept Stock / माल स्वीकार करें</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* WAREHOUSE KEEPER: CREATE LOADING PASS FORM */}
+          {isManager && (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="p-4 sm:p-5 border-b border-slate-100 bg-slate-50/60 flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 m-0 flex items-center gap-2">
+                    <Truck className="w-5 h-5 text-emerald-700" />
+                    <span>Create Van Loading Pass / गाड़ी में माल भरो</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5 mb-0">
+                    Select van, assigned salesman, and enter finished goods packets to load. Stock is deducted upon salesman acceptance.
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleCreateLoadingPass} className="p-4 sm:p-6 space-y-6">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Loading Date / दिनांक <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      value={passDate}
+                      onChange={(e) => setPassDate(e.target.value)}
+                      required
+                      className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Delivery Van / गाड़ी नंबर <span className="text-rose-500">*</span>
+                    </label>
+                    <select
+                      value={passVan}
+                      onChange={(e) => setPassVan(e.target.value)}
+                      required
+                      className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 focus:outline-none"
+                    >
+                      <option value="Van 1 - RJ 09 GA 1234">Van 1 (RJ 09 GA 1234)</option>
+                      <option value="Van 2 - RJ 09 GA 5678">Van 2 (RJ 09 GA 5678)</option>
+                      <option value="Van 3 - RJ 09 GA 9012">Van 3 (RJ 09 GA 9012)</option>
+                      <option value="Auto / Rickshaw 1">Auto / Rickshaw 1</option>
+                      <option value="Factory Counter / Direct">Factory Direct Loading</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Assigned Salesman / गाड़ी चालक <span className="text-rose-500">*</span>
+                    </label>
+                    <select
+                      value={passSalesmanId}
+                      onChange={(e) => setPassSalesmanId(e.target.value)}
+                      required
+                      className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 focus:outline-none"
+                    >
+                      <option value="">-- Select Salesman --</option>
+                      {activeSalesmen.map((s) => (
+                        <option key={s.user_id} value={s.user_id}>
+                          {s.full_name} ({s.user_id})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* PRODUCT SELECTION TABLE */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                      Product Quantities / माल की मात्रा (पैकेट)
+                    </label>
+                    <span className="text-xs text-slate-500">
+                      Warehouse stock cannot become negative
+                    </span>
+                  </div>
+
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-xs text-left">
+                      <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                        <tr>
+                          <th className="py-2.5 px-3">Product SKU &amp; Name</th>
+                          <th className="py-2.5 px-3 text-center">Pack Weight</th>
+                          <th className="py-2.5 px-3 text-right">Available in Warehouse</th>
+                          <th className="py-2.5 px-3 text-center min-w-[200px]">Packets to Load</th>
+                          <th className="py-2.5 px-3 text-right">Weight (kg)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {activeProducts.map((p) => {
+                          const available = warehouseStockMap[p.product_id] || 0;
+                          const entered = passQuantities[p.product_id] || 0;
+                          const isOver = entered > available;
+                          const lineWeightKg = ((entered * (p.pack_weight_g || 500)) / 1000.0).toFixed(2);
+
+                          return (
+                            <tr
+                              key={p.product_id}
+                              className={`transition-colors ${
+                                isOver ? 'bg-rose-50/70' : entered > 0 ? 'bg-emerald-50/40' : 'hover:bg-slate-50/50'
+                              }`}
+                            >
+                              <td className="py-2.5 px-3">
+                                <div className="font-bold text-slate-900">{p.product_name}</div>
+                                <div className="text-[11px] font-mono text-slate-500">{p.sku}</div>
+                              </td>
+                              <td className="py-2.5 px-3 text-center text-slate-600 font-medium">
+                                {p.pack_weight_g}g
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <span className={`inline-block px-2 py-0.5 rounded text-xs font-bold ${
+                                  available <= 0
+                                    ? 'bg-rose-100 text-rose-700'
+                                    : available < 20
+                                    ? 'bg-amber-100 text-amber-800'
+                                    : 'bg-slate-100 text-slate-700'
+                                }`}>
+                                  {available} pkts
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    max={available}
+                                    value={entered || ''}
+                                    placeholder="0"
+                                    onChange={(e) => {
+                                      const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                                      setPassQuantities((prev) => ({ ...prev, [p.product_id]: val }));
+                                    }}
+                                    className={`w-20 px-2 py-1.5 text-center text-sm font-bold rounded-lg border focus:outline-none ${
+                                      isOver
+                                        ? 'border-rose-400 bg-rose-50 text-rose-700'
+                                        : entered > 0
+                                        ? 'border-emerald-500 bg-emerald-50 text-emerald-800'
+                                        : 'border-slate-200 bg-white text-slate-900'
+                                    }`}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setPassQuantities((prev) => ({ ...prev, [p.product_id]: Math.min(available, (prev[p.product_id] || 0) + 10) }))}
+                                    className="px-2 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-semibold cursor-pointer"
+                                  >
+                                    +10
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setPassQuantities((prev) => ({ ...prev, [p.product_id]: Math.min(available, (prev[p.product_id] || 0) + 25) }))}
+                                    className="px-2 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-semibold cursor-pointer"
+                                  >
+                                    +25
+                                  </button>
+                                  {entered > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setPassQuantities((prev) => ({ ...prev, [p.product_id]: 0 }))}
+                                      className="p-1 text-slate-400 hover:text-rose-600 rounded cursor-pointer"
+                                      title="Clear"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                                {isOver && (
+                                  <div className="text-[10px] text-rose-600 font-bold text-center mt-1">
+                                    Exceeds available stock ({available} pkts)!
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-medium text-slate-700">
+                                {entered > 0 ? `${lineWeightKg} kg` : '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* NOTES */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Notes / Remarks / विशेष टिप्पणी (वैकल्पिक)
+                  </label>
+                  <input
+                    type="text"
+                    value={passNotes}
+                    onChange={(e) => setPassNotes(e.target.value)}
+                    placeholder="e.g. Route: Bhilwara Mandi, Extra stock for festive promotion"
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                {/* SUMMARY & SUBMISSION BAR */}
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="grid grid-cols-3 gap-6 text-center sm:text-left">
+                    <div>
+                      <div className="text-[11px] text-slate-500 font-medium">Total SKUs</div>
+                      <div className="text-base font-extrabold text-slate-900">{passSummary.totalSkus} SKUs</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-slate-500 font-medium">Total Packets</div>
+                      <div className="text-base font-extrabold text-emerald-700">{passSummary.totalPackets} pkts</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-slate-500 font-medium">Total Weight</div>
+                      <div className="text-base font-extrabold text-slate-900">{passSummary.totalWeightKg.toFixed(2)} kg</div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isCreatingPass || passSummary.totalPackets <= 0 || passSummary.hasExceededStock}
+                    className="w-full sm:w-auto px-6 py-3 bg-emerald-800 hover:bg-emerald-900 text-white font-extrabold text-sm rounded-xl shadow-sm transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {isCreatingPass ? (
+                      <>
+                        <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        <span>Generating Loading Pass...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Truck className="w-4 h-4" />
+                        <span>Generate Loading Pass / लोडिंग पर्ची बनाएं</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* LOADING PASSES RECORD & AUDIT HISTORY */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 m-0">
+                  Van Loading Passes History / लोडिंग पर्ची रिकॉर्ड
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5 mb-0">
+                  Traceable audit trail of morning stock dispatches and physical salesman acceptances
+                </p>
+              </div>
+
+              {/* Status Filter */}
+              <div className="flex items-center gap-1.5">
+                {['ALL', 'PENDING_ACCEPTANCE', 'ACCEPTED', 'DISCREPANCY_REPORTED', 'CANCELLED'].map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setLoadingPassFilterStatus(st)}
+                    className={`px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer ${
+                      loadingPassFilterStatus === st
+                        ? 'bg-slate-900 text-white'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {st === 'ALL'
+                      ? 'All'
+                      : st === 'PENDING_ACCEPTANCE'
+                      ? 'Pending'
+                      : st === 'ACCEPTED'
+                      ? 'Accepted'
+                      : st === 'DISCREPANCY_REPORTED'
+                      ? 'Discrepancy'
+                      : 'Cancelled'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2.5 px-3">Pass Number</th>
+                    <th className="py-2.5 px-3">Date</th>
+                    <th className="py-2.5 px-3">Van / Vehicle</th>
+                    <th className="py-2.5 px-3">Assigned Salesman</th>
+                    <th className="py-2.5 px-3 text-center">SKUs</th>
+                    <th className="py-2.5 px-3 text-right">Packets</th>
+                    <th className="py-2.5 px-3 text-right">Total kg</th>
+                    <th className="py-2.5 px-3 text-center">Status</th>
+                    <th className="py-2.5 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {loadingPasses
+                    .filter((p) => loadingPassFilterStatus === 'ALL' || p.status === loadingPassFilterStatus)
+                    .map((pass) => {
+                      const isPending = pass.status === 'PENDING_ACCEPTANCE';
+                      const isAccepted = pass.status === 'ACCEPTED';
+                      const isDiscrepancy = pass.status === 'DISCREPANCY_REPORTED';
+                      const isCancelled = pass.status === 'CANCELLED';
+
+                      return (
+                        <tr key={pass.pass_id} className="hover:bg-slate-50/60">
+                          <td className="py-2.5 px-3 font-mono font-bold text-emerald-800">
+                            {pass.pass_number}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
+                            {pass.loading_date}
+                          </td>
+                          <td className="py-2.5 px-3 font-medium text-slate-900">
+                            {pass.van_number}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="font-semibold text-slate-900">{pass.salesman_name}</span>
+                            <span className="text-[10px] text-slate-500 block">{pass.salesman_user_id}</span>
+                          </td>
+                          <td className="py-2.5 px-3 text-center text-slate-600 font-medium">
+                            {pass.total_skus}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-bold text-slate-900">
+                            {pass.total_packets} pkts
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600">
+                            {Number(pass.total_weight_kg).toFixed(2)} kg
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            {isAccepted && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-700" />
+                                <span>Accepted</span>
+                              </span>
+                            )}
+                            {isPending && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 animate-pulse">
+                                <Clock className="w-3 h-3 text-amber-700" />
+                                <span>Waiting</span>
+                              </span>
+                            )}
+                            {isDiscrepancy && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800">
+                                <AlertTriangle className="w-3 h-3 text-rose-700" />
+                                <span>Discrepancy</span>
+                              </span>
+                            )}
+                            {isCancelled && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-600">
+                                <span>Cancelled</span>
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setViewingPass(pass)}
+                                className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
+                              >
+                                View Details
+                              </button>
+
+                              {/* Salesman or Manager can accept if pending */}
+                              {isPending && (currentUser?.role !== 'SALESMAN' || pass.salesman_user_id === currentUser?.user_id) && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAcceptPass(pass.pass_id)}
+                                  disabled={acceptingPassId === pass.pass_id}
+                                  className="px-2.5 py-1 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer shadow-2xs"
+                                >
+                                  {acceptingPassId === pass.pass_id ? 'Accepting...' : 'Accept'}
+                                </button>
+                              )}
+
+                              {/* Manager or Creator can cancel if pending */}
+                              {isPending && isManager && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleCancelPass(pass.pass_id)}
+                                  className="px-2 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                                  title="Cancel Pass"
+                                >
+                                  Cancel
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                  {loadingPasses.length === 0 && (
+                    <tr>
+                      <td colSpan={9} className="py-8 text-center text-slate-500">
+                        {loadingPassesLoading
+                          ? 'Loading van loading passes...'
+                          : 'No van loading passes recorded yet. Create the first morning pass above.'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* VIEW PASS MODAL */}
+          {viewingPass && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-xl border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 m-0">
+                      Van Loading Pass / गाड़ी लोडिंग पर्ची
+                    </h3>
+                    <span className="text-xs font-mono font-bold text-emerald-800">
+                      {viewingPass.pass_number}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setViewingPass(null)}
+                    className="text-slate-400 hover:text-slate-600 p-1"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 text-xs bg-slate-50 p-3 rounded-xl border border-slate-100">
+                  <div>
+                    <span className="text-slate-500">Date:</span>{' '}
+                    <span className="font-bold text-slate-800">{viewingPass.loading_date}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Van:</span>{' '}
+                    <span className="font-bold text-slate-800">{viewingPass.van_number}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Salesman:</span>{' '}
+                    <span className="font-bold text-slate-800">{viewingPass.salesman_name}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Issuer:</span>{' '}
+                    <span className="font-bold text-slate-800">{viewingPass.created_by_name}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Status:</span>{' '}
+                    <span className="font-extrabold text-emerald-800">{viewingPass.status}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Created:</span>{' '}
+                    <span className="text-slate-700">{viewingPass.created_at ? viewingPass.created_at.slice(0, 16).replace('T', ' ') : '—'}</span>
+                  </div>
+                </div>
+
+                {viewingPass.discrepancy_notes && (
+                  <div className="bg-rose-50 border border-rose-200 p-3 rounded-xl text-xs text-rose-900">
+                    <span className="font-bold block mb-0.5">Reported Discrepancy:</span>
+                    {viewingPass.discrepancy_notes}
+                  </div>
+                )}
+
+                {/* Items breakdown */}
+                <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                  <table className="w-full text-xs text-left">
+                    <thead className="bg-slate-50 text-slate-600">
+                      <tr>
+                        <th className="py-2 px-3">Product Name</th>
+                        <th className="py-2 px-3 text-center">Pack</th>
+                        <th className="py-2 px-3 text-right">Packets</th>
+                        <th className="py-2 px-3 text-right">kg</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {viewingPass.items.map((it, idx) => (
+                        <tr key={idx}>
+                          <td className="py-2 px-3 font-medium text-slate-900">{it.product_name || it.sku}</td>
+                          <td className="py-2 px-3 text-center text-slate-600">{it.pack_weight_g}g</td>
+                          <td className="py-2 px-3 text-right font-bold text-emerald-800">{it.quantity} pkts</td>
+                          <td className="py-2 px-3 text-right text-slate-600">{it.weight_kg ? Number(it.weight_kg).toFixed(2) : '-'} kg</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-slate-50 font-bold border-t border-slate-200 text-slate-900">
+                      <tr>
+                        <td className="py-2 px-3" colSpan={2}>Grand Total</td>
+                        <td className="py-2 px-3 text-right text-emerald-800">{viewingPass.total_packets} pkts</td>
+                        <td className="py-2 px-3 text-right">{Number(viewingPass.total_weight_kg).toFixed(2)} kg</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                {viewingPass.accepted_at && (
+                  <div className="text-xs text-emerald-800 bg-emerald-50 p-2.5 rounded-xl border border-emerald-100 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>
+                      Accepted by <strong>{viewingPass.accepted_by_user_id}</strong> on{' '}
+                      {viewingPass.accepted_at.slice(0, 16).replace('T', ' ')}
+                    </span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setViewingPass(null)}
+                    className="px-4 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                  >
+                    Close
+                  </button>
+                  {viewingPass.status === 'PENDING_ACCEPTANCE' && (currentUser?.role !== 'SALESMAN' || viewingPass.salesman_user_id === currentUser?.user_id) && (
+                    <button
+                      type="button"
+                      onClick={() => handleAcceptPass(viewingPass.pass_id)}
+                      disabled={acceptingPassId === viewingPass.pass_id}
+                      className="px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl cursor-pointer shadow-xs"
+                    >
+                      {acceptingPassId === viewingPass.pass_id ? 'Accepting...' : 'Accept Stock'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* DISCREPANCY REPORTING MODAL */}
+          {discrepancyModalPass && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <form onSubmit={handleReportDiscrepancy} className="bg-white rounded-2xl max-w-md w-full p-5 sm:p-6 shadow-xl border border-slate-200 space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+                  <div className="flex items-center gap-2 text-amber-700 font-bold">
+                    <AlertTriangle className="w-5 h-5 text-amber-600" />
+                    <span>Report Physical Count Discrepancy</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDiscrepancyModalPass(null)}
+                    className="text-slate-400 hover:text-slate-600 p-1"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-600 m-0">
+                  Report any missing, leaking, or damaged packets found while verifying loading pass{' '}
+                  <strong className="font-mono text-slate-900">{discrepancyModalPass.pass_number}</strong>.
+                  The pass will be flagged for warehouse manager review.
+                </p>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Discrepancy Details / गड़बड़ी का विवरण <span className="text-rose-500">*</span>
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={discrepancyNotes}
+                    onChange={(e) => setDiscrepancyNotes(e.target.value)}
+                    required
+                    placeholder="e.g. Counted 22 packets of Chana Chotu 200g instead of 25. 3 packets missing from carton."
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-amber-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setDiscrepancyModalPass(null)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingDiscrepancy || !discrepancyNotes.trim()}
+                    className="px-4 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl cursor-pointer shadow-xs disabled:opacity-50"
+                  >
+                    {isSubmittingDiscrepancy ? 'Submitting...' : 'Submit Discrepancy'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };
+
 

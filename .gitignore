@@ -41,6 +41,10 @@ credentials*.json
 *.swo
 *~
 .DS_Store
+.aistudio/
+.phase1_backup/
+*.bak
+*audit_results.json
 
 # Temporary & Upload archives
 *.zip

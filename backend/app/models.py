@@ -816,3 +816,57 @@ class SalaryReceiptModel(BaseModel):
     total_deductions: float
     net_paid: float
     notes: str
+
+# Van Loading Pass Models (Phase 2A.1)
+class VanLoadingItem(BaseModel):
+    product_id: str
+    product_name: Optional[str] = ""
+    sku: Optional[str] = ""
+    pack_weight_g: Optional[int] = 500
+    quantity: int = Field(..., gt=0, description="Quantity in packets must be greater than zero")
+    weight_kg: Optional[float] = 0.0
+    notes: Optional[str] = ""
+
+class VanLoadingPassCreate(BaseModel):
+    van_number: str = Field(..., min_length=1, description="Delivery vehicle number or identifier")
+    salesman_user_id: str = Field(..., min_length=1, description="Assigned salesman user ID")
+    loading_date: Optional[str] = ""
+    items: List[VanLoadingItem] = Field(..., min_items=1, description="List of loaded product items")
+    notes: Optional[str] = ""
+    idempotency_key: Optional[str] = None
+
+class VanLoadingPassAccept(BaseModel):
+    notes: Optional[str] = ""
+    idempotency_key: Optional[str] = None
+
+class VanLoadingPassDiscrepancy(BaseModel):
+    discrepancy_notes: str = Field(..., min_length=3, description="Details of physical count discrepancy")
+    idempotency_key: Optional[str] = None
+
+class VanLoadingPass(BaseModel):
+    pass_id: str
+    pass_number: str
+    loading_date: str
+    van_number: str
+    salesman_user_id: str
+    salesman_name: str
+    created_by_user_id: str
+    created_by_name: str
+    status: str  # PENDING_ACCEPTANCE, ACCEPTED, DISCREPANCY_REPORTED, CANCELLED
+    total_skus: int
+    total_packets: int
+    total_weight_kg: float
+    items: List[VanLoadingItem]
+    created_at: str
+    accepted_at: Optional[str] = ""
+    accepted_by_user_id: Optional[str] = ""
+    discrepancy_notes: Optional[str] = ""
+    idempotency_key: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class LoadingPassActionReq(BaseModel):
+    notes: Optional[str] = ""
+    discrepancy_notes: Optional[str] = ""
+    idempotency_key: Optional[str] = None
+
+

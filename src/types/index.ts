@@ -720,3 +720,49 @@ export interface SalesmanStockItem {
   quantity: number;
 }
 
+export interface VanLoadingItem {
+  product_id: string;
+  product_name?: string;
+  sku?: string;
+  pack_weight_g?: number;
+  quantity: number;
+  weight_kg?: number;
+  notes?: string;
+}
+
+export interface VanLoadingPass {
+  pass_id: string;
+  pass_number: string;
+  loading_date: string;
+  van_number: string;
+  salesman_user_id: string;
+  salesman_name: string;
+  created_by_user_id: string;
+  created_by_name: string;
+  status: 'PENDING_ACCEPTANCE' | 'ACCEPTED' | 'DISCREPANCY_REPORTED' | 'CANCELLED';
+  total_skus: number;
+  total_packets: number;
+  total_weight_kg: number;
+  items: VanLoadingItem[];
+  created_at: string;
+  accepted_at?: string;
+  accepted_by_user_id?: string;
+  discrepancy_notes?: string;
+  idempotency_key?: string;
+  notes?: string;
+}
+
+export interface VanLoadingPassCreate {
+  loading_date?: string;
+  van_number: string;
+  salesman_user_id: string;
+  items: {
+    product_id: string;
+    quantity: number;
+    notes?: string;
+  }[];
+  notes?: string;
+  idempotency_key?: string;
+}
+
+

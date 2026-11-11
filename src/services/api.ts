@@ -22,6 +22,8 @@ import type {
   CashBankReport,
   GstSummaryReport,
   AccountingPeriod,
+  VanLoadingPass,
+  VanLoadingPassCreate,
 } from '../types';
 
 export const DEFAULT_API_BASE_URL =
@@ -1500,6 +1502,56 @@ export async function closeAccountingPeriod(periodId: string): Promise<{ ok: boo
     method: 'POST',
   });
 }
+
+// -------------------------------------------------------------
+// Van Loading Pass API (Phase 2A.1)
+// -------------------------------------------------------------
+
+export async function getVanLoadingPasses(params?: { salesman_id?: string; date?: string; status?: string }): Promise<VanLoadingPass[]> {
+  let url = '/api/stock/loading-passes';
+  if (params) {
+    const q = new URLSearchParams();
+    if (params.salesman_id) q.set('salesman_id', params.salesman_id);
+    if (params.date) q.set('date', params.date);
+    if (params.status) q.set('status', params.status);
+    const qs = q.toString();
+    if (qs) url += `?${qs}`;
+  }
+  return apiRequest<VanLoadingPass[]>(url);
+}
+
+export async function getVanLoadingPass(passIdOrNumber: string): Promise<VanLoadingPass> {
+  return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}`);
+}
+
+export async function createVanLoadingPass(payload: VanLoadingPassCreate): Promise<VanLoadingPass> {
+  return apiRequest<VanLoadingPass>('/api/stock/loading-passes', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function acceptVanLoadingPass(passIdOrNumber: string, notes?: string): Promise<VanLoadingPass> {
+  return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}/accept`, {
+    method: 'POST',
+    body: JSON.stringify({ notes }),
+  });
+}
+
+export async function reportVanLoadingDiscrepancy(passIdOrNumber: string, discrepancyNotes: string): Promise<VanLoadingPass> {
+  return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}/discrepancy`, {
+    method: 'POST',
+    body: JSON.stringify({ discrepancy_notes: discrepancyNotes }),
+  });
+}
+
+export async function cancelVanLoadingPass(passIdOrNumber: string, notes?: string): Promise<VanLoadingPass> {
+  return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ notes }),
+  });
+}
+
 
 
 
