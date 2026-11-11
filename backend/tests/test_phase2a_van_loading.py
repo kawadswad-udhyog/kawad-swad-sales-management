@@ -59,6 +59,18 @@ def _concurrent_accept_worker(test_dir: str, pass_id: str, salesman_user: dict, 
         result_queue.put({"success": False, "error": str(exc), "type": type(exc).__name__})
 
 
+def _competing_pass_worker(test_dir: str, pass_id: str, salesman_user: dict, result_queue: multiprocessing.Queue):
+    """Isolated worker process attempting to accept a competing pass for warehouse inventory."""
+    try:
+        db.enable_shared_file_store(test_dir)
+        res = asyncio.run(stock.accept_van_loading_pass(pass_id, req=None, current_user=salesman_user))
+        result_queue.put({"success": True, "pass_id": pass_id, "status": res.status})
+    except HTTPException as exc:
+        result_queue.put({"success": False, "pass_id": pass_id, "status_code": exc.status_code, "detail": exc.detail})
+    except Exception as exc:
+        result_queue.put({"success": False, "pass_id": pass_id, "status_code": 500, "error": str(exc)})
+
+
 class TestPhase2AVanLoadingPass(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -304,6 +316,19 @@ class TestPhase2AVanLoadingPass(unittest.TestCase):
         all_passes = db.get_records("VanLoadingPasses", fresh=True)
         self.assertEqual(len(all_passes), 1)
 
+        # Reusing the same idempotency key with conflicting payload must return HTTP 409
+        req_conflict = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[VanLoadingItem(product_id="PRD-MOONG-200G", quantity=99)],
+            idempotency_key="IDEM-VAN-LOAD-999",
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.create_van_loading_pass(req_conflict, current_user=self.keeper_user))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("Conflict: Idempotency key reused", ctx.exception.detail)
+
     def test_07_concurrent_acceptance_multiprocessing(self):
         """Multiprocessing test: Two separate OS worker processes simultaneously call accept."""
         create_req = VanLoadingPassCreate(
@@ -422,6 +447,360 @@ class TestPhase2AVanLoadingPass(unittest.TestCase):
         self.assertIsNotNone(accept_audit)
         self.assertEqual(accept_audit.get("actor_user_id"), "USR-SALES-101")
 
+    def test_11_partial_transfer_failure_first_sku_succeeds_second_fails_and_recovery(self):
+        """Blocker 1: First SKU succeeds, second fails. Retrying completes transfer without duplication."""
+        create_req = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[
+                VanLoadingItem(product_id="PRD-MOONG-200G", quantity=30),
+                VanLoadingItem(product_id="PRD-GARLIC-200G", quantity=20),
+            ],
+        )
+        pass_resp = asyncio.run(stock.create_van_loading_pass(create_req, current_user=self.keeper_user))
+
+        original_append = db.append_record
+        append_call_count = 0
+
+        def flaky_append(tab_name, record, raise_on_error=False):
+            nonlocal append_call_count
+            if tab_name == "SalesmanStockLedger" and record.get("product_id") == "PRD-GARLIC-200G" and append_call_count == 0:
+                append_call_count += 1
+                if raise_on_error:
+                    raise RuntimeError("Injected disk failure on second SKU append")
+                return False
+            return original_append(tab_name, record, raise_on_error=raise_on_error)
+
+        db.append_record = flaky_append
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+            self.assertEqual(ctx.exception.status_code, 503)
+        finally:
+            db.append_record = original_append
+
+        # Pass status must remain PENDING_ACCEPTANCE (fail closed, never prematurely ACCEPTED)
+        curr = asyncio.run(stock.get_van_loading_pass(pass_resp.pass_id, current_user=self.keeper_user))
+        self.assertEqual(curr.status, "PENDING_ACCEPTANCE")
+
+        # In ledger: Moong was recorded (30 pkts), Garlic was not
+        ledger_mid = db.get_records("SalesmanStockLedger", fresh=True)
+        pass_txns_mid = [r for r in ledger_mid if str(r.get("reference_id")) == pass_resp.pass_number]
+        self.assertEqual(len(pass_txns_mid), 1)
+        self.assertEqual(pass_txns_mid[0].get("product_id"), "PRD-MOONG-200G")
+
+        # Retry acceptance with healthy storage
+        recovered = asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+        self.assertEqual(recovered.status, "ACCEPTED")
+
+        # Verify final balances
+        ledger_final = db.get_records("SalesmanStockLedger", fresh=True)
+        wh_final, _ = balances(ledger_final)
+        self.assertEqual(wh_final["PRD-MOONG-200G"], 70)   # 100 - 30
+        self.assertEqual(wh_final["PRD-GARLIC-200G"], 60)  # 80 - 20
+        self.assertEqual(salesman_available(ledger_final, "USR-SALES-101", "PRD-MOONG-200G"), 30)
+        self.assertEqual(salesman_available(ledger_final, "USR-SALES-101", "PRD-GARLIC-200G"), 20)
+
+        # Verify exactly 2 movements exist for this pass (one for Moong, one for Garlic, NO duplicate)
+        pass_txns_final = [r for r in ledger_final if str(r.get("reference_id")) == pass_resp.pass_number]
+        self.assertEqual(len(pass_txns_final), 2)
+        pids = [r.get("product_id") for r in pass_txns_final]
+        self.assertIn("PRD-MOONG-200G", pids)
+        self.assertIn("PRD-GARLIC-200G", pids)
+
+    def test_12_partial_transfer_failure_first_two_succeed_third_fails_and_recovery(self):
+        """Blocker 1: First two succeed, third fails. Retry completes only the third."""
+        create_req = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[
+                VanLoadingItem(product_id="PRD-MOONG-200G", quantity=20),
+                VanLoadingItem(product_id="PRD-GARLIC-200G", quantity=15),
+                VanLoadingItem(product_id="PRD-CHANA-200G", quantity=10),
+            ],
+        )
+        pass_resp = asyncio.run(stock.create_van_loading_pass(create_req, current_user=self.keeper_user))
+
+        original_append = db.append_record
+        append_call_count = 0
+
+        def flaky_append(tab_name, record, raise_on_error=False):
+            nonlocal append_call_count
+            if tab_name == "SalesmanStockLedger" and record.get("product_id") == "PRD-CHANA-200G" and append_call_count == 0:
+                append_call_count += 1
+                if raise_on_error:
+                    raise RuntimeError("Injected failure on third SKU append")
+                return False
+            return original_append(tab_name, record, raise_on_error=raise_on_error)
+
+        db.append_record = flaky_append
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+            self.assertEqual(ctx.exception.status_code, 503)
+        finally:
+            db.append_record = original_append
+
+        # Status remains pending
+        curr = asyncio.run(stock.get_van_loading_pass(pass_resp.pass_id, current_user=self.keeper_user))
+        self.assertEqual(curr.status, "PENDING_ACCEPTANCE")
+
+        # Retry and recover
+        recovered = asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+        self.assertEqual(recovered.status, "ACCEPTED")
+
+        ledger_final = db.get_records("SalesmanStockLedger", fresh=True)
+        wh_final, _ = balances(ledger_final)
+        self.assertEqual(wh_final["PRD-MOONG-200G"], 80)
+        self.assertEqual(wh_final["PRD-GARLIC-200G"], 65)
+        self.assertEqual(wh_final["PRD-CHANA-200G"], 50)
+        self.assertEqual(salesman_available(ledger_final, "USR-SALES-101", "PRD-MOONG-200G"), 20)
+        self.assertEqual(salesman_available(ledger_final, "USR-SALES-101", "PRD-GARLIC-200G"), 15)
+        self.assertEqual(salesman_available(ledger_final, "USR-SALES-101", "PRD-CHANA-200G"), 10)
+
+        pass_txns = [r for r in ledger_final if str(r.get("reference_id")) == pass_resp.pass_number]
+        self.assertEqual(len(pass_txns), 3)
+
+    def test_13_failure_while_updating_pass_status_after_all_movements_and_recovery(self):
+        """Blocker 1: Failure while updating pass status after all movements succeed. Retry updates status with 0 new stock movements."""
+        create_req = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[
+                VanLoadingItem(product_id="PRD-MOONG-200G", quantity=15),
+                VanLoadingItem(product_id="PRD-GARLIC-200G", quantity=10),
+            ],
+        )
+        pass_resp = asyncio.run(stock.create_van_loading_pass(create_req, current_user=self.keeper_user))
+
+        # Inject failure on VanLoadingPasses update
+        db.inject_failure_once("VanLoadingPasses", 1)
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+        self.assertEqual(ctx.exception.status_code, 503)
+
+        # Both items are already recorded in ledger
+        ledger_mid = db.get_records("SalesmanStockLedger", fresh=True)
+        pass_txns_mid = [r for r in ledger_mid if str(r.get("reference_id")) == pass_resp.pass_number]
+        self.assertEqual(len(pass_txns_mid), 2)
+
+        # Pass is still PENDING_ACCEPTANCE
+        curr = asyncio.run(stock.get_van_loading_pass(pass_resp.pass_id, current_user=self.keeper_user))
+        self.assertEqual(curr.status, "PENDING_ACCEPTANCE")
+
+        # Retry: Should verify all movements already present, append 0 new movements, and mark ACCEPTED
+        recovered = asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+        self.assertEqual(recovered.status, "ACCEPTED")
+
+        ledger_final = db.get_records("SalesmanStockLedger", fresh=True)
+        pass_txns_final = [r for r in ledger_final if str(r.get("reference_id")) == pass_resp.pass_number]
+        self.assertEqual(len(pass_txns_final), 2)  # Zero duplicates!
+
+    def test_14_authoritative_warehouse_stock_calculations(self):
+        """Blocker 2: Authoritative warehouse stock calculations. Canonical stock ledger is sole source of truth."""
+        # 1. Packaging records exceed ledger stock: ledger=50, packaging=500 -> available must be 50
+        db.append_record("PackagingBatches", {
+            "batch_id": "PKG-TEST-001",
+            "product_id": "PRD-URAD-500G",
+            "packets_produced": 500,
+            "status": "APPROVED",
+        })
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        comp_bals, _ = balances(ledger)
+        avail = stock._get_available_warehouse_stock("PRD-URAD-500G", comp_bals)
+        self.assertEqual(avail, 50)  # Exactly the 50 from SalesmanStockLedger, NOT 500
+
+        # Requesting 51 must fail even though PackagingBatches shows 500
+        req_51 = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[VanLoadingItem(product_id="PRD-URAD-500G", quantity=51)],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.create_van_loading_pass(req_51, current_user=self.keeper_user))
+        self.assertEqual(ctx.exception.status_code, 422)
+
+        # Requesting exactly 50 (available == requested) must succeed
+        req_50 = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[VanLoadingItem(product_id="PRD-URAD-500G", quantity=50)],
+        )
+        p50 = asyncio.run(stock.create_van_loading_pass(req_50, current_user=self.keeper_user))
+        self.assertEqual(p50.status, "PENDING_ACCEPTANCE")
+
+        # 2. Production records exceed ledger stock
+        db.append_record("ProductionStockLedger", {
+            "stock_txn_id": "PSL-TEST-001",
+            "product_id": "PRD-URAD-500G",
+            "movement_type": "PACKETS_PACKAGED",
+            "quantity_packets": 1000,
+        })
+        avail2 = stock._get_available_warehouse_stock("PRD-URAD-500G", comp_bals)
+        self.assertEqual(avail2, 50)  # Still 50, production ledger does not override
+
+        # 3. Ledger stock is zero while packaging/production shows 1000
+        comp_bals_zero = {"PRD-ZERO-STOCK": 0}
+        avail_zero = stock._get_available_warehouse_stock("PRD-ZERO-STOCK", comp_bals_zero)
+        self.assertEqual(avail_zero, 0)
+
+        # 4. Ledger stock is negative (-5)
+        comp_bals_neg = {"PRD-NEG-STOCK": -5}
+        avail_neg = stock._get_available_warehouse_stock("PRD-NEG-STOCK", comp_bals_neg)
+        self.assertEqual(avail_neg, -5)
+
+    def test_15_concurrent_passes_competing_for_same_warehouse_stock_multiprocessing(self):
+        """Blocker 3: Multiprocessing test with competing passes. Warehouse has 100, Pass A requests 70, Pass B requests 60. Exactly one succeeds."""
+        # Repeat test across 3 iterations to guarantee absolute concurrency stability
+        for iteration in range(3):
+            # Clean and re-seed 100 packets of Moong for this iteration
+            self.setUp()
+
+            # Create Pass A (70 pkts for Salesman 101)
+            req_a = VanLoadingPassCreate(
+                loading_date="2026-11-12",
+                van_number="Van 1",
+                salesman_user_id="USR-SALES-101",
+                items=[VanLoadingItem(product_id="PRD-MOONG-200G", quantity=70)],
+            )
+            pass_a = asyncio.run(stock.create_van_loading_pass(req_a, current_user=self.keeper_user))
+
+            # Create Pass B (60 pkts for Salesman 102)
+            req_b = VanLoadingPassCreate(
+                loading_date="2026-11-12",
+                van_number="Van 2",
+                salesman_user_id="USR-SALES-102",
+                items=[VanLoadingItem(product_id="PRD-MOONG-200G", quantity=60)],
+            )
+            pass_b = asyncio.run(stock.create_van_loading_pass(req_b, current_user=self.keeper_user))
+
+            ctx = multiprocessing.get_context("fork")
+            q = ctx.Queue()
+
+            p1 = ctx.Process(target=_competing_pass_worker, args=(self.test_dir, pass_a.pass_id, self.salesman_101, q))
+            p2 = ctx.Process(target=_competing_pass_worker, args=(self.test_dir, pass_b.pass_id, self.salesman_102, q))
+
+            p1.start()
+            p2.start()
+
+            results = []
+            for _ in range(2):
+                try:
+                    results.append(q.get(timeout=10.0))
+                except Exception:
+                    break
+
+            p1.join(timeout=5.0)
+            p2.join(timeout=5.0)
+
+            self.assertEqual(len(results), 2, f"Iteration {iteration}: Expected 2 results, got {len(results)}")
+            successes = [r for r in results if r.get("success")]
+            failures = [r for r in results if not r.get("success")]
+
+            # Exactly one may succeed
+            self.assertEqual(len(successes), 1, f"Iteration {iteration}: Exactly one pass must succeed: {results}")
+            self.assertEqual(len(failures), 1, f"Iteration {iteration}: Exactly one pass must fail: {results}")
+            self.assertEqual(failures[0].get("status_code"), 422)
+
+            # Check final balances in canonical ledger
+            ledger = db.get_records("SalesmanStockLedger", fresh=True)
+            wh_bal, _ = balances(ledger)
+            final_wh = wh_bal.get("PRD-MOONG-200G", 0)
+
+            # Final warehouse balance must never be negative
+            self.assertGreaterEqual(final_wh, 0, f"Iteration {iteration}: Warehouse balance negative: {final_wh}")
+
+            # Total salesman stock issued must never exceed 100
+            s1_stock = salesman_available(ledger, "USR-SALES-101", "PRD-MOONG-200G")
+            s2_stock = salesman_available(ledger, "USR-SALES-102", "PRD-MOONG-200G")
+            self.assertLessEqual(s1_stock + s2_stock, 100)
+
+            # Exactly one pass was transferred: either 70 or 60
+            self.assertIn(s1_stock + s2_stock, {60, 70})
+            self.assertEqual(final_wh + s1_stock + s2_stock, 100)
+
+    def test_16_safe_state_transitions_and_racing_protection(self):
+        """Blocker 4: Safe state transitions. ACCEPTED cannot be cancelled; CANCELLED cannot be accepted; discrepancy failure fails closed."""
+        create_req = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[VanLoadingItem(product_id="PRD-MOONG-200G", quantity=10)],
+        )
+        pass_resp = asyncio.run(stock.create_van_loading_pass(create_req, current_user=self.keeper_user))
+
+        # 1. Accept the pass
+        asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+
+        # 2. ACCEPTED pass cannot be cancelled
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.cancel_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.keeper_user))
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("Cannot cancel an accepted loading pass", ctx.exception.detail)
+
+        # 3. ACCEPTED pass cannot report discrepancy
+        disc_req = VanLoadingPassDiscrepancy(discrepancy_notes="Count mismatch")
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.report_van_loading_discrepancy(pass_resp.pass_id, disc_req, current_user=self.salesman_101))
+        self.assertEqual(ctx.exception.status_code, 422)
+
+        # 4. Discrepancy persistence failure: Injected failure on StockDiscrepancies
+        p2_req = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[VanLoadingItem(product_id="PRD-GARLIC-200G", quantity=5)],
+        )
+        p2 = asyncio.run(stock.create_van_loading_pass(p2_req, current_user=self.keeper_user))
+
+        db.inject_failure_once("StockDiscrepancies", 1)
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.report_van_loading_discrepancy(p2.pass_id, disc_req, current_user=self.salesman_101))
+        self.assertEqual(ctx.exception.status_code, 503)
+
+        # Pass status remains PENDING_ACCEPTANCE
+        curr = asyncio.run(stock.get_van_loading_pass(p2.pass_id, current_user=self.keeper_user))
+        self.assertEqual(curr.status, "PENDING_ACCEPTANCE")
+
+    def test_17_repeated_retries_during_persistent_outage_then_successful_recovery(self):
+        """Blocker 1 & 5: Repeated retries during persistent outage fail closed, then recover cleanly."""
+        create_req = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[
+                VanLoadingItem(product_id="PRD-MOONG-200G", quantity=10),
+                VanLoadingItem(product_id="PRD-GARLIC-200G", quantity=10),
+            ],
+        )
+        pass_resp = asyncio.run(stock.create_van_loading_pass(create_req, current_user=self.keeper_user))
+
+        # Inject failures on consecutive attempts
+        for attempt in range(3):
+            db.inject_failure_once("SalesmanStockLedger", 1)
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+            self.assertEqual(ctx.exception.status_code, 503)
+
+            # Pass remains PENDING_ACCEPTANCE after each failed attempt
+            curr = asyncio.run(stock.get_van_loading_pass(pass_resp.pass_id, current_user=self.keeper_user))
+            self.assertEqual(curr.status, "PENDING_ACCEPTANCE")
+
+        # Now storage is healthy: retry succeeds
+        recovered = asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+        self.assertEqual(recovered.status, "ACCEPTED")
+
+        # Final balances verified
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-MOONG-200G"), 10)
+        self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-GARLIC-200G"), 10)
+
 
 if __name__ == "__main__":
     unittest.main()
+

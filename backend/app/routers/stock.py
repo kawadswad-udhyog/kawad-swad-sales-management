@@ -1,4 +1,6 @@
 import json
+import collections
+import contextlib
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from fastapi import APIRouter, HTTPException, status, Depends, Query
@@ -638,18 +640,12 @@ def _to_van_loading_pass(record: dict) -> VanLoadingPass:
 
 
 def _get_available_warehouse_stock(product_id: str, company_balances: dict) -> int:
-    avail = company_balances.get(product_id, 0)
-    prod_stock = sum(
-        int(float(p.get("quantity_packets", 0) or 0))
-        for p in db.get_records("ProductionStockLedger", fresh=False)
-        if str(p.get("product_id")) == product_id and str(p.get("movement_type")).upper() == "PACKETS_PACKAGED"
-    )
-    pack_stock = sum(
-        int(float(p.get("packets_produced") or p.get("packets_200g") or p.get("total_packets") or 0))
-        for p in db.get_records("PackagingBatches", fresh=False)
-        if str(p.get("product_id")) == product_id and str(p.get("status", "")).upper() not in {"INCOMPLETE", "FAILED", "REJECTED"}
-    )
-    return max(avail, prod_stock, pack_stock)
+    """
+    Authoritative transferable finished-goods warehouse stock.
+    Strictly derived from the canonical SalesmanStockLedger company balance.
+    Production and packaging totals do NOT silently override the canonical ledger.
+    """
+    return int(company_balances.get(str(product_id), 0) or 0)
 
 
 @router.post("/loading-passes", response_model=VanLoadingPass, dependencies=[Depends(require_sheets_connection)])
@@ -665,18 +661,43 @@ async def create_van_loading_pass(req: VanLoadingPassCreate, current_user: dict 
             detail="You are not authorized to create van loading passes. Contact the warehouse manager or owner."
         )
 
-    # Idempotency check if key provided
-    if req.idempotency_key:
-        existing_passes = db.get_records("VanLoadingPasses", fresh=True)
-        for ep in existing_passes:
-            if str(ep.get("idempotency_key", "")).strip() == req.idempotency_key.strip():
-                return _to_van_loading_pass(ep)
-
     if not req.items:
         raise HTTPException(status_code=422, detail="At least one product item must be loaded.")
 
     van_num = req.van_number.strip().upper()
     salesman_uid = req.salesman_user_id.strip()
+
+    # Block 5: Creation Idempotency
+    # If idempotency key provided, check across processes
+    idem_key = req.idempotency_key.strip() if req.idempotency_key else None
+    if idem_key:
+        with CrossProcessLock("van_loading_create", idem_key):
+            existing_passes = db.get_records("VanLoadingPasses", fresh=True)
+            for ep in existing_passes:
+                if str(ep.get("idempotency_key", "")).strip() == idem_key:
+                    # Compare payload parameters:
+                    ep_van = str(ep.get("van_number", "")).strip().upper()
+                    req_van = van_num
+                    ep_salesman = str(ep.get("salesman_user_id", "")).strip()
+                    req_salesman = salesman_uid
+
+                    try:
+                        ep_items_raw = ep.get("items_json") or "[]"
+                        ep_items_data = json.loads(ep_items_raw) if isinstance(ep_items_raw, str) else ep_items_raw
+                    except Exception:
+                        ep_items_data = []
+
+                    ep_item_map = {str(it.get("product_id")): int(it.get("quantity", 0)) for it in ep_items_data}
+                    req_item_map = collections.defaultdict(int)
+                    for it in req.items:
+                        req_item_map[str(it.product_id)] += int(it.quantity)
+
+                    if ep_van != req_van or ep_salesman != req_salesman or ep_item_map != dict(req_item_map):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="Conflict: Idempotency key reused with conflicting request payload parameters."
+                        )
+                    return _to_van_loading_pass(ep)
 
     # Verify salesman user exists
     users = {str(u.get("user_id")): u for u in db.get_records("Users", fresh=True)}
@@ -685,15 +706,13 @@ async def create_van_loading_pass(req: VanLoadingPassCreate, current_user: dict 
         raise HTTPException(status_code=404, detail=f"Assigned salesman {salesman_uid} not found in system.")
     salesman_name = str(salesman_user.get("full_name") or salesman_uid)
 
-    # Verify products and check warehouse stock availability
+    # Verify products and check canonical warehouse stock availability
     products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
     ledger = db.get_records("SalesmanStockLedger", fresh=True)
     company_balances, _ = balances(ledger)
 
-    hydrated_items: List[VanLoadingItem] = []
-    total_packets = 0
-    total_weight_kg = 0.0
-
+    # Consolidate items by product_id
+    consolidated_items: Dict[str, VanLoadingItem] = {}
     for itm in req.items:
         p_info = products.get(itm.product_id)
         if not p_info:
@@ -707,63 +726,76 @@ async def create_van_loading_pass(req: VanLoadingPassCreate, current_user: dict 
         pack_weight_g = int(float(p_info.get("pack_weight_g", 500) or 500))
         weight_kg = round(itm.quantity * pack_weight_g / 1000.0, 3)
 
-        # Rule 3: Warehouse stock cannot become negative; prevent loading more than available
+        if itm.product_id in consolidated_items:
+            existing = consolidated_items[itm.product_id]
+            existing.quantity += itm.quantity
+            existing.weight_kg = round(existing.weight_kg + weight_kg, 3)
+            if itm.notes:
+                existing.notes = f"{existing.notes}; {itm.notes}".strip("; ")
+        else:
+            consolidated_items[itm.product_id] = VanLoadingItem(
+                product_id=itm.product_id,
+                product_name=p_name,
+                sku=sku,
+                pack_weight_g=pack_weight_g,
+                quantity=itm.quantity,
+                weight_kg=weight_kg,
+                notes=itm.notes or "",
+            )
+
+    hydrated_items = list(consolidated_items.values())
+    total_packets = 0
+    total_weight_kg = 0.0
+
+    # Rule 3: Authoritative stock check; warehouse stock cannot become negative
+    for itm in hydrated_items:
         available_wh = _get_available_warehouse_stock(itm.product_id, company_balances)
         if itm.quantity > available_wh:
             raise HTTPException(
                 status_code=422,
-                detail=f"Insufficient warehouse stock for {p_name} ({sku}). Available: {available_wh} packets, Requested: {itm.quantity} packets."
+                detail=f"Insufficient warehouse stock for {itm.product_name} ({itm.sku}). Available: {available_wh} packets, Requested: {itm.quantity} packets."
             )
-
-        hydrated_items.append(VanLoadingItem(
-            product_id=itm.product_id,
-            product_name=p_name,
-            sku=sku,
-            pack_weight_g=pack_weight_g,
-            quantity=itm.quantity,
-            weight_kg=weight_kg,
-            notes=itm.notes or "",
-        ))
         total_packets += itm.quantity
-        total_weight_kg += weight_kg
+        total_weight_kg += itm.weight_kg
 
     loading_date = (req.loading_date or business_today()).strip()
     date_compact = loading_date.replace("-", "")
 
-    # Generate pass ID and human-readable Pass Number (e.g., LP-20261112-001)
-    pass_id = db.generate_id("VanLoadingPasses")
-    existing_passes = db.get_records("VanLoadingPasses", fresh=True)
-    today_passes = [p for p in existing_passes if str(p.get("loading_date", "")).replace("-", "") == date_compact]
-    seq = len(today_passes) + 1
-    pass_number = f"LP-{date_compact}-{seq:03d}"
-
+    # Atomic sequential pass number generation
     creator_name = str(current_user.get("full_name") or user_id)
     now = now_iso()
 
-    record = {
-        "pass_id": pass_id,
-        "pass_number": pass_number,
-        "loading_date": loading_date,
-        "van_number": van_num,
-        "salesman_user_id": salesman_uid,
-        "salesman_name": salesman_name,
-        "created_by_user_id": user_id,
-        "created_by_name": creator_name,
-        "status": "PENDING_ACCEPTANCE",
-        "total_skus": len(hydrated_items),
-        "total_packets": total_packets,
-        "total_weight_kg": round(total_weight_kg, 3),
-        "items_json": json.dumps([i.dict() for i in hydrated_items]),
-        "created_at": now,
-        "accepted_at": "",
-        "accepted_by_user_id": "",
-        "discrepancy_notes": "",
-        "idempotency_key": req.idempotency_key or "",
-        "notes": req.notes or "",
-    }
+    with CrossProcessLock("van_loading_seq", date_compact):
+        pass_id = db.generate_id("VanLoadingPasses")
+        existing_passes = db.get_records("VanLoadingPasses", fresh=True)
+        today_passes = [p for p in existing_passes if str(p.get("loading_date", "")).replace("-", "") == date_compact]
+        seq = len(today_passes) + 1
+        pass_number = f"LP-{date_compact}-{seq:03d}"
 
-    if not db.append_record("VanLoadingPasses", record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Failed to save Van Loading Pass to persistent storage.")
+        record = {
+            "pass_id": pass_id,
+            "pass_number": pass_number,
+            "loading_date": loading_date,
+            "van_number": van_num,
+            "salesman_user_id": salesman_uid,
+            "salesman_name": salesman_name,
+            "created_by_user_id": user_id,
+            "created_by_name": creator_name,
+            "status": "PENDING_ACCEPTANCE",
+            "total_skus": len(hydrated_items),
+            "total_packets": total_packets,
+            "total_weight_kg": round(total_weight_kg, 3),
+            "items_json": json.dumps([i.dict() for i in hydrated_items]),
+            "created_at": now,
+            "accepted_at": "",
+            "accepted_by_user_id": "",
+            "discrepancy_notes": "",
+            "idempotency_key": req.idempotency_key or "",
+            "notes": req.notes or "",
+        }
+
+        if not db.append_record("VanLoadingPasses", record, raise_on_error=True):
+            raise HTTPException(status_code=503, detail="Failed to save Van Loading Pass to persistent storage.")
 
     db.log_audit(
         actor=user_id,
@@ -855,8 +887,23 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
             detail=f"Unauthorized: You cannot accept a loading pass assigned to another salesman ({assigned_salesman})."
         )
 
-    # Mutual exclusion lock across processes for safe custody handshake
-    with CrossProcessLock("van_loading", pass_id):
+    # Decode items to determine products for safe per-product isolation and ordered locking
+    items_raw = match.get("items_json") or "[]"
+    try:
+        items_data = json.loads(items_raw) if isinstance(items_raw, str) else (items_raw or [])
+    except Exception:
+        items_data = []
+    items = [VanLoadingItem(**it) for it in items_data]
+    sorted_pids = sorted(list({str(it.product_id) for it in items}))
+
+    # Multi-resource locking:
+    # 1. Shared pass-level state-transition lock ("van_loading_pass", pass_id)
+    # 2. Per-product stock locks in strictly sorted order ("stock_product", pid) to prevent inter-pass race conditions & deadlocks
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(CrossProcessLock("van_loading_pass", pass_id))
+        for pid in sorted_pids:
+            stack.enter_context(CrossProcessLock("stock_product", pid))
+
         # Refresh state inside the lock
         fresh_passes = db.get_records("VanLoadingPasses", fresh=True)
         curr = next((p for p in fresh_passes if str(p.get("pass_id")) == pass_id), None)
@@ -869,39 +916,48 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
         if current_status == "ACCEPTED":
             return _to_van_loading_pass(curr)
 
-        # Rule 6 & 9: Completed or cancelled loading passes cannot be accepted
+        # Rule 6 & 9: Completed, cancelled, or discrepant loading passes cannot be accepted
         if current_status == "CANCELLED":
             raise HTTPException(status_code=422, detail="Cannot accept a cancelled loading pass.")
 
-        # Re-verify warehouse stock availability at the exact moment of acceptance
-        items_raw = curr.get("items_json") or "[]"
-        try:
-            items_data = json.loads(items_raw) if isinstance(items_raw, str) else (items_raw or [])
-        except Exception:
-            items_data = []
-        items = [VanLoadingItem(**it) for it in items_data]
+        if current_status == "DISCREPANCY_REPORTED":
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot accept a loading pass with a reported discrepancy. Discrepancy must be resolved first."
+            )
 
-        ledger = db.get_records("SalesmanStockLedger", fresh=True)
-        company_balances, _ = balances(ledger)
-
-        for itm in items:
-            avail_wh = _get_available_warehouse_stock(itm.product_id, company_balances)
-            if itm.quantity > avail_wh:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Cannot complete transfer: Warehouse stock for {itm.product_name or itm.sku} is no longer sufficient (Available: {avail_wh}, Required: {itm.quantity})."
-                )
-
-        now = now_iso()
         pass_num = str(curr.get("pass_number"))
         van_num = str(curr.get("van_number"))
         creator_uid = str(curr.get("created_by_user_id"))
 
-        # Step D: Complete Transfer atomically in SalesmanStockLedger
-        # Check if movements for this pass number were already recorded to guarantee idempotency
-        existing_refs = {str(r.get("reference_id", "")) for r in ledger}
-        if pass_num not in existing_refs:
-            for itm in items:
+        # Refresh canonical SalesmanStockLedger inside the lock
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        transferred_by_prod = collections.defaultdict(int)
+        for tx in ledger:
+            if str(tx.get("reference_id", "")).strip() == pass_num and str(tx.get("txn_type", "")).upper() == "ISSUE_TO_SALESMAN":
+                transferred_by_prod[str(tx.get("product_id"))] += int(float(tx.get("quantity", 0) or 0))
+
+        # Track movement completion per product
+        untransferred_items = []
+        for itm in items:
+            already = transferred_by_prod.get(itm.product_id, 0)
+            if already < itm.quantity:
+                remaining = itm.quantity - already
+                untransferred_items.append((itm, remaining))
+
+        if untransferred_items:
+            # Re-verify authoritative warehouse stock availability for untransferred items
+            company_balances, _ = balances(ledger)
+            for itm, remaining_qty in untransferred_items:
+                avail_wh = _get_available_warehouse_stock(itm.product_id, company_balances)
+                if remaining_qty > avail_wh:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Cannot complete transfer: Warehouse stock for {itm.product_name or itm.sku} is no longer sufficient (Available: {avail_wh}, Required: {remaining_qty})."
+                    )
+
+            now = now_iso()
+            for itm, qty_to_transfer in untransferred_items:
                 stk_id = db.generate_id("SalesmanStockLedger")
                 stk_record = {
                     "stock_txn_id": stk_id,
@@ -911,8 +967,8 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
                     "product_id": itm.product_id,
                     "sku_snapshot": itm.sku or itm.product_id,
                     "txn_type": "ISSUE_TO_SALESMAN",
-                    "quantity": itm.quantity,
-                    "quantity_packets": itm.quantity,
+                    "quantity": qty_to_transfer,
+                    "quantity_packets": qty_to_transfer,
                     "unit": "PACKET",
                     "pack_weight_g": itm.pack_weight_g or 500,
                     "related_sale_id": "",
@@ -922,19 +978,45 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
                     "reference_id": pass_num,
                     "notes": f"Van Loading Pass {pass_num} for Van {van_num}",
                 }
-                if not db.append_record("SalesmanStockLedger", stk_record, raise_on_error=True):
-                    raise HTTPException(status_code=503, detail="Failed to record stock movement in SalesmanStockLedger.")
+                try:
+                    if not db.append_record("SalesmanStockLedger", stk_record, raise_on_error=True):
+                        raise HTTPException(status_code=503, detail=f"Failed to record stock movement for {itm.product_name} in SalesmanStockLedger.")
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    raise HTTPException(status_code=503, detail=f"Failed to record stock movement for {itm.product_name} in SalesmanStockLedger: {exc}")
 
-        # Update VanLoadingPasses status
+        # Post-transfer complete verification: Every expected product movement must be verified
+        verified_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        verified_by_prod = collections.defaultdict(int)
+        for tx in verified_ledger:
+            if str(tx.get("reference_id", "")).strip() == pass_num and str(tx.get("txn_type", "")).upper() == "ISSUE_TO_SALESMAN":
+                verified_by_prod[str(tx.get("product_id"))] += int(float(tx.get("quantity", 0) or 0))
+
+        for itm in items:
+            total_done = verified_by_prod.get(itm.product_id, 0)
+            if total_done < itm.quantity:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Incomplete transfer: Verified {total_done} of {itm.quantity} packets for {itm.product_name}. Pass remains pending."
+                )
+
+        # Update VanLoadingPasses status to ACCEPTED
         action_notes = (req.notes if req else "") or ""
+        now = now_iso()
         update_payload = {
             "status": "ACCEPTED",
             "accepted_at": now,
             "accepted_by_user_id": user_id,
             "notes": f"{curr.get('notes', '')} [Accepted by {user_id} at {now}{': ' + action_notes if action_notes else ''}]".strip(),
         }
-        if not db.update_record("VanLoadingPasses", "pass_id", pass_id, update_payload, raise_on_error=True):
-            raise HTTPException(status_code=503, detail="Failed to update loading pass status to ACCEPTED.")
+        try:
+            if not db.update_record("VanLoadingPasses", "pass_id", pass_id, update_payload, raise_on_error=True):
+                raise HTTPException(status_code=503, detail="Failed to update loading pass status to ACCEPTED.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Failed to update loading pass status to ACCEPTED: {exc}")
 
         curr.update(update_payload)
 
@@ -966,65 +1048,91 @@ async def report_van_loading_discrepancy(pass_id_or_number: str, req: VanLoading
         raise HTTPException(status_code=403, detail="You can only report discrepancies on your assigned van's loading pass.")
 
     pass_id = str(match.get("pass_id"))
-    curr_status = str(match.get("status", "")).strip().upper()
-    if curr_status == "ACCEPTED":
-        raise HTTPException(
-            status_code=422,
-            detail="Loading pass has already been accepted and stock transferred. Use physical stock discrepancy reporting to record adjustments."
+
+    # Shared pass-level state-transition lock
+    with CrossProcessLock("van_loading_pass", pass_id):
+        fresh_passes = db.get_records("VanLoadingPasses", fresh=True)
+        curr = next((p for p in fresh_passes if str(p.get("pass_id")) == pass_id), None)
+        if not curr:
+            raise HTTPException(status_code=404, detail="Van loading pass not found.")
+
+        curr_status = str(curr.get("status", "")).strip().upper()
+        if curr_status == "ACCEPTED":
+            raise HTTPException(
+                status_code=422,
+                detail="Loading pass has already been accepted and stock transferred. Cannot report loading discrepancy."
+            )
+        if curr_status == "CANCELLED":
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot report discrepancy on a cancelled loading pass."
+            )
+        if curr_status == "DISCREPANCY_REPORTED":
+            return _to_van_loading_pass(curr)
+
+        discrepancy_text = req.discrepancy_notes.strip()
+        if not discrepancy_text:
+            raise HTTPException(status_code=422, detail="Discrepancy notes are required.")
+
+        now = now_iso()
+        pass_num = str(curr.get("pass_number"))
+        van_num = str(curr.get("van_number"))
+
+        # Durable discrepancy persistence: Record in StockDiscrepancies FIRST
+        disc_id = db.generate_id("StockDiscrepancies")
+        disc_row = {
+            "discrepancy_id": disc_id,
+            "discrepancy_date": business_today(),
+            "location": f"VAN_{van_num}",
+            "product_id": "",
+            "product_name_snapshot": f"Van Loading Discrepancy - {pass_num}",
+            "expected_stock": curr.get("total_packets", 0),
+            "physical_count": 0,
+            "difference": 0,
+            "reason": f"Discrepancy on {pass_num} for Van {van_num}: {discrepancy_text}",
+            "counted_by_user_id": user_id,
+            "reviewed_by_user_id": "",
+            "status": "PENDING_APPROVAL",
+            "approved_adjustment": 0,
+            "created_at": now,
+        }
+        try:
+            if not db.append_record("StockDiscrepancies", disc_row, raise_on_error=True):
+                raise HTTPException(status_code=503, detail="Failed to persist stock discrepancy record.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Failed to persist stock discrepancy record: {exc}")
+
+        update_payload = {
+            "status": "DISCREPANCY_REPORTED",
+            "discrepancy_notes": discrepancy_text,
+            "notes": f"{curr.get('notes', '')} [Discrepancy reported by {user_id} at {now}: {discrepancy_text}]".strip(),
+        }
+        try:
+            if not db.update_record("VanLoadingPasses", "pass_id", pass_id, update_payload, raise_on_error=True):
+                raise HTTPException(status_code=503, detail="Failed to update loading pass status to DISCREPANCY_REPORTED.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Failed to update loading pass status to DISCREPANCY_REPORTED: {exc}")
+
+        curr.update(update_payload)
+
+        db.log_audit(
+            actor=user_id,
+            action="REPORT_VAN_LOADING_DISCREPANCY",
+            entity_type="VanLoadingPasses",
+            entity_id=pass_id,
+            reason=f"Discrepancy on loading pass {pass_num} reported by {user_id}: {discrepancy_text}"
         )
 
-    discrepancy_text = req.discrepancy_notes.strip()
-    if not discrepancy_text:
-        raise HTTPException(status_code=422, detail="Discrepancy notes are required.")
-
-    now = now_iso()
-    pass_num = str(match.get("pass_number"))
-    van_num = str(match.get("van_number"))
-
-    update_payload = {
-        "status": "DISCREPANCY_REPORTED",
-        "discrepancy_notes": discrepancy_text,
-        "notes": f"{match.get('notes', '')} [Discrepancy reported by {user_id} at {now}: {discrepancy_text}]".strip(),
-    }
-    if not db.update_record("VanLoadingPasses", "pass_id", pass_id, update_payload, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Failed to record discrepancy on loading pass.")
-
-    # Also log to StockDiscrepancies so warehouse manager is alerted
-    disc_id = db.generate_id("StockDiscrepancies")
-    disc_row = {
-        "discrepancy_id": disc_id,
-        "discrepancy_date": business_today(),
-        "location": f"VAN_{van_num}",
-        "product_id": "",
-        "product_name_snapshot": f"Van Loading Discrepancy - {pass_num}",
-        "expected_stock": match.get("total_packets", 0),
-        "physical_count": 0,
-        "difference": 0,
-        "reason": f"Discrepancy on {pass_num} for Van {van_num}: {discrepancy_text}",
-        "counted_by_user_id": user_id,
-        "reviewed_by_user_id": "",
-        "status": "PENDING_APPROVAL",
-        "approved_adjustment": 0,
-        "created_at": now,
-    }
-    db.append_record("StockDiscrepancies", disc_row)
-
-    db.log_audit(
-        actor=user_id,
-        action="REPORT_VAN_LOADING_DISCREPANCY",
-        entity_type="VanLoadingPasses",
-        entity_id=pass_id,
-        reason=f"Discrepancy on loading pass {pass_num} reported by {user_id}: {discrepancy_text}"
-    )
-
-    match.update(update_payload)
-    return _to_van_loading_pass(match)
+        return _to_van_loading_pass(curr)
 
 
 @router.post("/loading-passes/{pass_id_or_number}/cancel", response_model=VanLoadingPass, dependencies=[Depends(require_sheets_connection)])
 async def cancel_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingPassActionReq] = None, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id", ""))
-    role = role_of(current_user)
 
     target = pass_id_or_number.strip()
     records = db.get_records("VanLoadingPasses", fresh=True)
@@ -1037,32 +1145,48 @@ async def cancel_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
         raise HTTPException(status_code=403, detail="Only the creator or a manager can cancel this loading pass.")
 
     pass_id = str(match.get("pass_id"))
-    curr_status = str(match.get("status", "")).strip().upper()
-    if curr_status == "ACCEPTED":
-        raise HTTPException(
-            status_code=422,
-            detail="Cannot cancel an accepted loading pass. Stock has already been transferred; an authorized return is required."
+
+    # Shared pass-level state-transition lock
+    with CrossProcessLock("van_loading_pass", pass_id):
+        fresh_passes = db.get_records("VanLoadingPasses", fresh=True)
+        curr = next((p for p in fresh_passes if str(p.get("pass_id")) == pass_id), None)
+        if not curr:
+            raise HTTPException(status_code=404, detail="Van loading pass not found.")
+
+        curr_status = str(curr.get("status", "")).strip().upper()
+        if curr_status == "ACCEPTED":
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot cancel an accepted loading pass. Stock has already been transferred; an authorized return is required."
+            )
+        if curr_status == "CANCELLED":
+            return _to_van_loading_pass(curr)
+
+        cancel_reason = (req.notes if req else "") or "Cancelled by user"
+        now = now_iso()
+        update_payload = {
+            "status": "CANCELLED",
+            "notes": f"{curr.get('notes', '')} [Cancelled by {user_id} at {now}: {cancel_reason}]".strip(),
+        }
+        try:
+            if not db.update_record("VanLoadingPasses", "pass_id", pass_id, update_payload, raise_on_error=True):
+                raise HTTPException(status_code=503, detail="Failed to update loading pass status to CANCELLED.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Failed to update loading pass status to CANCELLED: {exc}")
+
+        curr.update(update_payload)
+
+        db.log_audit(
+            actor=user_id,
+            action="CANCEL_VAN_LOADING_PASS",
+            entity_type="VanLoadingPasses",
+            entity_id=pass_id,
+            reason=f"Cancelled van loading pass {curr.get('pass_number')}: {cancel_reason}"
         )
 
-    cancel_reason = (req.notes if req else "") or "Cancelled by user"
-    now = now_iso()
-    update_payload = {
-        "status": "CANCELLED",
-        "notes": f"{match.get('notes', '')} [Cancelled by {user_id} at {now}: {cancel_reason}]".strip(),
-    }
-    if not db.update_record("VanLoadingPasses", "pass_id", pass_id, update_payload, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Failed to update loading pass status to CANCELLED.")
-
-    db.log_audit(
-        actor=user_id,
-        action="CANCEL_VAN_LOADING_PASS",
-        entity_type="VanLoadingPasses",
-        entity_id=pass_id,
-        reason=f"Cancelled van loading pass {match.get('pass_number')}: {cancel_reason}"
-    )
-
-    match.update(update_payload)
-    return _to_van_loading_pass(match)
+        return _to_van_loading_pass(curr)
 
 
 
