@@ -112,75 +112,81 @@ class CrossProcessLock:
             self._close_fd()
 
 
+_REGISTRY_LOCK = threading.RLock()
+
+
 def get_cross_process_reservation(approval_id: str) -> Optional[Dict[str, Any]]:
     clean_id = str(approval_id).strip()
-    if not os.path.exists(_STATE_FILE):
-        return None
-    try:
-        with open(_STATE_FILE, "r") as f:
-            data = json.load(f)
-            return data.get("approvals", {}).get(clean_id)
-    except json.JSONDecodeError as exc:
-        logging.error("Corrupted cross-process state file: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail=f"Cross-process reservation state is corrupted: {exc}"
-        ) from exc
-    except Exception as exc:
-        logging.error("Error reading cross-process reservation for %s: %s", clean_id, exc)
-        raise HTTPException(
-            status_code=503,
-            detail=f"Error accessing cross-process reservation state: {exc}"
-        ) from exc
+    with _REGISTRY_LOCK, CrossProcessLock("registry", "global"):
+        if not os.path.exists(_STATE_FILE):
+            return None
+        try:
+            with open(_STATE_FILE, "r") as f:
+                data = json.load(f)
+                return data.get("approvals", {}).get(clean_id)
+        except json.JSONDecodeError as exc:
+            logging.error("Corrupted cross-process state file: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cross-process reservation state is corrupted: {exc}"
+            ) from exc
+        except Exception as exc:
+            logging.error("Error reading cross-process reservation for %s: %s", clean_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Error accessing cross-process reservation state: {exc}"
+            ) from exc
 
 
 def set_cross_process_reservation(approval_id: str, state: Optional[Dict[str, Any]]) -> None:
     clean_id = str(approval_id).strip()
-    try:
-        state_dir = os.path.dirname(_STATE_FILE) or "."
-        os.makedirs(state_dir, exist_ok=True)
-        data = {}
-        if os.path.exists(_STATE_FILE):
-            try:
-                with open(_STATE_FILE, "r") as f:
-                    data = json.load(f)
-            except json.JSONDecodeError as exc:
-                logging.error("Corrupted cross-process state file during write: %s", exc)
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Cross-process reservation state is corrupted: {exc}"
-                ) from exc
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Could not read cross-process state file: {exc}"
-                ) from exc
-        approvals = data.setdefault("approvals", {})
-        if state is None:
-            approvals.pop(clean_id, None)
-        else:
-            approvals[clean_id] = state
-        tmp_file = f"{_STATE_FILE}.tmp.{os.getpid()}_{time.time_ns()}"
-        with open(tmp_file, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp_file, _STATE_FILE)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logging.error("Could not persist cross-process reservation for %s: %s", clean_id, exc)
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to persist cross-process reservation for approval {clean_id}: {exc}"
-        ) from exc
+    with _REGISTRY_LOCK, CrossProcessLock("registry", "global"):
+        try:
+            state_dir = os.path.dirname(_STATE_FILE) or "."
+            os.makedirs(state_dir, exist_ok=True)
+            data = {}
+            if os.path.exists(_STATE_FILE):
+                try:
+                    with open(_STATE_FILE, "r") as f:
+                        data = json.load(f)
+                except json.JSONDecodeError as exc:
+                    logging.error("Corrupted cross-process state file during write: %s", exc)
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Cross-process reservation state is corrupted: {exc}"
+                    ) from exc
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Could not read cross-process state file: {exc}"
+                    ) from exc
+            approvals = data.setdefault("approvals", {})
+            if state is None:
+                approvals.pop(clean_id, None)
+            else:
+                approvals[clean_id] = state
+            tmp_file = f"{_STATE_FILE}.tmp.{os.getpid()}_{time.time_ns()}"
+            with open(tmp_file, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp_file, _STATE_FILE)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logging.error("Could not persist cross-process reservation for %s: %s", clean_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to persist cross-process reservation for approval {clean_id}: {exc}"
+            ) from exc
 
 
 def reset_cross_process_state() -> None:
     """Resets cross-process concurrency state file (used during test setup)."""
-    try:
-        if os.path.exists(_STATE_FILE):
-            os.remove(_STATE_FILE)
-    except Exception as exc:
-        logging.warning("Error resetting cross-process state: %s", exc)
+    with _REGISTRY_LOCK, CrossProcessLock("registry", "global"):
+        try:
+            if os.path.exists(_STATE_FILE):
+                os.remove(_STATE_FILE)
+        except Exception as exc:
+            logging.warning("Error resetting cross-process state: %s", exc)
 
 
 _APPROVAL_LOCKS: Dict[str, threading.RLock] = {}

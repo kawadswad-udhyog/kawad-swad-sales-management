@@ -9,6 +9,8 @@ import asyncio
 import builtins
 import multiprocessing
 import os
+import shutil
+import tempfile
 import threading
 import time
 import unittest
@@ -42,13 +44,94 @@ from app.accounting.customer_ledger import (
 )
 
 
+def _mp_credit_sale_worker(req_dict, user_dict, shared_dir, barrier, out_q):
+    os.environ["SALES_TESTING"] = "1"
+    os.environ["SALES_AUTH_MOCK"] = "1"
+    os.environ["SALES_SHARED_TEST_DIR"] = shared_dir
+    from app.sheets import db
+    db.enable_shared_file_store(shared_dir)
+    from app.routers.sales import create_sale
+    from app.models import SaleCreate, SaleItemCreate
+
+    items = [SaleItemCreate(**it) for it in req_dict["items"]]
+    req = SaleCreate(
+        salesman_user_id=req_dict["salesman_user_id"],
+        customer_id=req_dict["customer_id"],
+        payment_method=req_dict["payment_method"],
+        cash_collected=req_dict["cash_collected"],
+        credit_amount=req_dict["credit_amount"],
+        items=items,
+        idempotency_key=req_dict.get("idempotency_key"),
+    )
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        barrier.wait(timeout=5)
+        res = loop.run_until_complete(create_sale(req, current_user=user_dict))
+        out_q.put(("SUCCESS", res.sale_id, float(res.credit_amount)))
+    except HTTPException as exc:
+        out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
+    except Exception as exc:
+        out_q.put(("ERR", str(exc)))
+    finally:
+        loop.close()
+
+
+def _mp_idemp_sale_worker(req_dict, user_dict, shared_dir, barrier, out_q):
+    os.environ["SALES_TESTING"] = "1"
+    os.environ["SALES_AUTH_MOCK"] = "1"
+    os.environ["SALES_SHARED_TEST_DIR"] = shared_dir
+    from app.sheets import db
+    db.enable_shared_file_store(shared_dir)
+    from app.routers.sales import create_sale
+    from app.models import SaleCreate, SaleItemCreate
+
+    items = [SaleItemCreate(**it) for it in req_dict["items"]]
+    req = SaleCreate(
+        salesman_user_id=req_dict["salesman_user_id"],
+        customer_id=req_dict["customer_id"],
+        payment_method=req_dict["payment_method"],
+        cash_collected=req_dict["cash_collected"],
+        credit_amount=req_dict["credit_amount"],
+        items=items,
+        idempotency_key=req_dict["idempotency_key"],
+    )
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        barrier.wait(timeout=5)
+        res = loop.run_until_complete(create_sale(req, current_user=user_dict))
+        out_q.put(("SUCCESS", res.sale_id, res.bill_number))
+    except HTTPException as exc:
+        out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
+    except Exception as exc:
+        out_q.put(("ERR", str(exc)))
+    finally:
+        loop.close()
+
+
+def _mp_reservation_worker(approval_id, sale_id, customer_id, credit_amt, barrier, out_q):
+    try:
+        barrier.wait(timeout=5)
+        ok = reserve_credit_approval(approval_id, sale_id, customer_id, credit_amt)
+        out_q.put(("SUCCESS", approval_id, sale_id))
+    except HTTPException as exc:
+        out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
+    except Exception as exc:
+        out_q.put(("ERR", str(exc)))
+
+
 class TestPhase141FailureInjection(unittest.TestCase):
     def setUp(self):
+        db.disable_shared_file_store()
         db.memory_store = {tab: [] for tab in db.memory_store}
         reset_cross_process_state()
         self._seed_core_data()
 
     def tearDown(self):
+        db.disable_shared_file_store()
         reset_cross_process_state()
 
     def _seed_core_data(self):
@@ -1354,100 +1437,281 @@ class TestPhase141FailureInjection(unittest.TestCase):
     def test_30_customer_credit_limit_competition_across_separate_processes(self):
         """
         Failure Injection 30:
-        Customer credit-limit competition across separate OS processes.
-        Two processes synchronize on multiprocessing.Barrier(2) and compete on
-        CrossProcessLock("customer", "CUS-PROC-30").
-        The first process acquires the exclusive lock and holds it while processing;
-        the competing process is locked out and fails closed with HTTP 503.
-        Verifies mutual exclusion on the shared filesystem lock across OS processes.
+        Actual customer credit concurrency test across separate OS processes.
+        - Customer credit limit: ₹1,000.
+        - Two independent processes simultaneously attempt credit sales of ₹700 each.
+        - Both execute the actual credit-control validation in create_sale().
+        - Both use shared persistent test storage (JSON file store).
+        - Exactly one sale may be completed.
+        - Final outstanding must be ₹700, never ₹1,400.
+        - Verify no duplicate payment or journal records.
         """
-        barrier = multiprocessing.Barrier(2)
-        q = multiprocessing.Queue()
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_credit_shared_")
+        try:
+            db.append_record("Customers", {
+                "customer_id": "CUS-CONC-30",
+                "shop_name": "Agrawal Concurrency Kirana",
+                "credit_limit": 1000.0,
+                "max_overdue_days": 30,
+                "active": "TRUE",
+            })
+            db.enable_shared_file_store(temp_dir)
 
-        def proc_worker(cid, proc_name, b, out_q):
-            try:
-                b.wait(timeout=5)
-                # Attempt to acquire customer credit lock with a small timeout
-                with cl.CrossProcessLock("customer", cid, timeout=0.1):
-                    out_q.put(("ACQUIRED", proc_name))
-                    time.sleep(0.25)  # Hold lock during critical financial check
-                out_q.put(("RELEASED", proc_name))
-            except HTTPException as exc:
-                out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
-            except Exception as e:
-                out_q.put(("ERR", str(e)))
+            req1_dict = {
+                "salesman_user_id": "USR-SALES-01",
+                "customer_id": "CUS-CONC-30",
+                "payment_method": "CREDIT",
+                "cash_collected": 0.0,
+                "credit_amount": 700.0,
+                "items": [{"product_id": "PRD-PAPAD-200G", "quantity": 14, "actual_unit_price": 50.0}],
+                "idempotency_key": "credit-race-sale-1",
+            }
+            req2_dict = {
+                "salesman_user_id": "USR-SALES-01",
+                "customer_id": "CUS-CONC-30",
+                "payment_method": "CREDIT",
+                "cash_collected": 0.0,
+                "credit_amount": 700.0,
+                "items": [{"product_id": "PRD-PAPAD-200G", "quantity": 14, "actual_unit_price": 50.0}],
+                "idempotency_key": "credit-race-sale-2",
+            }
 
-        p1 = multiprocessing.Process(target=proc_worker, args=("CUS-PROC-30", "P1", barrier, q))
-        p2 = multiprocessing.Process(target=proc_worker, args=("CUS-PROC-30", "P2", barrier, q))
-        p1.start()
-        p2.start()
-        p1.join(timeout=10)
-        p2.join(timeout=10)
+            barrier = multiprocessing.Barrier(2)
+            q = multiprocessing.Queue()
 
-        events = []
-        while not q.empty():
-            events.append(q.get())
+            p1 = multiprocessing.Process(
+                target=_mp_credit_sale_worker,
+                args=(req1_dict, self.salesman_user, temp_dir, barrier, q),
+            )
+            p2 = multiprocessing.Process(
+                target=_mp_credit_sale_worker,
+                args=(req2_dict, self.salesman_user, temp_dir, barrier, q),
+            )
+            p1.start()
+            p2.start()
+            p1.join(timeout=10)
+            p2.join(timeout=10)
 
-        acquired_events = [e for e in events if e[0] == "ACQUIRED"]
-        http_errors = [e for e in events if e[0] == "HTTP_ERR"]
+            results = []
+            while not q.empty():
+                results.append(q.get())
 
-        # Exactly one process acquired the lock during concurrency window
-        self.assertEqual(len(acquired_events), 1, f"Expected exactly 1 process to acquire lock, got: {events}")
-        self.assertEqual(len(http_errors), 1, f"Expected 1 process to fail closed with HTTP error, got: {events}")
-        self.assertEqual(http_errors[0][1], 503)
-        self.assertIn("Lock timeout", http_errors[0][2])
+            successes = [r for r in results if r[0] == "SUCCESS"]
+            http_errors = [r for r in results if r[0] == "HTTP_ERR"]
 
-        # Verify filesystem lock file exists and was exercised
-        lock_file = os.path.join(cl._LOCK_DIR, "customer_CUS-PROC-30.lock")
-        self.assertTrue(os.path.exists(lock_file), f"Expected customer lock file {lock_file} to exist")
+            # 1. Exactly one sale completed
+            self.assertEqual(len(successes), 1, f"Expected exactly 1 sale to complete, got: {results}")
+            self.assertEqual(len(http_errors), 1, f"Expected exactly 1 sale to be rejected, got: {results}")
+            self.assertEqual(http_errors[0][1], 400)
+            self.assertTrue(
+                "credit limit" in http_errors[0][2].lower() or "limit exceeded" in http_errors[0][2].lower(),
+                f"Expected credit limit exceeded in detail, got: {http_errors[0][2]}"
+            )
+
+            winning_sale_id = successes[0][1]
+
+            # 2. Exactly one sale record exists in shared storage
+            sales = [
+                s for s in db.get_records("Sales", fresh=True)
+                if str(s.get("customer_id")) == "CUS-CONC-30" and str(s.get("txn_status")).upper() == "COMPLETE"
+            ]
+            self.assertEqual(len(sales), 1, "Exactly one completed sale record must exist in Sales storage")
+            self.assertEqual(str(sales[0].get("sale_id")), winning_sale_id)
+
+            # 3. Final outstanding must be ₹700, NEVER ₹1,400
+            outstanding = cl.calculate_customer_outstanding("CUS-CONC-30")
+            self.assertEqual(float(outstanding), 700.0)
+            self.assertNotEqual(float(outstanding), 1400.0)
+
+            # 4. Stock deducted only once (14 packets, not 28)
+            stock_deductions = [
+                r for r in db.get_records("SalesmanStockLedger", fresh=True)
+                if str(r.get("txn_type")) == "SOLD_DELIVERY" and str(r.get("related_sale_id")) == winning_sale_id
+            ]
+            self.assertEqual(len(stock_deductions), 1, "Salesman stock must be deducted exactly once")
+            self.assertEqual(float(stock_deductions[0].get("quantity")), -14.0)
+
+            # 5. Verify no duplicate journal records (exactly 1 journal for the sale)
+            journals = [
+                j for j in db.get_records("JournalHeaders", fresh=True)
+                if str(j.get("reference_id")) == winning_sale_id
+            ]
+            self.assertEqual(len(journals), 1, "Exactly one journal voucher must be created")
+
+            # 6. Verify no duplicate payment records
+            payments = [
+                p for p in db.get_records("Payments", fresh=True)
+                if str(p.get("sale_id")) == winning_sale_id
+            ]
+            self.assertEqual(len(payments), 0)
+
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_31_idempotent_sale_requests_across_separate_processes(self):
         """
         Failure Injection 31:
-        Simultaneous requests with the same idempotency key across separate OS processes.
-        Two processes synchronize on multiprocessing.Barrier(2) and compete on
-        CrossProcessLock("idemp", "idemp-proc-31").
-        Verifies mutual exclusion on the idempotency key lock: one process locks and enters
-        the transaction, and the competing concurrent process fails closed with HTTP 503
-        rather than creating duplicate transactions.
+        Actual idempotency concurrency test across separate OS processes.
+        Two simultaneous sale requests with the same idempotency key using shared persistent test storage.
+        Verify:
+        - Exactly one sale record exists.
+        - Both successful retries return the same sale ID.
+        - Stock is deducted only once.
+        - Payments are recorded only once.
+        - Journal vouchers are created only once.
         """
+        temp_dir = tempfile.mkdtemp(prefix="ks_erp_idemp_shared_")
+        try:
+            db.append_record("Customers", {
+                "customer_id": "CUS-IDEMP-31",
+                "shop_name": "Gupta Idempotent Store",
+                "credit_limit": 5000.0,
+                "max_overdue_days": 30,
+                "active": "TRUE",
+            })
+            db.enable_shared_file_store(temp_dir)
+
+            req_dict = {
+                "salesman_user_id": "USR-SALES-01",
+                "customer_id": "CUS-IDEMP-31",
+                "payment_method": "CASH",
+                "cash_collected": 500.0,
+                "credit_amount": 0.0,
+                "items": [{"product_id": "PRD-PAPAD-200G", "quantity": 10, "actual_unit_price": 50.0}],
+                "idempotency_key": "idemp-race-shared-key-31",
+            }
+
+            barrier = multiprocessing.Barrier(2)
+            q = multiprocessing.Queue()
+
+            p1 = multiprocessing.Process(
+                target=_mp_idemp_sale_worker,
+                args=(req_dict, self.salesman_user, temp_dir, barrier, q),
+            )
+            p2 = multiprocessing.Process(
+                target=_mp_idemp_sale_worker,
+                args=(req_dict, self.salesman_user, temp_dir, barrier, q),
+            )
+            p1.start()
+            p2.start()
+            p1.join(timeout=10)
+            p2.join(timeout=10)
+
+            results = []
+            while not q.empty():
+                results.append(q.get())
+
+            successes = [r for r in results if r[0] == "SUCCESS"]
+            self.assertEqual(len(successes), 2, f"Expected both idempotent retries to succeed, got: {results}")
+
+            # Both successful retries return the same sale ID
+            sale_id_1 = successes[0][1]
+            sale_id_2 = successes[1][1]
+            self.assertEqual(sale_id_1, sale_id_2, "Both concurrent retries must return the exact same sale ID")
+
+            winning_sale_id = sale_id_1
+
+            # Exactly one sale record exists
+            sales = [
+                s for s in db.get_records("Sales", fresh=True)
+                if str(s.get("idempotency_key")) == "idemp-race-shared-key-31"
+            ]
+            self.assertEqual(len(sales), 1, "Exactly one sale record must exist for this idempotency key")
+            self.assertEqual(str(sales[0].get("sale_id")), winning_sale_id)
+
+            # Stock is deducted only once (10 packets)
+            stock_records = [
+                r for r in db.get_records("SalesmanStockLedger", fresh=True)
+                if str(r.get("txn_type")) == "SOLD_DELIVERY" and str(r.get("related_sale_id")) == winning_sale_id
+            ]
+            self.assertEqual(len(stock_records), 1, "Stock must be deducted exactly once")
+            self.assertEqual(float(stock_records[0].get("quantity")), -10.0)
+
+            # Payments are recorded only once
+            payments = [
+                p for p in db.get_records("Payments", fresh=True)
+                if str(p.get("sale_id")) == winning_sale_id
+            ]
+            self.assertEqual(len(payments), 1, "Payment must be recorded exactly once")
+            self.assertEqual(float(payments[0].get("amount")), 500.0)
+
+            # Journal vouchers are created only once
+            journals = [
+                j for j in db.get_records("JournalHeaders", fresh=True)
+                if str(j.get("reference_id")) == winning_sale_id
+            ]
+            self.assertEqual(len(journals), 1, "Journal voucher must be created exactly once")
+
+        finally:
+            db.disable_shared_file_store()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_32_concurrent_reservations_for_different_approvals_both_survive_in_registry(self):
+        """
+        Failure Injection 32:
+        Protect global reservation registry.
+        Different approval IDs use different approval locks while writing the same registry file.
+        Dedicated global cross-process registry lock ensures that simultaneous read-modify-write
+        operations do not clobber each other.
+        Verifies that when different processes reserve different approval IDs simultaneously,
+        both entries survive intact in the global reservation registry.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-SURVIVE-32A",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-REG-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-SURVIVE-32B",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
         barrier = multiprocessing.Barrier(2)
         q = multiprocessing.Queue()
 
-        def proc_worker(key, proc_name, b, out_q):
-            try:
-                b.wait(timeout=5)
-                with cl.CrossProcessLock("idemp", key, timeout=0.1):
-                    out_q.put(("ACQUIRED", proc_name))
-                    time.sleep(0.25)  # Simulate atomic transaction write
-                out_q.put(("RELEASED", proc_name))
-            except HTTPException as exc:
-                out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
-            except Exception as e:
-                out_q.put(("ERR", str(e)))
-
-        p1 = multiprocessing.Process(target=proc_worker, args=("idemp-proc-31", "P1", barrier, q))
-        p2 = multiprocessing.Process(target=proc_worker, args=("idemp-proc-31", "P2", barrier, q))
+        p1 = multiprocessing.Process(
+            target=_mp_reservation_worker,
+            args=("APP-SURVIVE-32A", "SALE-32A", "CUS-REG-01", 1000.0, barrier, q),
+        )
+        p2 = multiprocessing.Process(
+            target=_mp_reservation_worker,
+            args=("APP-SURVIVE-32B", "SALE-32B", "CUS-TIGHT-01", 1000.0, barrier, q),
+        )
         p1.start()
         p2.start()
         p1.join(timeout=10)
         p2.join(timeout=10)
 
-        events = []
+        results = []
         while not q.empty():
-            events.append(q.get())
+            results.append(q.get())
 
-        acquired_events = [e for e in events if e[0] == "ACQUIRED"]
-        http_errors = [e for e in events if e[0] == "HTTP_ERR"]
+        successes = [r for r in results if r[0] == "SUCCESS"]
+        self.assertEqual(len(successes), 2, f"Expected both reservations to succeed, got: {results}")
 
-        self.assertEqual(len(acquired_events), 1, f"Expected exactly 1 process to acquire idempotency lock, got: {events}")
-        self.assertEqual(len(http_errors), 1, f"Expected 1 process to fail closed with HTTP 503, got: {events}")
-        self.assertEqual(http_errors[0][1], 503)
-        self.assertIn("Lock timeout", http_errors[0][2])
+        # Verify BOTH entries survive in the global reservation registry
+        res_a = cl.get_cross_process_reservation("APP-SURVIVE-32A")
+        res_b = cl.get_cross_process_reservation("APP-SURVIVE-32B")
 
-        # Verify filesystem lock file exists and was exercised
-        lock_file = os.path.join(cl._LOCK_DIR, "idemp_idemp-proc-31.lock")
-        self.assertTrue(os.path.exists(lock_file), f"Expected idempotency lock file {lock_file} to exist")
+        self.assertIsNotNone(res_a, "APP-SURVIVE-32A must survive in registry")
+        self.assertEqual(str(res_a.get("reserved_by_sale_id")), "SALE-32A")
+
+        self.assertIsNotNone(res_b, "APP-SURVIVE-32B must survive in registry")
+        self.assertEqual(str(res_b.get("reserved_by_sale_id")), "SALE-32B")
 
 
 if __name__ == "__main__":

@@ -3,8 +3,15 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from typing import Dict, List, Any, Optional
+
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
 
 from app.config import (
     SALES_GOOGLE_SPREADSHEET_ID,
@@ -345,9 +352,56 @@ class SheetsDatabase:
         self._lock = threading.RLock()
         self._inflight: Dict[str, threading.Event] = {}
         self._fail_once: Dict[str, int] = {}
+        self.shared_file_dir: Optional[str] = os.getenv("SALES_SHARED_TEST_DIR") or None
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self._last_conn_attempt_time: float = 0.0
         self.init_connection()
+
+    def enable_shared_file_store(self, directory_path: str) -> None:
+        """Enables multi-process shared persistent file storage for testing."""
+        self.shared_file_dir = directory_path
+        os.environ["SALES_SHARED_TEST_DIR"] = directory_path
+        os.makedirs(directory_path, exist_ok=True)
+        # Flush current memory store to disk if not already existing
+        for tab_name, rows in self.memory_store.items():
+            path = self._tab_file_path(tab_name)
+            if not os.path.exists(path) and rows:
+                self._write_shared_records(tab_name, [dict(r) for r in rows])
+
+    def disable_shared_file_store(self) -> None:
+        """Disables shared persistent file storage, returning to standard in-memory test store."""
+        self.shared_file_dir = None
+        os.environ.pop("SALES_SHARED_TEST_DIR", None)
+
+    def _tab_file_path(self, tab_name: str) -> str:
+        s_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR") or "/tmp"
+        return os.path.join(s_dir, f"{tab_name}.json")
+
+    def _tab_file_lock_path(self, tab_name: str) -> str:
+        s_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR") or "/tmp"
+        return os.path.join(s_dir, f"{tab_name}.lock")
+
+    def _read_shared_records(self, tab_name: str) -> List[Dict[str, Any]]:
+        path = self._tab_file_path(tab_name)
+        if not os.path.exists(path):
+            return []
+        for _ in range(5):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                time.sleep(0.005)
+            except Exception as exc:
+                logger.warning("Error reading shared test file %s: %s", path, exc)
+                return []
+        return []
+
+    def _write_shared_records(self, tab_name: str, records: List[Dict[str, Any]]) -> None:
+        path = self._tab_file_path(tab_name)
+        tmp_path = f"{path}.tmp.{os.getpid()}_{time.time_ns()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(records, f)
+        os.replace(tmp_path, path)
 
     def init_connection(self) -> bool:
         """Attempt to connect to Google Sheets using configured service account credentials."""
@@ -530,6 +584,11 @@ class SheetsDatabase:
                 self.init_connection()
 
         if not (self.is_connected and self.spreadsheet):
+            shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+            if shared_dir:
+                rows = self._read_shared_records(tab_name)
+                self.memory_store[tab_name] = rows
+                return [dict(row) for row in rows]
             if self.allow_in_memory_fallback:
                 return [dict(row) for row in self.memory_store.get(tab_name, [])]
             err_msg = (
@@ -649,6 +708,22 @@ class SheetsDatabase:
                 return False
 
         # Disconnected state:
+        shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+        if shared_dir:
+            lock_path = self._tab_file_lock_path(tab_name)
+            with open(lock_path, "a") as lk:
+                if HAS_FCNTL:
+                    fcntl.flock(lk, fcntl.LOCK_EX)
+                try:
+                    rows = self._read_shared_records(tab_name)
+                    rows.append(dict(record))
+                    self._write_shared_records(tab_name, rows)
+                    self.memory_store[tab_name] = rows
+                    return True
+                finally:
+                    if HAS_FCNTL:
+                        fcntl.flock(lk, fcntl.LOCK_UN)
+
         if self.allow_in_memory_fallback:
             self.memory_store.setdefault(tab_name, []).append(dict(record))
             return True
@@ -717,6 +792,30 @@ class SheetsDatabase:
                     raise RuntimeError(f"Injected failure updating {tab_name}")
                 return False
             if not (self.is_connected and self.spreadsheet):
+                shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+                if shared_dir:
+                    lock_path = self._tab_file_lock_path(tab_name)
+                    with open(lock_path, "a") as lk:
+                        if HAS_FCNTL:
+                            fcntl.flock(lk, fcntl.LOCK_EX)
+                        try:
+                            rows = self._read_shared_records(tab_name)
+                            found = False
+                            for item in rows:
+                                if str(item.get(id_field)) == str(id_value):
+                                    if expected_conditions and not self._matches_conditions(item, expected_conditions):
+                                        return False
+                                    item.update(updates)
+                                    found = True
+                                    break
+                            if found:
+                                self._write_shared_records(tab_name, rows)
+                                self.memory_store[tab_name] = rows
+                            return found
+                        finally:
+                            if HAS_FCNTL:
+                                fcntl.flock(lk, fcntl.LOCK_UN)
+
                 if self.allow_in_memory_fallback:
                     found = False
                     for item in self.memory_store.get(tab_name, []):
@@ -773,6 +872,25 @@ class SheetsDatabase:
     def delete_record(self, tab_name: str, id_field: str, id_value: str, raise_on_error: bool = False) -> bool:
         self._invalidate_records_cache(tab_name)
         if not (self.is_connected and self.spreadsheet):
+            shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+            if shared_dir:
+                lock_path = self._tab_file_lock_path(tab_name)
+                with open(lock_path, "a") as lk:
+                    if HAS_FCNTL:
+                        fcntl.flock(lk, fcntl.LOCK_EX)
+                    try:
+                        rows = self._read_shared_records(tab_name)
+                        prev_len = len(rows)
+                        rows = [item for item in rows if str(item.get(id_field)) != str(id_value)]
+                        if len(rows) < prev_len:
+                            self._write_shared_records(tab_name, rows)
+                            self.memory_store[tab_name] = rows
+                            return True
+                        return False
+                    finally:
+                        if HAS_FCNTL:
+                            fcntl.flock(lk, fcntl.LOCK_UN)
+
             if self.allow_in_memory_fallback:
                 prev_len = len(self.memory_store.get(tab_name, []))
                 self.memory_store[tab_name] = [item for item in self.memory_store.get(tab_name, []) if str(item.get(id_field)) != str(id_value)]
