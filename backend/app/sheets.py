@@ -342,7 +342,7 @@ class SheetsDatabase:
         self._records_cache: Dict[str, tuple] = {}
         self._records_cache_ttl_seconds = 30.0
         self._worksheets: Dict[str, Any] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._inflight: Dict[str, threading.Event] = {}
         self._fail_once: Dict[str, int] = {}
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
@@ -612,6 +612,10 @@ class SheetsDatabase:
 
     get_all_records = get_records
 
+    def inject_failure_once(self, tab_name: str, count: int = 1) -> None:
+        with self._lock:
+            self._fail_once[tab_name] = count
+
     def append_record(self, tab_name: str, record: Dict[str, Any], raise_on_error: bool = False) -> bool:
         self._invalidate_records_cache(tab_name)
         failures = self._fail_once.get(tab_name, 0)
@@ -685,67 +689,86 @@ class SheetsDatabase:
         raise_on_error: bool = False,
         expected_conditions: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        self._invalidate_records_cache(tab_name)
-        failures = self._fail_once.get(tab_name, 0)
-        if failures > 0:
-            self._fail_once[tab_name] = failures - 1
-            logger.error("Injected update failure for %s", tab_name)
-            if raise_on_error:
-                raise RuntimeError(f"Injected failure updating {tab_name}")
-            return False
-        if not (self.is_connected and self.spreadsheet):
-            if self.allow_in_memory_fallback:
-                found = False
-                for item in self.memory_store.get(tab_name, []):
-                    if str(item.get(id_field)) == str(id_value):
-                        if expected_conditions and not self._matches_conditions(item, expected_conditions):
-                            return False
-                        item.update(updates)
-                        found = True
-                        break
-                return found
-            err_msg = (
-                f"Persistent storage is unavailable: Google Sheets is disconnected ({self.last_connection_error or 'not connected'}). "
-                f"Business update for '{tab_name}' record {id_value} was blocked to prevent data loss."
-            )
-            logger.error(err_msg)
-            if raise_on_error:
-                raise RuntimeError(err_msg)
-            return False
+        """
+        Updates an existing record matching id_field == id_value.
+        
+        CONCURRENCY & STORAGE ARCHITECTURE NOTICE:
+        1. Single-Process / Thread Safety:
+           Protected by `self._lock` (threading.RLock). Within this process, condition
+           evaluation and updates to in-memory state are serialized and thread-safe.
+        2. Google Sheets Storage Limitations:
+           Google Sheets API is an HTTP REST service that does NOT support native ACID
+           transactions, database row locks, or distributed Compare-And-Swap (CAS).
+           Reading rows followed by batch_update introduces an inevitable TOCTOU window
+           across independent OS worker processes or cloud replicas.
+        3. Distributed Production Requirement:
+           In multi-worker deployments (e.g. multiple Gunicorn/Uvicorn workers or containers),
+           true distributed atomicity requires PostgreSQL with row locks (`SELECT ... FOR UPDATE`
+           or conditional `UPDATE ... WHERE`) or Redis distributed locks (Redlock).
+           Financial authorization remains fail-closed to prevent unverified updates.
+        """
+        with self._lock:
+            self._invalidate_records_cache(tab_name)
+            failures = self._fail_once.get(tab_name, 0)
+            if failures > 0:
+                self._fail_once[tab_name] = failures - 1
+                logger.error("Injected update failure for %s", tab_name)
+                if raise_on_error:
+                    raise RuntimeError(f"Injected failure updating {tab_name}")
+                return False
+            if not (self.is_connected and self.spreadsheet):
+                if self.allow_in_memory_fallback:
+                    found = False
+                    for item in self.memory_store.get(tab_name, []):
+                        if str(item.get(id_field)) == str(id_value):
+                            if expected_conditions and not self._matches_conditions(item, expected_conditions):
+                                return False
+                            item.update(updates)
+                            found = True
+                            break
+                    return found
+                err_msg = (
+                    f"Persistent storage is unavailable: Google Sheets is disconnected ({self.last_connection_error or 'not connected'}). "
+                    f"Business update for '{tab_name}' record {id_value} was blocked to prevent data loss."
+                )
+                logger.error(err_msg)
+                if raise_on_error:
+                    raise RuntimeError(err_msg)
+                return False
 
-        try:
-            worksheet = self._get_worksheet(tab_name)
-            records = worksheet.get_all_records()
-            headers = worksheet.row_values(1)
-            header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers)}
-            missing = [k for k in updates if k not in header_map]
-            if missing:
-                self._ensure_headers(worksheet, headers + missing)
-                headers = headers + missing
+            try:
+                worksheet = self._get_worksheet(tab_name)
+                records = worksheet.get_all_records()
+                headers = worksheet.row_values(1)
                 header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers)}
-            for idx, row in enumerate(records, start=2):
-                if str(row.get(id_field)) != str(id_value):
-                    continue
-                if expected_conditions and not self._matches_conditions(row, expected_conditions):
-                    return False
-                cells = []
-                for key, value in updates.items():
-                    col = header_map.get(key)
-                    if col:
-                        cells.append({"range": self._a1(col, idx, col), "values": [[value]]})
-                if cells:
-                    worksheet.batch_update([{"range": c["range"], "values": c["values"]} for c in cells])
-                for item in self.memory_store.get(tab_name, []):
-                    if str(item.get(id_field)) == str(id_value):
-                        item.update(updates)
-                        break
-                return True
-            return False
-        except Exception as exc:
-            logger.error("Error updating record in %s: %s", tab_name, exc)
-            if raise_on_error:
-                raise RuntimeError(f"Persistent update failed for {tab_name}: {exc}") from exc
-            return False
+                missing = [k for k in updates if k not in header_map]
+                if missing:
+                    self._ensure_headers(worksheet, headers + missing)
+                    headers = headers + missing
+                    header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers)}
+                for idx, row in enumerate(records, start=2):
+                    if str(row.get(id_field)) != str(id_value):
+                        continue
+                    if expected_conditions and not self._matches_conditions(row, expected_conditions):
+                        return False
+                    cells = []
+                    for key, value in updates.items():
+                        col = header_map.get(key)
+                        if col:
+                            cells.append({"range": self._a1(col, idx, col), "values": [[value]]})
+                    if cells:
+                        worksheet.batch_update([{"range": c["range"], "values": c["values"]} for c in cells])
+                    for item in self.memory_store.get(tab_name, []):
+                        if str(item.get(id_field)) == str(id_value):
+                            item.update(updates)
+                            break
+                    return True
+                return False
+            except Exception as exc:
+                logger.error("Error updating record in %s: %s", tab_name, exc)
+                if raise_on_error:
+                    raise RuntimeError(f"Persistent update failed for {tab_name}: {exc}") from exc
+                return False
 
     def delete_record(self, tab_name: str, id_field: str, id_value: str, raise_on_error: bool = False) -> bool:
         self._invalidate_records_cache(tab_name)

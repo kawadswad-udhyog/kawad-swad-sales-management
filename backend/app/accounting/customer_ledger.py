@@ -3,17 +3,141 @@ Kawad Swad ERP - Customer Outstanding & Accounts Receivable Sub-Ledger
 Authoritative transaction ledger for debtor management, credit limits, and aging.
 """
 
+import math
+import os
+import json
+import logging
+import threading
+import time
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, date, timedelta
 from decimal import Decimal
-import json
-import logging
 from fastapi import HTTPException
+
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
 
 from app.sheets import db
 from app.timeutil import now_iso
 from app.accounting.journal_engine import to_decimal, round_money
 from app.permissions import is_owner, is_manager, is_salesman
+
+_LOCK_DIR = "/tmp/ks_erp_locks"
+_STATE_FILE = "/tmp/ks_erp_cross_process_state.json"
+
+class CrossProcessLock:
+    """
+    POSIX advisory file lock (fcntl.flock) for cross-process synchronization.
+    Guarantees mutual exclusion between separate worker processes on the same system.
+    """
+    def __init__(self, resource_type: str, resource_id: str, timeout: float = 10.0):
+        self.resource_type = resource_type
+        self.resource_id = str(resource_id).strip()
+        safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in self.resource_id)
+        os.makedirs(_LOCK_DIR, exist_ok=True)
+        self.lock_path = os.path.join(_LOCK_DIR, f"{resource_type}_{safe_id}.lock")
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        if self.resource_type == "noop" or not HAS_FCNTL:
+            return self
+        try:
+            self.fd = open(self.lock_path, "w+")
+            start = time.monotonic()
+            while True:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except (BlockingIOError, OSError):
+                    if time.monotonic() - start > self.timeout:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=f"Resource {self.resource_type}:{self.resource_id} is currently locked by another worker. Retry."
+                        )
+                    time.sleep(0.01)
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.fd and HAS_FCNTL:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+                self.fd.close()
+            except Exception:
+                pass
+
+
+def get_cross_process_reservation(approval_id: str) -> Optional[Dict[str, Any]]:
+    clean_id = str(approval_id).strip()
+    if not os.path.exists(_STATE_FILE):
+        return None
+    try:
+        with open(_STATE_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("approvals", {}).get(clean_id)
+    except Exception:
+        return None
+
+
+def set_cross_process_reservation(approval_id: str, state: Optional[Dict[str, Any]]) -> None:
+    clean_id = str(approval_id).strip()
+    try:
+        os.makedirs(os.path.dirname(_STATE_FILE) or ".", exist_ok=True)
+        data = {}
+        if os.path.exists(_STATE_FILE):
+            try:
+                with open(_STATE_FILE, "r") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        approvals = data.setdefault("approvals", {})
+        if state is None:
+            approvals.pop(clean_id, None)
+        else:
+            approvals[clean_id] = state
+        tmp_file = f"{_STATE_FILE}.tmp.{os.getpid()}"
+        with open(tmp_file, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp_file, _STATE_FILE)
+    except Exception as exc:
+        logging.warning("Could not persist cross-process reservation for %s: %s", clean_id, exc)
+
+
+def reset_cross_process_state() -> None:
+    """Resets cross-process concurrency state file (used during test setup)."""
+    try:
+        if os.path.exists(_STATE_FILE):
+            os.remove(_STATE_FILE)
+    except Exception:
+        pass
+
+
+_APPROVAL_LOCKS: Dict[str, threading.RLock] = {}
+_APPROVAL_LOCKS_GUARD = threading.Lock()
+
+def get_approval_lock(approval_id: str) -> threading.RLock:
+    clean_id = str(approval_id or "").strip()
+    with _APPROVAL_LOCKS_GUARD:
+        if clean_id not in _APPROVAL_LOCKS:
+            _APPROVAL_LOCKS[clean_id] = threading.RLock()
+        return _APPROVAL_LOCKS[clean_id]
+
+
+_CUSTOMER_CREDIT_LOCKS: Dict[str, threading.RLock] = {}
+_CUSTOMER_CREDIT_LOCKS_GUARD = threading.Lock()
+
+def get_customer_credit_lock(customer_id: str) -> threading.RLock:
+    clean_id = str(customer_id or "").strip()
+    with _CUSTOMER_CREDIT_LOCKS_GUARD:
+        if clean_id not in _CUSTOMER_CREDIT_LOCKS:
+            _CUSTOMER_CREDIT_LOCKS[clean_id] = threading.RLock()
+        return _CUSTOMER_CREDIT_LOCKS[clean_id]
 
 
 class CustomerTxnType:
@@ -387,7 +511,12 @@ def check_credit_control(
         7. Not revoked
         8. Not already consumed or reserved by an unrelated transaction
     """
-    req_credit = round(float(requested_credit or 0.0), 2)
+    try:
+        req_credit = round(float(requested_credit or 0.0), 2)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Requested credit amount must be a valid number.")
+    if math.isnan(req_credit) or math.isinf(req_credit):
+        raise HTTPException(status_code=400, detail="Requested credit amount must be a finite number.")
     if req_credit <= 0:
         return {"approved": True, "reason": "No credit requested (full payment)"}
 
@@ -407,7 +536,12 @@ def check_credit_control(
     if not is_active:
         raise HTTPException(status_code=400, detail=f"Customer '{customer.get('shop_name') or cid}' is inactive.")
 
-    credit_limit = float(customer.get("credit_limit", 0) or 0.0)
+    try:
+        credit_limit = float(customer.get("credit_limit", 0) or 0.0)
+        if math.isnan(credit_limit) or math.isinf(credit_limit):
+            credit_limit = 0.0
+    except (ValueError, TypeError):
+        credit_limit = 0.0
     max_overdue_days = int(float(customer.get("max_overdue_days", 30) or 30))
 
     current_outstanding = calculate_customer_outstanding(cid)
@@ -584,6 +718,11 @@ def validate_credit_approval_request(
             status_code=400,
             detail=f"Approval request '{clean_app_id}' has invalid approved amount '{raw_approved_amt}'.",
         )
+    if math.isnan(app_amt) or math.isinf(app_amt):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval request '{clean_app_id}' has non-finite approved amount '{raw_approved_amt}'.",
+        )
     if app_amt <= 0:
         raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' has approved amount <= 0 (must be > 0).")
     if requested_credit > app_amt + 0.05:
@@ -613,7 +752,24 @@ def validate_credit_approval_request(
     if date.today() > exp_date:
         raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' expired on {exp_str}.")
 
-    # 8. Consumed check: Cannot be consumed by another transaction
+    # 8. Cross-process reservation check
+    xp_res = get_cross_process_reservation(clean_app_id)
+    if xp_res:
+        xp_holder = str(xp_res.get("reserved_by_sale_id", "")).strip()
+        xp_consumed = bool(xp_res.get("is_consumed"))
+        if xp_consumed:
+            if not (current_sale_id and xp_holder == current_sale_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Approval request '{clean_app_id}' has already been consumed by sale '{xp_holder or 'ANOTHER_SALE'}'.",
+                )
+        elif xp_holder and xp_holder != current_sale_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval request '{clean_app_id}' is already reserved by sale '{xp_holder}'.",
+            )
+
+    # 9. Consumed check: Cannot be consumed by another transaction
     consumed_sale = str(appr.get("consumed_by_sale_id") or payload.get("consumed_by_sale_id") or "").strip()
     is_consumed = bool(appr.get("is_consumed") or payload.get("is_consumed"))
     if is_consumed or consumed_sale:
@@ -625,7 +781,7 @@ def validate_credit_approval_request(
                 detail=f"Approval request '{clean_app_id}' has already been consumed by sale '{consumed_sale or 'ANOTHER_SALE'}'.",
             )
 
-    # 9. Reserved check: Cannot be reserved by another transaction
+    # 10. Reserved check: Cannot be reserved by another transaction
     reserved_sale = str(appr.get("reserved_by_sale_id") or payload.get("reserved_by_sale_id") or "").strip()
     if reserved_sale:
         if current_sale_id and reserved_sale == current_sale_id:
@@ -658,102 +814,212 @@ def reserve_credit_approval(
     if not approval_request_id:
         return False
     clean_id = str(approval_request_id).strip()
-    approvals = db.get_records("ApprovalRequests", fresh=True) or []
-    appr = next((a for a in approvals if str(a.get("request_id", "")).strip() == clean_id), None)
-    if not appr:
-        raise HTTPException(status_code=400, detail=f"Approval request '{clean_id}' not found.")
+    clean_sale_id = str(sale_id).strip()
+    with get_approval_lock(clean_id):
+        with CrossProcessLock("approval", clean_id):
+            xp_res = get_cross_process_reservation(clean_id)
+            if xp_res:
+                xp_holder = str(xp_res.get("reserved_by_sale_id", "")).strip()
+                if xp_holder and xp_holder != clean_sale_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Approval request '{clean_id}' was concurrently reserved by sale '{xp_holder}'.",
+                    )
 
-    # Validate approval constraints with intended sale ID
-    validate_credit_approval_request(
-        appr=appr,
-        approval_id=clean_id,
-        customer_id=customer_id,
-        requested_credit=requested_credit,
-        current_sale_id=sale_id,
-    )
+            approvals = db.get_records("ApprovalRequests", fresh=True) or []
+            appr = next((a for a in approvals if str(a.get("request_id", "")).strip() == clean_id), None)
+            if not appr:
+                raise HTTPException(status_code=400, detail=f"Approval request '{clean_id}' not found.")
 
-    current_reserved = str(appr.get("reserved_by_sale_id", "")).strip()
-    if current_reserved == sale_id:
-        return True  # Idempotent retry
-
-    now = now_iso()
-    # Atomic reservation with expected condition
-    updated = db.update_record(
-        tab_name="ApprovalRequests",
-        id_field="request_id",
-        id_value=clean_id,
-        updates={
-            "reserved_by_sale_id": sale_id,
-            "reserved_at": now,
-        },
-        expected_conditions={
-            "is_consumed": False,
-            "reserved_by_sale_id": "",
-        },
-    )
-    if not updated:
-        # Check if another sale raced and reserved it
-        fresh_apprs = db.get_records("ApprovalRequests", fresh=True) or []
-        fresh_appr = next((a for a in fresh_apprs if str(a.get("request_id", "")).strip() == clean_id), None)
-        other_holder = str(fresh_appr.get("reserved_by_sale_id", "") if fresh_appr else "").strip()
-        if other_holder and other_holder != sale_id:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Approval request '{clean_id}' was concurrently reserved by sale '{other_holder}'.",
+            # Validate approval constraints with intended sale ID
+            validate_credit_approval_request(
+                appr=appr,
+                approval_id=clean_id,
+                customer_id=customer_id,
+                requested_credit=requested_credit,
+                current_sale_id=clean_sale_id,
             )
-        raise HTTPException(status_code=503, detail=f"Failed to reserve approval request '{clean_id}' for sale {sale_id}. Retry.")
-    return True
+
+            current_reserved = str(appr.get("reserved_by_sale_id", "")).strip()
+            if current_reserved == clean_sale_id:
+                set_cross_process_reservation(clean_id, {
+                    "reserved_by_sale_id": clean_sale_id,
+                    "is_consumed": False,
+                    "reserved_at": appr.get("reserved_at") or now_iso(),
+                })
+                return True  # Idempotent retry
+
+            now = now_iso()
+            # Atomic reservation with expected condition
+            updated = db.update_record(
+                tab_name="ApprovalRequests",
+                id_field="request_id",
+                id_value=clean_id,
+                updates={
+                    "reserved_by_sale_id": clean_sale_id,
+                    "reserved_at": now,
+                },
+                expected_conditions={
+                    "is_consumed": False,
+                    "reserved_by_sale_id": "",
+                },
+            )
+            if not updated:
+                # Check if another sale raced and reserved it
+                fresh_apprs = db.get_records("ApprovalRequests", fresh=True) or []
+                fresh_appr = next((a for a in fresh_apprs if str(a.get("request_id", "")).strip() == clean_id), None)
+                other_holder = str(fresh_appr.get("reserved_by_sale_id", "") if fresh_appr else "").strip()
+                if other_holder and other_holder != clean_sale_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Approval request '{clean_id}' was concurrently reserved by sale '{other_holder}'.",
+                    )
+                raise HTTPException(status_code=503, detail=f"Failed to reserve approval request '{clean_id}' for sale {clean_sale_id}. Retry.")
+
+            set_cross_process_reservation(clean_id, {
+                "reserved_by_sale_id": clean_sale_id,
+                "is_consumed": False,
+                "reserved_at": now,
+            })
+            return True
 
 
 def consume_credit_approval(approval_request_id: str, sale_id: str) -> bool:
     """
     Marks an approval request as permanently consumed by a completed sale.
+    Enforces strict ownership, non-revocation, and atomic CAS conditions:
+    - Only the sale that reserved the approval can consume it.
+    - A consumed approval cannot be re-consumed by a different sale.
+    - An approval revoked while reserved cannot be consumed.
+    - Uses atomic conditional updates with expected_conditions.
     Returns True on success, False on failure.
     """
-    if not approval_request_id:
+    if not approval_request_id or not sale_id:
         return False
     clean_id = str(approval_request_id).strip()
-    now = now_iso()
-    try:
-        updated = db.update_record(
-            tab_name="ApprovalRequests",
-            id_field="request_id",
-            id_value=clean_id,
-            updates={
-                "is_consumed": True,
-                "consumed_by_sale_id": sale_id,
-                "consumed_at": now,
-                "reserved_by_sale_id": sale_id,
-            },
-        )
-        return bool(updated)
-    except Exception as e:
-        logging.error("Failed to mark approval request %s as consumed by sale %s: %s", clean_id, sale_id, e)
-        return False
+    clean_sale_id = str(sale_id).strip()
+    with get_approval_lock(clean_id):
+        with CrossProcessLock("approval", clean_id):
+            apprs = db.get_records("ApprovalRequests", fresh=True) or []
+            appr = next((a for a in apprs if str(a.get("request_id", "")).strip() == clean_id), None)
+            if not appr:
+                logging.error("Cannot consume non-existent approval request %s for sale %s", clean_id, clean_sale_id)
+                return False
+
+            # 1. A consumed approval cannot be re-consumed by a different sale
+            if bool(appr.get("is_consumed")):
+                consumed_by = str(appr.get("consumed_by_sale_id", "")).strip()
+                if consumed_by == clean_sale_id:
+                    return True  # Idempotent replay by the same sale
+                logging.error(
+                    "Approval consumption rejected: Approval %s was already consumed by sale '%s', not '%s'",
+                    clean_id, consumed_by, clean_sale_id
+                )
+                return False
+
+            # 2. Ownership check: Must be reserved by THIS sale
+            holder = str(appr.get("reserved_by_sale_id", "")).strip()
+            if holder != clean_sale_id:
+                logging.error(
+                    "Approval consumption rejected: Approval %s is reserved by '%s', cannot be consumed by sale '%s'",
+                    clean_id, holder, clean_sale_id
+                )
+                return False
+
+            # 3. Revocation check: An approval revoked while reserved CANNOT be consumed
+            app_status = str(appr.get("status", "")).upper()
+            is_rev = str(appr.get("revoked", "")).lower() in {"true", "1", "yes"} or app_status == "REVOKED"
+            if is_rev:
+                logging.error(
+                    "Approval consumption rejected: Approval %s was revoked while reserved by sale %s",
+                    clean_id, clean_sale_id
+                )
+                return False
+
+            now = now_iso()
+            # 4. Atomic conditional update: only update if still reserved by this sale and not consumed
+            updated = db.update_record(
+                tab_name="ApprovalRequests",
+                id_field="request_id",
+                id_value=clean_id,
+                updates={
+                    "is_consumed": True,
+                    "consumed_by_sale_id": clean_sale_id,
+                    "consumed_at": now,
+                    "reserved_by_sale_id": clean_sale_id,
+                },
+                expected_conditions={
+                    "reserved_by_sale_id": clean_sale_id,
+                    "is_consumed": False,
+                },
+            )
+            if updated:
+                set_cross_process_reservation(clean_id, {
+                    "reserved_by_sale_id": clean_sale_id,
+                    "is_consumed": True,
+                    "consumed_at": now,
+                })
+            return bool(updated)
 
 
 def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
     """
     Releases an approval reservation if a sale failed prior to completion.
-    Only releases if the approval was reserved by this sale and has NOT been consumed.
+    Enforces strict ownership and conditional constraints:
+    - Only the sale that reserved the approval can release it.
+    - A consumed approval can NEVER be released.
+    - Uses atomic conditional updates with expected_conditions.
+    Returns True on success, False on failure.
     """
-    if not approval_request_id:
+    if not approval_request_id or not sale_id:
         return False
     clean_id = str(approval_request_id).strip()
-    try:
-        apprs = db.get_records("ApprovalRequests", fresh=True) or []
-        appr = next((a for a in apprs if str(a.get("request_id", "")).strip() == clean_id), None)
-        if appr:
-            is_consumed = bool(appr.get("is_consumed"))
-            holder = str(appr.get("reserved_by_sale_id", "")).strip()
-            if not is_consumed and holder == sale_id:
-                db.update_record("ApprovalRequests", "request_id", clean_id, {
-                    "reserved_by_sale_id": "",
-                    "reserved_at": "",
-                })
-                return True
-    except Exception as e:
-        logging.warning("Failed to release approval reservation %s: %s", clean_id, e)
+    clean_sale_id = str(sale_id).strip()
+    with get_approval_lock(clean_id):
+        with CrossProcessLock("approval", clean_id):
+            try:
+                apprs = db.get_records("ApprovalRequests", fresh=True) or []
+                appr = next((a for a in apprs if str(a.get("request_id", "")).strip() == clean_id), None)
+                if not appr:
+                    return False
+
+                # 1. A consumed approval can NEVER be released
+                if bool(appr.get("is_consumed")):
+                    logging.warning(
+                        "Cannot release consumed approval %s (consumed by %s)",
+                        clean_id, appr.get("consumed_by_sale_id")
+                    )
+                    return False
+
+                # 2. Ownership check: Only the sale that reserved the approval can release it
+                holder = str(appr.get("reserved_by_sale_id", "")).strip()
+                if holder != clean_sale_id:
+                    logging.warning(
+                        "Cannot release approval %s: reserved by '%s', release requested by '%s'",
+                        clean_id, holder, clean_sale_id
+                    )
+                    return False
+
+                # 3. Atomic conditional update: only clear if still reserved by this sale and not consumed
+                updated = db.update_record(
+                    tab_name="ApprovalRequests",
+                    id_field="request_id",
+                    id_value=clean_id,
+                    updates={
+                        "reserved_by_sale_id": "",
+                        "reserved_at": "",
+                    },
+                    expected_conditions={
+                        "reserved_by_sale_id": clean_sale_id,
+                        "is_consumed": False,
+                    },
+                )
+                if updated:
+                    set_cross_process_reservation(clean_id, None)
+                return bool(updated)
+            except Exception as e:
+                logging.warning("Failed to release approval reservation %s: %s", clean_id, e)
+                return False
     return False
 
 

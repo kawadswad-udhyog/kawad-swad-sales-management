@@ -6,7 +6,9 @@ CAS / multi-worker credit protection, and resilient journal reversal recovery.
 """
 
 import asyncio
+import multiprocessing
 import os
+import threading
 import unittest
 from datetime import date, timedelta
 from fastapi import HTTPException
@@ -28,12 +30,23 @@ from app.accounting.journal_engine import (
     calculate_trial_balance,
 )
 import app.accounting.journal_engine as je
+import app.accounting.customer_ledger as cl
+from app.accounting.customer_ledger import (
+    reserve_credit_approval,
+    consume_credit_approval,
+    release_credit_approval,
+    reset_cross_process_state,
+)
 
 
 class TestPhase141FailureInjection(unittest.TestCase):
     def setUp(self):
         db.memory_store = {tab: [] for tab in db.memory_store}
+        reset_cross_process_state()
         self._seed_core_data()
+
+    def tearDown(self):
+        reset_cross_process_state()
 
     def _seed_core_data(self):
         # Users
@@ -523,12 +536,12 @@ class TestPhase141FailureInjection(unittest.TestCase):
         finally:
             db.update_record = orig_update
 
-    def test_13_two_concurrent_sales_attempting_same_approval_rejects_second(self):
+    def test_13_two_simultaneous_requests_attempting_same_approval_barrier_synchronized(self):
         """
-        Failure Injection 13:
-        Two sales attempting to use the same approval:
-        Sale 1 reserves or consumes the approval.
-        Sale 2 attempting to reserve/consume the same approval must fail with HTTP 400.
+        Failure Injection 13 (Concurrent Execution):
+        Two simultaneous requests attempting to reserve/use the same approval.
+        Uses a threading.Barrier to ensure genuine simultaneous invocation.
+        Verifies that exactly one succeeds and the other is rejected with HTTP 400.
         """
         db.append_record("ApprovalRequests", {
             "request_id": "APP-CONC-13",
@@ -563,14 +576,44 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="conc-13-sale-2",
         )
 
-        sale1 = asyncio.run(create_sale(req1, current_user=self.salesman_user))
-        self.assertEqual(sale1.txn_status, "COMPLETE")
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
 
-        # Second sale must fail with HTTP 400 because approval was consumed by sale1
-        with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req2, current_user=self.salesman_user))
-        self.assertEqual(ctx.exception.status_code, 400)
-        self.assertIn("consumed", ctx.exception.detail.lower())
+        def worker(req):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                barrier.wait(timeout=5)
+                res = loop.run_until_complete(create_sale(req, current_user=self.salesman_user))
+                results.append(res)
+            except Exception as e:
+                errors.append(e)
+            finally:
+                loop.close()
+
+        t1 = threading.Thread(target=worker, args=(req1,))
+        t2 = threading.Thread(target=worker, args=(req2,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        # Exactly one must succeed and one must be rejected
+        self.assertEqual(len(results), 1, f"Expected exactly 1 success, got {len(results)}")
+        self.assertEqual(len(errors), 1, f"Expected exactly 1 error, got {len(errors)}")
+        self.assertIsInstance(errors[0], HTTPException)
+        self.assertEqual(errors[0].status_code, 400)
+        self.assertTrue(
+            "consumed" in errors[0].detail.lower() or "reserved" in errors[0].detail.lower(),
+            f"Expected consumed/reserved in detail, got: {errors[0].detail}"
+        )
+
+        # In database: approval must be consumed by the winning sale
+        winning_sale_id = results[0].sale_id
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-CONC-13")
+        self.assertTrue(appr.get("is_consumed"))
+        self.assertEqual(str(appr.get("consumed_by_sale_id")), winning_sale_id)
 
     def test_14_cancellation_interrupted_between_multiple_journal_reversals(self):
         """
@@ -736,6 +779,458 @@ class TestPhase141FailureInjection(unittest.TestCase):
         # 4. Verify General Ledger trial balance is balanced (total variance = ₹0.00)
         tb = calculate_trial_balance()
         self.assertEqual(float(tb.get("variance", 0)), 0.0)
+
+    def test_16_two_separate_processes_attempting_same_approval(self):
+        """
+        Failure Injection 16:
+        Two separate OS processes attempting to reserve the same approval request.
+        Uses multiprocessing.Process to execute genuine cross-process competition.
+        Verifies that cross-process synchronization ensures exactly one process reserves
+        the approval, and the other is rejected with HTTP 400.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-PROC-16",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
+        def process_worker(appr_id, sale_id, q):
+            try:
+                ok = reserve_credit_approval(appr_id, sale_id, "CUS-TIGHT-01", 1500.0)
+                q.put(("SUCCESS", sale_id))
+            except HTTPException as exc:
+                q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
+            except Exception as e:
+                q.put(("ERR", str(e)))
+
+        q = multiprocessing.Queue()
+        p1 = multiprocessing.Process(target=process_worker, args=("APP-PROC-16", "SALE-P1", q))
+        p2 = multiprocessing.Process(target=process_worker, args=("APP-PROC-16", "SALE-P2", q))
+        p1.start()
+        p2.start()
+        p1.join(timeout=10)
+        p2.join(timeout=10)
+
+        out1 = q.get(timeout=5)
+        out2 = q.get(timeout=5)
+        outcomes = [out1, out2]
+        successes = [o for o in outcomes if o[0] == "SUCCESS"]
+        http_errors = [o for o in outcomes if o[0] == "HTTP_ERR"]
+
+        self.assertEqual(len(successes), 1, f"Expected 1 process to succeed, got: {outcomes}")
+        self.assertEqual(len(http_errors), 1, f"Expected 1 process to fail with HTTP error, got: {outcomes}")
+        self.assertEqual(http_errors[0][1], 400)
+        self.assertIn("reserved", http_errors[0][2].lower())
+
+    def test_17_two_simultaneous_sales_attempting_to_exceed_customer_credit_limit(self):
+        """
+        Failure Injection 17:
+        Customer has credit limit of ₹1000.00.
+        Two concurrent sales simultaneously request ₹700.00 credit (total ₹1400.00).
+        Uses threading.Barrier to ensure simultaneous invocation.
+        Verifies that exactly one succeeds, and the other is rejected with HTTP 400.
+        """
+        req1 = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-TIGHT-01",
+            payment_method="CASH",
+            cash_collected=0.0,
+            credit_amount=700.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=14, actual_unit_price=50.0)],
+            idempotency_key="credit-limit-race-1",
+        )
+        req2 = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-TIGHT-01",
+            payment_method="CASH",
+            cash_collected=0.0,
+            credit_amount=700.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=14, actual_unit_price=50.0)],
+            idempotency_key="credit-limit-race-2",
+        )
+
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+
+        def worker(req):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                barrier.wait(timeout=5)
+                res = loop.run_until_complete(create_sale(req, current_user=self.salesman_user))
+                results.append(res)
+            except Exception as e:
+                errors.append(e)
+            finally:
+                loop.close()
+
+        t1 = threading.Thread(target=worker, args=(req1,))
+        t2 = threading.Thread(target=worker, args=(req2,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertEqual(len(results), 1, f"Expected exactly 1 success, got {len(results)}")
+        self.assertEqual(len(errors), 1, f"Expected exactly 1 error, got {len(errors)}")
+        self.assertIsInstance(errors[0], HTTPException)
+        self.assertEqual(errors[0].status_code, 400)
+        self.assertIn("credit", errors[0].detail.lower())
+
+    def test_18_approval_consumption_attempted_by_sale_not_owning_reservation(self):
+        """
+        Failure Injection 18:
+        Approval is reserved by SALE-LEGIT-18.
+        Attempting to consume the approval by a different sale SALE-UNOWNED-99 must fail.
+        Only the reserving sale can consume the approval.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-OWN-18",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
+        # Reserve by SALE-LEGIT-18
+        ok = reserve_credit_approval("APP-OWN-18", "SALE-LEGIT-18", "CUS-TIGHT-01", 1000.0)
+        self.assertTrue(ok)
+
+        # Attempt consumption by unauthorized sale SALE-UNOWNED-99
+        consumed_unowned = consume_credit_approval("APP-OWN-18", "SALE-UNOWNED-99")
+        self.assertFalse(consumed_unowned, "Unauthorized sale must NOT be allowed to consume reservation")
+
+        # Approval must still be unconsumed
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-OWN-18")
+        self.assertFalse(appr.get("is_consumed"))
+        self.assertEqual(str(appr.get("reserved_by_sale_id")), "SALE-LEGIT-18")
+
+        # Legitimate sale consumes successfully
+        consumed_legit = consume_credit_approval("APP-OWN-18", "SALE-LEGIT-18")
+        self.assertTrue(consumed_legit)
+        appr_after = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-OWN-18")
+        self.assertTrue(appr_after.get("is_consumed"))
+
+    def test_19_approval_release_attempted_by_sale_not_owning_reservation(self):
+        """
+        Failure Injection 19:
+        Approval is reserved by SALE-LEGIT-19.
+        Attempting to release the reservation by SALE-UNOWNED-99 must fail.
+        Only the owning sale can release it.
+        A consumed approval can NEVER be released.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-OWN-19",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
+        ok = reserve_credit_approval("APP-OWN-19", "SALE-LEGIT-19", "CUS-TIGHT-01", 1000.0)
+        self.assertTrue(ok)
+
+        # Attempt release by unauthorized sale
+        released_unowned = release_credit_approval("APP-OWN-19", "SALE-UNOWNED-99")
+        self.assertFalse(released_unowned)
+
+        # Reservation remains held by SALE-LEGIT-19
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-OWN-19")
+        self.assertEqual(str(appr.get("reserved_by_sale_id")), "SALE-LEGIT-19")
+
+        # Legitimate sale releases it
+        released_legit = release_credit_approval("APP-OWN-19", "SALE-LEGIT-19")
+        self.assertTrue(released_legit)
+        appr_after = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-OWN-19")
+        self.assertEqual(str(appr_after.get("reserved_by_sale_id")), "")
+
+        # Re-reserve and consume, then verify a consumed approval can NEVER be released
+        reserve_credit_approval("APP-OWN-19", "SALE-LEGIT-19", "CUS-TIGHT-01", 1000.0)
+        consume_credit_approval("APP-OWN-19", "SALE-LEGIT-19")
+        released_consumed = release_credit_approval("APP-OWN-19", "SALE-LEGIT-19")
+        self.assertFalse(released_consumed, "A consumed approval must NEVER be released")
+
+    def test_20_retry_of_sale_after_successful_reservation_but_failed_sale_persistence(self):
+        """
+        Failure Injection 20:
+        Sale successfully reserves approval, but database write fails during sale header write.
+        The reservation must be released.
+        Subsequent retry with the same (or new) request must succeed and complete cleanly.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-FAIL-20",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
+        req = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-TIGHT-01",
+            payment_method="CASH",
+            cash_collected=0.0,
+            credit_amount=1500.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=30, actual_unit_price=50.0)],
+            owner_credit_approval_id="APP-FAIL-20",
+            idempotency_key="fail-persist-20",
+        )
+
+        # Inject single failure on Sales tab
+        db.inject_failure_once("Sales")
+
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(create_sale(req, current_user=self.salesman_user))
+        self.assertEqual(ctx.exception.status_code, 503)
+
+        # Approval must be cleanly released
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-20")
+        self.assertFalse(appr.get("is_consumed"))
+        self.assertEqual(str(appr.get("reserved_by_sale_id", "")).strip(), "")
+
+        # Retry with the same request
+        retried_sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        self.assertEqual(retried_sale.txn_status, "COMPLETE")
+
+        # Now approval is consumed
+        appr_after = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-20")
+        self.assertTrue(appr_after.get("is_consumed"))
+        self.assertEqual(str(appr_after.get("consumed_by_sale_id")), retried_sale.sale_id)
+
+    def test_21_retry_of_sale_after_successful_persistence_but_failed_consumption(self):
+        """
+        Failure Injection 21:
+        Sale header and lines are written, but approval consumption fails.
+        Sale is left INCOMPLETE, logging APPROVAL_CONSUMPTION_PENDING.
+        Retry of the same sale (with same idempotency key) consumes approval and completes sale.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-FAIL-21",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
+        req = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-TIGHT-01",
+            payment_method="CASH",
+            cash_collected=0.0,
+            credit_amount=1500.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=30, actual_unit_price=50.0)],
+            owner_credit_approval_id="APP-FAIL-21",
+            idempotency_key="fail-consume-21",
+        )
+
+        orig_consume = cl.consume_credit_approval
+        fail_consume = True
+
+        def failing_consume(appr_id, s_id):
+            if fail_consume and appr_id == "APP-FAIL-21":
+                return False
+            return orig_consume(appr_id, s_id)
+
+        cl.consume_credit_approval = failing_consume
+
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(create_sale(req, current_user=self.salesman_user))
+            self.assertEqual(ctx.exception.status_code, 503)
+
+            # Check IncompleteTransactions
+            inc_records = db.get_records("IncompleteTransactions", fresh=True)
+            inc = next(r for r in inc_records if "APP-FAIL-21" in str(r.get("payload_json", "")))
+            self.assertEqual(str(inc.get("status")), "CONSUMPTION_FAILED")
+
+            # Now allow consumption to succeed
+            fail_consume = False
+
+            # Retry exact same request
+            retried = asyncio.run(create_sale(req, current_user=self.salesman_user))
+            self.assertEqual(retried.txn_status, "COMPLETE")
+
+            # Approval is now consumed
+            appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-21")
+            self.assertTrue(appr.get("is_consumed"))
+
+            # IncompleteTransactions entry is resolved
+            inc_after = next(r for r in db.get_records("IncompleteTransactions", fresh=True) if str(r.get("transaction_id")) == inc.get("transaction_id"))
+            self.assertEqual(str(inc_after.get("status")), "RESOLVED")
+        finally:
+            cl.consume_credit_approval = orig_consume
+
+    def test_22_concurrent_idempotent_retries_of_the_same_sale(self):
+        """
+        Failure Injection 22:
+        Two simultaneous requests submitted with the exact same idempotency_key.
+        Both threads must succeed and return the exact same sale_id.
+        No duplicate rows in Sales, SaleItems, Payments, or SalesmanStockLedger.
+        """
+        req = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-REG-01",
+            payment_method="CASH",
+            cash_collected=1000.0,
+            credit_amount=0.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=20, actual_unit_price=50.0)],
+            idempotency_key="concurrent-idemp-22",
+        )
+
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+
+        def worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                barrier.wait(timeout=5)
+                res = loop.run_until_complete(create_sale(req, current_user=self.salesman_user))
+                results.append(res)
+            except Exception as e:
+                errors.append(e)
+            finally:
+                loop.close()
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertEqual(len(errors), 0, f"Expected 0 errors under idempotency serialization, got: {errors}")
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].sale_id, results[1].sale_id, "Both requests must return the identical sale_id")
+
+        # Verify no duplicate entries in storage
+        sale_rows = [s for s in db.get_records("Sales", fresh=True) if str(s.get("idempotency_key")) == "concurrent-idemp-22"]
+        self.assertEqual(len(sale_rows), 1, "Exactly one Sales row must exist")
+
+        item_rows = [i for i in db.get_records("SaleItems", fresh=True) if str(i.get("sale_id")) == results[0].sale_id]
+        self.assertEqual(len(item_rows), 1, "Exactly one line item must exist")
+
+        stock_rows = [m for m in db.get_records("SalesmanStockLedger", fresh=True) if str(m.get("related_sale_id")) == results[0].sale_id]
+        self.assertEqual(len(stock_rows), 1, "Exactly one stock deduction must exist")
+
+    def test_23_non_finite_approved_amounts_rejected(self):
+        """
+        Failure Injection 23:
+        Non-finite values (NaN, Infinity, -Infinity) in approved amounts or settlement amounts
+        must be strictly rejected with HTTP 400 or HTTP 422.
+        """
+        # 1. NaN in approved_amount
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-NAN-23",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": float("nan"),
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+        })
+
+        req_nan = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-TIGHT-01",
+            payment_method="CASH",
+            cash_collected=0.0,
+            credit_amount=1500.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=30, actual_unit_price=50.0)],
+            owner_credit_approval_id="APP-NAN-23",
+            idempotency_key="nan-test-23",
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(create_sale(req_nan, current_user=self.salesman_user))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("non-finite", ctx.exception.detail.lower())
+
+        # 2. Infinity in approved_amount
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-INF-23",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": float("inf"),
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+        })
+        req_inf = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-TIGHT-01",
+            payment_method="CASH",
+            cash_collected=0.0,
+            credit_amount=1500.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=30, actual_unit_price=50.0)],
+            owner_credit_approval_id="APP-INF-23",
+            idempotency_key="inf-test-23",
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(create_sale(req_inf, current_user=self.salesman_user))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("non-finite", ctx.exception.detail.lower())
+
+    def test_24_approval_revocation_while_reservation_is_pending(self):
+        """
+        Failure Injection 24:
+        Approval is approved and reserved by SALE-PEND-24.
+        Owner revokes the approval while reservation is pending.
+        Subsequent consumption must be rejected.
+        Credit extension must fail closed.
+        """
+        db.append_record("ApprovalRequests", {
+            "request_id": "APP-REV-24",
+            "request_type": "CREDIT_EXCEPTION",
+            "status": "APPROVED",
+            "decided_by": "USR-OWNER-01",
+            "customer_id": "CUS-TIGHT-01",
+            "approved_amount": 2000.0,
+            "expires_at": (date.today() + timedelta(days=7)).isoformat(),
+            "is_consumed": False,
+            "reserved_by_sale_id": "",
+        })
+
+        # Reserve approval
+        ok = reserve_credit_approval("APP-REV-24", "SALE-PEND-24", "CUS-TIGHT-01", 1500.0)
+        self.assertTrue(ok)
+
+        # While reservation is pending, Owner revokes approval
+        db.update_record("ApprovalRequests", "request_id", "APP-REV-24", {
+            "status": "REVOKED",
+            "revoked": True,
+        })
+
+        # Now attempt to consume the revoked approval
+        consumed = consume_credit_approval("APP-REV-24", "SALE-PEND-24")
+        self.assertFalse(consumed, "Revoked approval must NOT be consumable")
+
+        # Verify approval is NOT marked consumed
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-REV-24")
+        self.assertFalse(appr.get("is_consumed"))
 
 
 if __name__ == "__main__":
