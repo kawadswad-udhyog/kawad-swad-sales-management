@@ -264,24 +264,26 @@ const MainAppContent: React.FC = () => {
               </span>
             </div>
           </div>
-          <button
-            disabled={isReconnecting}
-            onClick={async () => {
-              setIsReconnecting(true);
-              try {
-                const res = await reconnectGoogleSheets();
-                if (res.success) {
-                  await refreshData();
+          {['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT'].includes(role) && (
+            <button
+              disabled={isReconnecting}
+              onClick={async () => {
+                setIsReconnecting(true);
+                try {
+                  const res = await reconnectGoogleSheets();
+                  if (res.success) {
+                    await refreshData();
+                  }
+                } finally {
+                  setIsReconnecting(false);
                 }
-              } finally {
-                setIsReconnecting(false);
-              }
-            }}
-            className="flex items-center gap-1.5 px-3 py-1 rounded bg-red-700 hover:bg-red-600 font-semibold text-xs transition-colors shrink-0 cursor-pointer disabled:opacity-50"
-          >
-            <RefreshCw size={13} className={isReconnecting ? 'animate-spin' : ''} />
-            <span>{isReconnecting ? 'Reconnecting…' : 'Reconnect Sheets'}</span>
-          </button>
+              }}
+              className="flex items-center gap-1.5 px-3 py-1 rounded bg-red-700 hover:bg-red-600 font-semibold text-xs transition-colors shrink-0 cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={isReconnecting ? 'animate-spin' : ''} />
+              <span>{isReconnecting ? 'Reconnecting…' : 'Reconnect Sheets'}</span>
+            </button>
+          )}
         </div>
       )}
 

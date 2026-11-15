@@ -281,12 +281,21 @@ class AttendanceAndWorkflowTestCase(unittest.TestCase):
         self.assertEqual(len(db.memory_store["WorkerAttendance"]), 1)
 
     def test_diagnostic_health_endpoint_schema(self):
-        from app.main import health_check
+        from app.main import health_check, health_details
         health = health_check()
         self.assertIn("backend", health)
         self.assertEqual(health["backend"]["status"], "CONNECTED")
-        self.assertIn("google_sheets", health)
-        self.assertIn("required_sheets", health)
+        self.assertIn("google_sheets_connected", health)
+        self.assertIn("persistent_writes_enabled", health)
+        self.assertNotIn("spreadsheet_id_configured", health)
+        self.assertNotIn("service_account_configured", health)
+        self.assertNotIn("last_connection_error", health)
+
+        details = health_details(current_user=self.owner_user)
+        self.assertIn("google_sheets", details)
+        self.assertIn("required_sheets", details)
+        self.assertIn("spreadsheet_id_configured", details)
+        self.assertIn("service_account_configured", details)
 
 if __name__ == "__main__":
     unittest.main()

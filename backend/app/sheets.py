@@ -367,6 +367,9 @@ class SheetsDatabase:
         self.allow_in_memory_fallback = os.getenv("SALES_TESTING", "").strip() == "1"
         self._records_cache: Dict[str, tuple] = {}
         self._records_cache_ttl_seconds = 30.0
+        self._diagnostic_headers_cache: Optional[Dict[str, Any]] = None
+        self._diagnostic_cache_ttl_seconds = 60.0
+        self._diagnostic_scan_lock = threading.Lock()
         self._worksheets: Dict[str, Any] = {}
         self._lock = threading.RLock()
         self._inflight: Dict[str, threading.Event] = {}
@@ -505,6 +508,7 @@ class SheetsDatabase:
         self._last_conn_attempt_time = time.monotonic()
         self.is_connected = False
         self.last_connection_error = None
+        self.invalidate_diagnostic_cache()
 
         if not SALES_GOOGLE_SPREADSHEET_ID:
             self.last_connection_error = (
@@ -568,34 +572,345 @@ class SheetsDatabase:
             logger.error("%s. Persistent writes disabled.", self.last_connection_error)
             return False
 
+    def invalidate_diagnostic_cache(self) -> None:
+        """Clear cached diagnostic tab/schema header snapshot."""
+        with self._lock:
+            self._diagnostic_headers_cache = None
+
+    @staticmethod
+    def _sheet_header_range(tab_name: str) -> str:
+        escaped = str(tab_name).replace("'", "''")
+        return f"'{escaped}'!1:1"
+
+    def _read_all_tab_headers_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Read row-1 headers for all REQUIRED_TABS in a strictly read-only manner.
+        Uses batch Google Sheets API calls (worksheets() + values_batch_get()) when available,
+        caches completed scans safely within TTL, and never treats unreadable/429 errors as empty headers.
+        """
+        if not (self.is_connected and self.spreadsheet):
+            return {
+                "connected": False,
+                "mode": "DISCONNECTED",
+                "verification_completed": False,
+                "error_type": "DISCONNECTED",
+                "error": self.last_connection_error or "Google Sheets not connected",
+                "tab_headers": {},
+                "missing_tabs": [],
+                "unreadable_tabs": {},
+                "cached": False,
+            }
+
+        now = time.monotonic()
+        if not force_refresh:
+            with self._lock:
+                cached = self._diagnostic_headers_cache
+                if (
+                    cached is not None
+                    and cached.get("spreadsheet") is self.spreadsheet
+                    and (now - float(cached.get("timestamp", 0.0))) < self._diagnostic_cache_ttl_seconds
+                ):
+                    snap = dict(cached["snapshot"])
+                    snap["tab_headers"] = {k: list(v) for k, v in snap.get("tab_headers", {}).items()}
+                    snap["missing_tabs"] = list(snap.get("missing_tabs", []))
+                    snap["unreadable_tabs"] = dict(snap.get("unreadable_tabs", {}))
+                    snap["cached"] = True
+                    return snap
+
+        with self._diagnostic_scan_lock:
+            now = time.monotonic()
+            if not force_refresh:
+                with self._lock:
+                    cached = self._diagnostic_headers_cache
+                    if (
+                        cached is not None
+                        and cached.get("spreadsheet") is self.spreadsheet
+                        and (now - float(cached.get("timestamp", 0.0))) < self._diagnostic_cache_ttl_seconds
+                    ):
+                        snap = dict(cached["snapshot"])
+                        snap["tab_headers"] = {k: list(v) for k, v in snap.get("tab_headers", {}).items()}
+                        snap["missing_tabs"] = list(snap.get("missing_tabs", []))
+                        snap["unreadable_tabs"] = dict(snap.get("unreadable_tabs", {}))
+                        snap["cached"] = True
+                        return snap
+
+            tab_headers: Dict[str, List[str]] = {}
+            missing_tabs: List[str] = []
+            unreadable_tabs: Dict[str, Dict[str, str]] = {}
+
+            # Fast batch path used for real gspread.Spreadsheet and batch-capable mocks
+            if hasattr(self.spreadsheet, "values_batch_get"):
+                ws_map: Optional[Dict[str, Any]] = None
+                if hasattr(self.spreadsheet, "worksheets"):
+                    try:
+                        ws_list = self.spreadsheet.worksheets()
+                        ws_map = {ws.title: ws for ws in ws_list}
+                        with self._lock:
+                            for title, ws in ws_map.items():
+                                self._worksheets[title] = ws
+                    except Exception as exc:
+                        err_type = self._classify_sheets_exception(exc)
+                        logger.warning("Diagnostic worksheets() list failed (%s): %s", err_type, exc)
+                        return {
+                            "connected": True,
+                            "mode": "GOOGLE_SHEETS_LIVE_READONLY",
+                            "verification_completed": False,
+                            "error_type": err_type,
+                            "error": str(exc),
+                            "tab_headers": {},
+                            "missing_tabs": [],
+                            "unreadable_tabs": {
+                                tab: {"error_type": err_type, "error": str(exc)}
+                                for tab in REQUIRED_TABS
+                            },
+                            "cached": False,
+                        }
+
+                if ws_map is not None:
+                    existing_tabs = [tab for tab in REQUIRED_TABS if tab in ws_map]
+                    missing_tabs = [tab for tab in REQUIRED_TABS if tab not in ws_map]
+                else:
+                    existing_tabs = list(REQUIRED_TABS.keys())
+
+                chunk_size = 35
+                for start_idx in range(0, len(existing_tabs), chunk_size):
+                    chunk = existing_tabs[start_idx : start_idx + chunk_size]
+                    ranges = [self._sheet_header_range(tab) for tab in chunk]
+                    try:
+                        resp = self.spreadsheet.values_batch_get(ranges)
+                        value_ranges = resp.get("valueRanges") if isinstance(resp, dict) else None
+                        if not isinstance(value_ranges, list) or len(value_ranges) != len(chunk):
+                            raise ValueError(
+                                f"Incomplete values_batch_get response: expected {len(chunk)} ranges, got {len(value_ranges) if isinstance(value_ranges, list) else type(value_ranges).__name__}"
+                            )
+                        for tab, vr in zip(chunk, value_ranges):
+                            rows = vr.get("values") or [] if isinstance(vr, dict) else []
+                            row1 = rows[0] if rows and isinstance(rows[0], list) else []
+                            tab_headers[tab] = [str(h).strip() for h in row1 if str(h).strip()]
+                    except Exception as exc:
+                        err_type = self._classify_sheets_exception(exc)
+                        logger.warning(
+                            "Diagnostic values_batch_get failed (%s) on chunk starting with %s: %s",
+                            err_type,
+                            chunk[0] if chunk else "",
+                            exc,
+                        )
+                        for remaining_tab in existing_tabs[start_idx:]:
+                            unreadable_tabs[remaining_tab] = {
+                                "error_type": err_type,
+                                "error": str(exc),
+                            }
+                        return {
+                            "connected": True,
+                            "mode": "GOOGLE_SHEETS_LIVE_READONLY",
+                            "verification_completed": False,
+                            "error_type": err_type,
+                            "error": str(exc),
+                            "tab_headers": tab_headers,
+                            "missing_tabs": missing_tabs,
+                            "unreadable_tabs": unreadable_tabs,
+                            "cached": False,
+                        }
+
+                snapshot = {
+                    "connected": True,
+                    "mode": "GOOGLE_SHEETS_LIVE_READONLY",
+                    "verification_completed": True,
+                    "error_type": None,
+                    "error": None,
+                    "tab_headers": tab_headers,
+                    "missing_tabs": missing_tabs,
+                    "unreadable_tabs": {},
+                    "cached": False,
+                }
+                with self._lock:
+                    self._diagnostic_headers_cache = {
+                        "spreadsheet": self.spreadsheet,
+                        "timestamp": time.monotonic(),
+                        "snapshot": {
+                            **snapshot,
+                            "tab_headers": {k: list(v) for k, v in tab_headers.items()},
+                            "missing_tabs": list(missing_tabs),
+                            "unreadable_tabs": {},
+                        },
+                    }
+                return snapshot
+
+            # Per-tab read-only fallback path (e.g., legacy test mocks without values_batch_get)
+            ws_map_fallback: Dict[str, Any] = {}
+            if hasattr(self.spreadsheet, "worksheets"):
+                try:
+                    ws_map_fallback = {ws.title: ws for ws in self.spreadsheet.worksheets()}
+                except Exception as exc:
+                    err_type = self._classify_sheets_exception(exc)
+                    logger.warning("Diagnostic worksheets() fallback list failed (%s): %s", err_type, exc)
+                    return {
+                        "connected": True,
+                        "mode": "GOOGLE_SHEETS_LIVE_READONLY",
+                        "verification_completed": False,
+                        "error_type": err_type,
+                        "error": str(exc),
+                        "tab_headers": {},
+                        "missing_tabs": [],
+                        "unreadable_tabs": {
+                            tab: {"error_type": err_type, "error": str(exc)}
+                            for tab in REQUIRED_TABS
+                        },
+                        "cached": False,
+                    }
+
+            aborted_err_type: Optional[str] = None
+            aborted_err_msg: Optional[str] = None
+            for idx, tab in enumerate(REQUIRED_TABS):
+                ws = ws_map_fallback.get(tab)
+                if ws is None:
+                    try:
+                        ws = self.spreadsheet.worksheet(tab)
+                    except Exception as exc:
+                        err_type = self._classify_sheets_exception(exc)
+                        if err_type == "TAB_NOT_FOUND":
+                            missing_tabs.append(tab)
+                            continue
+                        unreadable_tabs[tab] = {"error_type": err_type, "error": str(exc)}
+                        if err_type == "QUOTA_EXCEEDED":
+                            aborted_err_type = err_type
+                            aborted_err_msg = str(exc)
+                            for rem in list(REQUIRED_TABS.keys())[idx + 1 :]:
+                                unreadable_tabs[rem] = {"error_type": err_type, "error": str(exc)}
+                            break
+                        continue
+                try:
+                    row1 = ws.row_values(1)
+                    tab_headers[tab] = [str(h).strip() for h in row1 if str(h).strip()]
+                except Exception as exc:
+                    err_type = self._classify_sheets_exception(exc)
+                    unreadable_tabs[tab] = {"error_type": err_type, "error": str(exc)}
+                    if err_type == "QUOTA_EXCEEDED":
+                        aborted_err_type = err_type
+                        aborted_err_msg = str(exc)
+                        for rem in list(REQUIRED_TABS.keys())[idx + 1 :]:
+                            unreadable_tabs[rem] = {"error_type": err_type, "error": str(exc)}
+                        break
+
+            if unreadable_tabs:
+                err_types = [info["error_type"] for info in unreadable_tabs.values()]
+                dominant_err = aborted_err_type or (
+                    "QUOTA_EXCEEDED"
+                    if "QUOTA_EXCEEDED" in err_types
+                    else ("NETWORK_ERROR" if "NETWORK_ERROR" in err_types else err_types[0])
+                )
+                first_msg = aborted_err_msg or next(iter(unreadable_tabs.values()))["error"]
+                return {
+                    "connected": True,
+                    "mode": "GOOGLE_SHEETS_LIVE_READONLY",
+                    "verification_completed": False,
+                    "error_type": dominant_err,
+                    "error": first_msg,
+                    "tab_headers": tab_headers,
+                    "missing_tabs": missing_tabs,
+                    "unreadable_tabs": unreadable_tabs,
+                    "cached": False,
+                }
+
+            snapshot = {
+                "connected": True,
+                "mode": "GOOGLE_SHEETS_LIVE_READONLY",
+                "verification_completed": True,
+                "error_type": None,
+                "error": None,
+                "tab_headers": tab_headers,
+                "missing_tabs": missing_tabs,
+                "unreadable_tabs": {},
+                "cached": False,
+            }
+            with self._lock:
+                self._diagnostic_headers_cache = {
+                    "spreadsheet": self.spreadsheet,
+                    "timestamp": time.monotonic(),
+                    "snapshot": {
+                        **snapshot,
+                        "tab_headers": {k: list(v) for k, v in tab_headers.items()},
+                        "missing_tabs": list(missing_tabs),
+                        "unreadable_tabs": {},
+                    },
+                }
+            return snapshot
+
     def reconnect(self) -> bool:
         """Trigger re-initialization of Google Sheets connection and clear caches."""
         with self._lock:
             self._worksheets.clear()
             self._records_cache.clear()
+            self._diagnostic_headers_cache = None
         return self.init_connection()
 
-    def verify_tabs_accessibility(self) -> Dict[str, Any]:
-        """Verify that every required sheet can be read and written successfully."""
-        if not (self.is_connected and self.spreadsheet):
+    def verify_tabs_accessibility(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """Verify that every required sheet can be read successfully using batch header reads and safe caching."""
+        snapshot = self._read_all_tab_headers_snapshot(force_refresh=force_refresh)
+        if not snapshot.get("connected"):
             return {
                 "connected": False,
                 "all_tabs_accessible": False,
-                "error": self.last_connection_error or "Google Sheets not connected",
+                "status": "CHECK_FAILED",
+                "error_type": "DISCONNECTED",
+                "verification_completed": False,
+                "quota_exceeded": False,
+                "cached": False,
+                "error": snapshot.get("error") or "Google Sheets not connected",
                 "tabs": {},
             }
-        results = {}
+
+        tab_headers = snapshot.get("tab_headers", {})
+        missing_tabs = set(snapshot.get("missing_tabs", []))
+        unreadable_tabs = snapshot.get("unreadable_tabs", {})
+
+        results: Dict[str, Any] = {}
         for tab in REQUIRED_TABS:
-            try:
-                ws = self._get_worksheet(tab)
-                row1 = ws.row_values(1)
-                results[tab] = {"status": "ok", "columns": len(row1)}
-            except Exception as exc:
-                results[tab] = {"status": "error", "error": str(exc)}
-        all_ok = all(r.get("status") == "ok" for r in results.values())
+            if tab in tab_headers:
+                results[tab] = {"status": "ok", "columns": len(tab_headers[tab])}
+            elif tab in unreadable_tabs:
+                err_info = unreadable_tabs[tab]
+                results[tab] = {
+                    "status": "error",
+                    "error_type": err_info.get("error_type", "API_ERROR"),
+                    "error": err_info.get("error", "Unreadable worksheet"),
+                }
+            elif tab in missing_tabs:
+                results[tab] = {
+                    "status": "error",
+                    "error_type": "TAB_NOT_FOUND",
+                    "error": f"Worksheet '{tab}' not found",
+                }
+            else:
+                results[tab] = {
+                    "status": "error",
+                    "error_type": snapshot.get("error_type") or "API_ERROR",
+                    "error": snapshot.get("error") or "Verification did not complete",
+                }
+
+        all_ok = bool(
+            snapshot.get("verification_completed")
+            and not missing_tabs
+            and not unreadable_tabs
+            and all(r.get("status") == "ok" for r in results.values())
+        )
+        err_type = snapshot.get("error_type")
+        if err_type == "QUOTA_EXCEEDED":
+            status = "TEMPORARILY_UNAVAILABLE"
+        elif not snapshot.get("verification_completed") or unreadable_tabs or missing_tabs:
+            status = "CHECK_FAILED"
+        else:
+            status = "OK"
+
         return {
             "connected": True,
             "all_tabs_accessible": all_ok,
+            "status": status,
+            "verification_completed": bool(snapshot.get("verification_completed")),
+            "error_type": err_type,
+            "quota_exceeded": err_type == "QUOTA_EXCEEDED",
+            "cached": bool(snapshot.get("cached", False)),
+            "error": snapshot.get("error"),
             "tabs": results,
         }
 
@@ -621,6 +936,7 @@ class SheetsDatabase:
                     worksheet.update("A1", [headers])
                     with self._lock:
                         self._worksheets[tab] = worksheet
+                    self.invalidate_diagnostic_cache()
             except Exception as exc:
                 logger.error("Could not ensure tab %s: %s", tab, exc)
 
@@ -628,12 +944,14 @@ class SheetsDatabase:
         current = worksheet.row_values(1)
         if not current:
             worksheet.update("A1", [headers])
+            self.invalidate_diagnostic_cache()
             return
         missing = [h for h in headers if h not in current]
         if missing:
             start = len(current) + 1
             end = start + len(missing) - 1
             worksheet.update(self._a1(start, 1, end), [missing])
+            self.invalidate_diagnostic_cache()
 
     @staticmethod
     def _a1(start_col: int, row: int, end_col: int) -> str:
@@ -663,6 +981,7 @@ class SheetsDatabase:
                 logger.info("Worksheet '%s' not found. Creating worksheet with default headers.", tab_name)
                 ws = self.spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=max(26, len(headers) + 2))
                 self._ensure_headers(ws, headers)
+                self.invalidate_diagnostic_cache()
             else:
                 raise exc
         with self._lock:
@@ -671,8 +990,55 @@ class SheetsDatabase:
 
     @staticmethod
     def _is_quota_exception(exc: Exception) -> bool:
+        code = getattr(exc, "code", None)
+        if code == 429:
+            return True
+        resp = getattr(exc, "response", None)
+        if getattr(resp, "status_code", None) == 429:
+            return True
+        err_obj = getattr(exc, "error", None)
+        if isinstance(err_obj, dict):
+            if err_obj.get("code") == 429 or "RESOURCE_EXHAUSTED" in str(err_obj.get("status", "")).upper():
+                return True
         err_str = str(exc).lower()
-        return "429" in err_str or "quota" in err_str or "rate limit" in err_str
+        return (
+            "429" in err_str
+            or "quota" in err_str
+            or "rate limit" in err_str
+            or "resource_exhausted" in err_str
+            or "too many requests" in err_str
+        )
+
+    @classmethod
+    def _classify_sheets_exception(cls, exc: Exception) -> str:
+        if cls._is_quota_exception(exc):
+            return "QUOTA_EXCEEDED"
+        cls_name = exc.__class__.__name__
+        err_str = str(exc).lower()
+        if cls_name == "WorksheetNotFound" or (
+            "worksheet" in err_str
+            and ("not found" in err_str or "does not exist" in err_str or "missing" in err_str)
+        ):
+            return "TAB_NOT_FOUND"
+        if isinstance(exc, (ConnectionError, TimeoutError, OSError)) or any(
+            tok in err_str
+            for tok in (
+                "timed out",
+                "timeout",
+                "connection",
+                "network",
+                "unreachable",
+                "name resolution",
+                "dns",
+                "ssl",
+                "eof",
+                "502",
+                "503",
+                "504",
+            )
+        ):
+            return "NETWORK_ERROR"
+        return "API_ERROR"
 
     def _safe_read_worksheet_records(self, worksheet, tab_name: str) -> List[Dict[str, Any]]:
         """Read records safely, tolerating legacy duplicate headers, blank trailing columns, and extra columns."""
@@ -1230,10 +1596,11 @@ class SheetsDatabase:
         except Exception as exc:
             logger.error("Audit log write failed: %s", exc)
 
-    def inspect_schema_compatibility(self) -> Dict[str, Any]:
+    def inspect_schema_compatibility(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Read-only compatibility diagnostic comparing live or active sheet tabs/columns
         against REQUIRED_TABS without altering any headers, rows, or sheet structure.
+        Explicitly separates HTTP 429 quota limits and network/API errors from genuine incompatibility.
         """
         core_columns: Dict[str, List[str]] = {
             "Users": ["user_id", "username", "role", "active"],
@@ -1260,24 +1627,18 @@ class SheetsDatabase:
         checked_tabs = 0
 
         if self.is_connected and self.spreadsheet:
-            try:
-                ws_map = {ws.title: ws for ws in self.spreadsheet.worksheets()}
-            except Exception:
-                ws_map = {}
+            snapshot = self._read_all_tab_headers_snapshot(force_refresh=force_refresh)
+            tab_headers = snapshot.get("tab_headers", {})
+            missing_tabs = list(snapshot.get("missing_tabs", []))
+            unreadable_tabs = dict(snapshot.get("unreadable_tabs", {}))
+            verification_completed = bool(snapshot.get("verification_completed"))
+            error_type = snapshot.get("error_type")
 
             for tab, expected_cols in REQUIRED_TABS.items():
-                ws = ws_map.get(tab)
-                if ws is None:
-                    try:
-                        ws = self.spreadsheet.worksheet(tab)
-                    except Exception:
-                        missing_tabs.append(tab)
-                        continue
+                if tab not in tab_headers:
+                    continue
                 checked_tabs += 1
-                try:
-                    actual_headers = [str(h).strip() for h in ws.row_values(1) if str(h).strip()]
-                except Exception:
-                    actual_headers = []
+                actual_headers = tab_headers[tab]
                 actual_lower = {h.lower() for h in actual_headers}
                 expected_lower = {c.lower() for c in expected_cols}
                 required_set = core_columns.get(tab, expected_cols[:3])
@@ -1293,32 +1654,63 @@ class SheetsDatabase:
                 if extras:
                     extra_columns_detected[tab] = extras
 
-            if missing_tabs or missing_required_columns:
+            if error_type == "QUOTA_EXCEEDED":
+                status = "TEMPORARILY_UNAVAILABLE"
+                diagnostics = (
+                    "Google Sheets API read quota temporarily exceeded (HTTP 429). "
+                    "Verification could not complete; retry in a few moments."
+                )
+            elif not verification_completed or unreadable_tabs:
+                status = "CHECK_FAILED"
+                diagnostics = (
+                    f"Schema verification could not complete ({error_type or 'API_ERROR'}): "
+                    f"{snapshot.get('error') or 'One or more sheets could not be read.'}"
+                )
+            elif missing_tabs or missing_required_columns:
                 status = "INCOMPATIBLE"
+                diagnostics = "Required tabs or core columns are missing; inspect missing_tabs/missing_required_columns before writes."
             elif missing_optional_columns:
                 status = "COMPATIBLE_WITH_OPTIONAL_GAPS"
+                diagnostics = "Core tabs/columns satisfied; optional extension columns absent and handled safely in read/write mode."
             else:
                 status = "COMPATIBLE"
+                diagnostics = "All core schema requirements satisfied."
 
             return {
                 "status": status,
                 "mode": "GOOGLE_SHEETS_LIVE_READONLY",
                 "mutated": False,
+                "verification_completed": verification_completed,
+                "error_type": error_type,
+                "quota_exceeded": error_type == "QUOTA_EXCEEDED",
+                "cached": bool(snapshot.get("cached", False)),
                 "total_expected_tabs": len(REQUIRED_TABS),
                 "checked_tabs": checked_tabs,
                 "missing_tabs": missing_tabs,
+                "unreadable_tabs": unreadable_tabs,
                 "missing_required_columns": missing_required_columns,
                 "missing_optional_columns": missing_optional_columns,
                 "extra_columns_preserved": extra_columns_detected,
-                "diagnostics": (
-                    "All core schema requirements satisfied."
-                    if status == "COMPATIBLE"
-                    else (
-                        "Core tabs/columns satisfied; optional extension columns absent and handled safely in read/write mode."
-                        if status == "COMPATIBLE_WITH_OPTIONAL_GAPS"
-                        else "Required tabs or core columns are missing; inspect missing_tabs/missing_required_columns before writes."
-                    )
-                ),
+                "diagnostics": diagnostics,
+            }
+
+        if not self.allow_in_memory_fallback:
+            return {
+                "status": "CHECK_FAILED",
+                "mode": "DISCONNECTED",
+                "mutated": False,
+                "verification_completed": False,
+                "error_type": "DISCONNECTED",
+                "quota_exceeded": False,
+                "cached": False,
+                "total_expected_tabs": len(REQUIRED_TABS),
+                "checked_tabs": 0,
+                "missing_tabs": [],
+                "unreadable_tabs": {},
+                "missing_required_columns": {},
+                "missing_optional_columns": {},
+                "extra_columns_preserved": {},
+                "diagnostics": "Google Sheets is currently disconnected; schema verification could not complete.",
             }
 
         # Disconnected / test mode inspection over memory_store without mutations
@@ -1345,9 +1737,14 @@ class SheetsDatabase:
             "status": "TEST_OR_OFFLINE_COMPATIBLE" if not missing_required_columns else "INCOMPATIBLE",
             "mode": "MEMORY_STORE_READONLY",
             "mutated": False,
+            "verification_completed": True,
+            "error_type": None,
+            "quota_exceeded": False,
+            "cached": False,
             "total_expected_tabs": len(REQUIRED_TABS),
             "checked_tabs": checked_tabs,
             "missing_tabs": [],
+            "unreadable_tabs": {},
             "missing_required_columns": missing_required_columns,
             "missing_optional_columns": missing_optional_columns,
             "extra_columns_preserved": extra_columns_detected,

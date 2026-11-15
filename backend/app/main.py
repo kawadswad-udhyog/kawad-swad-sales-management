@@ -121,42 +121,129 @@ def _check_configuration():
             raise exc
         logger.error("Configuration warning on startup: %s", exc)
 
+def _sanitize_diagnostic_error(err: str | None) -> str | None:
+    """Redact spreadsheet IDs, file paths, service-account emails, and secret keys from diagnostic messages."""
+    if not err:
+        return None
+    import os
+    import re
+    from app.config import (
+        SALES_GOOGLE_SPREADSHEET_ID,
+        SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
+    )
+
+    msg = str(err)
+    for sensitive in (
+        SALES_GOOGLE_SPREADSHEET_ID,
+        SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
+        os.getenv("SALES_JWT_SECRET", "").strip(),
+    ):
+        if sensitive and len(sensitive) > 3:
+            msg = msg.replace(sensitive, "[REDACTED]")
+
+    msg = re.sub(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        "[REDACTED_PRIVATE_KEY]",
+        msg,
+    )
+    msg = re.sub(r'"private_key"\s*:\s*"[^"]*"', '"private_key": "[REDACTED]"', msg)
+    msg = re.sub(
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.iam\.gserviceaccount\.com",
+        "[REDACTED_SERVICE_ACCOUNT]",
+        msg,
+    )
+    msg = re.sub(r"/(?:etc/secrets|tmp|var|app|home)/[^\s'\"]+\.json", "[REDACTED_PATH]", msg)
+    return msg
+
+
+def _sanitize_diagnostic_payload(payload: dict) -> dict:
+    """Recursively sanitize error/diagnostic string fields in diagnostic payloads."""
+    sanitized = dict(payload)
+    if "error" in sanitized and isinstance(sanitized["error"], str):
+        sanitized["error"] = _sanitize_diagnostic_error(sanitized["error"])
+    if "diagnostics" in sanitized and isinstance(sanitized["diagnostics"], str):
+        sanitized["diagnostics"] = _sanitize_diagnostic_error(sanitized["diagnostics"])
+    if isinstance(sanitized.get("tabs"), dict):
+        sanitized["tabs"] = {
+            tab: (
+                {**info, "error": _sanitize_diagnostic_error(info["error"])}
+                if isinstance(info, dict) and isinstance(info.get("error"), str)
+                else info
+            )
+            for tab, info in sanitized["tabs"].items()
+        }
+    if isinstance(sanitized.get("unreadable_tabs"), dict):
+        sanitized["unreadable_tabs"] = {
+            tab: (
+                {**info, "error": _sanitize_diagnostic_error(info["error"])}
+                if isinstance(info, dict) and isinstance(info.get("error"), str)
+                else info
+            )
+            for tab, info in sanitized["unreadable_tabs"].items()
+        }
+    return sanitized
+
+
 @app.get("/health", tags=["System"])
 @app.get("/api/health", tags=["System"])
 def health_check():
+    """Public minimal liveness & connectivity check for Render and frontend pre-login indicator."""
+    status_str = "ok" if db.is_connected else "storage_disconnected"
+    persistent_writes = bool(db.is_connected and db.spreadsheet is not None)
+    return {
+        "status": status_str,
+        "service": "kawad-swad-sales-dev",
+        "google_sheets_connected": bool(db.is_connected),
+        "persistent_writes_enabled": persistent_writes,
+        "backend": {
+            "status": "CONNECTED",
+            "service": "kawad-swad-sales-dev",
+            "version": "1.0.0",
+        },
+    }
+
+
+@app.get("/health/details", tags=["System"])
+@app.get("/api/health/details", tags=["System"])
+def health_details(current_user: dict = Depends(auth.get_current_user)):
+    """Authenticated Owner/PA infrastructure & storage configuration diagnostics."""
     import os
     from app.config import (
         SALES_GOOGLE_SPREADSHEET_ID,
         SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
         SALES_GOOGLE_SERVICE_ACCOUNT_JSON,
     )
+    from app.permissions import require_manager
+    from app.sheets import REQUIRED_TABS
+
+    require_manager(current_user)
     status_str = "ok" if db.is_connected else "storage_disconnected"
     has_sa_file = bool(SALES_GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE))
     has_sa_json = bool(SALES_GOOGLE_SERVICE_ACCOUNT_JSON and len(SALES_GOOGLE_SERVICE_ACCOUNT_JSON.strip()) > 10)
+    sanitized_error = _sanitize_diagnostic_error(db.last_connection_error)
 
-    # Granular status classification conforming to Phase 4 connectivity standards
     if not SALES_GOOGLE_SPREADSHEET_ID:
         gs_status = "NOT_CONFIGURED"
-        gs_message = "SALES_GOOGLE_SPREADSHEET_ID is missing from environment"
+        gs_message = "Spreadsheet ID is not configured in environment"
     elif not (has_sa_file or has_sa_json):
         gs_status = "CREDENTIALS_MISSING"
-        gs_message = "Service account credentials file or JSON not found"
+        gs_message = "Service account credentials are not configured"
     elif db.is_connected and db.spreadsheet is not None:
         gs_status = "CONNECTED"
         gs_message = "Google Sheets connected and accessible"
     else:
         gs_status = "ERROR"
-        gs_message = db.last_connection_error or "Google Sheets connection failed"
+        gs_message = sanitized_error or "Google Sheets connection failed"
 
     return {
         "status": status_str,
         "service": "kawad-swad-sales-dev",
-        "google_sheets_connected": db.is_connected,
-        "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
+        "google_sheets_connected": bool(db.is_connected),
+        "persistent_writes_enabled": bool(db.is_connected and db.spreadsheet is not None),
         "spreadsheet_id_configured": bool(SALES_GOOGLE_SPREADSHEET_ID),
         "service_account_configured": has_sa_file or has_sa_json,
-        "last_connection_error": db.last_connection_error,
-        "allow_in_memory_fallback": db.allow_in_memory_fallback,
+        "last_connection_error": sanitized_error,
+        "allow_in_memory_fallback": bool(db.allow_in_memory_fallback),
         "backend": {
             "status": "CONNECTED",
             "service": "kawad-swad-sales-dev",
@@ -164,37 +251,50 @@ def health_check():
         },
         "google_sheets": {
             "status": gs_status,
-            "connected": db.is_connected,
-            "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
+            "connected": bool(db.is_connected),
+            "persistent_writes_enabled": bool(db.is_connected and db.spreadsheet is not None),
             "message": gs_message,
         },
         "required_sheets": {
             "status": "AVAILABLE" if db.is_connected else "NOT_VERIFIED",
-            "total_managed_tabs": len(db.memory_store) if hasattr(db, "memory_store") and db.memory_store else 60,
+            "total_managed_tabs": len(REQUIRED_TABS),
         },
     }
 
+
 @app.post("/health/reconnect", tags=["System"])
 @app.post("/api/health/reconnect", tags=["System"])
-def health_reconnect():
+def health_reconnect(current_user: dict = Depends(auth.get_current_user)):
+    from app.permissions import require_manager
+
+    require_manager(current_user)
     success = db.reconnect()
+    sanitized_error = _sanitize_diagnostic_error(db.last_connection_error)
     return {
         "success": success,
-        "google_sheets_connected": db.is_connected,
-        "persistent_writes_enabled": db.is_connected and db.spreadsheet is not None,
-        "message": "Reconnected to Google Sheets successfully." if success else f"Reconnection failed: {db.last_connection_error}",
-        "error": db.last_connection_error,
+        "google_sheets_connected": bool(db.is_connected),
+        "persistent_writes_enabled": bool(db.is_connected and db.spreadsheet is not None),
+        "message": "Reconnected to Google Sheets successfully." if success else f"Reconnection failed: {sanitized_error}",
+        "error": sanitized_error,
     }
+
 
 @app.get("/health/verify-tabs", tags=["System"])
 @app.get("/api/health/verify-tabs", tags=["System"])
-def health_verify_tabs():
-    return db.verify_tabs_accessibility()
+def health_verify_tabs(refresh: bool = False, current_user: dict = Depends(auth.get_current_user)):
+    from app.permissions import require_manager
+
+    require_manager(current_user)
+    return _sanitize_diagnostic_payload(db.verify_tabs_accessibility(force_refresh=bool(refresh)))
+
 
 @app.get("/health/schema-compatibility", tags=["System"])
 @app.get("/api/health/schema-compatibility", tags=["System"])
-def health_schema_compatibility():
-    return db.inspect_schema_compatibility()
+def health_schema_compatibility(refresh: bool = False, current_user: dict = Depends(auth.get_current_user)):
+    from app.permissions import require_manager
+
+    require_manager(current_user)
+    return _sanitize_diagnostic_payload(db.inspect_schema_compatibility(force_refresh=bool(refresh)))
 
 @app.get("/health/backup", tags=["System"])
 @app.get("/api/health/backup", tags=["System"])

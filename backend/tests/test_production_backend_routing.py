@@ -70,26 +70,27 @@ class TestProductionBackendRouting(unittest.TestCase):
                                     self.fail(f"Found forbidden target hostname {forbidden} on line {line_no} in {path}: {line.strip()}")
 
     def test_health_check_contract_definition(self):
-        """Verify that main.py defines the exact required health contract fields."""
+        """Verify main.py keeps public /health minimal while exposing detailed fields only in /health/details."""
+        from app.main import health_check
+        public = health_check()
+        for key in ("status", "service", "google_sheets_connected", "persistent_writes_enabled", "backend"):
+            self.assertIn(key, public)
+        for sensitive_key in (
+            "spreadsheet_id_configured",
+            "service_account_configured",
+            "last_connection_error",
+            "allow_in_memory_fallback",
+            "google_sheets",
+            "required_sheets",
+        ):
+            self.assertNotIn(sensitive_key, public)
+
         main_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "main.py"))
         with open(main_path, "r", encoding="utf-8") as f:
             content = f.read()
-
-        required_keys = [
-            '"status":',
-            '"service":',
-            '"google_sheets_connected":',
-            '"persistent_writes_enabled":',
-            '"spreadsheet_id_configured":',
-            '"service_account_configured":',
-            '"last_connection_error":',
-            '"allow_in_memory_fallback":',
-            '"backend":',
-            '"google_sheets":',
-            '"required_sheets":',
-        ]
-        for key in required_keys:
-            self.assertIn(key, content, f"Health contract key {key} missing from main.py")
+        self.assertIn("def health_details(", content)
+        for key in ('"spreadsheet_id_configured":', '"service_account_configured":', '"google_sheets":', '"required_sheets":'):
+            self.assertIn(key, content)
 
 if __name__ == "__main__":
     unittest.main()

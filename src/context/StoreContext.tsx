@@ -759,6 +759,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return;
       }
       if (!health.sheetsConnected) {
+        const userRole = String(currentUser?.role || '').toUpperCase();
+        const canReconnect = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT'].includes(userRole);
+        if (!canReconnect) {
+          setSyncError('Google Sheets storage is currently disconnected. Ask the Owner or PA to reconnect.');
+          return;
+        }
         const reconn = await reconnectGoogleSheets();
         if (!reconn.success) {
           setSyncError(`Backend is reached, but Google Sheets reconnect failed: ${reconn.message}`);
