@@ -393,6 +393,286 @@ class TestStockDiscrepancyIdempotency(unittest.TestCase):
         self.assertEqual(disc_txns[0]["salesman_user_id"], "USR-SALES-101")
         self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-MOONG-200G"), 18)
 
+    @staticmethod
+    def _approval_audits(disc_id: str):
+        audits = db.get_records("AuditLog", fresh=True)
+        return [
+            a for a in audits
+            if str(a.get("entity_type", "")).strip() == "StockDiscrepancies"
+            and str(a.get("entity_id", "")).strip() == disc_id
+            and str(a.get("action", "")).strip().upper() == "APPROVED_STOCK_DISCREPANCY"
+        ]
+
+    def test_H_audit_log_failure_after_adjustment_and_status_update_and_retry_recovery(self):
+        """Test H: AuditLog write failure raises 503 (never silent success); retry writes missing audit with 0 duplicate ledger moves."""
+        disc_req = stock.StockDiscrepancyCreate(
+            location="WAREHOUSE",
+            product_id="PRD-MOONG-200G",
+            expected_stock=100,
+            physical_count=98,
+            reason="2 packets missing for Test H",
+        )
+        sub = asyncio.run(stock.submit_stock_discrepancy(disc_req, self.owner_user))
+        disc_id = sub["discrepancy_id"]
+
+        # Inject AuditLog write failure: ledger append & StockDiscrepancies status update succeed, AuditLog append fails
+        db.inject_failure_once("AuditLog", 1)
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.review_stock_discrepancy(
+                disc_id,
+                stock.StockDiscrepancyReview(action="APPROVE", notes="Initial approval with audit failure"),
+                self.owner_user,
+            ))
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIn("audit", ctx.exception.detail.lower())
+
+        # Partial state verified: 1 ledger adjustment, status=APPROVED, 0 approval audit events yet
+        ledger_mid = db.get_records("SalesmanStockLedger", fresh=True)
+        disc_txns_mid = [tx for tx in ledger_mid if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
+        self.assertEqual(len(disc_txns_mid), 1)
+        curr_disc = next(r for r in db.get_records("StockDiscrepancies", fresh=True) if r["discrepancy_id"] == disc_id)
+        self.assertEqual(curr_disc["status"], "APPROVED")
+        self.assertEqual(len(self._approval_audits(disc_id)), 0)
+
+        # Retry approval -> must repair missing AuditLog event and create 0 new ledger movements
+        res_retry = asyncio.run(stock.review_stock_discrepancy(
+            disc_id,
+            stock.StockDiscrepancyReview(action="APPROVE", notes="Retry audit recovery"),
+            self.owner_user,
+        ))
+        self.assertEqual(res_retry["status"], "APPROVED")
+
+        ledger_final = db.get_records("SalesmanStockLedger", fresh=True)
+        disc_txns_final = [tx for tx in ledger_final if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
+        self.assertEqual(len(disc_txns_final), 1)
+        wh_bal, _ = balances(ledger_final)
+        self.assertEqual(wh_bal["PRD-MOONG-200G"], 98)
+
+        approval_audits = self._approval_audits(disc_id)
+        self.assertEqual(len(approval_audits), 1)
+        self.assertEqual(approval_audits[0]["related_record_id"], f"AUDIT-DISC-{disc_id}-APPROVED")
+
+    def test_I_audit_succeeds_but_status_update_fails_then_retry_completes_cleanly(self):
+        """Test I: Status update failure recovery (with and without pre-existing approval audit) produces 1 ledger row, 1 audit event, and APPROVED status."""
+        # Part 1: Inject StockDiscrepancies update failure during approval -> retry finishes with 1 ledger + 1 audit
+        disc_req = stock.StockDiscrepancyCreate(
+            location="WAREHOUSE",
+            product_id="PRD-MOONG-200G",
+            expected_stock=100,
+            physical_count=97,
+            reason="3 packets short for Test I part 1",
+        )
+        sub1 = asyncio.run(stock.submit_stock_discrepancy(disc_req, self.owner_user))
+        disc_id_1 = sub1["discrepancy_id"]
+
+        db.inject_failure_once("StockDiscrepancies", 1)
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.review_stock_discrepancy(
+                disc_id_1,
+                stock.StockDiscrepancyReview(action="APPROVE", notes="Attempt 1 status fail"),
+                self.owner_user,
+            ))
+        self.assertEqual(ctx.exception.status_code, 503)
+
+        res1 = asyncio.run(stock.review_stock_discrepancy(
+            disc_id_1,
+            stock.StockDiscrepancyReview(action="APPROVE", notes="Retry 1"),
+            self.owner_user,
+        ))
+        self.assertEqual(res1["status"], "APPROVED")
+        ledger1 = db.get_records("SalesmanStockLedger", fresh=True)
+        self.assertEqual(len([tx for tx in ledger1 if str(tx.get("reference_id")) == f"DISC-{disc_id_1}"]), 1)
+        self.assertEqual(len(self._approval_audits(disc_id_1)), 1)
+
+        # Part 2: Pre-existing approval audit event succeeded while StockDiscrepancies remained PENDING_APPROVAL
+        self.setUp()
+        disc_req2 = stock.StockDiscrepancyCreate(
+            location="WAREHOUSE",
+            product_id="PRD-MOONG-200G",
+            expected_stock=100,
+            physical_count=96,
+            reason="4 packets short for Test I part 2",
+        )
+        sub2 = asyncio.run(stock.submit_stock_discrepancy(disc_req2, self.owner_user))
+        disc_id_2 = sub2["discrepancy_id"]
+
+        db.append_record("AuditLog", {
+            "audit_id": db.generate_id("AuditLog"),
+            "event_datetime": datetime.now(timezone.utc).isoformat(),
+            "actor_user_id": self.owner_user["user_id"],
+            "action": "APPROVED_STOCK_DISCREPANCY",
+            "entity_type": "StockDiscrepancies",
+            "entity_id": disc_id_2,
+            "field_changed": "status",
+            "old_value": "PENDING_APPROVAL",
+            "new_value": "APPROVED",
+            "reason": f"APPROVED stock discrepancy {disc_id_2}. Adjustment: -4.",
+            "approved_by_user_id": self.owner_user["user_id"],
+            "related_record_id": f"AUDIT-DISC-{disc_id_2}-APPROVED",
+        }, raise_on_error=True)
+
+        db.inject_failure_once("StockDiscrepancies", 1)
+        with self.assertRaises(HTTPException) as ctx2:
+            asyncio.run(stock.review_stock_discrepancy(
+                disc_id_2,
+                stock.StockDiscrepancyReview(action="APPROVE", notes="Status fail with pre-written audit"),
+                self.owner_user,
+            ))
+        self.assertEqual(ctx2.exception.status_code, 503)
+
+        res2 = asyncio.run(stock.review_stock_discrepancy(
+            disc_id_2,
+            stock.StockDiscrepancyReview(action="APPROVE", notes="Retry completes status"),
+            self.owner_user,
+        ))
+        self.assertEqual(res2["status"], "APPROVED")
+        curr_disc2 = next(r for r in db.get_records("StockDiscrepancies", fresh=True) if r["discrepancy_id"] == disc_id_2)
+        self.assertEqual(curr_disc2["status"], "APPROVED")
+        ledger2 = db.get_records("SalesmanStockLedger", fresh=True)
+        self.assertEqual(len([tx for tx in ledger2 if str(tx.get("reference_id")) == f"DISC-{disc_id_2}"]), 1)
+        self.assertEqual(len(self._approval_audits(disc_id_2)), 1)
+
+    def test_J_repeated_approval_after_recovery_is_fully_idempotent(self):
+        """Test J: Repeated approvals after audit recovery create 0 extra ledger adjustments and 0 duplicate audit events."""
+        disc_req = stock.StockDiscrepancyCreate(
+            location="WAREHOUSE",
+            product_id="PRD-MOONG-200G",
+            expected_stock=100,
+            physical_count=95,
+            reason="5 packets missing for Test J",
+        )
+        sub = asyncio.run(stock.submit_stock_discrepancy(disc_req, self.owner_user))
+        disc_id = sub["discrepancy_id"]
+
+        db.inject_failure_once("AuditLog", 1)
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(stock.review_stock_discrepancy(
+                disc_id,
+                stock.StockDiscrepancyReview(action="APPROVE", notes="Fail audit once"),
+                self.owner_user,
+            ))
+        self.assertEqual(ctx.exception.status_code, 503)
+
+        # Recover + call approval repeatedly 3 more times
+        for attempt in range(4):
+            res = asyncio.run(stock.review_stock_discrepancy(
+                disc_id,
+                stock.StockDiscrepancyReview(action="APPROVE", notes=f"Repeat attempt {attempt}"),
+                self.owner_user,
+            ))
+            self.assertEqual(res["status"], "APPROVED")
+
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        disc_txns = [tx for tx in ledger if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
+        self.assertEqual(len(disc_txns), 1)
+        self.assertEqual(len(self._approval_audits(disc_id)), 1)
+        wh_bal, _ = balances(ledger)
+        self.assertEqual(wh_bal["PRD-MOONG-200G"], 95)
+
+    def test_K_concurrent_approval_with_audit_recovery(self):
+        """Test K: Two separate OS processes racing on approval & audit-recovery produce 1 ledger adjustment and 1 audit event."""
+        # Phase 1: Concurrent audit-recovery race after AuditLog write failure
+        for iteration in range(2):
+            self.setUp()
+            disc_req = stock.StockDiscrepancyCreate(
+                location="WAREHOUSE",
+                product_id="PRD-MOONG-200G",
+                expected_stock=100,
+                physical_count=98,
+                reason=f"Concurrent audit recovery iter {iteration}",
+            )
+            sub = asyncio.run(stock.submit_stock_discrepancy(disc_req, self.owner_user))
+            disc_id = sub["discrepancy_id"]
+
+            # Simulate initial partial failure where ledger & status=APPROVED succeeded but AuditLog write failed
+            db.inject_failure_once("AuditLog", 1)
+            with self.assertRaises(HTTPException) as ctx_init:
+                asyncio.run(stock.review_stock_discrepancy(
+                    disc_id,
+                    stock.StockDiscrepancyReview(action="APPROVE", notes="Initial failed audit"),
+                    self.owner_user,
+                ))
+            self.assertEqual(ctx_init.exception.status_code, 503)
+            self.assertEqual(len(self._approval_audits(disc_id)), 0)
+
+            ctx = multiprocessing.get_context("fork")
+            res_q = ctx.Queue()
+            barrier = ctx.Barrier(2)
+            p1 = ctx.Process(
+                target=_concurrent_review_worker,
+                args=(self.test_dir, disc_id, "APPROVE", "Worker 1 recovery", self.owner_user, res_q, barrier),
+            )
+            p2 = ctx.Process(
+                target=_concurrent_review_worker,
+                args=(self.test_dir, disc_id, "APPROVE", "Worker 2 recovery", self.owner_user, res_q, barrier),
+            )
+            p1.start()
+            p2.start()
+            p1.join(timeout=10)
+            p2.join(timeout=10)
+
+            results = []
+            while not res_q.empty():
+                results.append(res_q.get_nowait())
+            self.assertEqual(len(results), 2)
+            pids = sorted({r["pid"] for r in results})
+            self.assertEqual(len(pids), 2)
+            for r in results:
+                self.assertTrue(r.get("success"), f"Unexpected failure during concurrent audit recovery: {r}")
+                self.assertEqual(r["result"]["status"], "APPROVED")
+
+            ledger = db.get_records("SalesmanStockLedger", fresh=True)
+            disc_txns = [tx for tx in ledger if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
+            self.assertEqual(len(disc_txns), 1)
+            audits = self._approval_audits(disc_id)
+            self.assertEqual(len(audits), 1)
+            curr_disc = next(r for r in db.get_records("StockDiscrepancies", fresh=True) if r["discrepancy_id"] == disc_id)
+            self.assertEqual(curr_disc["status"], "APPROVED")
+            print(f"[Discrepancy Test K recovery iter={iteration}] PIDs={pids} ledger_rows=1 audit_rows=1 status=APPROVED")
+
+        # Phase 2: Concurrent normal approval across 2 OS processes verifies exactly 1 ledger + 1 audit row
+        self.setUp()
+        disc_req_fresh = stock.StockDiscrepancyCreate(
+            location="WAREHOUSE",
+            product_id="PRD-MOONG-200G",
+            expected_stock=100,
+            physical_count=94,
+            reason="Concurrent normal approval check for audit uniqueness",
+        )
+        sub_fresh = asyncio.run(stock.submit_stock_discrepancy(disc_req_fresh, self.owner_user))
+        disc_id_fresh = sub_fresh["discrepancy_id"]
+
+        ctx = multiprocessing.get_context("fork")
+        res_q2 = ctx.Queue()
+        barrier2 = ctx.Barrier(2)
+        p3 = ctx.Process(
+            target=_concurrent_review_worker,
+            args=(self.test_dir, disc_id_fresh, "APPROVE", "Worker A", self.owner_user, res_q2, barrier2),
+        )
+        p4 = ctx.Process(
+            target=_concurrent_review_worker,
+            args=(self.test_dir, disc_id_fresh, "APPROVE", "Worker B", self.owner_user, res_q2, barrier2),
+        )
+        p3.start()
+        p4.start()
+        p3.join(timeout=10)
+        p4.join(timeout=10)
+
+        results2 = []
+        while not res_q2.empty():
+            results2.append(res_q2.get_nowait())
+        self.assertEqual(len(results2), 2)
+        pids2 = sorted({r["pid"] for r in results2})
+        self.assertEqual(len(pids2), 2)
+        for r in results2:
+            self.assertTrue(r.get("success"), f"Unexpected failure: {r}")
+            self.assertEqual(r["result"]["status"], "APPROVED")
+
+        ledger_f = db.get_records("SalesmanStockLedger", fresh=True)
+        self.assertEqual(len([tx for tx in ledger_f if str(tx.get("reference_id")) == f"DISC-{disc_id_fresh}"]), 1)
+        self.assertEqual(len(self._approval_audits(disc_id_fresh)), 1)
+        print(f"[Discrepancy Test K normal] PIDs={pids2} ledger_rows=1 audit_rows=1 status=APPROVED")
+
 
 if __name__ == "__main__":
     unittest.main()

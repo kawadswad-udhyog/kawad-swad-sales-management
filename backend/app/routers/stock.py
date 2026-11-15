@@ -285,6 +285,85 @@ async def submit_stock_discrepancy(req: StockDiscrepancyCreate, current_user: di
     return record
 
 
+def _discrepancy_audit_key(discrepancy_id: str, status_str: str) -> str:
+    return f"AUDIT-DISC-{discrepancy_id}-{status_str.strip().upper()}"
+
+
+def _find_discrepancy_review_audit(audit_rows: list, discrepancy_id: str, status_str: str) -> Optional[dict]:
+    norm_status = status_str.strip().upper()
+    audit_action = f"{norm_status}_STOCK_DISCREPANCY"
+    audit_key = _discrepancy_audit_key(discrepancy_id, norm_status)
+    for row in audit_rows:
+        if str(row.get("related_record_id", "")).strip() == audit_key:
+            return row
+        if (
+            str(row.get("entity_type", "")).strip() == "StockDiscrepancies"
+            and str(row.get("entity_id", "")).strip() == discrepancy_id
+            and str(row.get("action", "")).strip().upper() == audit_action
+        ):
+            return row
+    return None
+
+
+def _ensure_discrepancy_review_audit(
+    discrepancy_id: str,
+    status_str: str,
+    actor_user_id: str,
+    approved_adjustment: int,
+    notes: str = "",
+) -> dict:
+    """
+    Idempotently verify or persist the required StockDiscrepancies review audit event.
+    Must be called while holding the discrepancy's CrossProcessLock.
+    Translates persistence failures into HTTP 503 so incomplete operations never report silent success.
+    """
+    norm_status = status_str.strip().upper()
+    audit_action = f"{norm_status}_STOCK_DISCREPANCY"
+    audit_key = _discrepancy_audit_key(discrepancy_id, norm_status)
+
+    existing_rows = db.get_records("AuditLog", fresh=True)
+    existing = _find_discrepancy_review_audit(existing_rows, discrepancy_id, norm_status)
+    if existing is not None:
+        return existing
+
+    try:
+        audit_id = db.generate_id("AuditLog")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Incomplete discrepancy {norm_status.lower()}: could not allocate audit log ID: {exc}",
+        )
+
+    record = {
+        "audit_id": audit_id,
+        "event_datetime": datetime.now(timezone.utc).isoformat(),
+        "actor_user_id": actor_user_id,
+        "action": audit_action,
+        "entity_type": "StockDiscrepancies",
+        "entity_id": discrepancy_id,
+        "field_changed": "status",
+        "old_value": "PENDING_APPROVAL",
+        "new_value": norm_status,
+        "reason": f"{norm_status} stock discrepancy {discrepancy_id}. Adjustment: {approved_adjustment}. Notes: {notes}",
+        "approved_by_user_id": actor_user_id,
+        "related_record_id": audit_key,
+    }
+    try:
+        if not db.append_record("AuditLog", record, raise_on_error=True):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Incomplete discrepancy {norm_status.lower()}: required audit event could not be persisted.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Incomplete discrepancy {norm_status.lower()}: required audit event could not be persisted: {exc}",
+        )
+    return record
+
+
 @router.post("/discrepancies/{discrepancy_id}/review", dependencies=[Depends(require_sheets_connection)])
 async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyReview, current_user: dict = Depends(get_current_user)):
     if not is_manager(current_user):
@@ -332,6 +411,14 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                     status_code=422,
                     detail=f"Cannot approve discrepancy {discrepancy_id}: discrepancy has already been REJECTED."
                 )
+            reviewer = str(curr.get("reviewed_by_user_id") or user_id)
+            _ensure_discrepancy_review_audit(
+                discrepancy_id=discrepancy_id,
+                status_str="REJECTED",
+                actor_user_id=reviewer,
+                approved_adjustment=0,
+                notes=req.notes,
+            )
             return {"ok": True, "status": "REJECTED", "discrepancy_id": discrepancy_id}
 
         if curr_status == "APPROVED":
@@ -340,7 +427,19 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                     status_code=422,
                     detail=f"Cannot reject discrepancy {discrepancy_id}: discrepancy has already been APPROVED."
                 )
-            # Already approved -> idempotent return without creating another ledger movement
+            # Already approved -> verify/repair required approval audit event without creating another ledger movement
+            reviewer = str(curr.get("reviewed_by_user_id") or user_id)
+            try:
+                recorded_adj = int(float(curr.get("approved_adjustment", diff) or 0))
+            except (TypeError, ValueError):
+                recorded_adj = diff
+            _ensure_discrepancy_review_audit(
+                discrepancy_id=discrepancy_id,
+                status_str="APPROVED",
+                actor_user_id=reviewer,
+                approved_adjustment=recorded_adj,
+                notes=req.notes,
+            )
             return {"ok": True, "status": "APPROVED", "discrepancy_id": discrepancy_id}
 
         if curr_status != "PENDING_APPROVAL":
@@ -436,6 +535,7 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                     raise HTTPException(status_code=503, detail=f"Could not record discrepancy stock adjustment: {exc}")
 
         status_str = "APPROVED" if action == "APPROVE" else "REJECTED"
+        approved_adj_val = diff if action == "APPROVE" else 0
         try:
             updated = db.update_record(
                 "StockDiscrepancies",
@@ -444,7 +544,7 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                 {
                     "status": status_str,
                     "reviewed_by_user_id": user_id,
-                    "approved_adjustment": diff if action == "APPROVE" else 0,
+                    "approved_adjustment": approved_adj_val,
                     "reason": f"{curr.get('reason', '')} [REVIEW:{status_str}:{user_id}:{req.notes}]".strip(),
                 },
                 expected_conditions={"status": "PENDING_APPROVAL"},
@@ -457,12 +557,12 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
         if not updated:
             raise HTTPException(status_code=503, detail="Could not update discrepancy status.")
 
-        db.log_audit(
-            user_id,
-            f"{status_str}_STOCK_DISCREPANCY",
-            "StockDiscrepancies",
-            discrepancy_id,
-            reason=f"{status_str} stock discrepancy {discrepancy_id}. Adjustment: {diff if action == 'APPROVE' else 0}. Notes: {req.notes}",
+        _ensure_discrepancy_review_audit(
+            discrepancy_id=discrepancy_id,
+            status_str=status_str,
+            actor_user_id=user_id,
+            approved_adjustment=approved_adj_val,
+            notes=req.notes,
         )
         return {"ok": True, "status": status_str, "discrepancy_id": discrepancy_id}
 
