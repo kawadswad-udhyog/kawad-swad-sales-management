@@ -20,6 +20,7 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import types
 import unittest
@@ -747,6 +748,484 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
         self.assertEqual(bill_tot, 500.0)
         van_after_sale = calculate_salesman_stock_balance(db.get_records("SalesmanStockLedger", fresh=True), "USR-SALES-01", "PRD-0001")
         self.assertEqual(van_after_sale, 20)
+
+
+class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase):
+    def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        _reset_db()
+        self.owner = {"user_id": "USR-OWNER-01", "full_name": "Owner", "role": "OWNER", "active": True}
+        self.pa = {"user_id": "USR-PA-01", "full_name": "PA", "role": "PA", "active": True}
+        self.salesman = {"user_id": "USR-SALES-01", "full_name": "Sales", "role": "SALESMAN", "active": True}
+        db.memory_store["Users"] = [self.owner, self.pa, self.salesman]
+        db.memory_store["Products"] = [
+            {
+                "product_id": "PRD-0001",
+                "sku": "KS-MM-200",
+                "product_name": "Moong Master Papad (200g)",
+                "category": "Papad",
+                "variant": "Master",
+                "pack_weight_g": 200,
+                "selling_unit": "PACKET",
+                "active": "true",
+            }
+        ]
+        db.memory_store["Recipes"] = [
+            {
+                "recipe_id": "RCP-TEST-MM",
+                "product_id": "PRD-0001",
+                "product_name_snapshot": "Moong Master Papad (200g)",
+                "version": "1",
+                "approved": "true",
+                "expected_yield_kg": "1.0",
+                "items_json": json.dumps([
+                    {"material_name": "Moong Dal Flour", "quantity_per_kg": 1.0, "unit": "kg"},
+                    {"material_name": "Salt", "quantity_per_kg": 0.05, "unit": "kg"},
+                ]),
+            }
+        ]
+        db.memory_store["RawMaterials"] = [
+            {
+                "raw_material_id": "RM-MOONG-FLOUR",
+                "material_name": "Moong Dal Flour",
+                "category": "FLOUR",
+                "unit": "kg",
+                "current_stock": 120.0,
+                "rate_per_unit": 95.0,
+                "rate_status": "CONFIRMED",
+            },
+            {
+                "raw_material_id": "RM-SALT",
+                "material_name": "Salt",
+                "category": "SPICE",
+                "unit": "kg",
+                "current_stock": 50.0,
+                "rate_per_unit": 20.0,
+                "rate_status": "CONFIRMED",
+                "opening_stock_verified": "true",
+            },
+            {
+                "raw_material_id": "RM-WHOLE-MOONG-DAL",
+                "material_name": "Whole Moong Dal",
+                "category": "WHOLE_GRAIN",
+                "unit": "kg",
+                "current_stock": 100.0,
+                "rate_per_unit": 85.0,
+                "rate_status": "CONFIRMED",
+            },
+        ]
+
+    def tearDown(self):
+        _reset_db()
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+
+    def test_01_unverified_opening_stock_blocks_issue_materials(self):
+        batch = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(
+                product_id="PRD-0001",
+                production_date="2026-11-15",
+                quantity_kg=10.0,
+                wastage_kg=0.0,
+                auto_issue_materials=False,
+            ),
+            self.pa,
+        ))
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.issue_materials(batch["production_id"], self.pa))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("UNVERIFIED", str(ctx.exception.detail))
+        self.assertIn("Owner", str(ctx.exception.detail))
+        self.assertEqual(len(db.memory_store["RawMaterialLedger"]), 0)
+
+    def test_02_unverified_opening_stock_blocks_auto_issue_and_rolls_back_batch(self):
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.create_batch(
+                prod.ProductionCreate(
+                    product_id="PRD-0001",
+                    production_date="2026-11-15",
+                    quantity_kg=10.0,
+                    wastage_kg=0.0,
+                    auto_issue_materials=True,
+                ),
+                self.pa,
+            ))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("UNVERIFIED", str(ctx.exception.detail))
+        self.assertEqual(len(db.memory_store["ProductionBatches"]), 0)
+        self.assertEqual(len(db.memory_store["RawMaterialLedger"]), 0)
+
+    def test_03_unverified_opening_stock_blocks_approve_batch(self):
+        batch = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(
+                product_id="PRD-0001",
+                production_date="2026-11-15",
+                quantity_kg=10.0,
+                wastage_kg=0.0,
+                auto_issue_materials=False,
+            ),
+            self.pa,
+        ))
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.approve_batch(
+                batch["production_id"],
+                prod.ApprovalRequest(approved=True),
+                self.owner,
+            ))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("UNVERIFIED", str(ctx.exception.detail))
+        saved_batch = db.memory_store["ProductionBatches"][0]
+        self.assertEqual(saved_batch["status"], "PENDING")
+        self.assertEqual(saved_batch["materials_issued"], "false")
+        self.assertEqual(len(db.memory_store["RawMaterialLedger"]), 0)
+        self.assertEqual(len(db.memory_store["ProductionStockLedger"]), 0)
+
+    def test_04_unverified_opening_stock_blocks_dal_milling(self):
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.record_dal_milling_batch(
+                prod.DalMillingCreate(
+                    source_material_id="RM-WHOLE-MOONG-DAL",
+                    input_quantity_kg=50.0,
+                    flour_output_kg=48.0,
+                    milling_expenses=100.0,
+                    milling_date="2026-11-15",
+                ),
+                self.pa,
+            ))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("UNVERIFIED", str(ctx.exception.detail))
+        self.assertIn("Owner", str(ctx.exception.detail))
+        self.assertEqual(len(db.memory_store["RawMaterialLedger"]), 0)
+        self.assertEqual(len(db.memory_store["MillingBatches"]), 0)
+
+    def test_05_partial_confirmed_receipt_usable_while_unverified_opening_blocked(self):
+        asyncio.run(prod.receive_raw_material(
+            prod.RawMaterialReceiveRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                quantity=5.0,
+                unit="kg",
+                purchase_rate=96.0,
+                supplier_name="Flour Mill",
+                invoice_reference="INV-PART-01",
+                receipt_date="2026-11-15",
+            ),
+            self.pa,
+        ))
+        items = asyncio.run(prod.list_raw_materials(self.pa))
+        moong = next(i for i in items if i.raw_material_id == "RM-MOONG-FLOUR")
+        self.assertFalse(moong.opening_stock_verified)
+        self.assertEqual(moong.available_stock, 125.0)
+        self.assertEqual(moong.confirmed_available_stock, 5.0)
+
+        # 4 kg uses confirmed received stock only -> allowed
+        b_small = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(
+                product_id="PRD-0001",
+                production_date="2026-11-15",
+                quantity_kg=4.0,
+                wastage_kg=0.0,
+                auto_issue_materials=False,
+            ),
+            self.pa,
+        ))
+        res_small = asyncio.run(prod.issue_materials(b_small["production_id"], self.pa))
+        self.assertEqual(res_small["status"], "MATERIALS_ISSUED")
+
+        # 10 kg tries to dip into unverified 120 kg opening stock -> blocked
+        b_large = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(
+                product_id="PRD-0001",
+                production_date="2026-11-15",
+                quantity_kg=10.0,
+                wastage_kg=0.0,
+                auto_issue_materials=False,
+            ),
+            self.pa,
+        ))
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.issue_materials(b_large["production_id"], self.pa))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("UNVERIFIED", str(ctx.exception.detail))
+
+    def test_06_owner_verification_unlocks_production_and_writes_valid_schema(self):
+        ver = asyncio.run(prod.verify_raw_material_opening_stock(
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=95.0,
+                confirm_physical_count=True,
+                reason="Physical bag weighment",
+                idempotency_key="VER-SCHEMA-01",
+            ),
+            self.owner,
+        ))
+        self.assertEqual(ver["verification_status"], "CONFIRMED")
+        self.assertEqual(ver["confirmed_available_stock"], 95.0)
+        self.assertFalse(ver["is_replay"])
+        self.assertEqual(db.memory_store["RawMaterials"][0]["current_stock"], 120.0)
+
+        ledger_rows = [
+            r for r in db.memory_store["RawMaterialLedger"]
+            if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"
+        ]
+        self.assertEqual(len(ledger_rows), 1)
+        lrow = ledger_rows[0]
+        self.assertIn("raw_material_txn_id", lrow)
+        self.assertIn("issue_txn_id", lrow)
+        self.assertIn("rate_per_unit", lrow)
+        self.assertIn("production_id", lrow)
+        self.assertNotIn("ledger_id", lrow)
+        self.assertNotIn("reference", lrow)
+        self.assertEqual(lrow["raw_material_txn_id"], ver["raw_material_txn_id"])
+
+        audit_rows = [
+            a for a in db.memory_store["AuditLog"]
+            if a.get("action") == "VERIFY_RAW_MATERIAL_OPENING_STOCK"
+        ]
+        self.assertEqual(len(audit_rows), 1)
+        self.assertEqual(audit_rows[0]["related_record_id"], ver["raw_material_txn_id"])
+
+        # Now issuing 95 kg succeeds cleanly
+        batch = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(
+                product_id="PRD-0001",
+                production_date="2026-11-15",
+                quantity_kg=95.0,
+                wastage_kg=0.0,
+                auto_issue_materials=False,
+            ),
+            self.pa,
+        ))
+        issue_res = asyncio.run(prod.issue_materials(batch["production_id"], self.pa))
+        self.assertEqual(issue_res["status"], "MATERIALS_ISSUED")
+        items = asyncio.run(prod.list_raw_materials(self.pa))
+        moong = next(i for i in items if i.raw_material_id == "RM-MOONG-FLOUR")
+        self.assertEqual(moong.available_stock, 0.0)
+        self.assertEqual(moong.confirmed_available_stock, 0.0)
+
+    def test_07_owner_only_rbac_and_input_validation(self):
+        for non_owner in (self.pa, self.salesman):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(prod.verify_raw_material_opening_stock(
+                    prod.RawMaterialOpeningVerificationRequest(
+                        raw_material_id="RM-MOONG-FLOUR",
+                        physical_count=95.0,
+                        confirm_physical_count=True,
+                        reason="Attempted verification",
+                    ),
+                    non_owner,
+                ))
+            self.assertEqual(ctx.exception.status_code, 403)
+
+        invalid_payloads = [
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=-5.0,
+                confirm_physical_count=True,
+                reason="Negative check",
+            ),
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=float("nan"),
+                confirm_physical_count=True,
+                reason="NaN check",
+            ),
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=float("inf"),
+                confirm_physical_count=True,
+                reason="Inf check",
+            ),
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=95.0,
+                confirm_physical_count=False,
+                reason="Missing checkbox",
+            ),
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=95.0,
+                confirm_physical_count=True,
+                reason="ok",
+            ),
+        ]
+        for payload in invalid_payloads:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(prod.verify_raw_material_opening_stock(payload, self.owner))
+            self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_08_idempotent_replay_and_auditlog_failure_recovery(self):
+        db._fail_once["AuditLog"] = 1
+        req = prod.RawMaterialOpeningVerificationRequest(
+            raw_material_id="RM-MOONG-FLOUR",
+            physical_count=95.0,
+            confirm_physical_count=True,
+            reason="Verified sacks with weighbridge",
+            idempotency_key="VER-AUDIT-REC-01",
+        )
+        with self.assertRaises(HTTPException) as fail_ctx:
+            asyncio.run(prod.verify_raw_material_opening_stock(req, self.owner))
+        self.assertEqual(fail_ctx.exception.status_code, 503)
+
+        self.assertEqual(
+            len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
+            1,
+        )
+        self.assertEqual(
+            len([a for a in db.memory_store["AuditLog"] if a.get("action") == "VERIFY_RAW_MATERIAL_OPENING_STOCK"]),
+            0,
+        )
+
+        # Retry recovers missing AuditLog without duplicating RawMaterialLedger
+        replay_res = asyncio.run(prod.verify_raw_material_opening_stock(req, self.owner))
+        self.assertTrue(replay_res["is_replay"])
+        self.assertEqual(replay_res["verified_physical_stock"], 95.0)
+        self.assertEqual(
+            len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
+            1,
+        )
+        self.assertEqual(
+            len([a for a in db.memory_store["AuditLog"] if a.get("action") == "VERIFY_RAW_MATERIAL_OPENING_STOCK"]),
+            1,
+        )
+
+        # Third identical call still produces zero duplicates
+        replay_res_2 = asyncio.run(prod.verify_raw_material_opening_stock(req, self.owner))
+        self.assertTrue(replay_res_2["is_replay"])
+        self.assertEqual(
+            len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
+            1,
+        )
+        self.assertEqual(
+            len([a for a in db.memory_store["AuditLog"] if a.get("action") == "VERIFY_RAW_MATERIAL_OPENING_STOCK"]),
+            1,
+        )
+
+    def test_09_conflicting_verification_retries_return_409(self):
+        asyncio.run(prod.verify_raw_material_opening_stock(
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=95.0,
+                confirm_physical_count=True,
+                reason="Initial count",
+                idempotency_key="VER-CONF-01",
+            ),
+            self.owner,
+        ))
+
+        conflicts = [
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-SALT",
+                physical_count=50.0,
+                confirm_physical_count=True,
+                reason="Initial count",
+                idempotency_key="VER-CONF-01",
+            ),
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=96.0,
+                confirm_physical_count=True,
+                reason="Initial count",
+                idempotency_key="VER-CONF-01",
+            ),
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=80.0,
+                confirm_physical_count=True,
+                reason="Initial count",
+                idempotency_key="VER-CONF-02",
+            ),
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=95.0,
+                confirm_physical_count=True,
+                reason="Different reason",
+                idempotency_key="VER-CONF-02",
+            ),
+        ]
+        for bad_req in conflicts:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(prod.verify_raw_material_opening_stock(bad_req, self.owner))
+            self.assertEqual(ctx.exception.status_code, 409)
+
+        self.assertEqual(
+            len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
+            1,
+        )
+
+    def test_10_concurrent_verification_and_issuance_serialization(self):
+        b1 = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(
+                product_id="PRD-0001",
+                production_date="2026-11-15",
+                quantity_kg=10.0,
+                wastage_kg=0.0,
+                auto_issue_materials=False,
+            ),
+            self.pa,
+        ))
+        b2 = asyncio.run(prod.create_batch(
+            prod.ProductionCreate(
+                product_id="PRD-0001",
+                production_date="2026-11-15",
+                quantity_kg=10.0,
+                wastage_kg=0.0,
+                auto_issue_materials=False,
+            ),
+            self.pa,
+        ))
+
+        def run_verify():
+            return asyncio.run(prod.verify_raw_material_opening_stock(
+                prod.RawMaterialOpeningVerificationRequest(
+                    raw_material_id="RM-MOONG-FLOUR",
+                    physical_count=15.0,
+                    confirm_physical_count=True,
+                    reason="Physical stock 15 kg",
+                    idempotency_key="VER-CONC-01",
+                ),
+                self.owner,
+            ))
+
+        def run_issue(batch_id: str):
+            try:
+                return asyncio.run(prod.issue_materials(batch_id, self.pa))
+            except HTTPException as exc:
+                return {"error": exc.status_code, "detail": exc.detail}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_ver1 = pool.submit(run_verify)
+            f_ver2 = pool.submit(run_verify)
+            f_iss1 = pool.submit(run_issue, b1["production_id"])
+            f_iss2 = pool.submit(run_issue, b2["production_id"])
+            ver1 = f_ver1.result()
+            ver2 = f_ver2.result()
+            iss1 = f_iss1.result()
+            iss2 = f_iss2.result()
+
+        self.assertEqual(ver1["confirmed_available_stock"], 15.0)
+        self.assertEqual(ver2["confirmed_available_stock"], 15.0)
+        self.assertEqual(
+            len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
+            1,
+        )
+        self.assertEqual(
+            len([a for a in db.memory_store["AuditLog"] if a.get("action") == "VERIFY_RAW_MATERIAL_OPENING_STOCK"]),
+            1,
+        )
+
+        issued_count = sum(1 for r in (iss1, iss2) if r.get("status") == "MATERIALS_ISSUED")
+        self.assertLessEqual(issued_count, 1)
+
+        bal = calculate_raw_material_balance(
+            "Moong Dal Flour",
+            db.memory_store["RawMaterials"],
+            db.memory_store["RawMaterialLedger"],
+        )
+        expected_remaining = 15.0 - (10.0 * issued_count)
+        self.assertTrue(bal["opening_stock_verified"])
+        self.assertEqual(bal["available"], expected_remaining)
+        self.assertEqual(bal["confirmed_available"], expected_remaining)
 
 
 if __name__ == "__main__":

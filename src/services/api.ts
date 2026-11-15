@@ -713,6 +713,7 @@ export interface RawMaterialSummary {
   total_consumed: number;
   total_adjusted: number;
   available_stock: number;
+  confirmed_available_stock?: number;
   latest_landed_rate: number;
 }
 
@@ -722,6 +723,7 @@ export interface RawMaterialOpeningVerificationInput {
   confirm_physical_count: boolean;
   reason: string;
   verified_date?: string;
+  idempotency_key?: string;
 }
 
 export interface RawMaterialOpeningVerificationResult {
@@ -732,12 +734,15 @@ export interface RawMaterialOpeningVerificationResult {
   recorded_opening_stock: number;
   previous_available_stock: number;
   verified_physical_stock: number;
+  confirmed_available_stock?: number;
   variance: number;
   opening_stock_verified: boolean;
   verification_status: string;
   verified_by: string;
   verified_at: string;
+  raw_material_txn_id?: string;
   ledger_id: string;
+  is_replay?: boolean;
   message: string;
 }
 

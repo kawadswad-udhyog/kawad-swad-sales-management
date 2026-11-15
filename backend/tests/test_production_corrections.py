@@ -106,6 +106,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "unit": "kg",
             "rate_per_unit": 90.0,
             "category": "FLOUR",
+            "opening_stock_verified": "true",
         })
         db.append_record("RawMaterials", {
             "raw_material_id": "RM-URAD-FLOUR",
@@ -114,6 +115,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "unit": "kg",
             "rate_per_unit": 95.0,
             "category": "FLOUR",
+            "opening_stock_verified": "true",
         })
         db.append_record("RawMaterials", {
             "raw_material_id": "RM-BLACK-PEPPER",
@@ -122,6 +124,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "unit": "kg",
             "rate_per_unit": 700.0,
             "category": "SPICES",
+            "opening_stock_verified": "true",
         })
         db.append_record("RawMaterials", {
             "raw_material_id": "RM-SALT",
@@ -130,6 +133,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "unit": "kg",
             "rate_per_unit": 20.0,
             "category": "SPICES",
+            "opening_stock_verified": "true",
         })
         db.append_record("RawMaterials", {
             "raw_material_id": "RM-PAPAD-KHAR",
@@ -138,6 +142,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "unit": "kg",
             "rate_per_unit": 120.0,
             "category": "SPICES",
+            "opening_stock_verified": "true",
         })
 
     def _seed_bulk_stock(self, batch_id="PRB-001", quantity_kg=100.0):

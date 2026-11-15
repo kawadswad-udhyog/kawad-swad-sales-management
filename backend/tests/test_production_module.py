@@ -52,7 +52,7 @@ class TestProductionWorkflow(unittest.TestCase):
         })
         db.memory_store["RawMaterials"].append({
             "raw_material_id": "RM-1", "material_name": "Moong Flour",
-            "current_stock": 100, "unit": "kg",
+            "current_stock": 100, "unit": "kg", "opening_stock_verified": "true",
         })
 
     def tearDown(self):

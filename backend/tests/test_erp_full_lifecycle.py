@@ -101,6 +101,7 @@ class TestERPFullLifecycle(unittest.TestCase):
             "unit": "kg",
             "rate_per_unit": 700.0,
             "rate_status": "CONFIRMED",
+            "opening_stock_verified": "true",
         })
         db.append_record("RawMaterials", {
             "raw_material_id": "RM-SALT",
@@ -110,6 +111,7 @@ class TestERPFullLifecycle(unittest.TestCase):
             "unit": "kg",
             "rate_per_unit": 20.0,
             "rate_status": "CONFIRMED",
+            "opening_stock_verified": "true",
         })
 
         db.append_record("Products", {

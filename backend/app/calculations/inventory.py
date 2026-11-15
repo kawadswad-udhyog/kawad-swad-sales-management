@@ -747,6 +747,7 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
             "received": 0.0,
             "adjusted": 0.0,
             "available": 0.0,
+            "confirmed_available": 0.0,
             "unit": "kg",
         }
 
@@ -809,6 +810,11 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
                     pass
 
     available = opening - consumed + received + adjusted
+    if is_verified:
+        confirmed_available = available
+    else:
+        confirmed_available = min(available, max(Decimal("0"), received + adjusted - consumed))
+
     if is_verified and verified_physical_stock is None:
         verified_physical_stock = round_stock(available)
 
@@ -835,6 +841,7 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
         "received": round_stock(received),
         "adjusted": round_stock(adjusted),
         "available": round_stock(available),
+        "confirmed_available": round_stock(confirmed_available),
         "unit": unit,
     }
 

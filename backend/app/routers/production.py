@@ -1,6 +1,8 @@
 import logging
 import re
 import hashlib
+import contextlib
+import math
 from app.timeutil import business_today, now_iso
 from typing import Any, Dict, List, Optional
 from decimal import Decimal
@@ -365,6 +367,7 @@ class RawMaterialBalanceItem(BaseModel):
     adjusted: float = 0.0
     total_adjusted: Optional[float] = None
     available_stock: float
+    confirmed_available_stock: Optional[float] = None
     latest_landed_rate: Optional[float] = None
     rate_status: str
 
@@ -376,6 +379,7 @@ class RawMaterialOpeningVerificationRequest(BaseModel):
     confirm_physical_count: bool = Field(False, description="Explicit confirmation that physical count was checked")
     reason: str = Field(..., description="Verification notes or audit explanation")
     verified_date: Optional[str] = Field("", description="Optional verification date (YYYY-MM-DD)")
+    idempotency_key: Optional[str] = Field(None, description="Optional client idempotency key")
 
 
 class DalMillingCreate(BaseModel):
@@ -538,6 +542,7 @@ async def list_raw_materials(user: dict = Depends(get_current_user)):
             adjusted=adjusted_val,
             total_adjusted=adjusted_val,
             available_stock=float(bal.get("available", 0.0)),
+            confirmed_available_stock=float(bal.get("confirmed_available", bal.get("available", 0.0))),
             latest_landed_rate=float(latest_rate) if latest_rate is not None else None,
             rate_status=rate_status,
         ))
@@ -548,17 +553,74 @@ async def list_raw_materials(user: dict = Depends(get_current_user)):
 get_raw_material_balances = list_raw_materials
 
 
+def _ensure_raw_material_verification_audit(
+    *,
+    mat_id: str,
+    mat_name: str,
+    actor: str,
+    raw_material_txn_id: str,
+    old_val: str,
+    new_val: str,
+    reason: str,
+) -> Dict[str, Any]:
+    """Ensure an AuditLog entry exists for raw material opening stock verification."""
+    audit_rows = db.get_records("AuditLog", fresh=True)
+    for row in audit_rows:
+        if (
+            str(row.get("action", "")).strip().upper() == "VERIFY_RAW_MATERIAL_OPENING_STOCK"
+            and str(row.get("entity_type", "")).strip() == "RawMaterials"
+            and str(row.get("entity_id", "")).strip() == mat_id
+            and str(row.get("related_record_id", "")).strip() == raw_material_txn_id
+        ):
+            return row
+
+    try:
+        audit_id = db.generate_id("AuditLog")
+    except Exception:
+        audit_id = f"AUD-{hashlib.sha256(f'{mat_id}:{raw_material_txn_id}'.encode('utf-8')).hexdigest()[:10]}"
+
+    audit_rec = {
+        "audit_id": audit_id,
+        "event_datetime": now(),
+        "actor_user_id": actor,
+        "action": "VERIFY_RAW_MATERIAL_OPENING_STOCK",
+        "entity_type": "RawMaterials",
+        "entity_id": mat_id,
+        "field_changed": "opening_stock_verified",
+        "old_value": str(old_val),
+        "new_value": str(new_val),
+        "reason": f"{mat_name}: {reason}",
+        "approved_by_user_id": actor,
+        "related_record_id": raw_material_txn_id,
+    }
+    try:
+        if not db.append_record("AuditLog", audit_rec, raise_on_error=True):
+            raise HTTPException(
+                503,
+                "Verification ledger entry saved, but required AuditLog event could not be persisted. Safe to retry.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            503,
+            f"Verification ledger entry saved, but required AuditLog event could not be persisted: {exc}. Safe to retry.",
+        )
+    return audit_rec
+
+
 @router.post("/raw-materials/verify-opening-stock")
 async def verify_raw_material_opening_stock(
     req: RawMaterialOpeningVerificationRequest,
     user: dict = Depends(get_current_user),
 ):
     """
-    Explicitly verify physical opening / on-hand raw material stock without overwriting
-    historical ledger entries or mutating recorded baseline columns silently.
+    Owner-only physical opening / on-hand raw material stock verification.
+    Preserves RawMaterials.current_stock and historical ledger entries untouched.
     Appends an auditable OPENING_STOCK_VERIFICATION adjustment entry to RawMaterialLedger.
+    Idempotent across retries; rejects conflicting verifications with HTTP 409.
     """
-    actor, _ = require_production_access(user)
+    actor, _ = require_owner(user)
     require_persistent_store()
 
     if not req.confirm_physical_count:
@@ -566,107 +628,319 @@ async def verify_raw_material_opening_stock(
             422,
             "Explicit physical count confirmation checkbox is required before verifying raw material opening stock.",
         )
-    if req.physical_count is None or float(req.physical_count) < 0:
-        raise HTTPException(422, "Physical count cannot be negative.")
-    if not req.reason or len(req.reason.strip()) < 3:
+    if req.physical_count is None or not math.isfinite(float(req.physical_count)) or float(req.physical_count) < 0:
+        raise HTTPException(422, "Physical count must be a finite non-negative number.")
+    clean_reason = (req.reason or "").strip()
+    if len(clean_reason) < 3:
         raise HTTPException(422, "A verification reason (minimum 3 characters) is required.")
 
     target_id = (req.raw_material_id or req.material_id or "").strip()
     if not target_id:
         raise HTTPException(422, "raw_material_id is required.")
 
+    physical_val = round_stock(float(req.physical_count))
+    clean_date = (req.verified_date or "").strip()
+    clean_idemp_key = (req.idempotency_key or "").strip()
+
     with _RAW_MATERIAL_MUTEX:
-        raw_master = db.get_records("RawMaterials", fresh=True)
-        if not raw_master:
-            raw_master = list(RAW_MATERIALS_SEED)
+        raw_master_hint = db.get_records("RawMaterials", fresh=True)
+        if not raw_master_hint:
+            raw_master_hint = list(RAW_MATERIALS_SEED)
 
-        known_names = {str(field(r, "material_name", "name", default="")).strip().lower() for r in raw_master}
-        combined_master = list(raw_master)
+        known_names_hint = {str(field(r, "material_name", "name", default="")).strip().lower() for r in raw_master_hint}
+        combined_hint = list(raw_master_hint)
         for s in RAW_MATERIALS_SEED:
-            if s["material_name"].strip().lower() not in known_names:
-                combined_master.append(s)
-                known_names.add(s["material_name"].strip().lower())
+            if s["material_name"].strip().lower() not in known_names_hint:
+                combined_hint.append(s)
+                known_names_hint.add(s["material_name"].strip().lower())
 
-        mat_row = next(
-            (r for r in combined_master
+        mat_hint = next(
+            (r for r in combined_hint
              if str(field(r, "raw_material_id", default="")).strip().lower() == target_id.lower()
              or str(field(r, "material_name", "name", default="")).strip().lower() == target_id.lower()),
             None,
         )
-        if not mat_row:
+        if not mat_hint:
             raise HTTPException(404, f"Raw material '{target_id}' not found.")
 
-        mat_id = str(field(mat_row, "raw_material_id", default=target_id)).strip()
-        mat_name = str(field(mat_row, "material_name", "name", default=target_id)).strip()
-        unit = str(field(mat_row, "unit", default="kg")).strip()
+        lock_mat_id = str(field(mat_hint, "raw_material_id", default=target_id)).strip()
 
-        raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
-        bal = calculate_raw_material_balance(mat_name, combined_master, raw_ledger)
-        recorded_available = float(bal.get("available", 0.0))
-        physical_val = round_stock(float(req.physical_count))
-        variance = round_stock(physical_val - recorded_available)
+        with CrossProcessLock("raw_material", lock_mat_id):
+            raw_master = db.get_records("RawMaterials", fresh=True)
+            if not raw_master:
+                raw_master = list(RAW_MATERIALS_SEED)
 
-        verified_at = now()
-        txn_dt = (
-            f"{req.verified_date.strip()}T00:00:00"
-            if req.verified_date and req.verified_date.strip()
-            else verified_at
-        )
+            known_names = {str(field(r, "material_name", "name", default="")).strip().lower() for r in raw_master}
+            combined_master = list(raw_master)
+            for s in RAW_MATERIALS_SEED:
+                if s["material_name"].strip().lower() not in known_names:
+                    combined_master.append(s)
+                    known_names.add(s["material_name"].strip().lower())
 
-        meta_notes = json.dumps({
-            "verification_type": "PHYSICAL_OPENING_STOCK",
-            "physical_count": physical_val,
-            "previous_available": recorded_available,
-            "recorded_opening_stock": float(bal.get("recorded_opening_stock", 0.0)),
-            "variance": variance,
-            "reason": req.reason.strip(),
-            "verified_by": actor,
-            "verified_at": verified_at,
-        })
+            mat_row = next(
+                (r for r in combined_master
+                 if str(field(r, "raw_material_id", default="")).strip().lower() == target_id.lower()
+                 or str(field(r, "material_name", "name", default="")).strip().lower() == target_id.lower()),
+                None,
+            )
+            if not mat_row:
+                raise HTTPException(404, f"Raw material '{target_id}' not found.")
 
-        ledger_row = {
-            "ledger_id": make_id("RawMaterialLedger"),
-            "txn_datetime": txn_dt,
-            "raw_material_id": mat_id,
-            "material_name": mat_name,
-            "movement_type": "OPENING_STOCK_VERIFICATION",
-            "quantity": variance,
-            "unit": unit,
-            "reference": f"PHYS-VERIFY-{business_today()}",
-            "created_by": actor,
-            "notes": meta_notes,
-        }
+            mat_id = str(field(mat_row, "raw_material_id", default=target_id)).strip()
+            mat_name = str(field(mat_row, "material_name", "name", default=target_id)).strip()
+            unit = str(field(mat_row, "unit", default="kg")).strip()
 
-        if not db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True):
-            raise HTTPException(503, "Could not record physical opening stock verification.")
+            payload_dict = {
+                "raw_material_id": mat_id,
+                "physical_count": physical_val,
+                "reason": clean_reason,
+                "verified_date": clean_date,
+            }
+            payload_hash = hashlib.sha256(json.dumps(payload_dict, sort_keys=True).encode("utf-8")).hexdigest()
 
-        db.log_audit(
-            actor,
-            "VERIFY_RAW_MATERIAL_OPENING_STOCK",
-            "RawMaterials",
-            mat_id,
-            field_changed="opening_stock_verified",
-            old_val=str(recorded_available),
-            new_val=str(physical_val),
-            reason=req.reason.strip(),
-        )
+            raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+            incomp_records = db.get_records("IncompleteTransactions", fresh=True)
 
-        return {
-            "status": "CONFIRMED",
-            "raw_material_id": mat_id,
-            "material_name": mat_name,
-            "unit": unit,
-            "recorded_opening_stock": float(bal.get("recorded_opening_stock", 0.0)),
-            "previous_available_stock": recorded_available,
-            "verified_physical_stock": physical_val,
-            "variance": variance,
-            "opening_stock_verified": True,
-            "verification_status": "CONFIRMED",
-            "verified_by": actor,
-            "verified_at": verified_at,
-            "ledger_id": ledger_row["ledger_id"],
-            "message": f"Physical stock for {mat_name} confirmed at {physical_val} {unit} (variance {variance:+.3f} {unit}).",
-        }
+            # 1. Check IncompleteTransactions for idempotency key conflict/replay
+            if clean_idemp_key:
+                existing_incomp = next(
+                    (t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key),
+                    None,
+                )
+                if existing_incomp:
+                    try:
+                        incomp_meta = json.loads(str(existing_incomp.get("payload_json", "{}") or "{}"))
+                    except Exception:
+                        incomp_meta = {}
+                    stored_hash = incomp_meta.get("payload_hash")
+                    stored_mat = str(incomp_meta.get("raw_material_id", "")).strip()
+                    if (stored_mat and stored_mat != mat_id) or (stored_hash and stored_hash != payload_hash):
+                        raise HTTPException(
+                            409,
+                            "Conflict: Idempotency key reused with conflicting physical verification parameters.",
+                        )
+
+            # 2. Check RawMaterialLedger for existing OPENING_STOCK_VERIFICATION (by idempotency key or material)
+            existing_verifs = [
+                r for r in raw_ledger
+                if str(r.get("movement_type", "")).strip().upper() == "OPENING_STOCK_VERIFICATION"
+                and (
+                    str(r.get("raw_material_id", "")).strip().lower() == mat_id.lower()
+                    or str(r.get("material_name", "")).strip().lower() == mat_name.lower()
+                )
+            ]
+            if clean_idemp_key:
+                for r in raw_ledger:
+                    if str(r.get("movement_type", "")).strip().upper() != "OPENING_STOCK_VERIFICATION":
+                        continue
+                    r_issue_id = str(r.get("issue_txn_id", "")).strip()
+                    if r_issue_id == clean_idemp_key:
+                        r_mid = str(r.get("raw_material_id", "")).strip()
+                        if r_mid.lower() != mat_id.lower():
+                            raise HTTPException(
+                                409,
+                                f"Conflict: Idempotency key '{clean_idemp_key}' already used for raw material '{r_mid}'.",
+                            )
+
+            if existing_verifs:
+                ex_row = existing_verifs[-1]
+                try:
+                    ex_meta = json.loads(str(ex_row.get("notes", "{}") or "{}"))
+                except Exception:
+                    ex_meta = {}
+
+                ex_hash = ex_meta.get("payload_hash")
+                ex_phys = round_stock(ex_meta["physical_count"]) if ex_meta.get("physical_count") is not None else None
+                ex_reason = str(ex_meta.get("reason", "")).strip()
+                ex_date = str(ex_meta.get("verified_date", "")).strip()
+                ex_idemp = str(ex_meta.get("idempotency_key", "")).strip()
+
+                matches_existing = False
+                if ex_hash and ex_hash == payload_hash:
+                    matches_existing = True
+                elif (
+                    ex_phys is not None
+                    and abs(ex_phys - physical_val) < 0.0001
+                    and ex_reason == clean_reason
+                    and ex_date == clean_date
+                ):
+                    matches_existing = True
+
+                if clean_idemp_key and ex_idemp and ex_idemp != clean_idemp_key and not matches_existing:
+                    raise HTTPException(
+                        409,
+                        f"Conflict: Opening stock for {mat_name} was already physically verified at {ex_phys} {unit}.",
+                    )
+                if not matches_existing:
+                    raise HTTPException(
+                        409,
+                        f"Conflict: Opening stock for {mat_name} is already physically verified at {ex_phys} {unit}. "
+                        f"Conflicting re-verification ({physical_val} {unit}) rejected.",
+                    )
+
+                # Exact idempotent replay -> ensure AuditLog and IncompleteTransactions are complete
+                ex_txn_id = str(ex_row.get("raw_material_txn_id") or ex_row.get("ledger_id") or "").strip()
+                ex_prev = float(ex_meta.get("previous_available", 0.0))
+                ex_recorded_open = float(ex_meta.get("recorded_opening_stock", 0.0))
+                ex_var = float(ex_meta.get("variance", ex_row.get("quantity", 0.0)) or 0.0)
+                ex_by = str(ex_meta.get("verified_by") or ex_row.get("created_by") or actor).strip()
+                ex_at = str(ex_meta.get("verified_at") or ex_row.get("txn_datetime") or "").strip()
+
+                _ensure_raw_material_verification_audit(
+                    mat_id=mat_id,
+                    mat_name=mat_name,
+                    actor=ex_by,
+                    raw_material_txn_id=ex_txn_id,
+                    old_val=str(ex_prev),
+                    new_val=str(ex_phys if ex_phys is not None else physical_val),
+                    reason=ex_reason or clean_reason,
+                )
+
+                if clean_idemp_key:
+                    incomp_match = next(
+                        (t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key),
+                        None,
+                    )
+                    if incomp_match and str(incomp_match.get("status", "")).upper() != "COMPLETED":
+                        try:
+                            db.update_record("IncompleteTransactions", "transaction_id", incomp_match["transaction_id"], {
+                                "status": "COMPLETED",
+                                "resolved_by": actor,
+                                "resolved_at": now(),
+                                "updated_at": now(),
+                            })
+                        except Exception:
+                            pass
+
+                return {
+                    "status": "CONFIRMED",
+                    "raw_material_id": mat_id,
+                    "material_name": mat_name,
+                    "unit": unit,
+                    "recorded_opening_stock": ex_recorded_open,
+                    "previous_available_stock": ex_prev,
+                    "verified_physical_stock": ex_phys if ex_phys is not None else physical_val,
+                    "confirmed_available_stock": ex_phys if ex_phys is not None else physical_val,
+                    "variance": ex_var,
+                    "opening_stock_verified": True,
+                    "verification_status": "CONFIRMED",
+                    "verified_by": ex_by,
+                    "verified_at": ex_at,
+                    "raw_material_txn_id": ex_txn_id,
+                    "ledger_id": ex_txn_id,
+                    "is_replay": True,
+                    "message": f"[Idempotent Replay] Physical stock for {mat_name} already confirmed at {ex_phys if ex_phys is not None else physical_val} {unit}.",
+                }
+
+            bal = calculate_raw_material_balance(mat_name, combined_master, raw_ledger)
+            recorded_available = float(bal.get("available", 0.0))
+            recorded_opening = float(bal.get("recorded_opening_stock", 0.0))
+            variance = round_stock(physical_val - recorded_available)
+            rate_info = get_latest_purchase_rate(mat_name, combined_master, raw_ledger)
+            latest_rate = rate_info.get("rate_per_canonical_unit")
+
+            verified_at = now()
+            txn_dt = f"{clean_date}T00:00:00" if clean_date else verified_at
+
+            incomp_txn_id = None
+            if clean_idemp_key:
+                incomp_txn_id = make_id("IncompleteTransactions")
+                try:
+                    db.append_record("IncompleteTransactions", {
+                        "transaction_id": incomp_txn_id,
+                        "transaction_type": "RAW_MATERIAL_OPENING_VERIFICATION",
+                        "idempotency_key": clean_idemp_key,
+                        "status": "IN_PROGRESS",
+                        "payload_json": json.dumps({
+                            "payload_hash": payload_hash,
+                            "raw_material_id": mat_id,
+                            "physical_count": physical_val,
+                            "reason": clean_reason,
+                            "verified_date": clean_date,
+                        }),
+                        "error_details": "",
+                        "created_at": verified_at,
+                        "updated_at": verified_at,
+                        "resolved_by": "",
+                        "resolved_at": "",
+                    }, raise_on_error=True)
+                except Exception as exc:
+                    raise HTTPException(503, f"Could not record verification intent: {exc}. Safe to retry.")
+
+            ledger_txn_id = make_id("RawMaterialLedger")
+            verification_ref = clean_idemp_key or f"PHYS-VERIFY-{mat_id}-{business_today()}"
+            meta_notes = json.dumps({
+                "verification_type": "PHYSICAL_OPENING_STOCK",
+                "idempotency_key": clean_idemp_key,
+                "payload_hash": payload_hash,
+                "physical_count": physical_val,
+                "previous_available": recorded_available,
+                "recorded_opening_stock": recorded_opening,
+                "variance": variance,
+                "reason": clean_reason,
+                "verified_date": clean_date,
+                "verified_by": actor,
+                "verified_at": verified_at,
+            })
+
+            ledger_row = {
+                "raw_material_txn_id": ledger_txn_id,
+                "txn_datetime": txn_dt,
+                "material_name": mat_name,
+                "raw_material_id": mat_id,
+                "movement_type": "OPENING_STOCK_VERIFICATION",
+                "quantity": variance,
+                "unit": unit,
+                "rate_per_unit": float(latest_rate) if latest_rate is not None else "",
+                "production_id": "",
+                "issue_txn_id": verification_ref,
+                "created_by": actor,
+                "notes": meta_notes,
+            }
+
+            if not db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True):
+                raise HTTPException(503, "Could not record physical opening stock verification.")
+
+            if incomp_txn_id:
+                try:
+                    db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
+                        "status": "COMPLETED",
+                        "resolved_by": actor,
+                        "resolved_at": now(),
+                        "updated_at": now(),
+                    })
+                except Exception:
+                    pass
+
+            _ensure_raw_material_verification_audit(
+                mat_id=mat_id,
+                mat_name=mat_name,
+                actor=actor,
+                raw_material_txn_id=ledger_txn_id,
+                old_val=str(recorded_available),
+                new_val=str(physical_val),
+                reason=clean_reason,
+            )
+
+            return {
+                "status": "CONFIRMED",
+                "raw_material_id": mat_id,
+                "material_name": mat_name,
+                "unit": unit,
+                "recorded_opening_stock": recorded_opening,
+                "previous_available_stock": recorded_available,
+                "verified_physical_stock": physical_val,
+                "confirmed_available_stock": physical_val,
+                "variance": variance,
+                "opening_stock_verified": True,
+                "verification_status": "CONFIRMED",
+                "verified_by": actor,
+                "verified_at": verified_at,
+                "raw_material_txn_id": ledger_txn_id,
+                "ledger_id": ledger_txn_id,
+                "is_replay": False,
+                "message": f"Physical stock for {mat_name} confirmed at {physical_val} {unit} (variance {variance:+.3f} {unit}).",
+            }
 
 
 @router.post("/raw-materials/receive", response_model=RawMaterialReceiveResponse)
@@ -728,7 +1002,7 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
     payload_hash = hashlib.sha256(json.dumps(payload_dict, sort_keys=True).encode("utf-8")).hexdigest()
     line_key = f"INV:{clean_invoice}:L:{line_no}"
 
-    with _RAW_MATERIAL_MUTEX:
+    with _RAW_MATERIAL_MUTEX, contextlib.ExitStack() as _rm_lock_stack:
         # 2. Resolve material in master data
         raw_master = db.get_records("RawMaterials", fresh=True)
         mat_row = next(
@@ -766,6 +1040,8 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
 
         resolved_mat_id = str(field(mat_row, "raw_material_id", default=clean_mat_id)).strip()
         canonical_mat_name = str(field(mat_row, "material_name", default=clean_mat_id)).strip()
+        _rm_lock_stack.enter_context(CrossProcessLock("raw_material", resolved_mat_id))
+        raw_master = db.get_records("RawMaterials", fresh=True)
 
         # 3. Check IncompleteTransactions for idempotency key
         incomp_records = db.get_records("IncompleteTransactions", fresh=True)
@@ -1073,7 +1349,9 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
     }
     payload_hash = hashlib.sha256(json.dumps(payload_dict, sort_keys=True).encode("utf-8")).hexdigest()
 
-    with _RAW_MATERIAL_MUTEX:
+    with _RAW_MATERIAL_MUTEX, contextlib.ExitStack() as _rm_lock_stack:
+        for _mid in sorted({dal_id, mapping["target_flour_id"]}):
+            _rm_lock_stack.enter_context(CrossProcessLock("raw_material", _mid))
         raw_master = db.get_records("RawMaterials", fresh=True)
         raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
 
@@ -1308,10 +1586,19 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 message=f"✓ Forward-recovered and completed milling batch {existing_batch_id}. Milled {req.input_quantity_kg} kg {mapping['canonical_dal_name']} → {req.flour_output_kg} kg {mapping['target_flour_name']} at ₹{rec_flour_unit_rate}/kg.",
             )
 
-        # 4. Check Stock Availability (for fresh batch)
+        # 4. Check Stock Availability (for fresh batch) using confirmed available balance
         cur_whole_bal = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger)
+        confirmed_whole = float(cur_whole_bal.get("confirmed_available", cur_whole_bal.get("available", 0.0)))
         available_whole = float(cur_whole_bal.get("available", 0.0))
-        if float(req.input_quantity_kg) > available_whole:
+        if float(req.input_quantity_kg) > confirmed_whole:
+            if not cur_whole_bal.get("opening_stock_verified", False) and float(cur_whole_bal.get("opening_stock", 0.0)) > 0:
+                raise HTTPException(
+                    400,
+                    f"Cannot mill {mapping['canonical_dal_name']}: recorded opening stock "
+                    f"({cur_whole_bal.get('opening_stock', 0.0)} kg) is UNVERIFIED. "
+                    f"Confirmed available stock is {max(0.0, confirmed_whole)} kg (requested {req.input_quantity_kg} kg). "
+                    f"Owner must verify physical opening stock first."
+                )
             raise HTTPException(
                 400,
                 f"Insufficient {mapping['canonical_dal_name']} stock: requested {req.input_quantity_kg} kg but available balance is {available_whole} kg."
@@ -1679,42 +1966,45 @@ async def adjust_raw_material_stock(req: StockAdjustmentRequest, user: dict = De
     actor, _ = require_owner(user)
     require_persistent_store()
 
-    raw_master = db.get_records("RawMaterials", fresh=True)
-    mat = next((r for r in raw_master if str(field(r, "raw_material_id")).strip() == req.item_id.strip() or str(field(r, "material_name")).strip().lower() == req.item_id.strip().lower()), None)
-    if not mat:
-        raise HTTPException(404, f"Raw material '{req.item_id}' not found.")
+    with _RAW_MATERIAL_MUTEX, contextlib.ExitStack() as _rm_lock_stack:
+        raw_master = db.get_records("RawMaterials", fresh=True)
+        mat = next((r for r in raw_master if str(field(r, "raw_material_id")).strip() == req.item_id.strip() or str(field(r, "material_name")).strip().lower() == req.item_id.strip().lower()), None)
+        if not mat:
+            raise HTTPException(404, f"Raw material '{req.item_id}' not found.")
 
-    clean_mat_id = str(field(mat, "raw_material_id"))
-    clean_mat_name = str(field(mat, "material_name"))
-    txn_id = make_id("RawMaterialLedger")
-    mvt_type = "PURCHASE_RECEIPT" if req.quantity_change > 0 else "PRODUCTION_CONSUMPTION"
-    adj_notes = f"[{req.adjustment_type}] {req.reason.strip()} (Adjustment by {actor})"
+        clean_mat_id = str(field(mat, "raw_material_id"))
+        clean_mat_name = str(field(mat, "material_name"))
+        _rm_lock_stack.enter_context(CrossProcessLock("raw_material", clean_mat_id))
 
-    row = {
-        "raw_material_txn_id": txn_id,
-        "txn_datetime": now(),
-        "material_name": clean_mat_name,
-        "raw_material_id": clean_mat_id,
-        "movement_type": mvt_type,
-        "quantity": abs(req.quantity_change),
-        "unit": req.unit or str(field(mat, "unit", default="kg")),
-        "rate_per_unit": float(field(mat, "rate_per_unit", default=0) or 0),
-        "production_id": "",
-        "issue_txn_id": req.reference_id or f"ADJ-{clean_mat_id}",
-        "created_by": actor,
-        "notes": adj_notes,
-    }
-    if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
-        raise HTTPException(503, "Could not persist raw material adjustment.")
+        txn_id = make_id("RawMaterialLedger")
+        mvt_type = "PURCHASE_RECEIPT" if req.quantity_change > 0 else "PRODUCTION_CONSUMPTION"
+        adj_notes = f"[{req.adjustment_type}] {req.reason.strip()} (Adjustment by {actor})"
 
-    db.log_audit(
-        actor,
-        f"STOCK_ADJUSTMENT_{req.adjustment_type}",
-        "RawMaterialLedger",
-        clean_mat_id,
-        reason=f"{req.quantity_change:+.3f} {req.unit} adjustment to {clean_mat_name}: {req.reason}",
-    )
-    return {"status": "SUCCESS", "txn_id": txn_id, "material_id": clean_mat_id, "quantity_change": req.quantity_change}
+        row = {
+            "raw_material_txn_id": txn_id,
+            "txn_datetime": now(),
+            "material_name": clean_mat_name,
+            "raw_material_id": clean_mat_id,
+            "movement_type": mvt_type,
+            "quantity": abs(req.quantity_change),
+            "unit": req.unit or str(field(mat, "unit", default="kg")),
+            "rate_per_unit": float(field(mat, "rate_per_unit", default=0) or 0),
+            "production_id": "",
+            "issue_txn_id": req.reference_id or f"ADJ-{clean_mat_id}",
+            "created_by": actor,
+            "notes": adj_notes,
+        }
+        if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
+            raise HTTPException(503, "Could not persist raw material adjustment.")
+
+        db.log_audit(
+            actor,
+            f"STOCK_ADJUSTMENT_{req.adjustment_type}",
+            "RawMaterialLedger",
+            clean_mat_id,
+            reason=f"{req.quantity_change:+.3f} {req.unit} adjustment to {clean_mat_name}: {req.reason}",
+        )
+        return {"status": "SUCCESS", "txn_id": txn_id, "material_id": clean_mat_id, "quantity_change": req.quantity_change}
 
 
 @router.post("/finished-goods/adjustment")
@@ -2806,217 +3096,240 @@ def execute_material_issue(
                 }
             aggregated[agg_key]["required_qty"] = round(aggregated[agg_key]["required_qty"] + required_qty, 4)
 
-        # 5. Calculate remaining deductions (partial completion check)
-        missing_plans: Dict[str, Dict[str, Any]] = {}
-        for agg_key, plan in aggregated.items():
-            existing_for_mat = [
-                x for x in existing_deductions
-                if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
-                or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
+        # Acquire shared raw-material locks in deterministic order before reading/deducting balances
+        lock_mat_ids = sorted(
+            {str(plan["raw_material_id"]).strip() for plan in aggregated.values() if str(plan.get("raw_material_id", "")).strip()}
+        )
+        with _RAW_MATERIAL_MUTEX, contextlib.ExitStack() as _rm_lock_stack:
+            for _mid in lock_mat_ids:
+                _rm_lock_stack.enter_context(CrossProcessLock("raw_material", _mid))
+
+            raw_master = db.get_records("RawMaterials", fresh=True)
+            raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+            existing_deductions = [
+                x for x in raw_ledger
+                if str(field(x, "production_id", default="")).strip() == prod_id_clean
+                and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
             ]
-            already_deducted = round(sum(float(field(x, "quantity", default=0) or 0) for x in existing_for_mat), 4)
-            total_required = round(plan["required_qty"], 4)
-            needed = round(total_required - already_deducted, 4)
 
-            if already_deducted > total_required + 0.001:
-                raise HTTPException(
-                    409,
-                    f"Deduction anomaly for '{plan['material_name']}': already deducted {already_deducted} {plan['stock_unit']}, "
-                    f"exceeding required {total_required} {plan['stock_unit']}. Manual reconciliation required."
-                )
+            # 5. Calculate remaining deductions (partial completion check)
+            missing_plans: Dict[str, Dict[str, Any]] = {}
+            for agg_key, plan in aggregated.items():
+                existing_for_mat = [
+                    x for x in existing_deductions
+                    if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
+                    or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
+                ]
+                already_deducted = round(sum(float(field(x, "quantity", default=0) or 0) for x in existing_for_mat), 4)
+                total_required = round(plan["required_qty"], 4)
+                needed = round(total_required - already_deducted, 4)
 
-            if needed > 0.0001:
-                missing_plans[agg_key] = {
-                    **plan,
-                    "already_deducted_qty": already_deducted,
-                    "needed_qty": needed,
-                }
+                if already_deducted > total_required + 0.001:
+                    raise HTTPException(
+                        409,
+                        f"Deduction anomaly for '{plan['material_name']}': already deducted {already_deducted} {plan['stock_unit']}, "
+                        f"exceeding required {total_required} {plan['stock_unit']}. Manual reconciliation required."
+                    )
 
-        # 6. If no deductions needed:
-        if not missing_plans:
-            if not is_materials_issued:
-                issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
-                try:
-                    db.update_record("ProductionBatches", "production_id", prod_id_clean, {
-                        "materials_issued": "true",
-                        "material_issue_txn_id": issue_txn_id,
-                        "recipe_id": target_recipe_id,
-                        "recipe_version": str(target_recipe_ver),
-                    }, raise_on_error=True)
-                except Exception as recov_exc:
-                    logger.error("Failed to update status on recovery for %s: %s", prod_id_clean, recov_exc)
-                    raise HTTPException(503, "Could not update batch status during recovery. Safe to retry.")
-                db.log_audit(actor, "RECOVER_RAW_MATERIALS_STATUS", "ProductionBatches", prod_id_clean, reason="Marked materials_issued after verifying complete ledger entries.")
+                if needed > 0.0001:
+                    missing_plans[agg_key] = {
+                        **plan,
+                        "already_deducted_qty": already_deducted,
+                        "needed_qty": needed,
+                    }
 
-            return {
-                "status": "ALREADY_ISSUED",
-                "production_id": prod_id_clean,
-                "material_issue_txn_id": existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}",
-                "issued_items_count": len(existing_deductions),
-                "message": "Raw materials were already issued for this batch. No duplicate deduction made.",
-            }
+            # 6. If no deductions needed:
+            if not missing_plans:
+                if not is_materials_issued:
+                    issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
+                    try:
+                        db.update_record("ProductionBatches", "production_id", prod_id_clean, {
+                            "materials_issued": "true",
+                            "material_issue_txn_id": issue_txn_id,
+                            "recipe_id": target_recipe_id,
+                            "recipe_version": str(target_recipe_ver),
+                        }, raise_on_error=True)
+                    except Exception as recov_exc:
+                        logger.error("Failed to update status on recovery for %s: %s", prod_id_clean, recov_exc)
+                        raise HTTPException(503, "Could not update batch status during recovery. Safe to retry.")
+                    db.log_audit(actor, "RECOVER_RAW_MATERIALS_STATUS", "ProductionBatches", prod_id_clean, reason="Marked materials_issued after verifying complete ledger entries.")
 
-        # 7. Pre-flight stock availability check for all remaining items
-        for agg_key, plan in missing_plans.items():
-            name = plan["material_name"]
-            needed = plan["needed_qty"]
-            stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=prod_id_clean)
-            current_avail = round(stock_bal["available"] - plan["already_deducted_qty"], 4)
-            if current_avail < needed:
-                raise HTTPException(
-                    400,
-                    f"Insufficient stock for {name}: need {needed} {plan['stock_unit']}, available {max(0.0, current_avail)}."
-                )
-
-        # 8. Record in-flight intent in IncompleteTransactions
-        issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
-        idempotency_key = f"RAW_ISSUE_{prod_id_clean}"
-        try:
-            db.append_record("IncompleteTransactions", {
-                "transaction_id": make_id("IncompleteTransactions"),
-                "transaction_type": "RAW_MATERIAL_ISSUE",
-                "idempotency_key": idempotency_key,
-                "status": "IN_PROGRESS",
-                "payload_json": json.dumps({"production_id": prod_id_clean, "recipe_id": target_recipe_id, "needed": {k: p["needed_qty"] for k, p in missing_plans.items()}}),
-                "error_details": "",
-                "created_at": now(),
-                "updated_at": now(),
-                "resolved_by": "",
-                "resolved_at": "",
-            })
-        except Exception as exc:
-            logger.debug("Non-fatal: IncompleteTransactions logging bypassed: %s", exc)
-
-        # 9. Append missing deduction rows
-        appended_rows = []
-        try:
-            for agg_key, plan in missing_plans.items():
-                needed = plan["needed_qty"]
-                if needed <= 0:
-                    continue
-
-                mat_clean = re.sub(r'[^a-zA-Z0-9]', '', plan['raw_material_id'] or plan['material_name'])[:10]
-                existing_count = len([x for x in existing_deductions if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key])
-                suffix = f"-{existing_count + 1}" if existing_count > 0 else ""
-                txn_id = f"RML-{prod_id_clean}-{mat_clean}{suffix}"
-
-                row = {
-                    "raw_material_txn_id": txn_id,
-                    "txn_datetime": now(),
-                    "material_name": plan["material_name"],
-                    "raw_material_id": plan["raw_material_id"],
-                    "movement_type": "PRODUCTION_CONSUMPTION",
-                    "quantity": needed,
-                    "unit": plan["stock_unit"],
-                    "rate_per_unit": plan["rate_per_unit"],
+                return {
+                    "status": "ALREADY_ISSUED",
                     "production_id": prod_id_clean,
-                    "issue_txn_id": issue_txn_id,
-                    "created_by": actor,
-                    "notes": f"Batch {prod_id_clean} material issue under Recipe {target_recipe_id} (v{target_recipe_ver})",
+                    "material_issue_txn_id": existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}",
+                    "issued_items_count": len(existing_deductions),
+                    "message": "Raw materials were already issued for this batch. No duplicate deduction made.",
                 }
-                if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
-                    raise RuntimeError(f"Could not record raw material deduction for '{plan['material_name']}' in ledger.")
-                appended_rows.append(row)
-        except Exception as exc:
-            logger.error("Error during raw material deduction appends for batch %s: %s", prod_id_clean, exc)
+
+            # 7. Pre-flight confirmed stock availability check for all remaining items
+            for agg_key, plan in missing_plans.items():
+                name = plan["material_name"]
+                needed = plan["needed_qty"]
+                stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=prod_id_clean)
+                confirmed_avail = round(float(stock_bal.get("confirmed_available", stock_bal["available"])) - plan["already_deducted_qty"], 4)
+                if confirmed_avail < needed:
+                    if not stock_bal.get("opening_stock_verified", False) and float(stock_bal.get("opening_stock", 0.0)) > 0:
+                        raise HTTPException(
+                            400,
+                            f"Cannot issue {name}: recorded opening stock ({stock_bal.get('opening_stock', 0.0)} {plan['stock_unit']}) is UNVERIFIED. "
+                            f"Confirmed available stock is {max(0.0, confirmed_avail)} {plan['stock_unit']}, but {needed} {plan['stock_unit']} is needed. "
+                            f"Owner must verify physical opening stock first."
+                        )
+                    raise HTTPException(
+                        400,
+                        f"Insufficient stock for {name}: need {needed} {plan['stock_unit']}, available {max(0.0, confirmed_avail)}."
+                    )
+
+            # 8. Record in-flight intent in IncompleteTransactions
+            issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
+            idempotency_key = f"RAW_ISSUE_{prod_id_clean}"
             try:
                 db.append_record("IncompleteTransactions", {
                     "transaction_id": make_id("IncompleteTransactions"),
                     "transaction_type": "RAW_MATERIAL_ISSUE",
                     "idempotency_key": idempotency_key,
-                    "status": "PARTIAL_FAILED",
-                    "payload_json": json.dumps({"production_id": prod_id_clean, "appended_count": len(appended_rows)}),
-                    "error_details": str(exc),
+                    "status": "IN_PROGRESS",
+                    "payload_json": json.dumps({"production_id": prod_id_clean, "recipe_id": target_recipe_id, "needed": {k: p["needed_qty"] for k, p in missing_plans.items()}}),
+                    "error_details": "",
                     "created_at": now(),
                     "updated_at": now(),
                     "resolved_by": "",
                     "resolved_at": "",
                 })
-            except Exception:
-                pass
-            raise HTTPException(503, f"Raw material deduction interrupted: {exc}. Safe to retry; existing deductions are preserved.")
+            except Exception as exc:
+                logger.debug("Non-fatal: IncompleteTransactions logging bypassed: %s", exc)
 
-        # 10. Post-deduction verification
-        raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
-        all_deductions_after = [
-            x for x in raw_ledger_after
-            if str(field(x, "production_id", default="")).strip() == prod_id_clean
-            and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
-        ]
+            # 9. Append missing deduction rows
+            appended_rows = []
+            try:
+                for agg_key, plan in missing_plans.items():
+                    needed = plan["needed_qty"]
+                    if needed <= 0:
+                        continue
 
-        for agg_key, plan in aggregated.items():
-            total_deducted = round(sum(
-                float(field(x, "quantity", default=0) or 0)
-                for x in all_deductions_after
-                if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
-                or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
-            ), 4)
-            if abs(total_deducted - plan["required_qty"]) > 0.001:
+                    mat_clean = re.sub(r'[^a-zA-Z0-9]', '', plan['raw_material_id'] or plan['material_name'])[:10]
+                    existing_count = len([x for x in existing_deductions if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key])
+                    suffix = f"-{existing_count + 1}" if existing_count > 0 else ""
+                    txn_id = f"RML-{prod_id_clean}-{mat_clean}{suffix}"
+
+                    row = {
+                        "raw_material_txn_id": txn_id,
+                        "txn_datetime": now(),
+                        "material_name": plan["material_name"],
+                        "raw_material_id": plan["raw_material_id"],
+                        "movement_type": "PRODUCTION_CONSUMPTION",
+                        "quantity": needed,
+                        "unit": plan["stock_unit"],
+                        "rate_per_unit": plan["rate_per_unit"],
+                        "production_id": prod_id_clean,
+                        "issue_txn_id": issue_txn_id,
+                        "created_by": actor,
+                        "notes": f"Batch {prod_id_clean} material issue under Recipe {target_recipe_id} (v{target_recipe_ver})",
+                    }
+                    if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
+                        raise RuntimeError(f"Could not record raw material deduction for '{plan['material_name']}' in ledger.")
+                    appended_rows.append(row)
+            except Exception as exc:
+                logger.error("Error during raw material deduction appends for batch %s: %s", prod_id_clean, exc)
+                try:
+                    db.append_record("IncompleteTransactions", {
+                        "transaction_id": make_id("IncompleteTransactions"),
+                        "transaction_type": "RAW_MATERIAL_ISSUE",
+                        "idempotency_key": idempotency_key,
+                        "status": "PARTIAL_FAILED",
+                        "payload_json": json.dumps({"production_id": prod_id_clean, "appended_count": len(appended_rows)}),
+                        "error_details": str(exc),
+                        "created_at": now(),
+                        "updated_at": now(),
+                        "resolved_by": "",
+                        "resolved_at": "",
+                    })
+                except Exception:
+                    pass
+                raise HTTPException(503, f"Raw material deduction interrupted: {exc}. Safe to retry; existing deductions are preserved.")
+
+            # 10. Post-deduction verification
+            raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
+            all_deductions_after = [
+                x for x in raw_ledger_after
+                if str(field(x, "production_id", default="")).strip() == prod_id_clean
+                and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+            ]
+
+            for agg_key, plan in aggregated.items():
+                total_deducted = round(sum(
+                    float(field(x, "quantity", default=0) or 0)
+                    for x in all_deductions_after
+                    if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
+                    or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
+                ), 4)
+                if abs(total_deducted - plan["required_qty"]) > 0.001:
+                    raise HTTPException(
+                        503,
+                        f"Material issuance verification failed for '{plan['material_name']}': "
+                        f"deducted {total_deducted} != required {plan['required_qty']}. Safe to retry."
+                    )
+
+            # 11. Update batch materials_issued status
+            batch_updates = {
+                "materials_issued": "true",
+                "material_issue_txn_id": issue_txn_id,
+                "recipe_id": target_recipe_id,
+                "recipe_version": str(target_recipe_ver),
+            }
+            try:
+                saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, batch_updates, raise_on_error=True)
+                if not saved:
+                    saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, batch_updates, raise_on_error=True)
+            except Exception as upd_exc:
+                logger.error("Failed to update ProductionBatches for %s: %s", prod_id_clean, upd_exc)
+                saved = False
+
+            if not saved:
                 raise HTTPException(
                     503,
-                    f"Material issuance verification failed for '{plan['material_name']}': "
-                    f"deducted {total_deducted} != required {plan['required_qty']}. Safe to retry."
+                    "Material deductions succeeded and verified, but failed to update batch status. "
+                    "Safe to retry; retry will update status without duplicating deductions."
                 )
 
-        # 11. Update batch materials_issued status
-        batch_updates = {
-            "materials_issued": "true",
-            "material_issue_txn_id": issue_txn_id,
-            "recipe_id": target_recipe_id,
-            "recipe_version": str(target_recipe_ver),
-        }
-        try:
-            saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, batch_updates, raise_on_error=True)
-            if not saved:
-                saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, batch_updates, raise_on_error=True)
-        except Exception as upd_exc:
-            logger.error("Failed to update ProductionBatches for %s: %s", prod_id_clean, upd_exc)
-            saved = False
+            try:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": make_id("IncompleteTransactions"),
+                    "transaction_type": "RAW_MATERIAL_ISSUE",
+                    "idempotency_key": idempotency_key,
+                    "status": "COMPLETED",
+                    "payload_json": json.dumps({"production_id": prod_id_clean, "issue_txn_id": issue_txn_id}),
+                    "error_details": "",
+                    "created_at": now(),
+                    "updated_at": now(),
+                    "resolved_by": actor,
+                    "resolved_at": now(),
+                })
+            except Exception:
+                pass
 
-        if not saved:
-            raise HTTPException(
-                503,
-                "Material deductions succeeded and verified, but failed to update batch status. "
-                "Safe to retry; retry will update status without duplicating deductions."
-            )
+            db.log_audit(actor, "ISSUE_RAW_MATERIALS", "ProductionBatches", prod_id_clean, reason=f"Issued raw materials for {production_kg} kg papad under Recipe {target_recipe_id}")
 
-        try:
-            db.append_record("IncompleteTransactions", {
-                "transaction_id": make_id("IncompleteTransactions"),
-                "transaction_type": "RAW_MATERIAL_ISSUE",
-                "idempotency_key": idempotency_key,
-                "status": "COMPLETED",
-                "payload_json": json.dumps({"production_id": prod_id_clean, "issue_txn_id": issue_txn_id}),
-                "error_details": "",
-                "created_at": now(),
-                "updated_at": now(),
-                "resolved_by": actor,
-                "resolved_at": now(),
-            })
-        except Exception:
-            pass
-
-        db.log_audit(actor, "ISSUE_RAW_MATERIALS", "ProductionBatches", prod_id_clean, reason=f"Issued raw materials for {production_kg} kg papad under Recipe {target_recipe_id}")
-
-        return {
-            "status": "MATERIALS_ISSUED",
-            "production_id": prod_id_clean,
-            "material_issue_txn_id": issue_txn_id,
-            "recipe_id": target_recipe_id,
-            "recipe_version": target_recipe_ver,
-            "deductions_appended": len(appended_rows),
-            "total_items_issued": len(aggregated),
-            "deductions": [
-                {
-                    "material_name": r["material_name"],
-                    "raw_material_id": r["raw_material_id"],
-                    "quantity": r["required_qty"],
-                    "unit": r["stock_unit"],
-                    "rate_per_unit": r["rate_per_unit"],
-                }
-                for r in aggregated.values()
-            ],
-        }
+            return {
+                "status": "MATERIALS_ISSUED",
+                "production_id": prod_id_clean,
+                "material_issue_txn_id": issue_txn_id,
+                "recipe_id": target_recipe_id,
+                "recipe_version": target_recipe_ver,
+                "deductions_appended": len(appended_rows),
+                "total_items_issued": len(aggregated),
+                "deductions": [
+                    {
+                        "material_name": r["material_name"],
+                        "raw_material_id": r["raw_material_id"],
+                        "quantity": r["required_qty"],
+                        "unit": r["stock_unit"],
+                        "rate_per_unit": r["rate_per_unit"],
+                    }
+                    for r in aggregated.values()
+                ],
+            }
 
 
 @router.post("/batches/{production_id}/issue-materials")

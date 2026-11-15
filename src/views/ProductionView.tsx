@@ -115,6 +115,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [verifyPhysicalCount, setVerifyPhysicalCount] = useState<string>('');
   const [verifyConfirmChecked, setVerifyConfirmChecked] = useState<boolean>(false);
   const [verifyReason, setVerifyReason] = useState<string>('');
+  const [verifyIdempKey, setVerifyIdempKey] = useState<string>('');
   const [reviewingPackagingId, setReviewingPackagingId] = useState<string | null>(null);
   const [reviewExplanation, setReviewExplanation] = useState<string>('');
   const [rmCategoryFilter, setRmCategoryFilter] = useState<string>('ALL');
@@ -181,8 +182,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   }, [pack.product_id]);
   
   const role = String(currentUser?.role || '').toUpperCase();
-  const isOwner = role === 'OWNER';
-  const canManage = ['OWNER', 'OWNER_ADMIN', 'PA'].includes(role);
+  const isOwner = ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(role);
+  const canManage = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA'].includes(role);
   const activeProducts = useMemo(() => products.filter(p => p.active !== false && String(p.active).toLowerCase() !== 'false'), [products]);
 
   const isDuplicateAttendance = useMemo(() => {
@@ -1025,20 +1026,21 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           {rawMaterials.some(m => m.opening_stock_verified === false || m.verification_status === 'UNVERIFIED') && (
             <div style={{ ...card, background: '#fffbeb', borderColor: '#f59e0b', color: '#92400e', fontSize: 13 }}>
               <b>⚠️ Unverified Opening Balances Notice:</b>{' '}
-              Existing <code>RawMaterials.current_stock</code> figures are shown as <b>Recorded (Unverified)</b> and must not be
-              treated as confirmed physical opening stock until physically counted and verified via <b>Verify Physical Stock</b>.
+              Existing <code>RawMaterials.current_stock</code> figures are shown as <b>UNVERIFIED</b> and are NOT treated as confirmed
+              available stock for production or dal milling. Material issuance depending on an unverified opening balance is blocked until
+              the <b>Owner</b> counts and verifies physical opening stock.
               {` (${rawMaterials.filter(m => m.opening_stock_verified === false || m.verification_status === 'UNVERIFIED').length} material(s) unverified)`}
             </div>
           )}
 
-          {verifyingMaterial && (
+          {verifyingMaterial && isOwner && (
             <div style={{ ...card, background: '#eff6ff', borderColor: '#3b82f6' }}>
               <h4 style={{ margin: '0 0 8px', color: '#1e3a8a' }}>
-                Verify Physical Stock — {verifyingMaterial.material_name} ({verifyingMaterial.raw_material_id || verifyingMaterial.material_id})
+                Verify Physical Stock (Owner Only) — {verifyingMaterial.material_name} ({verifyingMaterial.raw_material_id || verifyingMaterial.material_id})
               </h4>
               <p style={{ margin: '0 0 10px', fontSize: 12, color: '#334155' }}>
-                Recorded baseline: <b>{verifyingMaterial.recorded_opening_stock ?? verifyingMaterial.baseline_stock} {verifyingMaterial.unit}</b> | Current computed book stock:{' '}
-                <b>{verifyingMaterial.available_stock} {verifyingMaterial.unit}</b>. Confirming physical count logs an auditable verification adjustment without erasing historical records.
+                Recorded baseline: <b>{verifyingMaterial.recorded_opening_stock ?? verifyingMaterial.baseline_stock} {verifyingMaterial.unit}</b> | Current book stock:{' '}
+                <b>{verifyingMaterial.available_stock} {verifyingMaterial.unit}</b>. Confirming physical count logs an auditable verification entry without erasing historical records.
               </p>
               <form
                 onSubmit={async e => {
@@ -1051,6 +1053,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         physical_count: Number(verifyPhysicalCount),
                         confirm_physical_count: verifyConfirmChecked,
                         reason: verifyReason.trim(),
+                        idempotency_key: verifyIdempKey || undefined,
                       }),
                     `Physical stock verified for ${verifyingMaterial.material_name}.`,
                     refreshRawMaterials
@@ -1060,6 +1063,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     setVerifyPhysicalCount('');
                     setVerifyConfirmChecked(false);
                     setVerifyReason('');
+                    setVerifyIdempKey('');
                   }
                 }}
                 style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10, alignItems: 'center' }}
@@ -1100,7 +1104,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   <button
                     type="button"
                     style={{ ...btn, background: '#64748b' }}
-                    onClick={() => setVerifyingMaterial(null)}
+                    onClick={() => {
+                      setVerifyingMaterial(null);
+                      setVerifyIdempKey('');
+                    }}
                   >
                     Cancel
                   </button>
@@ -1612,6 +1619,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       const isWhole = m.category === 'WHOLE_GRAIN' || m.material_id.includes('WHOLE');
                       const isVerified = Boolean(m.opening_stock_verified) || m.verification_status === 'CONFIRMED';
                       const recordedBase = m.recorded_opening_stock ?? m.baseline_stock;
+                      const confirmedAvail = m.confirmed_available_stock ?? m.available_stock;
                       return (
                         <tr
                           key={m.material_id}
@@ -1645,7 +1653,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                           </td>
                           <td style={{ textAlign: 'center', padding: '8px 10px' }}>
                             <span
-                              title={m.unverified_opening_warning || `Verified by ${m.verified_by || 'Supervisor'}`}
+                              title={m.unverified_opening_warning || `Verified by ${m.verified_by || 'Owner'}`}
                               style={{
                                 fontSize: 11,
                                 padding: '2px 8px',
@@ -1655,7 +1663,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                                 color: isVerified ? '#166534' : '#92400e',
                               }}
                             >
-                              {isVerified ? '✓ Physically Verified' : 'Recorded (Unverified)'}
+                              {isVerified ? '✓ Physically Verified' : 'UNVERIFIED'}
                             </span>
                           </td>
                           <td style={{ textAlign: 'right', padding: '8px 10px', color: '#047857', fontWeight: 600 }}>
@@ -1670,29 +1678,45 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                                 padding: '3px 8px',
                                 borderRadius: 6,
                                 fontWeight: 700,
-                                background: (m.available_stock || 0) > 0 ? '#dcfce7' : '#fee2e2',
-                                color: (m.available_stock || 0) > 0 ? '#166534' : '#991b1b',
+                                background: confirmedAvail > 0 ? '#dcfce7' : '#fee2e2',
+                                color: confirmedAvail > 0 ? '#166534' : '#991b1b',
                               }}
                             >
-                              {m.available_stock} {m.unit}
+                              {confirmedAvail} {m.unit}
                             </span>
+                            {!isVerified && m.available_stock !== confirmedAvail && (
+                              <div style={{ fontSize: 10, color: '#92400e', marginTop: 2 }}>
+                                Book (unverified): {m.available_stock} {m.unit}
+                              </div>
+                            )}
                           </td>
                           <td style={{ textAlign: 'right', padding: '8px 10px', fontWeight: 600, color: '#1e293b' }}>
                             {m.latest_landed_rate > 0 ? `₹${m.latest_landed_rate.toFixed(2)} / ${m.unit}` : '—'}
                           </td>
                           <td style={{ textAlign: 'center', padding: '8px 10px' }}>
-                            <button
-                              type="button"
-                              style={{ ...btn, background: isVerified ? '#475569' : '#0284c7', padding: '4px 9px', fontSize: 11 }}
-                              onClick={() => {
-                                setVerifyingMaterial(m);
-                                setVerifyPhysicalCount(String(m.available_stock ?? 0));
-                                setVerifyConfirmChecked(false);
-                                setVerifyReason('');
-                              }}
-                            >
-                              {isVerified ? 'Re-verify' : 'Verify Physical'}
-                            </button>
+                            {isVerified ? (
+                              <span style={{ fontSize: 11, color: '#166534', fontWeight: 600 }}>
+                                ✓ Verified
+                              </span>
+                            ) : isOwner ? (
+                              <button
+                                type="button"
+                                style={{ ...btn, background: '#0284c7', padding: '4px 9px', fontSize: 11 }}
+                                onClick={() => {
+                                  setVerifyingMaterial(m);
+                                  setVerifyPhysicalCount(String(m.available_stock ?? 0));
+                                  setVerifyConfirmChecked(false);
+                                  setVerifyReason('');
+                                  setVerifyIdempKey(`RMV-${m.raw_material_id || m.material_id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+                                }}
+                              >
+                                Verify Physical
+                              </button>
+                            ) : (
+                              <span style={{ fontSize: 11, color: '#92400e', fontWeight: 600 }}>
+                                Owner verification required
+                              </span>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1804,11 +1828,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             {(() => {
               const activeDalCfg = DAL_MILLING_CONFIG.find(c => c.id === millingForm.source_material_id) || DAL_MILLING_CONFIG[0];
               const wholeMat = rawMaterials.find(m => m.material_id === activeDalCfg.id);
-              const wholeAvail = wholeMat ? wholeMat.available_stock : 0;
+              const wholeAvail = wholeMat ? (wholeMat.confirmed_available_stock ?? wholeMat.available_stock) : 0;
+              const wholeVerified = wholeMat ? (Boolean(wholeMat.opening_stock_verified) || wholeMat.verification_status === 'CONFIRMED') : true;
               const wholeRate = wholeMat?.latest_landed_rate || 0;
 
               const flourMat = rawMaterials.find(m => m.material_id === activeDalCfg.flourId);
-              const flourAvail = flourMat ? flourMat.available_stock : 0;
+              const flourAvail = flourMat ? (flourMat.confirmed_available_stock ?? flourMat.available_stock) : 0;
 
               const inQty = parseFloat(millingForm.input_quantity_kg || '0') || 0;
               const outQty = parseFloat(millingForm.flour_output_kg || '0') || 0;
@@ -1844,7 +1869,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       return;
                     }
                     if (isOverStock) {
-                      showError(`Insufficient whole dal stock: requested ${inQty} kg but only ${wholeAvail} kg available.`);
+                      if (!wholeVerified && (wholeMat?.opening_stock ?? 0) > 0) {
+                        showError(
+                          `Cannot mill ${activeDalCfg.name}: recorded opening balance (${wholeMat?.opening_stock} kg) is UNVERIFIED. Confirmed available stock is ${wholeAvail} kg. Owner must verify physical opening stock first.`
+                        );
+                      } else {
+                        showError(`Insufficient whole dal stock: requested ${inQty} kg but only ${wholeAvail} kg confirmed available.`);
+                      }
                       return;
                     }
 

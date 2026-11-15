@@ -164,11 +164,11 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
                 }
             ],
             "RawMaterials": [
-                {"raw_material_id": "RM-MOONG", "material_name": "Moong Flour", "current_stock": 100.0, "unit": "kg"},
-                {"raw_material_id": "RM-SALT", "material_name": "Salt", "current_stock": 20.0, "unit": "kg"},
-                {"raw_material_id": "RM-HING", "material_name": "Hing", "current_stock": 5.0, "unit": "kg"},
-                {"raw_material_id": "RM-OIL", "material_name": "Edible Oil", "current_stock": 50.0, "unit": "L"},
-                {"raw_material_id": "RM-PEPPER", "material_name": "Black Pepper", "current_stock": 15.0, "unit": "kg"},
+                {"raw_material_id": "RM-MOONG", "material_name": "Moong Flour", "current_stock": 100.0, "unit": "kg", "opening_stock_verified": "true"},
+                {"raw_material_id": "RM-SALT", "material_name": "Salt", "current_stock": 20.0, "unit": "kg", "opening_stock_verified": "true"},
+                {"raw_material_id": "RM-HING", "material_name": "Hing", "current_stock": 5.0, "unit": "kg", "opening_stock_verified": "true"},
+                {"raw_material_id": "RM-OIL", "material_name": "Edible Oil", "current_stock": 50.0, "unit": "L", "opening_stock_verified": "true"},
+                {"raw_material_id": "RM-PEPPER", "material_name": "Black Pepper", "current_stock": 15.0, "unit": "kg", "opening_stock_verified": "true"},
             ],
             "RawMaterialLedger": [],
             "Recipes": [

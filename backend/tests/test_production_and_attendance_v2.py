@@ -81,10 +81,10 @@ class TestProductionAndAttendanceV2(unittest.TestCase):
                 },
             ],
             "RawMaterials": [
-                {"raw_material_id": "RAW-01", "material_name": "Moong Dal Flour", "current_stock": 1000.0, "unit": "kg"},
-                {"raw_material_id": "RAW-02", "material_name": "Black Pepper", "current_stock": 100.0, "unit": "kg"},
-                {"raw_material_id": "RAW-03", "material_name": "Hing", "current_stock": 50.0, "unit": "kg"},
-                {"raw_material_id": "RAW-04", "material_name": "Salt", "current_stock": 200.0, "unit": "kg"},
+                {"raw_material_id": "RAW-01", "material_name": "Moong Dal Flour", "current_stock": 1000.0, "unit": "kg", "opening_stock_verified": "true"},
+                {"raw_material_id": "RAW-02", "material_name": "Black Pepper", "current_stock": 100.0, "unit": "kg", "opening_stock_verified": "true"},
+                {"raw_material_id": "RAW-03", "material_name": "Hing", "current_stock": 50.0, "unit": "kg", "opening_stock_verified": "true"},
+                {"raw_material_id": "RAW-04", "material_name": "Salt", "current_stock": 200.0, "unit": "kg", "opening_stock_verified": "true"},
             ],
             "RawMaterialLedger": [],
             "Recipes": [

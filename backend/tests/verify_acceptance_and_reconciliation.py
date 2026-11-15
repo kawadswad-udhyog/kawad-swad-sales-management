@@ -127,6 +127,7 @@ def run_acceptance_and_reconciliation():
         "unit": "kg",
         "rate_per_unit": 400.0,
         "rate_status": "CONFIRMED",
+        "opening_stock_verified": "true",
     })
     db.append_record("RawMaterials", {
         "raw_material_id": "RM-SALT",
@@ -136,6 +137,7 @@ def run_acceptance_and_reconciliation():
         "unit": "kg",
         "rate_per_unit": 20.0,
         "rate_status": "CONFIRMED",
+        "opening_stock_verified": "true",
     })
     db.append_record("RawMaterials", {
         "raw_material_id": "PKG-POUCH-200G",
@@ -145,6 +147,7 @@ def run_acceptance_and_reconciliation():
         "unit": "pcs",
         "rate_per_unit": 3.5,
         "rate_status": "CONFIRMED",
+        "opening_stock_verified": "true",
     })
     db.append_record("Products", {
         "product_id": "PRD-CHANA-MASALA-200G",
