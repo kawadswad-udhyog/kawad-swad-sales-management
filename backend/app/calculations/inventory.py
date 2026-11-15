@@ -695,6 +695,17 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
         target_keys.update(clean_keys)
 
         opening = to_decimal(master_row.get("current_stock") or master_row.get("opening_stock") or 0) if master_row else Decimal("0")
+        master_verified_flag = False
+        master_ver_status = ""
+        if master_row:
+            master_verified_flag = str(
+                master_row.get("opening_stock_verified")
+                or master_row.get("physical_count_verified")
+                or ""
+            ).strip().lower() in {"true", "1", "yes"}
+            master_ver_status = str(master_row.get("verification_status", "")).strip().upper()
+        is_verified = master_verified_flag or master_ver_status in {"CONFIRMED", "VERIFIED"}
+
         consumed = Decimal("0")
         received = Decimal("0")
         adjusted = Decimal("0")
@@ -714,7 +725,14 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
                 received += qty
             elif typ in {"OPENING_STOCK_VERIFICATION", "STOCK_ADJUSTMENT", "ADJUSTMENT"}:
                 adjusted += qty
-        return float(round_stock(opening - consumed + received + adjusted))
+                if typ == "OPENING_STOCK_VERIFICATION":
+                    is_verified = True
+
+        available = opening - consumed + received + adjusted
+        if is_verified:
+            return float(round_stock(available))
+        confirmed_available = min(available, max(Decimal("0"), received + adjusted - consumed))
+        return float(round_stock(confirmed_available))
 
     raw_material_id_or_name = args[0] if len(args) > 0 else kwargs.get("raw_material_id_or_name", "")
     raw_materials_master = args[1] if len(args) > 1 else kwargs.get("raw_materials_master", [])

@@ -2679,7 +2679,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10 }}
             >
-              {productSelect(production.product_id, v => setProduction({ ...production, product_id: v }))}
+              {productSelect(production.product_id, v => setProduction({ ...production, product_id: v, recipe_id: '' }))}
               <input
                 style={input}
                 type="date"

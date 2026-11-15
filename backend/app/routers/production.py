@@ -4356,150 +4356,258 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
     return {"status": "RECORDED", "packaging_id": packaging_id, "message": "Incomplete packaging movements and vouchers recovered."}
 
 
+_PACKAGING_DISCREPANCY_MUTEX = threading.RLock()
+
+
+def _ensure_packaging_discrepancy_audit(
+    *,
+    packaging_id: str,
+    actor: str,
+    explanation: str,
+) -> Dict[str, Any]:
+    """Ensure an AuditLog entry exists for packaging discrepancy approval."""
+    audit_rows = db.get_records("AuditLog", fresh=True)
+    for row in audit_rows:
+        if (
+            str(row.get("action", "")).strip().upper() == "APPROVE_PACKAGING_DISCREPANCY"
+            and str(row.get("entity_type", "")).strip() == "PackagingBatches"
+            and str(row.get("entity_id", "")).strip() == packaging_id
+        ):
+            return row
+
+    try:
+        audit_id = db.generate_id("AuditLog")
+    except Exception:
+        audit_id = f"AUD-{hashlib.sha256(f'PKG:{packaging_id}'.encode('utf-8')).hexdigest()[:10]}"
+
+    audit_rec = {
+        "audit_id": audit_id,
+        "event_datetime": now(),
+        "actor_user_id": actor,
+        "action": "APPROVE_PACKAGING_DISCREPANCY",
+        "entity_type": "PackagingBatches",
+        "entity_id": packaging_id,
+        "field_changed": "discrepancy_approved",
+        "old_value": "false",
+        "new_value": "true",
+        "reason": explanation,
+        "approved_by_user_id": actor,
+        "related_record_id": packaging_id,
+    }
+    try:
+        if not db.append_record("AuditLog", audit_rec, raise_on_error=True):
+            raise HTTPException(
+                503,
+                "Discrepancy reconciliation saved, but required AuditLog event could not be persisted. Safe to retry.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            503,
+            f"Discrepancy reconciliation saved, but required AuditLog event could not be persisted: {exc}. Safe to retry.",
+        )
+    return audit_rec
+
+
 @router.post("/packaging/{packaging_id}/approve-discrepancy")
 async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyApprovalRequest, user: dict = Depends(get_current_user)):
     """
     Approve an unexplained packing discrepancy.
     Preserves original quantities, saves explanation, records approving Owner, and posts stock movements if pending.
+    Idempotent across retries, serialized per packaging_id, and rejects conflicting re-approvals with HTTP 409.
     """
     actor, _ = require_owner(user)
     require_persistent_store()
 
-    if not req.explanation or len(req.explanation.strip()) < 3:
+    clean_explanation = (req.explanation or "").strip()
+    if len(clean_explanation) < 3:
         raise HTTPException(422, "An explanation (minimum 3 characters) is required to approve an unexplained packing discrepancy.")
 
-    batch = next((p for p in db.get_records("PackagingBatches") if str(field(p, "packaging_id")) == packaging_id), None)
-    if not batch:
-        raise HTTPException(404, "Packaging batch not found")
-
-    cls_info = classify_packaging_discrepancy(batch)
-    if cls_info["classification"] == "HISTORICAL_UNRESOLVED":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Historical packaging discrepancy cannot be overwritten, reversed, or re-deducted operationally. "
-                "Existing stock deduction is preserved for manual reconciliation and synthetic sales are blocked."
-            ),
+    with _PACKAGING_DISCREPANCY_MUTEX, CrossProcessLock("packaging_discrepancy", packaging_id):
+        batch = next(
+            (p for p in db.get_records("PackagingBatches", fresh=True) if str(field(p, "packaging_id")) == packaging_id),
+            None,
         )
+        if not batch:
+            raise HTTPException(404, "Packaging batch not found")
 
-    ledger = db.get_records("ProductionStockLedger")
-    bulk_key = str(field(batch, "product_name_snapshot")).strip().lower()
-    bulk_kg = float(field(batch, "bulk_kg_used", default=0) or 0)
-    p200 = int(float(field(batch, "packets_200g", default=0) or 0))
-    p500 = int(float(field(batch, "packets_500g", default=0) or 0))
-    p1000 = int(float(field(batch, "packets_1000g", default=0) or 0))
+        cls_info = classify_packaging_discrepancy(batch)
+        if cls_info["classification"] == "HISTORICAL_UNRESOLVED":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Historical packaging discrepancy cannot be overwritten, reversed, or re-deducted operationally. "
+                    "Existing stock deduction is preserved for manual reconciliation and synthetic sales are blocked."
+                ),
+            )
 
-    # Ensure bulk stock deduction exists
-    existing_bulk = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
-    if not existing_bulk:
-        row = {
-            "movement_id": make_id("ProductionStockLedger"),
-            "txn_datetime": now(),
-            "movement_type": "BULK_PACKAGED",
-            "quantity_kg": bulk_kg,
-            "quantity_packets": 0,
-            "channel": "FACTORY_BULK",
-            "product_id": field(batch, "product_id"),
-            "bulk_product_key": bulk_key,
-            "product_name_snapshot": field(batch, "product_name_snapshot"),
-            "reference_id": packaging_id,
-            "created_by": actor,
-            "notes": f"Discrepancy approved deduction: {req.explanation}",
-        }
-        if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-            raise HTTPException(503, "Could not record bulk stock deduction.")
-
-    # Ensure finished packets exist
-    for weight_g, count in [(200, p200), (500, p500), (1000, p1000)]:
-        if count <= 0:
-            continue
-        sku_product = next((p for p in db.get_records("Products") if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
-        if sku_product:
-            target_sku_id = str(field(sku_product, "product_id"))
-            existing_sku = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "product_id")) == target_sku_id and str(field(m, "movement_type")).upper() == "PACKETS_PACKAGED"), None)
-            if not existing_sku:
-                row = {
-                    "movement_id": make_id("ProductionStockLedger"),
-                    "txn_datetime": now(),
-                    "movement_type": "PACKETS_PACKAGED",
-                    "quantity_kg": 0,
-                    "quantity_packets": count,
-                    "channel": "FACTORY_FINISHED",
-                    "product_id": target_sku_id,
-                    "bulk_product_key": bulk_key,
-                    "product_name_snapshot": field(sku_product, "product_name"),
-                    "sku_snapshot": field(sku_product, "sku"),
-                    "pack_weight_g": weight_g,
-                    "reference_id": packaging_id,
-                    "created_by": actor,
-                    "notes": f"Discrepancy approved packet credit: {req.explanation}",
-                }
-                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                    raise HTTPException(503, "Could not record packet stock.")
-
-    updates = {
-        "status": "RECORDED",
-        "difference_status": "APPROVED_DISCREPANCY",
-        "discrepancy_approved": "true",
-        "discrepancy_explanation": req.explanation.strip(),
-        "discrepancy_approved_by": actor,
-        "discrepancy_approved_at": now(),
-    }
-    db.update_record("PackagingBatches", "packaging_id", packaging_id, updates)
-
-    # Reconcile accounting journal in JournalHeaders if missing
-    try:
-        from app.accounting.postings import post_packaging_batch_journal
-        headers = db.get_records("JournalHeaders", fresh=True)
-        has_voucher = any(
-            str(field(v, "reference_id", default="")).strip() == packaging_id
-            and str(field(v, "reference_type", default="")).strip().upper() == "PACKAGING_BATCH"
-            and str(field(v, "status", default="")).strip().upper() in {"POSTED", "PROVISIONAL"}
-            for v in headers
+        already_approved = (
+            cls_info["classification"] == "APPROVED_DISCREPANCY"
+            or truthy(field(batch, "discrepancy_approved", default="false"))
+            or str(field(batch, "difference_status", default="")).strip().upper() == "APPROVED_DISCREPANCY"
         )
-        if not has_voucher:
-            b_cost = to_decimal(field(batch, "bulk_cost", default=0) or 0)
-            m_cost = to_decimal(field(batch, "packaging_material_cost", default=0) or 0)
-            l_cost = to_decimal(field(batch, "packaging_labor_cost", default=0) or 0)
-            c_status = str(field(batch, "cost_status", default="ACTUAL"))
-            pack_dict = {
-                "packaging_id": packaging_id,
+        existing_explanation = str(field(batch, "discrepancy_explanation", default="")).strip()
+        if already_approved:
+            if existing_explanation and existing_explanation != clean_explanation:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Conflict: Packaging discrepancy {packaging_id} was already approved with a different explanation.",
+                )
+
+        ledger = db.get_records("ProductionStockLedger", fresh=True)
+        bulk_key = str(field(batch, "product_name_snapshot")).strip().lower()
+        bulk_kg = float(field(batch, "bulk_kg_used", default=0) or 0)
+        p200 = int(float(field(batch, "packets_200g", default=0) or 0))
+        p500 = int(float(field(batch, "packets_500g", default=0) or 0))
+        p1000 = int(float(field(batch, "packets_1000g", default=0) or 0))
+
+        # Ensure bulk stock deduction exists (idempotent check)
+        existing_bulk = next(
+            (m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"),
+            None,
+        )
+        if not existing_bulk:
+            row = {
+                "movement_id": make_id("ProductionStockLedger"),
+                "txn_datetime": now(),
+                "movement_type": "BULK_PACKAGED",
+                "quantity_kg": bulk_kg,
+                "quantity_packets": 0,
+                "channel": "FACTORY_BULK",
+                "product_id": field(batch, "product_id"),
+                "bulk_product_key": bulk_key,
                 "product_name_snapshot": field(batch, "product_name_snapshot"),
-                "bulk_kg_used": bulk_kg,
-                "total_packets": int(float(field(batch, "total_packets", default=0) or 0)),
-                "packaging_date": field(batch, "packaging_date", default="") or now()[:10],
-                "bulk_cost": float(b_cost),
-                "packaging_material_cost": float(m_cost),
-                "packaging_labor_cost": float(l_cost),
-                "cost_status": c_status,
-                "has_estimated_cost": c_status == "ESTIMATED",
-                "batch_allocations_json": field(batch, "batch_allocations_json", default=""),
+                "reference_id": packaging_id,
+                "created_by": actor,
+                "notes": f"Discrepancy approved deduction: {clean_explanation}",
             }
-            post_packaging_batch_journal(pack_dict, bulk_cost=b_cost, packing_material_cost=m_cost, packing_labor_cost=l_cost, actor=actor)
-    except Exception as acct_err:
-        logger.warning(f"Accounting posting on discrepancy approval for packaging {packaging_id}: {acct_err}")
+            if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                raise HTTPException(503, "Could not record bulk stock deduction.")
 
-    # Mark associated ApprovalRequests as APPROVED
-    try:
-        for appr in db.get_records("ApprovalRequests", fresh=True):
-            if (
-                str(field(appr, "target_user_id", default="")).strip() == packaging_id
-                and str(field(appr, "request_type", default="")).strip().upper() == "PACKAGING_DISCREPANCY"
-                and str(field(appr, "status", default="")).strip().upper() == "PENDING"
-            ):
-                req_id = str(field(appr, "request_id", default="")).strip()
-                db.update_record("ApprovalRequests", "request_id", req_id, {
-                    "status": "APPROVED",
-                    "approved_by": actor,
-                    "approved_at": now(),
-                    "notes": f"Discrepancy approved: {req.explanation.strip()}",
-                })
-    except Exception as appr_upd_err:
-        logger.debug(f"ApprovalRequest update bypassed: {appr_upd_err}")
+        # Ensure finished packets exist (idempotent check)
+        all_products = db.get_records("Products", fresh=True)
+        for weight_g, count in [(200, p200), (500, p500), (1000, p1000)]:
+            if count <= 0:
+                continue
+            sku_product = next(
+                (p for p in all_products
+                 if str(field(p, "product_name")).strip().lower() == bulk_key
+                 and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g
+                 and truthy(field(p, "active", default="true"))),
+                None,
+            )
+            if sku_product:
+                target_sku_id = str(field(sku_product, "product_id"))
+                existing_sku = next(
+                    (m for m in ledger
+                     if str(field(m, "reference_id")) == packaging_id
+                     and str(field(m, "product_id")) == target_sku_id
+                     and str(field(m, "movement_type")).upper() == "PACKETS_PACKAGED"),
+                    None,
+                )
+                if not existing_sku:
+                    row = {
+                        "movement_id": make_id("ProductionStockLedger"),
+                        "txn_datetime": now(),
+                        "movement_type": "PACKETS_PACKAGED",
+                        "quantity_kg": 0,
+                        "quantity_packets": count,
+                        "channel": "FACTORY_FINISHED",
+                        "product_id": target_sku_id,
+                        "bulk_product_key": bulk_key,
+                        "product_name_snapshot": field(sku_product, "product_name"),
+                        "sku_snapshot": field(sku_product, "sku"),
+                        "pack_weight_g": weight_g,
+                        "reference_id": packaging_id,
+                        "created_by": actor,
+                        "notes": f"Discrepancy approved packet credit: {clean_explanation}",
+                    }
+                    if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
+                        raise HTTPException(503, "Could not record packet stock.")
 
-    db.log_audit(actor, "APPROVE_PACKAGING_DISCREPANCY", "PackagingBatches", packaging_id, reason=req.explanation.strip())
+        if not already_approved:
+            updates = {
+                "status": "RECORDED",
+                "difference_status": "APPROVED_DISCREPANCY",
+                "discrepancy_approved": "true",
+                "discrepancy_explanation": clean_explanation,
+                "discrepancy_approved_by": actor,
+                "discrepancy_approved_at": now(),
+            }
+            if not db.update_record("PackagingBatches", "packaging_id", packaging_id, updates, raise_on_error=True):
+                raise HTTPException(503, "Could not update PackagingBatches approval status.")
 
-    return {"status": "SUCCESS", "packaging_id": packaging_id, "message": "Discrepancy approved and stock reconciled."}
+        # Reconcile accounting journal in JournalHeaders if missing
+        try:
+            from app.accounting.postings import post_packaging_batch_journal
+            headers = db.get_records("JournalHeaders", fresh=True)
+            has_voucher = any(
+                str(field(v, "reference_id", default="")).strip() == packaging_id
+                and str(field(v, "reference_type", default="")).strip().upper() == "PACKAGING_BATCH"
+                and str(field(v, "status", default="")).strip().upper() in {"POSTED", "PROVISIONAL"}
+                for v in headers
+            )
+            if not has_voucher:
+                b_cost = to_decimal(field(batch, "bulk_cost", default=0) or 0)
+                m_cost = to_decimal(field(batch, "packaging_material_cost", default=0) or 0)
+                l_cost = to_decimal(field(batch, "packaging_labor_cost", default=0) or 0)
+                c_status = str(field(batch, "cost_status", default="ACTUAL"))
+                pack_dict = {
+                    "packaging_id": packaging_id,
+                    "product_name_snapshot": field(batch, "product_name_snapshot"),
+                    "bulk_kg_used": bulk_kg,
+                    "total_packets": int(float(field(batch, "total_packets", default=0) or 0)),
+                    "packaging_date": field(batch, "packaging_date", default="") or now()[:10],
+                    "bulk_cost": float(b_cost),
+                    "packaging_material_cost": float(m_cost),
+                    "packaging_labor_cost": float(l_cost),
+                    "cost_status": c_status,
+                    "has_estimated_cost": c_status == "ESTIMATED",
+                    "batch_allocations_json": field(batch, "batch_allocations_json", default=""),
+                }
+                post_packaging_batch_journal(pack_dict, bulk_cost=b_cost, packing_material_cost=m_cost, packing_labor_cost=l_cost, actor=actor)
+        except Exception as acct_err:
+            logger.warning(f"Accounting posting on discrepancy approval for packaging {packaging_id}: {acct_err}")
+
+        # Mark associated ApprovalRequests as APPROVED
+        try:
+            for appr in db.get_records("ApprovalRequests", fresh=True):
+                if (
+                    str(field(appr, "target_user_id", default="")).strip() == packaging_id
+                    and str(field(appr, "request_type", default="")).strip().upper() == "PACKAGING_DISCREPANCY"
+                    and str(field(appr, "status", default="")).strip().upper() == "PENDING"
+                ):
+                    req_id = str(field(appr, "request_id", default="")).strip()
+                    db.update_record("ApprovalRequests", "request_id", req_id, {
+                        "status": "APPROVED",
+                        "approved_by": actor,
+                        "approved_at": now(),
+                        "notes": f"Discrepancy approved: {clean_explanation}",
+                    })
+        except Exception as appr_upd_err:
+            logger.debug(f"ApprovalRequest update bypassed: {appr_upd_err}")
+
+        _ensure_packaging_discrepancy_audit(
+            packaging_id=packaging_id,
+            actor=str(field(batch, "discrepancy_approved_by", default=actor) or actor),
+            explanation=existing_explanation or clean_explanation,
+        )
+
+        if already_approved:
+            return {
+                "status": "SUCCESS",
+                "packaging_id": packaging_id,
+                "is_replay": True,
+                "message": "Packaging discrepancy already approved and reconciled.",
+            }
+
+        return {
+            "status": "SUCCESS",
+            "packaging_id": packaging_id,
+            "is_replay": False,
+            "message": "Discrepancy approved and stock reconciled.",
+        }
 
 
 # -------------------------------------------------------------

@@ -32,22 +32,32 @@ _LOCK_DIR = _DEFAULT_LOCK_DIR
 _STATE_FILE = _DEFAULT_STATE_FILE
 
 
+def _uid_suffix() -> str:
+    try:
+        return f"_{os.getuid()}"
+    except AttributeError:
+        return ""
+
+
 def _get_lock_dir() -> str:
+    explicit_lock_dir = os.getenv("KS_ERP_LOCK_DIR")
+    if explicit_lock_dir and explicit_lock_dir.strip():
+        return explicit_lock_dir.strip()
     env_dir = os.getenv("KS_ERP_STATE_DIR") or os.getenv("SALES_SHARED_TEST_DIR")
-    if env_dir:
-        return os.path.join(env_dir, "locks")
+    if env_dir and env_dir.strip():
+        return os.path.join(env_dir.strip(), "locks")
     if _LOCK_DIR != _DEFAULT_LOCK_DIR:
         return _LOCK_DIR
-    return os.path.join(tempfile.gettempdir(), "ks_erp_locks")
+    return os.path.join(tempfile.gettempdir(), f"ks_erp_locks{_uid_suffix()}")
 
 
 def _get_state_file() -> str:
     env_dir = os.getenv("KS_ERP_STATE_DIR") or os.getenv("SALES_SHARED_TEST_DIR")
-    if env_dir:
-        return os.path.join(env_dir, "ks_erp_cross_process_state.json")
+    if env_dir and env_dir.strip():
+        return os.path.join(env_dir.strip(), "ks_erp_cross_process_state.json")
     if _STATE_FILE != _DEFAULT_STATE_FILE:
         return _STATE_FILE
-    return os.path.join(tempfile.gettempdir(), "ks_erp_cross_process_state.json")
+    return os.path.join(tempfile.gettempdir(), f"ks_erp_cross_process_state{_uid_suffix()}.json")
 
 
 class CrossProcessLock:
@@ -85,7 +95,7 @@ class CrossProcessLock:
             )
 
         try:
-            os.makedirs(self.lock_dir, exist_ok=True)
+            os.makedirs(self.lock_dir, mode=0o700, exist_ok=True)
         except Exception as exc:
             raise HTTPException(
                 status_code=503,

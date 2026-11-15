@@ -142,6 +142,11 @@ def _mp_reservation_worker(approval_id, sale_id, customer_id, credit_amt, shared
 
 class TestPhase141FailureInjection(unittest.TestCase):
     def setUp(self):
+        self._prev_state_dir = os.environ.get("KS_ERP_STATE_DIR")
+        self._prev_lock_dir = os.environ.get("KS_ERP_LOCK_DIR")
+        self._isolated_state_dir = tempfile.mkdtemp(prefix="ks_p141_state_")
+        os.environ["KS_ERP_STATE_DIR"] = self._isolated_state_dir
+        os.environ.pop("KS_ERP_LOCK_DIR", None)
         db.disable_shared_file_store()
         db.memory_store = {tab: [] for tab in db.memory_store}
         reset_cross_process_state()
@@ -150,6 +155,15 @@ class TestPhase141FailureInjection(unittest.TestCase):
     def tearDown(self):
         db.disable_shared_file_store()
         reset_cross_process_state()
+        if self._prev_state_dir is not None:
+            os.environ["KS_ERP_STATE_DIR"] = self._prev_state_dir
+        else:
+            os.environ.pop("KS_ERP_STATE_DIR", None)
+        if self._prev_lock_dir is not None:
+            os.environ["KS_ERP_LOCK_DIR"] = self._prev_lock_dir
+        else:
+            os.environ.pop("KS_ERP_LOCK_DIR", None)
+        shutil.rmtree(self._isolated_state_dir, ignore_errors=True)
 
     def _seed_core_data(self):
         # Users
@@ -943,7 +957,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         self.assertEqual(str(xp_res.get("reserved_by_sale_id")), winning_sale_id)
 
         # 3. Verify the test actually exercised the shared filesystem lock
-        lock_file = os.path.join(cl._LOCK_DIR, "approval_APP-PROC-16.lock")
+        lock_file = os.path.join(cl._get_lock_dir(), "approval_APP-PROC-16.lock")
         self.assertTrue(os.path.exists(lock_file), f"Expected filesystem lock file {lock_file} to exist")
 
     def test_17_two_simultaneous_sales_attempting_to_exceed_customer_credit_limit(self):
@@ -1390,8 +1404,9 @@ class TestPhase141FailureInjection(unittest.TestCase):
         Never silently continue without acquiring a required lock.
         """
         import fcntl
-        lock_path = os.path.join(cl._LOCK_DIR, "approval_APP-TIMEOUT-27.lock")
-        os.makedirs(cl._LOCK_DIR, exist_ok=True)
+        lock_dir = cl._get_lock_dir()
+        lock_path = os.path.join(lock_dir, "approval_APP-TIMEOUT-27.lock")
+        os.makedirs(lock_dir, mode=0o700, exist_ok=True)
         with open(lock_path, "w+") as fd:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
@@ -1402,6 +1417,39 @@ class TestPhase141FailureInjection(unittest.TestCase):
                 self.assertIn("Lock timeout", ctx.exception.detail)
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def test_27b_lock_dir_env_config_and_multiuser_isolation(self):
+        """
+        Regression: CrossProcessLock honors KS_ERP_LOCK_DIR, defaults to per-UID directory
+        when env vars are unset (avoiding shared /tmp/ks_erp_locks permission errors),
+        and still enforces timeout fail-closed 503 protections.
+        """
+        import fcntl
+        with tempfile.TemporaryDirectory(prefix="ks_custom_lock_") as custom_dir:
+            with patch.dict(os.environ, {"KS_ERP_LOCK_DIR": custom_dir}):
+                self.assertEqual(cl._get_lock_dir(), custom_dir)
+                lock_path = os.path.join(custom_dir, "approval_APP-CUSTOM-27B.lock")
+                with cl.CrossProcessLock("approval", "APP-CUSTOM-27B"):
+                    self.assertTrue(os.path.exists(lock_path))
+                with open(lock_path, "w+") as fd:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        with self.assertRaises(HTTPException) as ctx:
+                            with cl.CrossProcessLock("approval", "APP-CUSTOM-27B", timeout=0.05):
+                                pass
+                        self.assertEqual(ctx.exception.status_code, 503)
+                        self.assertIn("Lock timeout", ctx.exception.detail)
+                    finally:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+
+        clean_env = {
+            k: v for k, v in os.environ.items()
+            if k not in {"KS_ERP_LOCK_DIR", "KS_ERP_STATE_DIR", "SALES_SHARED_TEST_DIR"}
+        }
+        with patch.dict(os.environ, clean_env, clear=True):
+            default_dir = cl._get_lock_dir()
+            if hasattr(os, "getuid"):
+                self.assertTrue(default_dir.endswith(f"ks_erp_locks_{os.getuid()}"))
 
     def test_28_cross_process_lock_fcntl_unavailable_raises_503(self):
         """

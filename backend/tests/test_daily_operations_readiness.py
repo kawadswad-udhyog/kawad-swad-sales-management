@@ -1227,6 +1227,123 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
         self.assertEqual(bal["available"], expected_remaining)
         self.assertEqual(bal["confirmed_available"], expected_remaining)
 
+    def test_11_two_arg_balance_signature_blocks_unverified_opening_stock(self):
+        """Legacy 2-arg calculate_raw_material_balance(ledger, id) must NOT treat unverified current_stock as confirmed stock."""
+        # RM-MOONG-FLOUR has current_stock=120.0 unverified -> 2-arg balance must be 0.0
+        self.assertEqual(
+            calculate_raw_material_balance(db.memory_store["RawMaterialLedger"], "RM-MOONG-FLOUR"),
+            0.0,
+        )
+        # Confirmed receipt of 5.0 kg -> 2-arg balance exposes only confirmed 5.0 kg, never unverified 120.0
+        asyncio.run(prod.receive_raw_material(
+            prod.RawMaterialReceiveRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                quantity=5.0,
+                unit="kg",
+                purchase_rate=96.0,
+                supplier_name="Flour Mill",
+                invoice_reference="INV-2ARG-01",
+                receipt_date="2026-11-15",
+            ),
+            self.pa,
+        ))
+        self.assertEqual(
+            calculate_raw_material_balance(db.memory_store["RawMaterialLedger"], "RM-MOONG-FLOUR"),
+            5.0,
+        )
+        # Verified RM-SALT (opening_stock_verified=true, current_stock=50.0) returns 50.0
+        self.assertEqual(
+            calculate_raw_material_balance(db.memory_store["RawMaterialLedger"], "RM-SALT"),
+            50.0,
+        )
+        # After Owner physical verification (95.0 kg), 2-arg balance reflects confirmed 95.0 kg
+        asyncio.run(prod.verify_raw_material_opening_stock(
+            prod.RawMaterialOpeningVerificationRequest(
+                raw_material_id="RM-MOONG-FLOUR",
+                physical_count=95.0,
+                confirm_physical_count=True,
+                reason="Verified sacks",
+                idempotency_key="VER-2ARG-01",
+            ),
+            self.owner,
+        ))
+        self.assertEqual(
+            calculate_raw_material_balance(db.memory_store["RawMaterialLedger"], "RM-MOONG-FLOUR"),
+            95.0,
+        )
+
+    def test_12_packaging_discrepancy_duplicate_conflict_and_auditlog_recovery(self):
+        """approve_packaging_discrepancy must recover AuditLog on 503 retry, replay idempotently, and 409 on conflict."""
+        db.memory_store["PackagingBatches"] = [
+            {
+                "packaging_id": "PKG-PEND-24",
+                "packaging_date": "2026-11-15",
+                "product_id": "PRD-0001",
+                "product_name_snapshot": "Moong Master Papad (200g)",
+                "bulk_kg_used": 52.4,
+                "expected_kg": 50.0,
+                "packets_200g": 250,
+                "packets_500g": 0,
+                "packets_1000g": 0,
+                "total_packets": 250,
+                "difference_kg": 2.4,
+                "status": "PENDING_REVIEW",
+                "difference_status": "REVIEW_REQUIRED",
+                "discrepancy_approved": "false",
+                "notes": "Breakage variance",
+            }
+        ]
+        # Inject one AuditLog write failure -> 503
+        db._fail_once["AuditLog"] = 1
+        req_ok = prod.DiscrepancyApprovalRequest(explanation="Verified 2.4 kg breakage on packing table")
+        with self.assertRaises(HTTPException) as fail_ctx:
+            asyncio.run(prod.approve_packaging_discrepancy("PKG-PEND-24", req_ok, self.owner))
+        self.assertEqual(fail_ctx.exception.status_code, 503)
+
+        # Retry recovers missing AuditLog and replays cleanly without duplicate stock movements
+        res_retry = asyncio.run(prod.approve_packaging_discrepancy("PKG-PEND-24", req_ok, self.owner))
+        self.assertEqual(res_retry["status"], "SUCCESS")
+        self.assertTrue(res_retry["is_replay"])
+        self.assertEqual(
+            len([m for m in db.memory_store["ProductionStockLedger"] if m.get("reference_id") == "PKG-PEND-24" and m.get("movement_type") == "BULK_PACKAGED"]),
+            1,
+        )
+        self.assertEqual(
+            len([m for m in db.memory_store["ProductionStockLedger"] if m.get("reference_id") == "PKG-PEND-24" and m.get("movement_type") == "PACKETS_PACKAGED"]),
+            1,
+        )
+        self.assertEqual(
+            len([a for a in db.memory_store["AuditLog"] if a.get("action") == "APPROVE_PACKAGING_DISCREPANCY" and a.get("entity_id") == "PKG-PEND-24"]),
+            1,
+        )
+
+        # Conflicting explanation on already-approved batch -> 409 Conflict
+        with self.assertRaises(HTTPException) as conflict_ctx:
+            asyncio.run(prod.approve_packaging_discrepancy(
+                "PKG-PEND-24",
+                prod.DiscrepancyApprovalRequest(explanation="Attempt overwrite with different reason"),
+                self.owner,
+            ))
+        self.assertEqual(conflict_ctx.exception.status_code, 409)
+
+    def test_13_all_15_master_recipes_resolve_for_sequential_prd_ids(self):
+        """All 15 master variants resolve deterministically even with sequential PRD-0001..PRD-0015 IDs."""
+        products = []
+        for idx, rec in enumerate(MASTER_RECIPES_DEFINITION, start=1):
+            products.append({
+                "product_id": f"PRD-{idx:04d}",
+                "sku": f"KS-VAR-{idx:02d}-200",
+                "product_name": f"{rec['product_name_snapshot']} (200g)",
+                "pack_weight_g": 200,
+                "active": "true",
+            })
+        audit = audit_product_recipe_mappings(products, [], MASTER_RECIPES_DEFINITION)
+        self.assertEqual(audit["summary"]["total_products"], len(MASTER_RECIPES_DEFINITION))
+        self.assertEqual(audit["summary"]["ambiguous"], 0)
+        self.assertEqual(audit["summary"]["unmapped"], 0)
+        for idx, rec in enumerate(MASTER_RECIPES_DEFINITION):
+            self.assertEqual(audit["mappings"][idx]["resolved_recipe_id"], rec["recipe_id"])
+
 
 if __name__ == "__main__":
     unittest.main()
