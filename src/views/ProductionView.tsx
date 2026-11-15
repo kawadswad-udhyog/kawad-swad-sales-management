@@ -3,8 +3,14 @@ import {
   apiRequest,
   getRawMaterials,
   receiveRawMaterial,
+  verifyRawMaterialOpeningStock,
+  getRecipeMappingAudit,
+  getPackagingDiscrepanciesSummary,
+  approvePackagingDiscrepancy,
   RawMaterialSummary,
   RawMaterialReceiveInput,
+  RecipeMappingAuditResponse,
+  PackagingDiscrepanciesSummary,
   recordMillingBatch,
   getMillingHistory,
   DalMillingInput,
@@ -14,8 +20,17 @@ import {
 import { useStore } from '../context/StoreContext';
 import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
 
-type Product = { product_id: string; product_name: string; sku: string; active: boolean; pack_weight_g: number };
+type Product = { product_id: string; product_name: string; sku: string; active: boolean; pack_weight_g: number; recipe_id?: string };
 type Row = Record<string, any>;
+
+function normalizeProductBaseName(name: string): string {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/(?:\(|\b)(?:100|150|200|250|400|500|1000)\s*(?:g|gm|gms|gram|grams)\b\)?|(?:\(|\b)[12]\s*kg\b\)?/gi, ' ')
+    .replace(/[()\-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 const card: React.CSSProperties = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16, marginBottom: 16 };
 const input: React.CSSProperties = { padding: '9px 10px', border: '1px solid #cbd5e1', borderRadius: 7, width: '100%', boxSizing: 'border-box' };
 const btn: React.CSSProperties = { padding: '9px 13px', border: 0, borderRadius: 7, background: '#166534', color: 'white', fontWeight: 600, cursor: 'pointer' };
@@ -94,6 +109,14 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
   // Raw Materials Inward Receiving & Balance State (Stage 1)
   const [rawMaterials, setRawMaterials] = useState<RawMaterialSummary[]>([]);
+  const [mappingAudit, setMappingAudit] = useState<RecipeMappingAuditResponse | null>(null);
+  const [discrepanciesSummary, setDiscrepanciesSummary] = useState<PackagingDiscrepanciesSummary | null>(null);
+  const [verifyingMaterial, setVerifyingMaterial] = useState<RawMaterialSummary | null>(null);
+  const [verifyPhysicalCount, setVerifyPhysicalCount] = useState<string>('');
+  const [verifyConfirmChecked, setVerifyConfirmChecked] = useState<boolean>(false);
+  const [verifyReason, setVerifyReason] = useState<string>('');
+  const [reviewingPackagingId, setReviewingPackagingId] = useState<string | null>(null);
+  const [reviewExplanation, setReviewExplanation] = useState<string>('');
   const [rmCategoryFilter, setRmCategoryFilter] = useState<string>('ALL');
   const [rmSearch, setRmSearch] = useState<string>('');
   const [receiveForm, setReceiveForm] = useState<{
@@ -255,9 +278,11 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>('/api/production/finished-goods-register', { silent: true }),
       getRawMaterials(),
       getMillingHistory(),
+      getRecipeMappingAudit(),
+      getPackagingDiscrepanciesSummary(),
     ]);
 
-    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes, rmRes, milRes] = results;
+    const [pRes, wRes, rRes, mrRes, bRes, pkRes, dRes, sRes, aRes, regRes, rmRes, milRes, mapAuditRes, packSumRes] = results;
 
     if (pRes.status === 'fulfilled' && Array.isArray(pRes.value)) setProducts(pRes.value);
     if (wRes.status === 'fulfilled' && Array.isArray(wRes.value)) setWorkers(wRes.value);
@@ -282,6 +307,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     if (aRes.status === 'fulfilled' && Array.isArray(aRes.value)) setAttendance([...aRes.value].reverse());
     if (rmRes.status === 'fulfilled' && Array.isArray(rmRes.value)) setRawMaterials(rmRes.value);
     if (milRes.status === 'fulfilled' && Array.isArray(milRes.value)) setMillingHistory(milRes.value);
+    if (mapAuditRes.status === 'fulfilled' && mapAuditRes.value) setMappingAudit(mapAuditRes.value);
+    if (packSumRes.status === 'fulfilled' && packSumRes.value) setDiscrepanciesSummary(packSumRes.value);
 
     const anyFailed = results.some(r => r.status === 'rejected');
     if (anyFailed) {
@@ -335,12 +362,14 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   };
 
   const refreshPackaging = async () => {
-    const [pkRes, sRes] = await Promise.allSettled([
+    const [pkRes, sRes, sumRes] = await Promise.allSettled([
       apiRequest<Row[]>('/api/production/packaging'),
       apiRequest<Row>('/api/production/summary'),
+      getPackagingDiscrepanciesSummary(),
     ]);
     if (pkRes.status === 'fulfilled' && Array.isArray(pkRes.value)) setPackaging([...pkRes.value].reverse());
     if (sRes.status === 'fulfilled' && sRes.value) setSummary(sRes.value);
+    if (sumRes.status === 'fulfilled' && sumRes.value) setDiscrepanciesSummary(sumRes.value);
   };
 
   const refreshRegister = async () => {
@@ -393,12 +422,14 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   };
 
   const refreshMasterRecipes = async () => {
-    const [mrRes, rRes] = await Promise.allSettled([
+    const [mrRes, rRes, auditRes] = await Promise.allSettled([
       apiRequest<Row[]>('/api/production/recipes/master'),
       apiRequest<Row[]>('/api/production/recipes'),
+      getRecipeMappingAudit(),
     ]);
     if (mrRes.status === 'fulfilled' && Array.isArray(mrRes.value)) setMasterRecipes(mrRes.value);
     if (rRes.status === 'fulfilled' && Array.isArray(rRes.value)) setRecipes(rRes.value);
+    if (auditRes.status === 'fulfilled' && auditRes.value) setMappingAudit(auditRes.value);
   };
 
   useEffect(() => {
@@ -694,6 +725,52 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 </button>
               ))}
             </div>
+
+            {/* Product-to-Recipe Mapping Audit Status */}
+            {mappingAudit && (
+              <div
+                style={{
+                  marginTop: 14,
+                  padding: 12,
+                  borderRadius: 8,
+                  border:
+                    mappingAudit.summary.ambiguous > 0 || mappingAudit.summary.unmapped > 0
+                      ? '1px solid #fecaca'
+                      : '1px solid #cbd5e1',
+                  background:
+                    mappingAudit.summary.ambiguous > 0 || mappingAudit.summary.unmapped > 0
+                      ? '#fef2f2'
+                      : '#f8fafc',
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                  <b style={{ color: '#0f172a' }}>Product-to-Recipe Mapping Audit ({mappingAudit.summary.total_products} products checked)</b>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    <span style={{ color: '#15803d', fontWeight: 600 }}>Mapped (Approved): {mappingAudit.summary.mapped_approved}</span>
+                    <span style={{ color: '#b45309', fontWeight: 600 }}>Mapped (Draft): {mappingAudit.summary.mapped_draft}</span>
+                    <span style={{ color: mappingAudit.summary.ambiguous > 0 ? '#b91c1c' : '#64748b', fontWeight: 600 }}>
+                      Ambiguous: {mappingAudit.summary.ambiguous}
+                    </span>
+                    <span style={{ color: mappingAudit.summary.unmapped > 0 ? '#b91c1c' : '#64748b', fontWeight: 600 }}>
+                      Unmapped: {mappingAudit.summary.unmapped}
+                    </span>
+                  </div>
+                </div>
+                {(mappingAudit.summary.ambiguous > 0 || mappingAudit.summary.unmapped > 0) && (
+                  <div style={{ marginTop: 8, color: '#991b1b' }}>
+                    {mappingAudit.mappings
+                      .filter(m => m.status === 'AMBIGUOUS' || m.status === 'UNMAPPED')
+                      .slice(0, 6)
+                      .map(m => (
+                        <div key={m.product_id} style={{ marginTop: 2 }}>
+                          • <b>{m.product_id}</b> ({m.product_name || m.sku}): {m.detail}
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* RECIPES GRID */}
@@ -861,11 +938,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       type="button"
                       style={{ ...btn, flex: 1, padding: '7px 10px', fontSize: 12, background: '#3b82f6' }}
                       onClick={() => {
-                        const targetProd = products.find(
-                          p =>
-                            p.product_id === r.product_id ||
-                            p.product_name.toLowerCase().includes(r.product_name_snapshot.toLowerCase())
-                        );
+                        const auditMatch = mappingAudit?.mappings.find(m => m.resolved_recipe_id === r.recipe_id);
+                        const recipeBase = normalizeProductBaseName(String(r.product_name_snapshot || ''));
+                        const targetProd =
+                          (auditMatch && products.find(p => p.product_id === auditMatch.product_id)) ||
+                          products.find(p => p.recipe_id && p.recipe_id === r.recipe_id) ||
+                          products.find(p => p.product_id === r.product_id) ||
+                          products.find(p => normalizeProductBaseName(p.product_name) === recipeBase);
                         if (targetProd) {
                           setProduction(prev => ({
                             ...prev,
@@ -876,7 +955,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                           setTab('production');
                           showSuccess(`Formula for ${r.product_name_snapshot} pre-selected in Daily Production.`);
                         } else {
-                          showError(`No linked product found for ${r.product_name_snapshot}. Create product in Products master.`);
+                          showError(`No linked product found for ${r.product_name_snapshot}. Link product recipe_id in Products master.`);
                         }
                       }}
                     >
@@ -942,6 +1021,93 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               </button>
             </div>
           </div>
+
+          {rawMaterials.some(m => m.opening_stock_verified === false || m.verification_status === 'UNVERIFIED') && (
+            <div style={{ ...card, background: '#fffbeb', borderColor: '#f59e0b', color: '#92400e', fontSize: 13 }}>
+              <b>⚠️ Unverified Opening Balances Notice:</b>{' '}
+              Existing <code>RawMaterials.current_stock</code> figures are shown as <b>Recorded (Unverified)</b> and must not be
+              treated as confirmed physical opening stock until physically counted and verified via <b>Verify Physical Stock</b>.
+              {` (${rawMaterials.filter(m => m.opening_stock_verified === false || m.verification_status === 'UNVERIFIED').length} material(s) unverified)`}
+            </div>
+          )}
+
+          {verifyingMaterial && (
+            <div style={{ ...card, background: '#eff6ff', borderColor: '#3b82f6' }}>
+              <h4 style={{ margin: '0 0 8px', color: '#1e3a8a' }}>
+                Verify Physical Stock — {verifyingMaterial.material_name} ({verifyingMaterial.raw_material_id || verifyingMaterial.material_id})
+              </h4>
+              <p style={{ margin: '0 0 10px', fontSize: 12, color: '#334155' }}>
+                Recorded baseline: <b>{verifyingMaterial.recorded_opening_stock ?? verifyingMaterial.baseline_stock} {verifyingMaterial.unit}</b> | Current computed book stock:{' '}
+                <b>{verifyingMaterial.available_stock} {verifyingMaterial.unit}</b>. Confirming physical count logs an auditable verification adjustment without erasing historical records.
+              </p>
+              <form
+                onSubmit={async e => {
+                  e.preventDefault();
+                  const matKey = verifyingMaterial.raw_material_id || verifyingMaterial.material_id;
+                  const ok = await runAction(
+                    () =>
+                      verifyRawMaterialOpeningStock({
+                        raw_material_id: matKey,
+                        physical_count: Number(verifyPhysicalCount),
+                        confirm_physical_count: verifyConfirmChecked,
+                        reason: verifyReason.trim(),
+                      }),
+                    `Physical stock verified for ${verifyingMaterial.material_name}.`,
+                    refreshRawMaterials
+                  );
+                  if (ok) {
+                    setVerifyingMaterial(null);
+                    setVerifyPhysicalCount('');
+                    setVerifyConfirmChecked(false);
+                    setVerifyReason('');
+                  }
+                }}
+                style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10, alignItems: 'center' }}
+              >
+                <input
+                  style={input}
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  placeholder={`Confirmed count (${verifyingMaterial.unit})`}
+                  value={verifyPhysicalCount}
+                  onChange={e => setVerifyPhysicalCount(e.target.value)}
+                  required
+                />
+                <input
+                  style={input}
+                  placeholder="Verification reason / supervisor reference"
+                  value={verifyReason}
+                  onChange={e => setVerifyReason(e.target.value)}
+                  required
+                />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#1e293b' }}>
+                  <input
+                    type="checkbox"
+                    checked={verifyConfirmChecked}
+                    onChange={e => setVerifyConfirmChecked(e.target.checked)}
+                  />
+                  Physically counted &amp; confirmed
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    type="submit"
+                    style={{ ...btn, background: '#1d4ed8' }}
+                    disabled={busy || !verifyConfirmChecked || verifyReason.trim().length < 3 || verifyPhysicalCount === ''}
+                  >
+                    Save Verification
+                  </button>
+                  <button
+                    type="button"
+                    style={{ ...btn, background: '#64748b' }}
+                    onClick={() => setVerifyingMaterial(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
 
           {/* Quick Stock KPI Cards */}
           {(() => {
@@ -1416,11 +1582,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     <th style={{ textAlign: 'left', padding: '8px 10px' }}>Material ID</th>
                     <th style={{ textAlign: 'left', padding: '8px 10px' }}>Material Name</th>
                     <th style={{ textAlign: 'left', padding: '8px 10px' }}>Category</th>
-                    <th style={{ textAlign: 'right', padding: '8px 10px' }}>Baseline Opening</th>
+                    <th style={{ textAlign: 'right', padding: '8px 10px' }}>Recorded Opening</th>
+                    <th style={{ textAlign: 'center', padding: '8px 10px' }}>Verification Status</th>
                     <th style={{ textAlign: 'right', padding: '8px 10px' }}>Inward Received</th>
                     <th style={{ textAlign: 'right', padding: '8px 10px' }}>Issued / Consumed</th>
                     <th style={{ textAlign: 'right', padding: '8px 10px' }}>Available Stock</th>
                     <th style={{ textAlign: 'right', padding: '8px 10px' }}>Latest Landed Rate</th>
+                    <th style={{ textAlign: 'center', padding: '8px 10px' }}>Verify</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1442,6 +1610,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     })
                     .map(m => {
                       const isWhole = m.category === 'WHOLE_GRAIN' || m.material_id.includes('WHOLE');
+                      const isVerified = Boolean(m.opening_stock_verified) || m.verification_status === 'CONFIRMED';
+                      const recordedBase = m.recorded_opening_stock ?? m.baseline_stock;
                       return (
                         <tr
                           key={m.material_id}
@@ -1471,7 +1641,22 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                             </span>
                           </td>
                           <td style={{ textAlign: 'right', padding: '8px 10px', color: '#64748b' }}>
-                            {m.baseline_stock} {m.unit}
+                            {recordedBase} {m.unit}
+                          </td>
+                          <td style={{ textAlign: 'center', padding: '8px 10px' }}>
+                            <span
+                              title={m.unverified_opening_warning || `Verified by ${m.verified_by || 'Supervisor'}`}
+                              style={{
+                                fontSize: 11,
+                                padding: '2px 8px',
+                                borderRadius: 6,
+                                fontWeight: 700,
+                                background: isVerified ? '#dcfce7' : '#fef3c7',
+                                color: isVerified ? '#166534' : '#92400e',
+                              }}
+                            >
+                              {isVerified ? '✓ Physically Verified' : 'Recorded (Unverified)'}
+                            </span>
                           </td>
                           <td style={{ textAlign: 'right', padding: '8px 10px', color: '#047857', fontWeight: 600 }}>
                             +{m.total_received} {m.unit}
@@ -1494,6 +1679,20 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                           </td>
                           <td style={{ textAlign: 'right', padding: '8px 10px', fontWeight: 600, color: '#1e293b' }}>
                             {m.latest_landed_rate > 0 ? `₹${m.latest_landed_rate.toFixed(2)} / ${m.unit}` : '—'}
+                          </td>
+                          <td style={{ textAlign: 'center', padding: '8px 10px' }}>
+                            <button
+                              type="button"
+                              style={{ ...btn, background: isVerified ? '#475569' : '#0284c7', padding: '4px 9px', fontSize: 11 }}
+                              onClick={() => {
+                                setVerifyingMaterial(m);
+                                setVerifyPhysicalCount(String(m.available_stock ?? 0));
+                                setVerifyConfirmChecked(false);
+                                setVerifyReason('');
+                              }}
+                            >
+                              {isVerified ? 'Re-verify' : 'Verify Physical'}
+                            </button>
                           </td>
                         </tr>
                       );
@@ -2840,6 +3039,77 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               for physical audit reconciliation.
             </p>
           </div>
+          {discrepanciesSummary && (discrepanciesSummary.historical_unresolved_count > 0 || discrepanciesSummary.pending_review_count > 0) && (
+            <div style={{ ...card, background: '#fffbeb', borderColor: '#f59e0b' }}>
+              <h4 style={{ margin: '0 0 6px', color: '#92400e' }}>Packaging Discrepancy Reconciliation Policy</h4>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, fontSize: 12 }}>
+                <div style={{ background: '#fff', padding: 10, borderRadius: 8, border: '1px solid #fde68a' }}>
+                  <b style={{ color: '#991b1b' }}>
+                    Historical Unresolved: {discrepanciesSummary.historical_unresolved_count} batch(es) ({discrepanciesSummary.historical_unresolved_kg} kg)
+                  </b>
+                  <p style={{ margin: '4px 0 0', color: '#475569' }}>
+                    Represents unrecorded historical sales. Existing stock deductions are preserved; reversals, duplicate deductions, and synthetic sales are locked.
+                  </p>
+                </div>
+                <div style={{ background: '#fff', padding: 10, borderRadius: 8, border: '1px solid #fde68a' }}>
+                  <b style={{ color: '#b45309' }}>
+                    Pending Owner Review: {discrepanciesSummary.pending_review_count} batch(es) ({discrepanciesSummary.pending_review_kg} kg)
+                  </b>
+                  <p style={{ margin: '4px 0 0', color: '#475569' }}>
+                    Variance outside tolerance awaiting Owner physical verification and explanation.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {reviewingPackagingId && isOwner && (
+            <div style={{ ...card, background: '#eff6ff', borderColor: '#3b82f6' }}>
+              <h4 style={{ margin: '0 0 8px', color: '#1e3a8a' }}>
+                Owner Discrepancy Review — Batch {reviewingPackagingId}
+              </h4>
+              <form
+                onSubmit={async e => {
+                  e.preventDefault();
+                  const ok = await runAction(
+                    () => approvePackagingDiscrepancy(reviewingPackagingId, reviewExplanation.trim()),
+                    `Discrepancy reviewed and approved for packaging batch ${reviewingPackagingId}.`,
+                    async () => {
+                      await refreshPackaging();
+                      await refreshRegister();
+                    }
+                  );
+                  if (ok) {
+                    setReviewingPackagingId(null);
+                    setReviewExplanation('');
+                  }
+                }}
+                style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}
+              >
+                <input
+                  style={{ ...input, flex: 1, minWidth: 240 }}
+                  placeholder="Enter verified physical reconciliation explanation (min 3 chars)"
+                  value={reviewExplanation}
+                  onChange={e => setReviewExplanation(e.target.value)}
+                  required
+                />
+                <button type="submit" style={{ ...btn, background: '#1d4ed8' }} disabled={busy || reviewExplanation.trim().length < 3}>
+                  Approve Discrepancy
+                </button>
+                <button
+                  type="button"
+                  style={{ ...btn, background: '#64748b' }}
+                  onClick={() => {
+                    setReviewingPackagingId(null);
+                    setReviewExplanation('');
+                  }}
+                >
+                  Cancel
+                </button>
+              </form>
+            </div>
+          )}
+
           <div style={card}>
             <h3>Packaging history &amp; ledger recovery</h3>
             <div style={{ overflowX: 'auto' }}>
@@ -2861,7 +3131,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 <tbody>
                   {packaging.map((p, idx) => {
                     const pId = String(p.packaging_id || idx);
-                    const isIncomplete = String(p.status).toUpperCase() === 'INCOMPLETE';
+                    const cls = String(p.discrepancy_classification || '').toUpperCase();
+                    const isHistoricalLocked = cls === 'HISTORICAL_UNRESOLVED';
+                    const isPendingReview =
+                      !isHistoricalLocked &&
+                      (cls === 'PENDING_REVIEW' || String(p.status).toUpperCase() === 'PENDING_REVIEW');
+                    const isIncomplete = !isHistoricalLocked && String(p.status).toUpperCase() === 'INCOMPLETE';
                     const diff = Number(p.difference_kg || 0);
                     let allocsSummary = '-';
                     if (p.batch_allocations_json) {
@@ -2889,20 +3164,53 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         </td>
                         <td style={{ textAlign: 'center', padding: 9 }}>
                           <span
+                            title={String(p.policy_note || '')}
                             style={{
                               padding: '3px 8px',
                               borderRadius: 6,
                               fontSize: 11,
                               fontWeight: 600,
-                              background: isIncomplete ? '#fee2e2' : '#dcfce7',
-                              color: isIncomplete ? '#991b1b' : '#166534',
+                              background: isHistoricalLocked
+                                ? '#fef2f2'
+                                : isPendingReview
+                                  ? '#fef3c7'
+                                  : isIncomplete
+                                    ? '#fee2e2'
+                                    : '#dcfce7',
+                              color: isHistoricalLocked
+                                ? '#991b1b'
+                                : isPendingReview
+                                  ? '#92400e'
+                                  : isIncomplete
+                                    ? '#991b1b'
+                                    : '#166534',
                             }}
                           >
-                            {String(p.status || (isIncomplete ? 'INCOMPLETE' : 'RECORDED'))}
+                            {isHistoricalLocked
+                              ? 'Historical Unresolved (Locked)'
+                              : isPendingReview
+                                ? 'Pending Review'
+                                : String(p.status || (isIncomplete ? 'INCOMPLETE' : 'RECORDED'))}
                           </span>
                         </td>
                         <td style={{ textAlign: 'center', padding: 9 }}>
-                          {isIncomplete ? (
+                          {isHistoricalLocked ? (
+                            <span style={{ color: '#991b1b', fontSize: 11, fontWeight: 600 }}>
+                              🔒 Locked for Reconciliation
+                            </span>
+                          ) : isPendingReview && isOwner ? (
+                            <button
+                              type="button"
+                              style={{ ...btn, background: '#1d4ed8', padding: '4px 10px', fontSize: 11 }}
+                              disabled={busy}
+                              onClick={() => {
+                                setReviewingPackagingId(pId);
+                                setReviewExplanation('');
+                              }}
+                            >
+                              Review Discrepancy
+                            </button>
+                          ) : isIncomplete ? (
                             <button
                               style={{ ...btn, background: '#d97706', padding: '4px 10px', fontSize: 11 }}
                               disabled={busy || recoveringBatchId === pId}
@@ -2912,7 +3220,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                               {recoveringBatchId === pId ? 'Recovering...' : '⚠️ Recover Movements'}
                             </button>
                           ) : (
-                            <span style={{ color: '#64748b', fontSize: 12 }}>✓ Reconciled</span>
+                            <span style={{ color: '#64748b', fontSize: 12 }}>
+                              {isPendingReview ? 'Awaiting Owner Review' : '✓ Reconciled'}
+                            </span>
                           )}
                         </td>
                       </tr>

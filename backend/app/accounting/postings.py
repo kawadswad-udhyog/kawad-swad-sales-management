@@ -179,7 +179,20 @@ def post_production_batch_journal(
             # If deduction rates are completely absent, evaluate approved recipe formula cost
             if f_calc == Decimal("0") and s_calc == Decimal("0"):
                 recipes = db.get_records("Recipes", fresh=True)
-                m_rec = next((r for r in recipes if str(r.get("product_name_snapshot", "")).strip().lower() == p_name.lower() and str(r.get("approved", "")).lower() in {"true", "1"}), None)
+                m_rec = None
+                req_rid = str(batch_data.get("recipe_id", "")).strip() or None
+                try:
+                    from app.calculations.recipe_mapping import resolve_product_recipe
+                    pid_b = str(batch_data.get("product_id", "")).strip()
+                    prods_list = db.get_records("Products", fresh=False)
+                    prod_obj = next((p for p in prods_list if str(p.get("product_id", "")).strip() == pid_b), None) or {
+                        "product_id": pid_b,
+                        "product_name": p_name,
+                        "recipe_id": req_rid or "",
+                    }
+                    m_rec = resolve_product_recipe(prod_obj, recipes, requested_recipe_id=req_rid, require_approved=True)
+                except Exception:
+                    m_rec = next((r for r in recipes if str(r.get("product_name_snapshot", "")).strip().lower() == p_name.lower() and str(r.get("approved", "")).lower() in {"true", "1"}), None)
                 if m_rec:
                     import json
                     items_raw = m_rec.get("items") or m_rec.get("items_json")

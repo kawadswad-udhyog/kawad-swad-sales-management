@@ -136,6 +136,7 @@ class Product(BaseModel):
     pack_weight_g: int = 500
     selling_unit: Optional[str] = "PACKET"
     retail_pack_only: bool = False
+    recipe_id: Optional[str] = ""
     active: bool = True
     notes: Optional[str] = ""
 
@@ -147,6 +148,7 @@ class ProductCreate(BaseModel):
     pack_weight_g: int = 500
     selling_unit: Optional[str] = "PACKET"
     retail_pack_only: bool = False
+    recipe_id: Optional[str] = ""
     active: bool = True
     notes: Optional[str] = ""
 
@@ -158,6 +160,7 @@ class ProductUpdate(BaseModel):
     pack_weight_g: Optional[int] = None
     selling_unit: Optional[str] = None
     retail_pack_only: Optional[bool] = None
+    recipe_id: Optional[str] = None
     active: Optional[bool] = None
     notes: Optional[str] = None
 

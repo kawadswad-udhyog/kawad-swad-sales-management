@@ -84,7 +84,6 @@ function isDisallowedBackendOverride(url: string): boolean {
   const lower = url.toLowerCase();
   return (
     lower.includes('kawad-swad-sales-backend.onrender.com') ||
-    lower.includes('kawad-swad-sales-dev.onrender.com') ||
     lower.includes('example.com') ||
     lower.includes('your-backend') ||
     lower.includes('replace-with-prod')
@@ -93,8 +92,8 @@ function isDisallowedBackendOverride(url: string): boolean {
 
 /**
  * Determine the active API base URL.
- * Deployed/production origins never honor stale localStorage overrides or -dev hosts;
- * they use build-time VITE_API_URL (when valid and non-dev) or same-origin relative routing.
+ * Deployed origins (https://kawad-swad-sales-frontend.onrender.com) never honor stale localStorage overrides;
+ * they use build-time VITE_API_URL or same-origin relative routing (/api/* -> https://kawad-swad-sales-dev.onrender.com).
  */
 export function getApiBaseUrl(): string {
   const rawDefault = (DEFAULT_API_BASE_URL || '').trim().replace(/\/+$/, '');
@@ -696,16 +695,86 @@ export async function fetchBackendHealth(): Promise<BackendHealthResponse> {
 }
 
 export interface RawMaterialSummary {
+  raw_material_id?: string;
   material_id: string;
   material_name: string;
   category: string;
   unit: string;
+  opening_stock?: number;
   baseline_stock: number;
+  recorded_opening_stock?: number;
+  opening_stock_verified?: boolean;
+  verification_status?: 'UNVERIFIED' | 'CONFIRMED' | string;
+  verified_physical_stock?: number | null;
+  verified_by?: string;
+  verified_at?: string;
+  unverified_opening_warning?: string;
   total_received: number;
   total_consumed: number;
   total_adjusted: number;
   available_stock: number;
   latest_landed_rate: number;
+}
+
+export interface RawMaterialOpeningVerificationInput {
+  raw_material_id: string;
+  physical_count: number;
+  confirm_physical_count: boolean;
+  reason: string;
+  verified_date?: string;
+}
+
+export interface RawMaterialOpeningVerificationResult {
+  status: string;
+  raw_material_id: string;
+  material_name: string;
+  unit: string;
+  recorded_opening_stock: number;
+  previous_available_stock: number;
+  verified_physical_stock: number;
+  variance: number;
+  opening_stock_verified: boolean;
+  verification_status: string;
+  verified_by: string;
+  verified_at: string;
+  ledger_id: string;
+  message: string;
+}
+
+export interface RecipeMappingAuditResponse {
+  summary: {
+    total_products: number;
+    mapped_approved: number;
+    mapped_draft: number;
+    ambiguous: number;
+    unmapped: number;
+  };
+  mappings: Array<{
+    product_id: string;
+    sku: string;
+    product_name: string;
+    pack_weight_g: number | string;
+    active: boolean;
+    explicit_recipe_id: string;
+    resolved_recipe_id: string | null;
+    resolved_recipe_name: string | null;
+    recipe_approved: boolean;
+    mapping_source: string | null;
+    status: string;
+    detail: string;
+    candidates?: string[];
+  }>;
+}
+
+export interface PackagingDiscrepanciesSummary {
+  historical_unresolved_count: number;
+  historical_unresolved_kg: number;
+  pending_review_count: number;
+  pending_review_kg: number;
+  approved_discrepancy_count: number;
+  historical_unresolved: Record<string, any>[];
+  pending_review: Record<string, any>[];
+  approved_discrepancy: Record<string, any>[];
 }
 
 export interface RawMaterialReceiveInput {
@@ -746,6 +815,36 @@ export interface RawMaterialReceiveResult {
 
 export async function getRawMaterials(): Promise<RawMaterialSummary[]> {
   return apiRequest<RawMaterialSummary[]>('/api/production/raw-materials');
+}
+
+export async function verifyRawMaterialOpeningStock(
+  data: RawMaterialOpeningVerificationInput
+): Promise<RawMaterialOpeningVerificationResult> {
+  return apiRequest<RawMaterialOpeningVerificationResult>('/api/production/raw-materials/verify-opening-stock', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getRecipeMappingAudit(): Promise<RecipeMappingAuditResponse> {
+  return apiRequest<RecipeMappingAuditResponse>('/api/production/recipes/mapping-audit', { silent: true });
+}
+
+export async function getPackagingDiscrepanciesSummary(): Promise<PackagingDiscrepanciesSummary> {
+  return apiRequest<PackagingDiscrepanciesSummary>('/api/production/packaging/discrepancies-summary', { silent: true });
+}
+
+export async function approvePackagingDiscrepancy(
+  packagingId: string,
+  explanation: string
+): Promise<Record<string, any>> {
+  return apiRequest<Record<string, any>>(
+    `/api/production/packaging/${encodeURIComponent(packagingId)}/approve-discrepancy`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ explanation }),
+    }
+  );
 }
 
 export async function receiveRawMaterial(data: RawMaterialReceiveInput): Promise<RawMaterialReceiveResult> {

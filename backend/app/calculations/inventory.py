@@ -697,6 +697,7 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
         opening = to_decimal(master_row.get("current_stock") or master_row.get("opening_stock") or 0) if master_row else Decimal("0")
         consumed = Decimal("0")
         received = Decimal("0")
+        adjusted = Decimal("0")
         for row in ledger:
             m_name = str(row.get("material_name", "")).strip().lower()
             m_id = str(row.get("raw_material_id", "")).strip().lower()
@@ -711,7 +712,9 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
                 consumed += qty
             elif typ in {"PURCHASE_RECEIPT", "STOCK_IN", "RETURN", "MILLING_OUTPUT", "MILLING_RECEIPT"}:
                 received += qty
-        return float(round_stock(opening - consumed + received))
+            elif typ in {"OPENING_STOCK_VERIFICATION", "STOCK_ADJUSTMENT", "ADJUSTMENT"}:
+                adjusted += qty
+        return float(round_stock(opening - consumed + received + adjusted))
 
     raw_material_id_or_name = args[0] if len(args) > 0 else kwargs.get("raw_material_id_or_name", "")
     raw_materials_master = args[1] if len(args) > 1 else kwargs.get("raw_materials_master", [])
@@ -733,21 +736,51 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
             "exists": False,
             "material_name": raw_material_id_or_name,
             "opening_stock": 0.0,
+            "recorded_opening_stock": 0.0,
+            "opening_stock_verified": False,
+            "verification_status": "UNVERIFIED",
+            "verified_physical_stock": None,
+            "verified_by": "",
+            "verified_at": "",
+            "unverified_opening_warning": "Raw material master record not found; opening stock unverified.",
             "consumed": 0.0,
+            "received": 0.0,
+            "adjusted": 0.0,
             "available": 0.0,
             "unit": "kg",
         }
 
+    master_id_lower = str(master_row.get("raw_material_id", "")).strip().lower()
+    master_name_lower = str(master_row.get("material_name", "")).strip().lower()
+    target_keys = {k for k in (target, master_id_lower, master_name_lower) if k}
+
     opening = to_decimal(master_row.get("current_stock") or master_row.get("opening_stock") or 0)
     unit = str(master_row.get("unit", "kg")).strip()
 
+    # Existing RawMaterials.current_stock values are unverified unless explicitly verified
+    master_verified_flag = str(
+        master_row.get("opening_stock_verified")
+        or master_row.get("physical_count_verified")
+        or ""
+    ).strip().lower() in {"true", "1", "yes"}
+    master_ver_status = str(master_row.get("verification_status", "")).strip().upper()
+    is_verified = master_verified_flag or master_ver_status in {"CONFIRMED", "VERIFIED"}
+    verified_physical_stock: Optional[float] = (
+        round_stock(master_row.get("verified_physical_stock"))
+        if master_row.get("verified_physical_stock") not in (None, "")
+        else (round_stock(opening) if is_verified else None)
+    )
+    verified_by = str(master_row.get("verified_by", "")).strip()
+    verified_at = str(master_row.get("verified_at", "")).strip()
+
     consumed = Decimal("0")
     received = Decimal("0")
+    adjusted = Decimal("0")
 
     for row in raw_material_ledger:
         m_name = str(row.get("material_name", "")).strip().lower()
         m_id = str(row.get("raw_material_id", "")).strip().lower()
-        if m_name != target and m_id != target:
+        if m_name not in target_keys and m_id not in target_keys:
             continue
 
         # If we are checking available stock for a batch retry, exclude current batch consumption
@@ -761,16 +794,46 @@ def calculate_raw_material_balance(*args, **kwargs) -> Any:
             consumed += qty
         elif typ in {"PURCHASE_RECEIPT", "STOCK_IN", "RETURN", "MILLING_OUTPUT", "MILLING_RECEIPT"}:
             received += qty
+        elif typ in {"OPENING_STOCK_VERIFICATION", "STOCK_ADJUSTMENT", "ADJUSTMENT"}:
+            adjusted += qty
+            if typ == "OPENING_STOCK_VERIFICATION":
+                is_verified = True
+                verified_by = str(row.get("created_by", "") or verified_by).strip()
+                verified_at = str(row.get("txn_datetime", "") or verified_at).strip()
+                try:
+                    import json
+                    meta = json.loads(str(row.get("notes", "") or "{}"))
+                    if isinstance(meta, dict) and meta.get("physical_count") is not None:
+                        verified_physical_stock = round_stock(meta["physical_count"])
+                except Exception:
+                    pass
 
-    available = opening - consumed + received
+    available = opening - consumed + received + adjusted
+    if is_verified and verified_physical_stock is None:
+        verified_physical_stock = round_stock(available)
+
+    verification_status = "CONFIRMED" if is_verified else "UNVERIFIED"
+    unverified_warning = (
+        ""
+        if is_verified
+        else "Recorded current_stock in RawMaterials sheet has not been physically verified; do not treat as confirmed physical opening stock."
+    )
 
     return {
         "exists": True,
         "raw_material_id": str(master_row.get("raw_material_id", "")),
         "material_name": str(master_row.get("material_name", raw_material_id_or_name)),
         "opening_stock": round_stock(opening),
+        "recorded_opening_stock": round_stock(opening),
+        "opening_stock_verified": is_verified,
+        "verification_status": verification_status,
+        "verified_physical_stock": verified_physical_stock,
+        "verified_by": verified_by,
+        "verified_at": verified_at,
+        "unverified_opening_warning": unverified_warning,
         "consumed": round_stock(consumed),
         "received": round_stock(received),
+        "adjusted": round_stock(adjusted),
         "available": round_stock(available),
         "unit": unit,
     }

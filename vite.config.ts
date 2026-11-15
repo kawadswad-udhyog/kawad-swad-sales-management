@@ -7,8 +7,7 @@ const isPlaceholderTarget =
   !envTarget ||
   envTarget.includes('example.com') ||
   envTarget.includes('your-backend') ||
-  envTarget.includes('REPLACE-WITH-PROD') ||
-  envTarget.includes('kawad-swad-sales-dev.onrender.com');
+  envTarget.includes('REPLACE-WITH-PROD');
 const backendTarget = isPlaceholderTarget ? 'http://127.0.0.1:8000' : envTarget.replace(/\/$/, '');
 
 function createProxyRule(prefix: string) {

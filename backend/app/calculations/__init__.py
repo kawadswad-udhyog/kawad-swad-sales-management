@@ -34,7 +34,17 @@ from .packaging import (
     calculate_packed_weight,
     calculate_packing_variance,
     validate_packing_discrepancy,
+    classify_packaging_discrepancy,
+    summarize_packaging_discrepancies,
     DEFAULT_PACKING_TOLERANCE_KG,
+)
+from .recipe_mapping import (
+    AmbiguousRecipeMappingError,
+    MissingRecipeMappingError,
+    CANONICAL_PRODUCT_RECIPE_MAP,
+    normalize_product_base_name,
+    resolve_product_recipe,
+    audit_product_recipe_mappings,
 )
 from .costing import (
     get_latest_purchase_rate,
@@ -74,7 +84,15 @@ __all__ = [
     "calculate_packed_weight",
     "calculate_packing_variance",
     "validate_packing_discrepancy",
+    "classify_packaging_discrepancy",
+    "summarize_packaging_discrepancies",
     "DEFAULT_PACKING_TOLERANCE_KG",
+    "AmbiguousRecipeMappingError",
+    "MissingRecipeMappingError",
+    "CANONICAL_PRODUCT_RECIPE_MAP",
+    "normalize_product_base_name",
+    "resolve_product_recipe",
+    "audit_product_recipe_mappings",
     "get_latest_purchase_rate",
     "calculate_batch_actual_cost",
     "calculate_finished_sku_cost",

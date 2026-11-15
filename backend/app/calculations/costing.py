@@ -394,6 +394,28 @@ def get_authoritative_bulk_cost_per_kg(
                         if dec > Decimal("0"):
                             return round_money(dec)
 
+        # Deterministic product-to-recipe mapping fallback
+        try:
+            from .recipe_mapping import resolve_product_recipe
+            probe_prod = {
+                "product_id": bulk_key_or_product_id if str(bulk_key_or_product_id).upper().startswith(("PRD-", "KS-", "MOONG-", "CHANA-", "URAD-")) else "",
+                "sku": bulk_key_or_product_id,
+                "product_name": bulk_key_or_product_id,
+            }
+            mapped_rec = resolve_product_recipe(probe_prod, recipes, require_approved=True)
+            items_raw = mapped_rec.get("items") or mapped_rec.get("items_json")
+            if isinstance(items_raw, str):
+                items_raw = json.loads(items_raw)
+            if items_raw:
+                expected_yield = float(mapped_rec.get("expected_yield_kg", 1.2) or 1.2)
+                recipe_cost = calculate_recipe_cost_estimate(items_raw, expected_yield)
+                if recipe_cost.get("cost_per_kg") is not None:
+                    dec = to_decimal(recipe_cost["cost_per_kg"])
+                    if dec > Decimal("0"):
+                        return round_money(dec)
+        except Exception:
+            pass
+
     raise ValueError(
         f"Authoritative bulk cost cannot be established for '{bulk_key_or_product_id}'. "
         "No approved batch actual cost or formula recipe cost is available. "

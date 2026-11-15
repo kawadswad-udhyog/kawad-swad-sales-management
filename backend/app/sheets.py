@@ -669,6 +669,61 @@ class SheetsDatabase:
             self._worksheets[tab_name] = ws
         return ws
 
+    @staticmethod
+    def _is_quota_exception(exc: Exception) -> bool:
+        err_str = str(exc).lower()
+        return "429" in err_str or "quota" in err_str or "rate limit" in err_str
+
+    def _safe_read_worksheet_records(self, worksheet, tab_name: str) -> List[Dict[str, Any]]:
+        """Read records safely, tolerating legacy duplicate headers, blank trailing columns, and extra columns."""
+        try:
+            records = worksheet.get_all_records()
+            return [dict(row) for row in records]
+        except Exception as exc:
+            if self._is_quota_exception(exc) or not hasattr(worksheet, "get_all_values"):
+                raise
+            logger.warning(
+                "Falling back to raw row parsing for '%s' after get_all_records() header warning: %s",
+                tab_name,
+                exc,
+            )
+            values = worksheet.get_all_values()
+            if not values or len(values) < 2:
+                return []
+            raw_headers = list(values[0])
+            data_rows = values[1:]
+            # Determine last column containing either header text or non-empty cell data
+            max_col = len(raw_headers)
+            for row in data_rows:
+                for idx in range(len(row) - 1, -1, -1):
+                    if str(row[idx]).strip() != "":
+                        max_col = max(max_col, idx + 1)
+                        break
+
+            seen_counts: Dict[str, int] = {}
+            resolved_headers: List[Optional[str]] = []
+            for idx in range(max_col):
+                h_raw = str(raw_headers[idx]).strip() if idx < len(raw_headers) else ""
+                if not h_raw:
+                    has_data = any(idx < len(r) and str(r[idx]).strip() != "" for r in data_rows)
+                    resolved_headers.append(f"_extra_col_{idx + 1}" if has_data else None)
+                    continue
+                count = seen_counts.get(h_raw, 0) + 1
+                seen_counts[h_raw] = count
+                resolved_headers.append(h_raw if count == 1 else f"{h_raw}__dup_{count}")
+
+            parsed: List[Dict[str, Any]] = []
+            for row in data_rows:
+                if not any(str(c).strip() != "" for c in row):
+                    continue
+                item: Dict[str, Any] = {}
+                for idx, header_name in enumerate(resolved_headers):
+                    if header_name is None:
+                        continue
+                    item[header_name] = row[idx] if idx < len(row) else ""
+                parsed.append(item)
+            return parsed
+
     def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
         import time
         now = time.monotonic()
@@ -722,15 +777,13 @@ class SheetsDatabase:
         for attempt in range(max_retries + 1):
             try:
                 worksheet = self._get_worksheet(tab_name)
-                records = worksheet.get_all_records()
-                safe_records = [dict(row) for row in records]
+                safe_records = self._safe_read_worksheet_records(worksheet, tab_name)
                 with self._lock:
                     self._records_cache[tab_name] = (time.monotonic(), safe_records)
                 return [dict(row) for row in safe_records]
             except Exception as exc:
                 last_exc = exc
-                err_str = str(exc).lower()
-                is_quota_error = "429" in err_str or "quota" in err_str or "rate limit" in err_str
+                is_quota_error = self._is_quota_exception(exc)
                 if is_quota_error:
                     logger.warning(
                         "Google Sheets rate limit/429 for %s (attempt %d/%d): %s",
@@ -771,7 +824,13 @@ class SheetsDatabase:
         with self._lock:
             self._fail_once[tab_name] = count
 
-    def append_record(self, tab_name: str, record: Dict[str, Any], raise_on_error: bool = False) -> bool:
+    def append_record(
+        self,
+        tab_name: str,
+        record: Dict[str, Any],
+        raise_on_error: bool = False,
+        authorize_header_update: bool = False,
+    ) -> bool:
         self._invalidate_records_cache(tab_name)
         failures = self._fail_once.get(tab_name, 0)
         if failures > 0:
@@ -789,11 +848,32 @@ class SheetsDatabase:
                     headers = list(record.keys())
                     worksheet.update("A1", [headers])
                 else:
-                    missing = [k for k in record.keys() if k not in headers]
+                    lower_headers = {str(h).strip().lower(): h for h in headers if str(h).strip()}
+                    missing = [
+                        k for k in record.keys()
+                        if k not in headers and str(k).strip().lower() not in lower_headers
+                    ]
                     if missing:
-                        self._ensure_headers(worksheet, headers + missing)
-                        headers = headers + missing
-                row = [record.get(h, "") for h in headers]
+                        if authorize_header_update:
+                            self._ensure_headers(worksheet, headers + missing)
+                            headers = headers + missing
+                        else:
+                            logger.warning(
+                                "Preserving existing sheet headers for '%s'; omitting unmapped write fields %s",
+                                tab_name,
+                                missing,
+                            )
+                record_lower = {str(k).strip().lower(): v for k, v in record.items()}
+                row = []
+                for h in headers:
+                    if h in record:
+                        row.append(record[h])
+                    elif str(h).strip() in record:
+                        row.append(record[str(h).strip()])
+                    elif str(h).strip().lower() in record_lower:
+                        row.append(record_lower[str(h).strip().lower()])
+                    else:
+                        row.append("")
                 worksheet.append_row(row, value_input_option="USER_ENTERED")
                 self.memory_store.setdefault(tab_name, []).append(dict(record))
                 return True
@@ -864,6 +944,7 @@ class SheetsDatabase:
         updates: Dict[str, Any],
         raise_on_error: bool = False,
         expected_conditions: Optional[Dict[str, Any]] = None,
+        authorize_header_update: bool = False,
     ) -> bool:
         """
         Updates an existing record matching id_field == id_value.
@@ -943,14 +1024,26 @@ class SheetsDatabase:
 
             try:
                 worksheet = self._get_worksheet(tab_name)
-                records = worksheet.get_all_records()
+                records = self._safe_read_worksheet_records(worksheet, tab_name)
                 headers = worksheet.row_values(1)
-                header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers)}
-                missing = [k for k in updates if k not in header_map]
+                header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers) if str(h).strip()}
+                lower_header_map = {str(h).strip().lower(): i + 1 for i, h in enumerate(headers) if str(h).strip()}
+                missing = [
+                    k for k in updates
+                    if str(k).strip() not in header_map and str(k).strip().lower() not in lower_header_map
+                ]
                 if missing:
-                    self._ensure_headers(worksheet, headers + missing)
-                    headers = headers + missing
-                    header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers)}
+                    if authorize_header_update:
+                        self._ensure_headers(worksheet, headers + missing)
+                        headers = headers + missing
+                        header_map = {str(h).strip(): i + 1 for i, h in enumerate(headers) if str(h).strip()}
+                        lower_header_map = {str(h).strip().lower(): i + 1 for i, h in enumerate(headers) if str(h).strip()}
+                    else:
+                        logger.warning(
+                            "Preserving existing sheet headers for '%s'; skipping unmapped update fields %s",
+                            tab_name,
+                            missing,
+                        )
                 for idx, row in enumerate(records, start=2):
                     if str(row.get(id_field)) != str(id_value):
                         continue
@@ -958,7 +1051,7 @@ class SheetsDatabase:
                         return False
                     cells = []
                     for key, value in updates.items():
-                        col = header_map.get(key)
+                        col = header_map.get(str(key).strip()) or lower_header_map.get(str(key).strip().lower())
                         if col:
                             cells.append({"range": self._a1(col, idx, col), "values": [[value]]})
                     if cells:
@@ -1017,7 +1110,7 @@ class SheetsDatabase:
 
         try:
             worksheet = self._get_worksheet(tab_name)
-            records = worksheet.get_all_records()
+            records = self._safe_read_worksheet_records(worksheet, tab_name)
             for idx, row in enumerate(records, start=2):
                 if str(row.get(id_field)) == str(id_value):
                     worksheet.delete_rows(idx)
@@ -1136,6 +1229,130 @@ class SheetsDatabase:
             self.append_record("AuditLog", record, raise_on_error=False)
         except Exception as exc:
             logger.error("Audit log write failed: %s", exc)
+
+    def inspect_schema_compatibility(self) -> Dict[str, Any]:
+        """
+        Read-only compatibility diagnostic comparing live or active sheet tabs/columns
+        against REQUIRED_TABS without altering any headers, rows, or sheet structure.
+        """
+        core_columns: Dict[str, List[str]] = {
+            "Users": ["user_id", "username", "role", "active"],
+            "AuthUsers": ["auth_id", "user_id", "username", "password_hash", "role", "active"],
+            "Products": ["product_id", "sku", "product_name", "pack_weight_g", "active"],
+            "Customers": ["customer_id", "shop_name", "active"],
+            "Sales": ["sale_id", "bill_number", "customer_id", "salesman_user_id", "bill_total"],
+            "SaleItems": ["sale_item_id", "sale_id", "product_id", "quantity", "line_total"],
+            "SalesmanStockLedger": ["stock_txn_id", "salesman_user_id", "product_id", "txn_type", "quantity"],
+            "Recipes": ["recipe_id", "product_id", "product_name_snapshot", "approved", "items_json"],
+            "RawMaterials": ["raw_material_id", "material_name", "current_stock", "unit"],
+            "RawMaterialLedger": ["raw_material_txn_id", "material_name", "raw_material_id", "movement_type", "quantity"],
+            "ProductionBatches": ["production_id", "product_id", "product_name_snapshot", "quantity_kg", "status"],
+            "PackagingBatches": ["packaging_id", "product_id", "bulk_kg_used", "total_packets", "status"],
+            "ProductionStockLedger": ["movement_id", "movement_type", "product_id"],
+            "VanLoadingPasses": ["pass_id", "pass_number", "salesman_user_id", "status"],
+            "AuditLog": ["audit_id", "event_datetime", "actor_user_id", "action"],
+        }
+
+        missing_tabs: List[str] = []
+        missing_required_columns: Dict[str, List[str]] = {}
+        missing_optional_columns: Dict[str, List[str]] = {}
+        extra_columns_detected: Dict[str, List[str]] = {}
+        checked_tabs = 0
+
+        if self.is_connected and self.spreadsheet:
+            try:
+                ws_map = {ws.title: ws for ws in self.spreadsheet.worksheets()}
+            except Exception:
+                ws_map = {}
+
+            for tab, expected_cols in REQUIRED_TABS.items():
+                ws = ws_map.get(tab)
+                if ws is None:
+                    try:
+                        ws = self.spreadsheet.worksheet(tab)
+                    except Exception:
+                        missing_tabs.append(tab)
+                        continue
+                checked_tabs += 1
+                try:
+                    actual_headers = [str(h).strip() for h in ws.row_values(1) if str(h).strip()]
+                except Exception:
+                    actual_headers = []
+                actual_lower = {h.lower() for h in actual_headers}
+                expected_lower = {c.lower() for c in expected_cols}
+                required_set = core_columns.get(tab, expected_cols[:3])
+
+                req_miss = [c for c in required_set if c.lower() not in actual_lower]
+                opt_miss = [c for c in expected_cols if c not in required_set and c.lower() not in actual_lower]
+                extras = [h for h in actual_headers if h.lower() not in expected_lower]
+
+                if req_miss:
+                    missing_required_columns[tab] = req_miss
+                if opt_miss:
+                    missing_optional_columns[tab] = opt_miss
+                if extras:
+                    extra_columns_detected[tab] = extras
+
+            if missing_tabs or missing_required_columns:
+                status = "INCOMPATIBLE"
+            elif missing_optional_columns:
+                status = "COMPATIBLE_WITH_OPTIONAL_GAPS"
+            else:
+                status = "COMPATIBLE"
+
+            return {
+                "status": status,
+                "mode": "GOOGLE_SHEETS_LIVE_READONLY",
+                "mutated": False,
+                "total_expected_tabs": len(REQUIRED_TABS),
+                "checked_tabs": checked_tabs,
+                "missing_tabs": missing_tabs,
+                "missing_required_columns": missing_required_columns,
+                "missing_optional_columns": missing_optional_columns,
+                "extra_columns_preserved": extra_columns_detected,
+                "diagnostics": (
+                    "All core schema requirements satisfied."
+                    if status == "COMPATIBLE"
+                    else (
+                        "Core tabs/columns satisfied; optional extension columns absent and handled safely in read/write mode."
+                        if status == "COMPATIBLE_WITH_OPTIONAL_GAPS"
+                        else "Required tabs or core columns are missing; inspect missing_tabs/missing_required_columns before writes."
+                    )
+                ),
+            }
+
+        # Disconnected / test mode inspection over memory_store without mutations
+        for tab, expected_cols in REQUIRED_TABS.items():
+            rows = self.memory_store.get(tab, [])
+            if not rows:
+                continue
+            checked_tabs += 1
+            actual_keys = {str(k).strip() for r in rows for k in r.keys() if str(k).strip()}
+            actual_lower = {k.lower() for k in actual_keys}
+            expected_lower = {c.lower() for c in expected_cols}
+            required_set = core_columns.get(tab, expected_cols[:3])
+            req_miss = [c for c in required_set if c.lower() not in actual_lower]
+            opt_miss = [c for c in expected_cols if c not in required_set and c.lower() not in actual_lower]
+            extras = sorted(h for h in actual_keys if h.lower() not in expected_lower)
+            if req_miss:
+                missing_required_columns[tab] = req_miss
+            if opt_miss:
+                missing_optional_columns[tab] = opt_miss
+            if extras:
+                extra_columns_detected[tab] = extras
+
+        return {
+            "status": "TEST_OR_OFFLINE_COMPATIBLE" if not missing_required_columns else "INCOMPATIBLE",
+            "mode": "MEMORY_STORE_READONLY",
+            "mutated": False,
+            "total_expected_tabs": len(REQUIRED_TABS),
+            "checked_tabs": checked_tabs,
+            "missing_tabs": [],
+            "missing_required_columns": missing_required_columns,
+            "missing_optional_columns": missing_optional_columns,
+            "extra_columns_preserved": extra_columns_detected,
+            "diagnostics": "Read-only schema inspection completed without modifying spreadsheets.",
+        }
 
 
 db = SheetsDatabase()

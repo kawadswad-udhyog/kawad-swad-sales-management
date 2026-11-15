@@ -191,6 +191,11 @@ def health_reconnect():
 def health_verify_tabs():
     return db.verify_tabs_accessibility()
 
+@app.get("/health/schema-compatibility", tags=["System"])
+@app.get("/api/health/schema-compatibility", tags=["System"])
+def health_schema_compatibility():
+    return db.inspect_schema_compatibility()
+
 @app.get("/health/backup", tags=["System"])
 @app.get("/api/health/backup", tags=["System"])
 def health_backup(current_user: dict = Depends(auth.get_current_user)):

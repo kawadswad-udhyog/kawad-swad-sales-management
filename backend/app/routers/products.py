@@ -42,6 +42,7 @@ async def list_products(current_user: dict = Depends(get_current_user)):
             pack_weight_g=int(_get_val(r, "pack_weight_g", default=500) or 500),
             selling_unit=str(_get_val(r, "selling_unit", default="PACKET")),
             retail_pack_only=_parse_bool(_get_val(r, "retail_pack_only"), default=False),
+            recipe_id=str(_get_val(r, "recipe_id", "master_recipe_id", default="")).strip(),
             active=_parse_bool(_get_val(r, "active"), default=True),
             notes=str(_get_val(r, "notes", default="")),
         ))
@@ -66,6 +67,8 @@ async def create_product(req: ProductCreate, current_user: dict = Depends(get_cu
         "active": "true" if req.active else "false",
         "notes": req.notes or "",
     }
+    if req.recipe_id and req.recipe_id.strip():
+        record["recipe_id"] = req.recipe_id.strip()
     if not db.append_record("Products", record, raise_on_error=True):
         raise HTTPException(status_code=503, detail="Could not save product to persistent storage.")
 
@@ -86,6 +89,7 @@ async def create_product(req: ProductCreate, current_user: dict = Depends(get_cu
         pack_weight_g=req.pack_weight_g,
         selling_unit=req.selling_unit or "PACKET",
         retail_pack_only=bool(req.retail_pack_only),
+        recipe_id=(req.recipe_id or "").strip(),
         active=bool(req.active),
         notes=req.notes or "",
     )
@@ -117,6 +121,8 @@ async def update_product(product_id: str, req: ProductUpdate, current_user: dict
         updates["selling_unit"] = req.selling_unit.strip()
     if req.retail_pack_only is not None:
         updates["retail_pack_only"] = "true" if req.retail_pack_only else "false"
+    if req.recipe_id is not None:
+        updates["recipe_id"] = req.recipe_id.strip()
     if req.active is not None:
         updates["active"] = "true" if req.active else "false"
     if req.notes is not None:
@@ -146,6 +152,7 @@ async def update_product(product_id: str, req: ProductUpdate, current_user: dict
         pack_weight_g=int(_get_val(merged, "pack_weight_g", default=500) or 500),
         selling_unit=str(_get_val(merged, "selling_unit", default="PACKET")),
         retail_pack_only=_parse_bool(_get_val(merged, "retail_pack_only"), default=False),
+        recipe_id=str(_get_val(merged, "recipe_id", "master_recipe_id", default="")).strip(),
         active=_parse_bool(_get_val(merged, "active"), default=True),
         notes=str(_get_val(merged, "notes", default="")),
     )

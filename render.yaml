@@ -4,26 +4,24 @@ services:
     buildCommand: npm ci && npm run build
     staticPublishPath: ./dist
     routes:
-      # Configure these rewrite destinations in Render to match your verified production backend service URL (never point production to -dev).
       - type: rewrite
         source: /api/*
-        destination: https://REPLACE-WITH-PROD-BACKEND-HOST.onrender.com/api/*
+        destination: https://kawad-swad-sales-dev.onrender.com/api/*
       - type: rewrite
         source: /health
-        destination: https://REPLACE-WITH-PROD-BACKEND-HOST.onrender.com/health
+        destination: https://kawad-swad-sales-dev.onrender.com/health
       - type: rewrite
         source: /auth/*
-        destination: https://REPLACE-WITH-PROD-BACKEND-HOST.onrender.com/auth/*
+        destination: https://kawad-swad-sales-dev.onrender.com/auth/*
       - type: rewrite
         source: /*
         destination: /index.html
     envVars:
-      # Leave unset in production when using same-origin Render rewrites, or set explicitly to your production API URL (never -dev).
       - key: VITE_API_URL
         sync: false
 
   - type: web
-    name: kawad-swad-sales-api
+    name: kawad-swad-sales-dev
     env: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt

@@ -47,6 +47,7 @@ export interface Product {
   pack_weight_g: number;
   selling_unit: 'packet' | 'kg';
   retail_pack_only: boolean;
+  recipe_id?: string;
   active: boolean;
   notes: string;
 }

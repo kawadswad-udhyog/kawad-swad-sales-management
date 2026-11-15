@@ -152,9 +152,19 @@ def calculate_recipe_cost_estimate(
 
     for item in items:
         name = str(item.get("material_name", "")).strip()
-        raw_qty = item.get("quantity", 0) or 0
+        if item.get("quantity") is not None:
+            raw_qty = item.get("quantity") or 0
+            unit = str(item.get("unit", "g")).strip()
+        elif item.get("raw_quantity") is not None:
+            raw_qty = item.get("raw_quantity") or 0
+            unit = str(item.get("raw_unit") or item.get("unit") or "g").strip()
+        elif item.get("quantity_per_kg") is not None:
+            raw_qty = float(item.get("quantity_per_kg") or 0) * float(expected_yield_kg or 1.0)
+            unit = str(item.get("unit", "kg")).strip()
+        else:
+            raw_qty = 0
+            unit = str(item.get("unit", "g")).strip()
         raw_qty_dec = to_decimal(raw_qty)
-        unit = str(item.get("unit", "g")).strip()
         rate = item.get("rate_per_unit")
         rate_status = str(item.get("rate_status", "CONFIRMED")).upper()
 

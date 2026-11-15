@@ -1,6 +1,5 @@
-# Production API proxy rewrite targets.
-# Replace https://REPLACE-WITH-PROD-BACKEND-HOST.onrender.com with your verified production backend URL before static deployment (never route production to -dev).
-/api/*  https://REPLACE-WITH-PROD-BACKEND-HOST.onrender.com/api/:splat  200
-/health https://REPLACE-WITH-PROD-BACKEND-HOST.onrender.com/health  200
-/auth/* https://REPLACE-WITH-PROD-BACKEND-HOST.onrender.com/auth/:splat 200
+# Render static proxy rewrite targets -> live backend service
+/api/*  https://kawad-swad-sales-dev.onrender.com/api/:splat  200
+/health https://kawad-swad-sales-dev.onrender.com/health  200
+/auth/* https://kawad-swad-sales-dev.onrender.com/auth/:splat 200
 /*      /index.html   200

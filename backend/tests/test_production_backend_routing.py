@@ -11,7 +11,7 @@ import unittest
 
 class TestProductionBackendRouting(unittest.TestCase):
     def test_render_yaml_routing(self):
-        """Verify render.yaml does not route production to -dev or obsolete backend hosts."""
+        """Verify render.yaml routes frontend API traffic to kawad-swad-sales-dev and aligns CORS/service name."""
         render_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "render.yaml"))
         self.assertTrue(os.path.exists(render_path), f"render.yaml must exist at {render_path}")
 
@@ -19,12 +19,16 @@ class TestProductionBackendRouting(unittest.TestCase):
             content = f.read()
 
         self.assertNotIn("kawad-swad-sales-backend.onrender.com", content)
-        self.assertNotIn("kawad-swad-sales-dev", content)
+        self.assertNotIn("REPLACE-WITH-PROD-BACKEND-HOST", content)
+        self.assertIn("https://kawad-swad-sales-dev.onrender.com/api/*", content)
+        self.assertIn("https://kawad-swad-sales-dev.onrender.com/health", content)
+        self.assertIn("https://kawad-swad-sales-dev.onrender.com/auth/*", content)
+        self.assertIn("https://kawad-swad-sales-frontend.onrender.com", content)
         self.assertIn("sync: false", content)
-        self.assertIn("name: kawad-swad-sales-api", content)
+        self.assertIn("name: kawad-swad-sales-dev", content)
 
     def test_public_redirects_routing(self):
-        """Verify public/_redirects does not hardcode -dev or obsolete backend targets."""
+        """Verify public/_redirects routes /api/*, /health, /auth/* to kawad-swad-sales-dev.onrender.com."""
         redirects_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "public", "_redirects"))
         self.assertTrue(os.path.exists(redirects_path), f"public/_redirects must exist at {redirects_path}")
 
@@ -32,12 +36,14 @@ class TestProductionBackendRouting(unittest.TestCase):
             content = f.read()
 
         self.assertNotIn("kawad-swad-sales-backend.onrender.com", content)
-        self.assertNotIn("kawad-swad-sales-dev.onrender.com", content)
+        self.assertNotIn("REPLACE-WITH-PROD-BACKEND-HOST", content)
+        self.assertIn("https://kawad-swad-sales-dev.onrender.com/api/:splat", content)
+        self.assertIn("https://kawad-swad-sales-dev.onrender.com/health", content)
         self.assertIn("/api/*", content)
         self.assertIn("/index.html", content)
 
     def test_vite_config_proxy_target(self):
-        """Verify vite.config.ts defaults local dev proxy to 127.0.0.1:8000 rather than remote -dev."""
+        """Verify vite.config.ts defaults local dev proxy to 127.0.0.1:8000 when VITE_API_URL is unset."""
         vite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "vite.config.ts"))
         self.assertTrue(os.path.exists(vite_path), f"vite.config.ts must exist at {vite_path}")
 
@@ -47,8 +53,8 @@ class TestProductionBackendRouting(unittest.TestCase):
         self.assertNotIn("https://kawad-swad-sales-backend.onrender.com", content)
         self.assertIn("http://127.0.0.1:8000", content)
 
-    def test_no_dev_or_obsolete_target_in_frontend_source(self):
-        """Verify frontend source never uses obsolete -backend or -dev hostnames as active targets."""
+    def test_no_obsolete_or_placeholder_target_in_frontend_source(self):
+        """Verify frontend source never uses obsolete -backend or placeholder hostnames as active targets."""
         src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
         for root, _, files in os.walk(src_dir):
             for file in files:
@@ -56,7 +62,7 @@ class TestProductionBackendRouting(unittest.TestCase):
                     path = os.path.join(root, file)
                     with open(path, "r", encoding="utf-8") as f:
                         for line_no, line in enumerate(f, 1):
-                            for forbidden in ("kawad-swad-sales-backend.onrender.com", "kawad-swad-sales-dev.onrender.com"):
+                            for forbidden in ("kawad-swad-sales-backend.onrender.com", "REPLACE-WITH-PROD"):
                                 if forbidden in line:
                                     # Allowed only inside explicit security purge/blocklist checks
                                     if "isDisallowedBackendOverride" in line or "lower.includes" in line or "localStorage.removeItem" in line:
