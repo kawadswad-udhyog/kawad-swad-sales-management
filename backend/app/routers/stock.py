@@ -122,6 +122,8 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
         "RETURN_FROM_SALESMAN": "RETURN_FROM_SALESMAN",
         "COMPANY_ADJUSTMENT": "POSITIVE_ADJUSTMENT",
         "POSITIVE_ADJUSTMENT": "POSITIVE_ADJUSTMENT",
+        "NEGATIVE_ADJUSTMENT": "NEGATIVE_ADJUSTMENT",
+        "COMPANY_NEGATIVE_ADJUSTMENT": "COMPANY_NEGATIVE_ADJUSTMENT",
         "SALESMAN_ADJUSTMENT": "SALESMAN_POSITIVE_ADJUSTMENT",
         "SALESMAN_POSITIVE_ADJUSTMENT": "SALESMAN_POSITIVE_ADJUSTMENT",
     }
@@ -129,7 +131,7 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     txn_type = aliases.get(requested_type)
     if not txn_type:
         raise HTTPException(status_code=422, detail=f"Unsupported stock movement type: {requested_type}")
-    if txn_type in {"COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT"} and role not in {"OWNER", "OWNER_ADMIN", "PA"}:
+    if txn_type in {"COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT", "NEGATIVE_ADJUSTMENT", "COMPANY_NEGATIVE_ADJUSTMENT"} and role not in {"OWNER", "OWNER_ADMIN", "PA"}:
         raise HTTPException(status_code=403, detail="Only Owner or PA can change company stock.")
     if txn_type in {"ISSUE_TO_SALESMAN", "RETURN_FROM_SALESMAN", "SALESMAN_POSITIVE_ADJUSTMENT"} and not req.salesman_user_id:
         raise HTTPException(status_code=422, detail="Select a salesman for this stock movement.")
@@ -137,7 +139,6 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
         raise HTTPException(status_code=403, detail="Salesmen can only record returns for their own assigned stock.")
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    stock_txn_id = db.generate_id("SalesmanStockLedger")
 
     products = db.get_records("Products")
     p_info = next((p for p in products if str(p.get("product_id")) == req.product_id), {})
@@ -147,66 +148,68 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     sku = str(p_info.get("sku", req.product_id))
     unit = str(p_info.get("selling_unit", "PACKET"))
     pack_weight_g = int(p_info.get("pack_weight_g", 500) or 500)
-    ledger = db.get_records("SalesmanStockLedger", fresh=True)
-    company_balances, _pairs = balances(ledger)
-    if txn_type in {"ISSUE_TO_SALESMAN", "POSITIVE_ADJUSTMENT"} or txn_type == "COMPANY_RECEIPT":
-        pass
-    if txn_type == "ISSUE_TO_SALESMAN":
-        available = company_balances.get(req.product_id, 0)
-        if req.quantity > available:
-            # Check factory/warehouse finished stock in ProductionStockLedger / PackagingBatches
-            prod_stock = sum(int(float(p.get("quantity_packets", 0) or 0)) for p in db.get_records("ProductionStockLedger", fresh=False) if str(p.get("product_id")) == req.product_id and str(p.get("movement_type")).upper() == "PACKETS_PACKAGED")
-            pack_stock = sum(int(float(p.get("packets_produced") or p.get("packets_200g") or p.get("total_packets") or 0)) for p in db.get_records("PackagingBatches", fresh=False) if str(p.get("product_id")) == req.product_id and str(p.get("status", "")).upper() not in {"INCOMPLETE", "FAILED", "REJECTED"})
-            total_avail = max(available, prod_stock, pack_stock)
-            if req.quantity > total_avail:
-                raise HTTPException(status_code=422, detail=f"Insufficient company stock. Available {total_avail}, requested {req.quantity}.")
-    if txn_type == "RETURN_FROM_SALESMAN":
-        available = salesman_available(ledger, req.salesman_user_id, req.product_id)
-        if req.quantity > available:
-            raise HTTPException(status_code=422, detail=f"Insufficient salesman stock to return. Available {available}, requested {req.quantity}.")
 
-    record = {
-        "stock_txn_id": stock_txn_id,
-        "movement_id": stock_txn_id,
-        "txn_datetime": now_iso,
-        "salesman_user_id": req.salesman_user_id,
-        "product_id": req.product_id,
-        "sku_snapshot": sku,
-        "txn_type": txn_type,
-        "quantity": req.quantity,
-        "quantity_packets": req.quantity,
-        "unit": unit,
-        "pack_weight_g": pack_weight_g,
-        "related_sale_id": "",
-        "issued_by_user_id": user_id,
-        "received_by_user_id": req.salesman_user_id,
-        "confirmed_by_user_id": user_id,
-        "reference_id": req.reference_id or "",
-        "notes": req.notes or "",
-    }
-    if not db.append_record("SalesmanStockLedger", record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Stock movement was not saved. Check the Google Sheets connection and retry.")
+    # Shared product lock protects all canonical warehouse stock movements
+    with CrossProcessLock("stock_product", req.product_id):
+        stock_txn_id = db.generate_id("SalesmanStockLedger")
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        company_balances, _pairs = balances(ledger)
+        if txn_type == "ISSUE_TO_SALESMAN":
+            available = company_balances.get(req.product_id, 0)
+            if req.quantity > available:
+                raise HTTPException(status_code=422, detail=f"Insufficient company warehouse stock. Available {available}, requested {req.quantity}.")
+        if txn_type == "RETURN_FROM_SALESMAN":
+            available = salesman_available(ledger, req.salesman_user_id, req.product_id)
+            if req.quantity > available:
+                raise HTTPException(status_code=422, detail=f"Insufficient salesman stock to return. Available {available}, requested {req.quantity}.")
+        if txn_type in {"NEGATIVE_ADJUSTMENT", "COMPANY_NEGATIVE_ADJUSTMENT"}:
+            available = company_balances.get(req.product_id, 0)
+            if req.quantity > available:
+                raise HTTPException(status_code=422, detail=f"Cannot reduce warehouse stock below zero. Available {available}, reduction requested {req.quantity}.")
 
-    # Also sync StockMovements sheet for canonical movement tracking
-    try:
-        mvt_record = {
+        record = {
+            "stock_txn_id": stock_txn_id,
             "movement_id": stock_txn_id,
             "txn_datetime": now_iso,
             "salesman_user_id": req.salesman_user_id,
             "product_id": req.product_id,
             "sku_snapshot": sku,
-            "movement_type": txn_type,
             "txn_type": txn_type,
             "quantity": req.quantity,
             "quantity_packets": req.quantity,
             "unit": unit,
             "pack_weight_g": pack_weight_g,
+            "related_sale_id": "",
+            "issued_by_user_id": user_id,
+            "received_by_user_id": req.salesman_user_id,
+            "confirmed_by_user_id": user_id,
             "reference_id": req.reference_id or "",
             "notes": req.notes or "",
         }
-        db.append_record("StockMovements", mvt_record)
-    except Exception:
-        pass
+        if not db.append_record("SalesmanStockLedger", record, raise_on_error=True):
+            raise HTTPException(status_code=503, detail="Stock movement was not saved. Check the Google Sheets connection and retry.")
+
+        # Also sync StockMovements sheet for canonical movement tracking
+        try:
+            mvt_record = {
+                "movement_id": stock_txn_id,
+                "txn_datetime": now_iso,
+                "salesman_user_id": req.salesman_user_id,
+                "product_id": req.product_id,
+                "sku_snapshot": sku,
+                "movement_type": txn_type,
+                "txn_type": txn_type,
+                "quantity": req.quantity,
+                "quantity_packets": req.quantity,
+                "unit": unit,
+                "pack_weight_g": pack_weight_g,
+                "reference_id": req.reference_id or "",
+                "notes": req.notes or "",
+            }
+            db.append_record("StockMovements", mvt_record)
+        except Exception:
+            pass
+
 
     db.log_audit(
         actor=user_id,
@@ -304,34 +307,50 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
 
     if action == "APPROVE" and diff != 0:
         # Create corresponding ledger adjustment so the physical count becomes authoritative
-        products = {str(p.get("product_id")): p for p in db.get_records("Products")}
-        p_info = products.get(p_id, {})
-        sku = str(p_info.get("sku", p_id))
-        pack = int(p_info.get("pack_weight_g", 500) or 500)
-        unit = str(p_info.get("selling_unit", "PACKET"))
+        with CrossProcessLock("stock_product", p_id):
+            products = {str(p.get("product_id")): p for p in db.get_records("Products")}
+            p_info = products.get(p_id, {})
+            sku = str(p_info.get("sku", p_id))
+            pack = int(p_info.get("pack_weight_g", 500) or 500)
+            unit = str(p_info.get("selling_unit", "PACKET"))
 
-        is_company = loc in {"COMPANY_WAREHOUSE", "FACTORY", "WAREHOUSE", ""}
-        txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "ISSUE_TO_SALESMAN"
-        salesman_target = "" if is_company else loc
+            is_company = loc in {"COMPANY_WAREHOUSE", "FACTORY", "WAREHOUSE", ""}
+            if is_company and diff < 0:
+                ledger = db.get_records("SalesmanStockLedger", fresh=True)
+                company_balances, _ = balances(ledger)
+                available = company_balances.get(p_id, 0)
+                if abs(diff) > available:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Cannot approve discrepancy reduction: warehouse stock available is {available}, reduction requested is {abs(diff)}."
+                    )
+            salesman_target = "" if is_company else loc
+            if is_company:
+                adj_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "NEGATIVE_ADJUSTMENT"
+                adj_qty = abs(diff)
+            else:
+                adj_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "RETURN_FROM_SALESMAN"
+                adj_qty = abs(diff) if diff > 0 else -abs(diff)
 
-        adj_record = {
-            "stock_txn_id": db.generate_id("SalesmanStockLedger"),
-            "txn_datetime": now_iso,
-            "salesman_user_id": salesman_target,
-            "product_id": p_id,
-            "sku_snapshot": sku,
-            "txn_type": "POSITIVE_ADJUSTMENT" if diff > 0 else "RETURN_FROM_SALESMAN",
-            "quantity": abs(diff) if diff > 0 else -abs(diff),
-            "unit": unit,
-            "pack_weight_g": pack,
-            "related_sale_id": "",
-            "issued_by_user_id": user_id,
-            "received_by_user_id": salesman_target,
-            "confirmed_by_user_id": user_id,
-            "reference_id": f"DISC-{discrepancy_id}",
-            "notes": f"Approved physical count adjustment for {discrepancy_id}: {req.notes}".strip(),
-        }
-        db.append_record("SalesmanStockLedger", adj_record, raise_on_error=True)
+            adj_record = {
+                "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+                "txn_datetime": now_iso,
+                "salesman_user_id": salesman_target,
+                "product_id": p_id,
+                "sku_snapshot": sku,
+                "txn_type": adj_txn_type,
+                "quantity": adj_qty,
+                "unit": unit,
+                "pack_weight_g": pack,
+                "related_sale_id": "",
+                "issued_by_user_id": user_id,
+                "received_by_user_id": salesman_target,
+                "confirmed_by_user_id": user_id,
+                "reference_id": f"DISC-{discrepancy_id}",
+                "notes": f"Approved physical count adjustment for {discrepancy_id}: {req.notes}".strip(),
+            }
+            db.append_record("SalesmanStockLedger", adj_record, raise_on_error=True)
+
 
     status_str = "APPROVED" if action == "APPROVE" else "REJECTED"
     updated = db.update_record("StockDiscrepancies", "discrepancy_id", discrepancy_id, {
@@ -467,27 +486,87 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
             "message": f"Factory stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
         }
 
-    # Warehouse or Salesman
-    salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
-    company_bal, salesman_bal = balances(salesman_ledger)
+    # Warehouse or Salesman - Protected by shared product lock
+    with CrossProcessLock("stock_product", req.product_id):
+        salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        company_bal, salesman_bal = balances(salesman_ledger)
 
-    if loc in {"WAREHOUSE", "COMPANY_WAREHOUSE", "COMPANY"}:
-        current_wh = company_bal.get(req.product_id, 0)
-        diff = req.physical_count - current_wh
+        if loc in {"WAREHOUSE", "COMPANY_WAREHOUSE", "COMPANY"}:
+            current_wh = company_bal.get(req.product_id, 0)
+            diff = req.physical_count - current_wh
+            if diff == 0:
+                return {
+                    "ok": True,
+                    "message": f"Physical count matches recorded warehouse stock ({current_wh} packets). No adjustment needed.",
+                    "adjusted": 0,
+                    "current_stock": current_wh,
+                }
+
+            txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "NEGATIVE_ADJUSTMENT"
+            txn_id = db.generate_id("SalesmanStockLedger")
+            row = {
+                "stock_txn_id": txn_id,
+                "txn_datetime": now_iso,
+                "salesman_user_id": "",
+                "product_id": req.product_id,
+                "sku_snapshot": sku,
+                "txn_type": txn_type,
+                "quantity": abs(diff),
+                "unit": str(product.get("selling_unit", "PACKET")),
+                "pack_weight_g": pack_weight,
+                "related_sale_id": "",
+                "issued_by_user_id": actor,
+                "received_by_user_id": "WAREHOUSE",
+                "confirmed_by_user_id": actor,
+                "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
+                "notes": f"Warehouse physical reconciliation: {req.reason}. {req.notes}".strip(),
+            }
+            if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
+                raise HTTPException(status_code=503, detail="Could not record warehouse stock adjustment.")
+
+            db.log_audit(
+                actor,
+                "RECONCILE_WAREHOUSE_STOCK",
+                "SalesmanStockLedger",
+                txn_id,
+                reason=f"Warehouse {sku} reconciled from {current_wh} to {req.physical_count} ({diff:+d}). Reason: {req.reason}",
+            )
+            return {
+                "ok": True,
+                "location": "WAREHOUSE",
+                "product_id": req.product_id,
+                "sku": sku,
+                "expected_balance": current_wh,
+                "previous_stock": current_wh,
+                "physical_count": req.physical_count,
+                "new_stock": req.physical_count,
+                "variance": diff,
+                "adjustment": diff,
+                "adjustment_txn_id": txn_id,
+                "final_balance": req.physical_count,
+                "reason": req.reason,
+                "reconciled_by": actor,
+                "message": f"Warehouse stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
+            }
+
+        # Otherwise, loc is salesman_user_id (e.g. USR-SALES-01)
+        salesman_id = req.location.strip()
+        current_s = salesman_available(salesman_ledger, salesman_id, req.product_id)
+        diff = req.physical_count - current_s
         if diff == 0:
             return {
                 "ok": True,
-                "message": f"Physical count matches recorded warehouse stock ({current_wh} packets). No adjustment needed.",
+                "message": f"Physical count matches recorded salesman stock ({current_s} packets). No adjustment needed.",
                 "adjusted": 0,
-                "current_stock": current_wh,
+                "current_stock": current_s,
             }
 
-        txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "NEGATIVE_ADJUSTMENT"
+        txn_type = "SALESMAN_POSITIVE_ADJUSTMENT" if diff > 0 else "SALESMAN_NEGATIVE_ADJUSTMENT"
         txn_id = db.generate_id("SalesmanStockLedger")
         row = {
             "stock_txn_id": txn_id,
             "txn_datetime": now_iso,
-            "salesman_user_id": "",
+            "salesman_user_id": salesman_id,
             "product_id": req.product_id,
             "sku_snapshot": sku,
             "txn_type": txn_type,
@@ -496,28 +575,28 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
             "pack_weight_g": pack_weight,
             "related_sale_id": "",
             "issued_by_user_id": actor,
-            "received_by_user_id": "WAREHOUSE",
+            "received_by_user_id": salesman_id,
             "confirmed_by_user_id": actor,
             "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
-            "notes": f"Warehouse physical reconciliation: {req.reason}. {req.notes}".strip(),
+            "notes": f"Salesman {salesman_id} physical reconciliation: {req.reason}. {req.notes}".strip(),
         }
         if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
-            raise HTTPException(status_code=503, detail="Could not record warehouse stock adjustment.")
+            raise HTTPException(status_code=503, detail="Could not record salesman stock adjustment.")
 
         db.log_audit(
             actor,
-            "RECONCILE_WAREHOUSE_STOCK",
+            "RECONCILE_SALESMAN_STOCK",
             "SalesmanStockLedger",
             txn_id,
-            reason=f"Warehouse {sku} reconciled from {current_wh} to {req.physical_count} ({diff:+d}). Reason: {req.reason}",
+            reason=f"Salesman {salesman_id} {sku} reconciled from {current_s} to {req.physical_count} ({diff:+d}). Reason: {req.reason}",
         )
         return {
             "ok": True,
-            "location": "WAREHOUSE",
+            "location": salesman_id,
             "product_id": req.product_id,
             "sku": sku,
-            "expected_balance": current_wh,
-            "previous_stock": current_wh,
+            "expected_balance": current_s,
+            "previous_stock": current_s,
             "physical_count": req.physical_count,
             "new_stock": req.physical_count,
             "variance": diff,
@@ -526,67 +605,9 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
             "final_balance": req.physical_count,
             "reason": req.reason,
             "reconciled_by": actor,
-            "message": f"Warehouse stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
+            "message": f"Salesman {salesman_id} stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
         }
 
-    # Otherwise, loc is salesman_user_id (e.g. USR-SALES-01)
-    salesman_id = req.location.strip()
-    current_s = salesman_available(salesman_ledger, salesman_id, req.product_id)
-    diff = req.physical_count - current_s
-    if diff == 0:
-        return {
-            "ok": True,
-            "message": f"Physical count matches recorded salesman stock ({current_s} packets). No adjustment needed.",
-            "adjusted": 0,
-            "current_stock": current_s,
-        }
-
-    txn_type = "SALESMAN_POSITIVE_ADJUSTMENT" if diff > 0 else "SALESMAN_NEGATIVE_ADJUSTMENT"
-    txn_id = db.generate_id("SalesmanStockLedger")
-    row = {
-        "stock_txn_id": txn_id,
-        "txn_datetime": now_iso,
-        "salesman_user_id": salesman_id,
-        "product_id": req.product_id,
-        "sku_snapshot": sku,
-        "txn_type": txn_type,
-        "quantity": abs(diff),
-        "unit": str(product.get("selling_unit", "PACKET")),
-        "pack_weight_g": pack_weight,
-        "related_sale_id": "",
-        "issued_by_user_id": actor,
-        "received_by_user_id": salesman_id,
-        "confirmed_by_user_id": actor,
-        "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
-        "notes": f"Salesman {salesman_id} physical reconciliation: {req.reason}. {req.notes}".strip(),
-    }
-    if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Could not record salesman stock adjustment.")
-
-    db.log_audit(
-        actor,
-        "RECONCILE_SALESMAN_STOCK",
-        "SalesmanStockLedger",
-        txn_id,
-        reason=f"Salesman {salesman_id} {sku} reconciled from {current_s} to {req.physical_count} ({diff:+d}). Reason: {req.reason}",
-    )
-    return {
-        "ok": True,
-        "location": salesman_id,
-        "product_id": req.product_id,
-        "sku": sku,
-        "expected_balance": current_s,
-        "previous_stock": current_s,
-        "physical_count": req.physical_count,
-        "new_stock": req.physical_count,
-        "variance": diff,
-        "adjustment": diff,
-        "adjustment_txn_id": txn_id,
-        "final_balance": req.physical_count,
-        "reason": req.reason,
-        "reconciled_by": actor,
-        "message": f"Salesman {salesman_id} stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
-    }
 
 
 @router.get("/bulk-batches")
@@ -941,6 +962,18 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
         untransferred_items = []
         for itm in items:
             already = transferred_by_prod.get(itm.product_id, 0)
+            if already > itm.quantity:
+                db.log_audit(
+                    actor=user_id,
+                    action="VAN_LOADING_OVERTRANSFER_DETECTED",
+                    entity_type="VanLoadingPasses",
+                    entity_id=pass_id,
+                    reason=f"Pre-transfer check blocked pass {pass_num} for SKU {itm.sku} ({itm.product_id}): recorded {already} > requested {itm.quantity}. Pass kept out of ACCEPTED status; no compensating movement created."
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Over-transfer detected: Recorded movements ({already}) exceed required ({itm.quantity}) for {itm.product_name or itm.sku}. Acceptance blocked."
+                )
             if already < itm.quantity:
                 remaining = itm.quantity - already
                 untransferred_items.append((itm, remaining))
@@ -986,7 +1019,7 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
                 except Exception as exc:
                     raise HTTPException(status_code=503, detail=f"Failed to record stock movement for {itm.product_name} in SalesmanStockLedger: {exc}")
 
-        # Post-transfer complete verification: Every expected product movement must be verified
+        # Post-transfer complete verification: Every expected product movement must match EXACTLY
         verified_ledger = db.get_records("SalesmanStockLedger", fresh=True)
         verified_by_prod = collections.defaultdict(int)
         for tx in verified_ledger:
@@ -995,11 +1028,32 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
 
         for itm in items:
             total_done = verified_by_prod.get(itm.product_id, 0)
-            if total_done < itm.quantity:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Incomplete transfer: Verified {total_done} of {itm.quantity} packets for {itm.product_name}. Pass remains pending."
-                )
+            if total_done != itm.quantity:
+                if total_done < itm.quantity:
+                    db.log_audit(
+                        actor=user_id,
+                        action="VAN_LOADING_UNDERTRANSFER_DETECTED",
+                        entity_type="VanLoadingPasses",
+                        entity_id=pass_id,
+                        reason=f"Post-transfer verification failed on pass {pass_num} for SKU {itm.sku} ({itm.product_id}): verified {total_done} < requested {itm.quantity}. Pass remains PENDING_ACCEPTANCE."
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Incomplete transfer: Verified {total_done} of {itm.quantity} packets for {itm.product_name}. Pass remains pending."
+                    )
+                else:
+                    db.log_audit(
+                        actor=user_id,
+                        action="VAN_LOADING_OVERTRANSFER_DETECTED",
+                        entity_type="VanLoadingPasses",
+                        entity_id=pass_id,
+                        reason=f"Post-transfer verification blocked pass {pass_num} for SKU {itm.sku} ({itm.product_id}): verified {total_done} > requested {itm.quantity}. Pass kept out of ACCEPTED status; no compensating movement created."
+                    )
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Over-transfer detected: Verified {total_done} packets exceeds expected {itm.quantity} packets for {itm.product_name}. Acceptance blocked."
+                    )
+
 
         # Update VanLoadingPasses status to ACCEPTED
         action_notes = (req.notes if req else "") or ""

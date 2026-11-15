@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.auth import get_current_user
 from app.sheets import db
 from app.config import SALES_GOOGLE_SPREADSHEET_ID
+from app.accounting.customer_ledger import CrossProcessLock
 from app.models import BulkAttendanceCreate, BulkAttendanceResponse, BulkAttendanceItem
 from app.recipes_master import (
     MASTER_RECIPES_DEFINITION,
@@ -4000,27 +4001,28 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
                     raise HTTPException(503, "Production stock deduction failed during dispatch recovery.")
 
             if req.channel.upper() == "WAREHOUSE":
-                salesman_ledger = db.get_records("SalesmanStockLedger")
-                existing_wh_mvt = next((m for m in salesman_ledger if str(field(m, "reference_id")) == disp_id and str(field(m, "txn_type")).upper() == "COMPANY_RECEIPT"), None)
-                if not existing_wh_mvt:
-                    if not db.append_record("SalesmanStockLedger", {
-                        "stock_txn_id": make_id("SalesmanStockLedger"),
-                        "txn_datetime": now(),
-                        "salesman_user_id": "",
-                        "product_id": req.product_id,
-                        "sku_snapshot": field(product, "sku"),
-                        "txn_type": "COMPANY_RECEIPT",
-                        "quantity": req.quantity_packets,
-                        "unit": "PACKET",
-                        "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
-                        "related_sale_id": "",
-                        "issued_by_user_id": actor,
-                        "received_by_user_id": "WAREHOUSE",
-                        "confirmed_by_user_id": actor,
-                        "reference_id": disp_id,
-                        "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'} (Reconciled retry).",
-                    }, raise_on_error=True):
-                        raise HTTPException(503, "Warehouse stock movement failed during dispatch recovery.")
+                with CrossProcessLock("stock_product", req.product_id):
+                    salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+                    existing_wh_mvt = next((m for m in salesman_ledger if str(field(m, "reference_id")) == disp_id and str(field(m, "txn_type")).upper() == "COMPANY_RECEIPT"), None)
+                    if not existing_wh_mvt:
+                        if not db.append_record("SalesmanStockLedger", {
+                            "stock_txn_id": make_id("SalesmanStockLedger"),
+                            "txn_datetime": now(),
+                            "salesman_user_id": "",
+                            "product_id": req.product_id,
+                            "sku_snapshot": field(product, "sku"),
+                            "txn_type": "COMPANY_RECEIPT",
+                            "quantity": req.quantity_packets,
+                            "unit": "PACKET",
+                            "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+                            "related_sale_id": "",
+                            "issued_by_user_id": actor,
+                            "received_by_user_id": "WAREHOUSE",
+                            "confirmed_by_user_id": actor,
+                            "reference_id": disp_id,
+                            "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'} (Reconciled retry).",
+                        }, raise_on_error=True):
+                            raise HTTPException(503, "Warehouse stock movement failed during dispatch recovery.")
 
             if req.channel.upper() == "SALESMAN" and req.destination:
                 salesman_ledger = db.get_records("SalesmanStockLedger")
@@ -4086,24 +4088,25 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
             raise RuntimeError("ProductionStockLedger append returned False")
 
         if req.channel.upper() == "WAREHOUSE":
-            if not db.append_record("SalesmanStockLedger", {
-                "stock_txn_id": make_id("SalesmanStockLedger"),
-                "txn_datetime": now(),
-                "salesman_user_id": "",
-                "product_id": req.product_id,
-                "sku_snapshot": field(product, "sku"),
-                "txn_type": "COMPANY_RECEIPT",
-                "quantity": req.quantity_packets,
-                "unit": "PACKET",
-                "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
-                "related_sale_id": "",
-                "issued_by_user_id": actor,
-                "received_by_user_id": "WAREHOUSE",
-                "confirmed_by_user_id": actor,
-                "reference_id": disp_id,
-                "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'}. Internal stock transfer.",
-            }, raise_on_error=True):
-                raise RuntimeError("SalesmanStockLedger append returned False for WAREHOUSE dispatch")
+            with CrossProcessLock("stock_product", req.product_id):
+                if not db.append_record("SalesmanStockLedger", {
+                    "stock_txn_id": make_id("SalesmanStockLedger"),
+                    "txn_datetime": now(),
+                    "salesman_user_id": "",
+                    "product_id": req.product_id,
+                    "sku_snapshot": field(product, "sku"),
+                    "txn_type": "COMPANY_RECEIPT",
+                    "quantity": req.quantity_packets,
+                    "unit": "PACKET",
+                    "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+                    "related_sale_id": "",
+                    "issued_by_user_id": actor,
+                    "received_by_user_id": "WAREHOUSE",
+                    "confirmed_by_user_id": actor,
+                    "reference_id": disp_id,
+                    "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'}. Internal stock transfer.",
+                }, raise_on_error=True):
+                    raise RuntimeError("SalesmanStockLedger append returned False for WAREHOUSE dispatch")
 
         if req.channel.upper() == "SALESMAN" and req.destination:
             if not db.append_record("SalesmanStockLedger", {
