@@ -1099,7 +1099,7 @@ export async function cancelPurchaseOrder(orderId: string, reason?: string): Pro
 }
 
 export async function getGoodsReceipts(): Promise<GoodsReceipt[]> {
-  return apiRequest<GoodsReceipt[]>('/api/purchasing/goods-receipts');
+  return apiRequest<GoodsReceipt[]>('/api/purchasing/receipts');
 }
 
 export async function createGoodsReceipt(payload: {
@@ -1159,7 +1159,7 @@ export async function createGoodsReceipt(payload: {
       };
     }),
   };
-  return apiRequest<GoodsReceipt>('/api/purchasing/goods-receipts', {
+  return apiRequest<GoodsReceipt>('/api/purchasing/receipts', {
     method: 'POST',
     body: JSON.stringify(normalized),
   });
@@ -1177,6 +1177,9 @@ export async function createSupplierBill(payload: {
   due_date?: string;
   po_id?: string;
   grn_id?: string;
+  receipt_id?: string;
+  subtotal?: number;
+  tax_amount?: number;
   taxable_amount: number;
   cgst_amount?: number;
   sgst_amount?: number;
@@ -1186,9 +1189,18 @@ export async function createSupplierBill(payload: {
   total_amount: number;
   notes?: string;
 }): Promise<SupplierBill> {
+  const normalized = {
+    ...payload,
+    receipt_id: payload.receipt_id || payload.grn_id || '',
+    subtotal: Number(payload.subtotal ?? payload.taxable_amount ?? 0),
+    tax_amount: Number(
+      payload.tax_amount ??
+        ((payload.cgst_amount || 0) + (payload.sgst_amount || 0) + (payload.igst_amount || 0))
+    ),
+  };
   return apiRequest<SupplierBill>('/api/purchasing/bills', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
   });
 }
 
@@ -1201,13 +1213,32 @@ export async function recordSupplierPayment(payload: {
   bill_id?: string;
   payment_date: string;
   payment_mode: 'CASH' | 'BANK' | 'UPI' | 'NEFT';
+  payment_method?: string;
   amount: number;
   reference_no?: string;
+  reference_number?: string;
   notes?: string;
 }): Promise<SupplierPayment> {
+  const methodMap: Record<string, string> = {
+    BANK: 'BANK_TRANSFER',
+    NEFT: 'BANK_TRANSFER',
+  };
+  const normalized = {
+    ...payload,
+    bill_id: payload.bill_id || '',
+    payment_method:
+      payload.payment_method ||
+      methodMap[payload.payment_mode] ||
+      payload.payment_mode ||
+      'BANK_TRANSFER',
+    reference_number:
+      (payload.reference_number || payload.reference_no || '').trim().length >= 2
+        ? (payload.reference_number || payload.reference_no || '').trim()
+        : `PAY-${Date.now().toString().slice(-6)}`,
+  };
   return apiRequest<SupplierPayment>('/api/purchasing/payments', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
   });
 }
 
@@ -1218,22 +1249,40 @@ export async function getSupplierReturns(): Promise<SupplierReturn[]> {
 export async function createSupplierReturn(payload: {
   supplier_id: string;
   grn_id?: string;
+  receipt_id?: string;
   return_date: string;
   reason: string;
   notes?: string;
   items: Array<{
     material_id: string;
+    raw_material_id?: string;
     material_name: string;
     returned_quantity: number;
+    quantity?: number;
     unit: string;
     unit_price: number;
+    unit_rate?: number;
     reason?: string;
     notes?: string;
   }>;
 }): Promise<SupplierReturn> {
+  const normalized = {
+    ...payload,
+    receipt_id: payload.receipt_id || payload.grn_id || '',
+    items: payload.items.map((item) => ({
+      ...item,
+      raw_material_id: item.raw_material_id || item.material_id,
+      quantity: Number(item.quantity ?? item.returned_quantity ?? 0),
+      unit_rate: Number(item.unit_rate ?? item.unit_price ?? 0),
+      reason:
+        (item.reason || payload.reason || 'Supplier material return').trim().length >= 3
+          ? (item.reason || payload.reason || 'Supplier material return').trim()
+          : 'Supplier return',
+    })),
+  };
   return apiRequest<SupplierReturn>('/api/purchasing/returns', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
   });
 }
 
@@ -1259,15 +1308,24 @@ export async function createQualityCheck(payload: {
   check_type: 'RAW_MATERIAL' | 'IN_PROCESS' | 'FINISHED_GOODS';
   entity_type: string;
   entity_id: string;
+  reference_type?: string;
+  reference_id?: string;
+  product_or_material_id?: string;
   item_name: string;
   decision: 'PASS' | 'FAIL' | 'HOLD';
   defect_details?: string;
   corrective_action?: string;
   notes?: string;
 }): Promise<QualityCheck> {
+  const normalized = {
+    ...payload,
+    reference_type: payload.reference_type || payload.entity_type || 'PRODUCT_LOT',
+    reference_id: payload.reference_id || payload.entity_id || 'LOT-REF',
+    product_or_material_id: payload.product_or_material_id || payload.entity_id || 'PRD-UNKNOWN',
+  };
   return apiRequest<QualityCheck>('/api/quality/checks', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
   });
 }
 
@@ -1298,14 +1356,14 @@ export async function updateLotStatus(
   holdReason?: string
 ): Promise<ProductLot> {
   return apiRequest<ProductLot>(`/api/quality/lots/${encodeURIComponent(lotId)}/status`, {
-    method: 'PUT',
+    method: 'POST',
     body: JSON.stringify({ quality_status: qualityStatus, hold_reason: holdReason }),
   });
 }
 
 export async function getLotMovements(lotId?: string): Promise<LotMovement[]> {
-  const url = lotId ? `/api/quality/lot-movements?lot_id=${encodeURIComponent(lotId)}` : '/api/quality/lot-movements';
-  return apiRequest<LotMovement[]>(url);
+  if (!lotId) return [];
+  return apiRequest<LotMovement[]>(`/api/quality/lots/${encodeURIComponent(lotId)}/movements`);
 }
 
 export async function getCustomerReturns(): Promise<CustomerReturn[]> {
@@ -1326,18 +1384,26 @@ export async function createCustomerReturn(payload: {
     quantity: number;
     unit: string;
     unit_price: number;
+    refund_amount?: number;
     reason: string;
     notes?: string;
   }>;
 }): Promise<CustomerReturn> {
+  const normalized = {
+    ...payload,
+    items: payload.items.map((item) => ({
+      ...item,
+      refund_amount: Number(item.refund_amount ?? (item.quantity * item.unit_price).toFixed(2)),
+    })),
+  };
   return apiRequest<CustomerReturn>('/api/quality/customer-returns', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
   });
 }
 
 export async function getComplaintsRecalls(status?: string): Promise<ComplaintRecall[]> {
-  const url = status ? `/api/quality/complaints-recalls?status=${encodeURIComponent(status)}` : '/api/quality/complaints-recalls';
+  const url = status ? `/api/quality/complaints?status=${encodeURIComponent(status)}` : '/api/quality/complaints';
   return apiRequest<ComplaintRecall[]>(url);
 }
 
@@ -1352,7 +1418,7 @@ export async function createComplaintOrRecall(payload: {
   description: string;
   notes?: string;
 }): Promise<ComplaintRecall> {
-  return apiRequest<ComplaintRecall>('/api/quality/complaints-recalls', {
+  return apiRequest<ComplaintRecall>('/api/quality/complaints', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -1362,10 +1428,14 @@ export async function closeComplaint(
   complaintId: string,
   data: { investigation?: string; corrective_action?: string; notes?: string }
 ): Promise<ComplaintRecall> {
-  return apiRequest<ComplaintRecall>(`/api/quality/complaints-recalls/${encodeURIComponent(complaintId)}/close`, {
-    method: 'PUT',
-    body: JSON.stringify(data),
-  });
+  const rawAction = (data.corrective_action || data.investigation || data.notes || 'Resolved and closed').trim();
+  const action = rawAction.length >= 5 ? rawAction : `${rawAction} (Closed)`;
+  return apiRequest<ComplaintRecall>(
+    `/api/quality/complaints/${encodeURIComponent(complaintId)}/close?corrective_action=${encodeURIComponent(action)}`,
+    {
+      method: 'POST',
+    }
+  );
 }
 
 export async function getQualitySummary(): Promise<{
@@ -1394,7 +1464,7 @@ export async function executeDalMilling(payload: {
   idempotency_key?: string;
   notes?: string;
 }): Promise<DalMillingResult> {
-  return apiRequest<DalMillingResult>('/api/production/dal-milling', {
+  return apiRequest<DalMillingResult>('/api/production/milling/record', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -1472,11 +1542,27 @@ export async function getDispatchSummary(): Promise<any> {
 // -------------------------------------------------------------
 
 export async function getDebtorsBalances(): Promise<{ as_of_date: string; debtors: DebtorItem[]; total_receivables: number }> {
-  return apiRequest('/api/accounting/debtors');
+  const res = await apiRequest<DebtorItem[] | { as_of_date?: string; debtors?: DebtorItem[]; total_receivables?: number }>('/api/accounting/debtors');
+  const debtors = Array.isArray(res) ? res : (res?.debtors || []);
+  return {
+    as_of_date: Array.isArray(res) ? new Date().toISOString().slice(0, 10) : (res?.as_of_date || ''),
+    debtors,
+    total_receivables: Array.isArray(res)
+      ? debtors.reduce((sum, item) => sum + Number(item.outstanding_balance || 0), 0)
+      : Number(res?.total_receivables || 0),
+  };
 }
 
 export async function getCreditorsBalances(): Promise<{ as_of_date: string; creditors: CreditorItem[]; total_payables: number }> {
-  return apiRequest('/api/accounting/creditors');
+  const res = await apiRequest<CreditorItem[] | { as_of_date?: string; creditors?: CreditorItem[]; total_payables?: number }>('/api/accounting/creditors');
+  const creditors = Array.isArray(res) ? res : (res?.creditors || []);
+  return {
+    as_of_date: Array.isArray(res) ? new Date().toISOString().slice(0, 10) : (res?.as_of_date || ''),
+    creditors,
+    total_payables: Array.isArray(res)
+      ? creditors.reduce((sum, item) => sum + Number(item.outstanding_payable || 0), 0)
+      : Number(res?.total_payables || 0),
+  };
 }
 
 export async function getCashBankReport(): Promise<CashBankReport> {
