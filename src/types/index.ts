@@ -471,6 +471,15 @@ export interface SupplierBill {
   notes?: string;
 }
 
+export interface SupplierPaymentAllocation {
+  bill_id: string;
+  bill_number?: string;
+  amount: number;
+  allocated_at?: string;
+  allocated_by?: string;
+  notes?: string;
+}
+
 export interface SupplierPayment {
   payment_id: string;
   payment_number?: string;
@@ -487,6 +496,10 @@ export interface SupplierPayment {
   paid_by: string;
   created_at: string;
   notes?: string;
+  payment_type?: 'BILL_PAYMENT' | 'ON_ACCOUNT' | string;
+  allocated_amount?: number;
+  unallocated_amount?: number;
+  allocations?: SupplierPaymentAllocation[];
 }
 
 export interface SupplierReturnItem {
@@ -678,7 +691,9 @@ export interface CreditorItem {
   supplier_name: string;
   total_billed: number;
   total_paid: number;
+  advance_balance?: number;
   outstanding_payable: number;
+  net_payable?: number;
   open_bills_count: number;
 }
 

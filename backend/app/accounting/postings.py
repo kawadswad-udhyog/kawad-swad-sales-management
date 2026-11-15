@@ -724,29 +724,37 @@ def post_supplier_payment_journal(
     method = str(payment_data.get("payment_method", "BANK_TRANSFER")).upper()
     supp_name = str(payment_data.get("supplier_name", "Supplier"))
     bill_id = str(payment_data.get("bill_id", "")).strip()
+    ref_no = str(payment_data.get("reference_number", "")).strip()
 
     if amount <= Decimal("0"):
         return {"status": "SKIPPED", "message": "Zero payment amount"}
 
     credit_code = "1110" if method == "CASH" else "1120"
+    debit_note = (
+        f"Settlement of payable to {supp_name} for bill {bill_id}"
+        if bill_id
+        else f"On-account / advance payment to {supp_name}"
+    )
+    ref_display = ref_no if ref_no else "N/A"
     lines = [
         {
             "account_code": "2100",
             "debit_amount": round_money(amount),
-            "notes": f"Settlement of payable to {supp_name} for bill {bill_id}",
+            "notes": debit_note,
         },
         {
             "account_code": credit_code,
             "credit_amount": round_money(amount),
-            "notes": f"Disbursement via {method} (Ref: {payment_data.get('reference_number', 'N/A')})",
+            "notes": f"Disbursement via {method} (Ref: {ref_display})",
         },
     ]
 
+    narration_suffix = f" [Bill {bill_id}]" if bill_id else " [On-Account]"
     return post_journal_voucher(
         voucher_type="PAYMENT",
         reference_type="SUPPLIER_PAYMENT",
         reference_id=pay_id,
-        narration=f"Supplier payment to {supp_name} via {method}: ₹{amount:.2f}",
+        narration=f"Supplier payment to {supp_name} via {method}: ₹{amount:.2f}{narration_suffix}",
         lines=lines,
         posted_by=actor,
         journal_date=str(payment_data.get("payment_date", ""))[:10] or None,

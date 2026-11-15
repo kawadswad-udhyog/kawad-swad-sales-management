@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
-import { exportSheetToExcel } from '../utils/exportToExcel';
 import { Payment } from '../types';
 
 export const ReportsView: React.FC = () => {
@@ -105,8 +104,9 @@ export const ReportsView: React.FC = () => {
   }
 
   // Handle export actions
-  const handleExport = (sheet: string) => {
+  const handleExport = async (sheet: string) => {
     try {
+      const { exportSheetToExcel } = await import('../utils/exportToExcel');
       if (sheet === 'Sales') {
         const data = sales.map((s) => ({
           sale_id: s.sale_id,
@@ -129,21 +129,21 @@ export const ReportsView: React.FC = () => {
           created_at: s.created_at,
           notes: s.notes,
         }));
-        exportSheetToExcel('Sales', data);
+        await exportSheetToExcel('Sales', data);
       } else if (sheet === 'Products') {
-        exportSheetToExcel('Products', products);
+        await exportSheetToExcel('Products', products);
       } else if (sheet === 'Customers') {
-        exportSheetToExcel('Customers', customers);
+        await exportSheetToExcel('Customers', customers);
       } else if (sheet === 'Expenses') {
-        exportSheetToExcel('Expenses', expenses);
+        await exportSheetToExcel('Expenses', expenses);
       } else if (sheet === 'SalesmanStockLedger') {
-        exportSheetToExcel('SalesmanStockLedger', stockTransactions);
+        await exportSheetToExcel('SalesmanStockLedger', stockTransactions);
       } else if (sheet === 'DailyClosing') {
-        exportSheetToExcel('DailyClosing', dailyClosings);
+        await exportSheetToExcel('DailyClosing', dailyClosings);
       } else if (sheet === 'SalaryIncentives') {
-        exportSheetToExcel('SalaryIncentives', salaryIncentives);
+        await exportSheetToExcel('SalaryIncentives', salaryIncentives);
       } else if (sheet === 'AuditLog') {
-        exportSheetToExcel('AuditLog', auditLogs);
+        await exportSheetToExcel('AuditLog', auditLogs);
       }
       setExportNotice(`Successfully exported ${sheet}.xlsx`);
       setTimeout(() => setExportNotice(null), 3500);

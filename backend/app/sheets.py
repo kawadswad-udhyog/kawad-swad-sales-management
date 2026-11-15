@@ -260,6 +260,7 @@ REQUIRED_TABS = {
     "SupplierPayments": [
         "payment_id", "bill_id", "supplier_id", "supplier_name", "payment_date",
         "amount", "payment_method", "reference_number", "status", "paid_by", "created_at", "notes",
+        "payment_type", "allocated_amount", "unallocated_amount", "allocations_json", "idempotency_key",
     ],
     "SupplierReturns": [
         "return_id", "return_number", "receipt_id", "supplier_id", "supplier_name",

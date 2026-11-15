@@ -241,36 +241,64 @@ async def get_customer_outstanding_balances(
 async def get_supplier_outstanding_balances(
     user: dict = Depends(get_current_user),
 ):
-    """Supplier accounts payable aging and outstanding balances."""
+    """Supplier accounts payable aging and outstanding balances (including on-account advances)."""
     require_accounting_access(user)
     bills = db.get_records("SupplierBills", fresh=True)
+    payments = db.get_records("SupplierPayments", fresh=True)
     suppliers = {str(s.get("supplier_id")): s for s in db.get_records("Suppliers", fresh=True)}
 
     creditor_map: Dict[str, Dict[str, Any]] = {}
-    for b in bills:
-        sid = str(b.get("supplier_id", "")).strip()
-        if not sid:
-            continue
-        s_meta = suppliers.get(sid, {})
-        s_name = str(b.get("supplier_name") or s_meta.get("supplier_name") or sid)
-        tot = float(b.get("total_amount", 0) or 0)
-        paid = float(b.get("paid_amount", 0) or 0)
-        bal = float(b.get("balance_amount", 0) or 0)
 
+    def _ensure_creditor(sid: str, fallback_name: str = "") -> Dict[str, Any]:
         if sid not in creditor_map:
+            s_meta = suppliers.get(sid, {})
+            s_name = str(fallback_name or s_meta.get("supplier_name") or sid)
             creditor_map[sid] = {
                 "supplier_id": sid,
                 "supplier_name": s_name,
                 "total_billed": 0.0,
                 "total_paid": 0.0,
+                "advance_balance": 0.0,
                 "outstanding_payable": 0.0,
+                "net_payable": 0.0,
                 "open_bills_count": 0,
             }
-        creditor_map[sid]["total_billed"] = round(creditor_map[sid]["total_billed"] + tot, 2)
-        creditor_map[sid]["total_paid"] = round(creditor_map[sid]["total_paid"] + paid, 2)
-        creditor_map[sid]["outstanding_payable"] = round(creditor_map[sid]["outstanding_payable"] + bal, 2)
+        return creditor_map[sid]
+
+    for b in bills:
+        sid = str(b.get("supplier_id", "")).strip()
+        if not sid:
+            continue
+        entry = _ensure_creditor(sid, str(b.get("supplier_name") or ""))
+        tot = float(b.get("total_amount", 0) or 0)
+        paid = float(b.get("paid_amount", 0) or 0)
+        entry["total_billed"] = round(entry["total_billed"] + tot, 2)
+        entry["total_paid"] = round(entry["total_paid"] + paid, 2)
         if str(b.get("payment_status", "")).upper() != "PAID":
-            creditor_map[sid]["open_bills_count"] += 1
+            entry["open_bills_count"] += 1
+
+    for p in payments:
+        if str(p.get("status", "")).strip().upper() != "PAID":
+            continue
+        sid = str(p.get("supplier_id", "")).strip()
+        if not sid:
+            continue
+        entry = _ensure_creditor(sid, str(p.get("supplier_name") or ""))
+        raw_unalloc = p.get("unallocated_amount")
+        if raw_unalloc is not None and str(raw_unalloc).strip() != "":
+            unalloc = max(0.0, float(raw_unalloc or 0))
+        elif str(p.get("bill_id", "")).strip() == "":
+            unalloc = max(0.0, float(p.get("amount", 0) or 0) - float(p.get("allocated_amount", 0) or 0))
+        else:
+            unalloc = 0.0
+        if unalloc > 0:
+            entry["advance_balance"] = round(entry["advance_balance"] + unalloc, 2)
+            entry["total_paid"] = round(entry["total_paid"] + unalloc, 2)
+
+    for entry in creditor_map.values():
+        signed_balance = round(entry["total_billed"] - entry["total_paid"], 2)
+        entry["outstanding_payable"] = signed_balance
+        entry["net_payable"] = max(0.0, signed_balance)
 
     creditors_list = list(creditor_map.values())
     creditors_list.sort(key=lambda x: x["outstanding_payable"], reverse=True)

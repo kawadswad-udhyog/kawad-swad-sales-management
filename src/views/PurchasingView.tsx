@@ -33,6 +33,7 @@ import {
   createSupplierBill,
   getSupplierPayments,
   recordSupplierPayment,
+  applySupplierAdvance,
   getSupplierReturns,
   createSupplierReturn,
   getPurchasingSummary,
@@ -182,8 +183,18 @@ export const PurchasingView: React.FC = () => {
     payment_mode: 'BANK' as 'CASH' | 'BANK' | 'UPI' | 'NEFT',
     amount: 0,
     reference_no: '',
+    idempotency_key: '',
     notes: '',
   });
+  const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
+  const [applyAdvanceModal, setApplyAdvanceModal] = useState<{
+    payment: SupplierPayment;
+    bill_id: string;
+    amount: number;
+    idempotency_key: string;
+    notes: string;
+  } | null>(null);
+  const [isApplyingAdvance, setIsApplyingAdvance] = useState(false);
 
   const [newReturn, setNewReturn] = useState({
     supplier_id: '',
@@ -222,8 +233,12 @@ export const PurchasingView: React.FC = () => {
         const billList = await getSupplierBills().catch(() => []);
         setBills(billList);
       } else if (activeTab === 'payments') {
-        const payList = await getSupplierPayments().catch(() => []);
+        const [payList, billList] = await Promise.all([
+          getSupplierPayments().catch(() => []),
+          getSupplierBills().catch(() => []),
+        ]);
         setPayments(payList);
+        setBills(billList);
       } else if (activeTab === 'returns') {
         const retList = await getSupplierReturns().catch(() => []);
         setReturns(retList);
@@ -310,15 +325,73 @@ export const PurchasingView: React.FC = () => {
     }
   };
 
+  const openPaymentModal = () => {
+    const idemp =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `spay-${crypto.randomUUID()}`
+        : `spay-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setNewPayment({
+      supplier_id: '',
+      bill_id: '',
+      payment_date: new Date().toISOString().split('T')[0],
+      payment_mode: 'BANK',
+      amount: 0,
+      reference_no: '',
+      idempotency_key: idemp,
+      notes: '',
+    });
+    setShowPaymentModal(true);
+    if (bills.length === 0) {
+      getSupplierBills().then(setBills).catch(() => {});
+    }
+  };
+
   const handleCreatePayment = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingPayment) return;
+    setError(null);
+    if (newPayment.payment_mode !== 'CASH' && newPayment.reference_no.trim().length < 2) {
+      setError(`External Bank/UPI/Cheque reference number is required for ${newPayment.payment_mode} payments.`);
+      return;
+    }
+    setIsSubmittingPayment(true);
     try {
       await recordSupplierPayment(newPayment);
-      setSuccessMsg(`Payment of ₹${newPayment.amount.toLocaleString()} recorded and ledger updated.`);
+      setSuccessMsg(
+        `Payment of ₹${newPayment.amount.toLocaleString()} recorded${
+          newPayment.bill_id ? '' : ' as On-Account Advance'
+        } and ledger updated.`
+      );
       setShowPaymentModal(false);
       loadData();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmittingPayment(false);
+    }
+  };
+
+  const handleApplyAdvance = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!applyAdvanceModal || isApplyingAdvance) return;
+    setError(null);
+    setIsApplyingAdvance(true);
+    try {
+      const res = await applySupplierAdvance(applyAdvanceModal.payment.payment_id, {
+        bill_id: applyAdvanceModal.bill_id,
+        amount: Number(applyAdvanceModal.amount || 0),
+        idempotency_key: applyAdvanceModal.idempotency_key,
+        notes: applyAdvanceModal.notes,
+      });
+      setSuccessMsg(
+        `Reconciled ₹${Number(res.applied_amount || applyAdvanceModal.amount).toLocaleString()} advance from ${applyAdvanceModal.payment.payment_id} against bill.`
+      );
+      setApplyAdvanceModal(null);
+      loadData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsApplyingAdvance(false);
     }
   };
 
@@ -390,7 +463,7 @@ export const PurchasingView: React.FC = () => {
           )}
           {activeTab === 'payments' && (
             <button
-              onClick={() => setShowPaymentModal(true)}
+              onClick={openPaymentModal}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
             >
               <Plus size={14} /> Record Payment
@@ -699,27 +772,89 @@ export const PurchasingView: React.FC = () => {
                   <th className="px-4 py-3">Payment #</th>
                   <th className="px-4 py-3">Date</th>
                   <th className="px-4 py-3">Supplier</th>
+                  <th className="px-4 py-3">Allocation / Bill</th>
                   <th className="px-4 py-3">Mode</th>
                   <th className="px-4 py-3">Ref No</th>
                   <th className="px-4 py-3 text-right">Amount Paid</th>
+                  <th className="px-4 py-3 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
-                {payments.map((p) => (
-                  <tr key={p.payment_id} className="hover:bg-slate-50/80">
-                    <td className="px-4 py-3 font-semibold text-slate-900">{p.payment_number}</td>
-                    <td className="px-4 py-3">{p.payment_date}</td>
-                    <td className="px-4 py-3">{p.supplier_name}</td>
-                    <td className="px-4 py-3 font-medium text-slate-700">{p.payment_mode}</td>
-                    <td className="px-4 py-3">{p.reference_no || '-'}</td>
-                    <td className="px-4 py-3 text-right font-bold text-emerald-800">
-                      ₹{Number(p.amount || 0).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
+                {payments.map((p) => {
+                  const unalloc = Number(p.unallocated_amount ?? (p.bill_id ? 0 : p.amount) ?? 0);
+                  const isOnAccount = (p.payment_type || (p.bill_id ? 'BILL_PAYMENT' : 'ON_ACCOUNT')) === 'ON_ACCOUNT';
+                  const suppOpenBills = bills.filter(
+                    (b) =>
+                      b.supplier_id === p.supplier_id &&
+                      b.payment_status !== 'PAID' &&
+                      Number(b.balance_amount ?? Number(b.total_amount || 0) - Number(b.paid_amount || 0)) > 0.01
+                  );
+                  return (
+                    <tr key={p.payment_id} className="hover:bg-slate-50/80">
+                      <td className="px-4 py-3 font-semibold text-slate-900">{p.payment_number || p.payment_id}</td>
+                      <td className="px-4 py-3">{p.payment_date}</td>
+                      <td className="px-4 py-3">{p.supplier_name}</td>
+                      <td className="px-4 py-3">
+                        {p.bill_id ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full text-2xs font-bold bg-slate-100 text-slate-800">
+                            Bill {p.bill_id}
+                          </span>
+                        ) : (
+                          <div className="space-y-0.5">
+                            <span className="inline-block px-2 py-0.5 rounded-full text-2xs font-bold bg-blue-100 text-blue-800">
+                              On-Account {isOnAccount ? 'Advance' : ''}
+                            </span>
+                            {unalloc > 0.01 ? (
+                              <div className="text-2xs text-amber-700 font-semibold">
+                                Unapplied: ₹{unalloc.toLocaleString()}
+                              </div>
+                            ) : (
+                              <div className="text-2xs text-emerald-700 font-semibold">
+                                Fully Reconciled
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-slate-700">{p.payment_mode || p.payment_method}</td>
+                      <td className="px-4 py-3 font-mono">{p.reference_no || p.reference_number || '—'}</td>
+                      <td className="px-4 py-3 text-right font-bold text-emerald-800">
+                        ₹{Number(p.amount || 0).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {unalloc > 0.01 && suppOpenBills.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const firstBill = suppOpenBills[0];
+                              const billBal = Number(
+                                firstBill.balance_amount ?? Number(firstBill.total_amount || 0) - Number(firstBill.paid_amount || 0)
+                              );
+                              const allocAmt = Math.min(unalloc, billBal);
+                              const idemp =
+                                typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                                  ? `alloc-${crypto.randomUUID()}`
+                                  : `alloc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                              setApplyAdvanceModal({
+                                payment: p,
+                                bill_id: firstBill.bill_id,
+                                amount: Math.round(allocAmt * 100) / 100,
+                                idempotency_key: idemp,
+                                notes: '',
+                              });
+                            }}
+                            className="px-2.5 py-1 text-2xs font-semibold rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100"
+                          >
+                            Apply to Bill
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
                 {payments.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="text-center py-8 text-slate-400">
+                    <td colSpan={8} className="text-center py-8 text-slate-400">
                       No payments recorded yet. Click &quot;Record Payment&quot; to disburse funds.
                     </td>
                   </tr>
@@ -1588,16 +1723,24 @@ export const PurchasingView: React.FC = () => {
 
       {/* 5. Modal: Record Supplier Payment */}
       {showPaymentModal && (() => {
-        const vendorBills = bills.filter((b) => b.supplier_id === newPayment.supplier_id && b.status !== 'PAID');
+        const vendorBills = bills.filter(
+          (b) =>
+            b.supplier_id === newPayment.supplier_id &&
+            b.payment_status !== 'PAID' &&
+            Number(b.balance_amount ?? Number(b.total_amount || 0) - Number(b.paid_amount || 0)) > 0.01
+        );
         const selectedBill = bills.find((b) => b.bill_id === newPayment.bill_id);
-        const billAmount = Number(selectedBill?.total_amount || 0);
-        const remainingAfter = Math.max(0, billAmount - (Number(newPayment.amount) || 0));
+        const billBalance = selectedBill
+          ? Number(selectedBill.balance_amount ?? Number(selectedBill.total_amount || 0) - Number(selectedBill.paid_amount || 0))
+          : 0;
+        const remainingAfter = Math.max(0, billBalance - (Number(newPayment.amount) || 0));
+        const isCashMode = newPayment.payment_mode === 'CASH';
 
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
             <FormLayout
               title="Record Supplier Payment"
-              subtitle="Disburse funds via Bank Transfer, UPI, or Factory Cash and reconcile accounts payable"
+              subtitle="Disburse funds against a bill or as an On-Account Advance, with full accounting reconciliation"
               icon={<CreditCard size={20} />}
               onSubmit={handleCreatePayment}
               onCancel={() => setShowPaymentModal(false)}
@@ -1605,7 +1748,11 @@ export const PurchasingView: React.FC = () => {
               actions={
                 <FormActions>
                   <CancelButton onClick={() => setShowPaymentModal(false)} />
-                  <SaveButton label="Disburse & Post Payment" icon={<CreditCard size={15} />} />
+                  <SaveButton
+                    label={isSubmittingPayment ? 'Posting Payment...' : 'Disburse & Post Payment'}
+                    icon={<CreditCard size={15} />}
+                    isLoading={isSubmittingPayment}
+                  />
                 </FormActions>
               }
             >
@@ -1626,27 +1773,40 @@ export const PurchasingView: React.FC = () => {
                   </select>
                 </FormField>
 
-                {newPayment.supplier_id && vendorBills.length > 0 && (
-                  <FormField label="Link to Unpaid Bill">
+                {newPayment.supplier_id && (
+                  <FormField
+                    label="Link to Unpaid Bill (Optional)"
+                    helpText={
+                      newPayment.bill_id
+                        ? 'Applied directly to selected supplier bill'
+                        : 'On-Account Advance: recorded to supplier balance and can be reconciled against future bills'
+                    }
+                  >
                     <select
                       value={newPayment.bill_id}
                       onChange={(e) => {
                         const bId = e.target.value;
                         const match = vendorBills.find((b) => b.bill_id === bId);
+                        const matchBal = match
+                          ? Number(match.balance_amount ?? Number(match.total_amount || 0) - Number(match.paid_amount || 0))
+                          : 0;
                         setNewPayment({
                           ...newPayment,
                           bill_id: bId,
-                          amount: match ? Number(match.total_amount) : newPayment.amount,
+                          amount: match ? Math.round(matchBal * 100) / 100 : newPayment.amount,
                         });
                       }}
                       className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
                     >
                       <option value="">-- On Account Payment (General) --</option>
-                      {vendorBills.map((b) => (
-                        <option key={b.bill_id} value={b.bill_id}>
-                          Bill #{b.bill_number} ({b.bill_date}) — Total: ₹{Number(b.total_amount).toLocaleString()}
-                        </option>
-                      ))}
+                      {vendorBills.map((b) => {
+                        const bBal = Number(b.balance_amount ?? Number(b.total_amount || 0) - Number(b.paid_amount || 0));
+                        return (
+                          <option key={b.bill_id} value={b.bill_id}>
+                            Bill #{b.bill_number} ({b.bill_date}) — Due: ₹{bBal.toLocaleString()} (Total: ₹{Number(b.total_amount).toLocaleString()})
+                          </option>
+                        );
+                      })}
                     </select>
                   </FormField>
                 )}
@@ -1683,22 +1843,30 @@ export const PurchasingView: React.FC = () => {
                     {selectedBill && (
                       <button
                         type="button"
-                        onClick={() => setNewPayment({ ...newPayment, amount: billAmount })}
+                        onClick={() => setNewPayment({ ...newPayment, amount: Math.round(billBalance * 100) / 100 })}
                         className="text-xs text-emerald-700 hover:text-emerald-800 font-semibold underline"
                       >
-                        Click to fill full bill balance (₹{billAmount.toLocaleString()})
+                        Click to fill remaining bill balance (₹{billBalance.toLocaleString()})
                       </button>
                     )}
                   </div>
                 </FormField>
 
-                <FormField label="Bank Reference / UTR Number *" required helpText="Unique transaction identifier from bank/UPI">
+                <FormField
+                  label={isCashMode ? 'Cash Voucher / Receipt Ref (Optional)' : 'Bank / UPI / Cheque Reference Number *'}
+                  required={!isCashMode}
+                  helpText={
+                    isCashMode
+                      ? 'Optional petty cash voucher number; leave blank if none'
+                      : 'Enter actual UTR / UPI transaction / Cheque reference (never auto-generated)'
+                  }
+                >
                   <input
                     type="text"
-                    required
+                    required={!isCashMode}
                     value={newPayment.reference_no}
                     onChange={(e) => setNewPayment({ ...newPayment, reference_no: e.target.value })}
-                    placeholder="e.g. UTR-202611-891234 / UPI Ref"
+                    placeholder={isCashMode ? 'Optional cash voucher ref' : 'e.g. UTR-202611-891234 / UPI Ref'}
                     className="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none"
                   />
                 </FormField>
@@ -1708,7 +1876,7 @@ export const PurchasingView: React.FC = () => {
                 <CalculationPreview
                   title="Payment Settlement Reconciliation"
                   items={[
-                    { label: 'Original Bill Payable', value: `₹${billAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
+                    { label: 'Outstanding Bill Balance', value: `₹${billBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
                     { label: 'This Payment Amount', value: `₹${Number(newPayment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
                     {
                       label: 'Remaining Unpaid Balance',
@@ -1718,6 +1886,89 @@ export const PurchasingView: React.FC = () => {
                   ]}
                 />
               )}
+            </FormLayout>
+          </div>
+        );
+      })()}
+
+      {/* 5b. Modal: Reconcile Advance Payment Against Bill */}
+      {applyAdvanceModal && (() => {
+        const eligibleBills = bills.filter(
+          (b) =>
+            b.supplier_id === applyAdvanceModal.payment.supplier_id &&
+            b.payment_status !== 'PAID' &&
+            Number(b.balance_amount ?? Number(b.total_amount || 0) - Number(b.paid_amount || 0)) > 0.01
+        );
+        const availAdvance = Number(applyAdvanceModal.payment.unallocated_amount || 0);
+        const targetBill = eligibleBills.find((b) => b.bill_id === applyAdvanceModal.bill_id);
+        const targetBal = targetBill
+          ? Number(targetBill.balance_amount ?? Number(targetBill.total_amount || 0) - Number(targetBill.paid_amount || 0))
+          : 0;
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <FormLayout
+              title="Apply Advance Payment to Bill"
+              subtitle={`Allocate unapplied balance from ${applyAdvanceModal.payment.payment_id} (${applyAdvanceModal.payment.supplier_name})`}
+              icon={<CreditCard size={20} />}
+              onSubmit={handleApplyAdvance}
+              onCancel={() => setApplyAdvanceModal(null)}
+              maxWidth="md"
+              actions={
+                <FormActions>
+                  <CancelButton onClick={() => setApplyAdvanceModal(null)} />
+                  <SaveButton
+                    label={isApplyingAdvance ? 'Applying...' : 'Reconcile Against Bill'}
+                    icon={<CheckCircle size={15} />}
+                    isLoading={isApplyingAdvance}
+                  />
+                </FormActions>
+              }
+            >
+              <FormSection title="Advance & Target Bill">
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900">
+                  Available Unallocated Advance: <strong>₹{availAdvance.toLocaleString()}</strong>
+                </div>
+                <FormField label="Target Supplier Bill *" required>
+                  <select
+                    required
+                    value={applyAdvanceModal.bill_id}
+                    onChange={(e) => {
+                      const bId = e.target.value;
+                      const match = eligibleBills.find((b) => b.bill_id === bId);
+                      const mBal = match
+                        ? Number(match.balance_amount ?? Number(match.total_amount || 0) - Number(match.paid_amount || 0))
+                        : 0;
+                      setApplyAdvanceModal({
+                        ...applyAdvanceModal,
+                        bill_id: bId,
+                        amount: Math.round(Math.min(availAdvance, mBal) * 100) / 100,
+                      });
+                    }}
+                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    {eligibleBills.map((b) => {
+                      const bBal = Number(b.balance_amount ?? Number(b.total_amount || 0) - Number(b.paid_amount || 0));
+                      return (
+                        <option key={b.bill_id} value={b.bill_id}>
+                          Bill #{b.bill_number} ({b.bill_date}) — Due: ₹{bBal.toLocaleString()}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </FormField>
+                <FormField label="Allocation Amount (₹) *" required>
+                  <MoneyInput
+                    value={applyAdvanceModal.amount}
+                    onChange={(val) => setApplyAdvanceModal({ ...applyAdvanceModal, amount: val })}
+                  />
+                </FormField>
+                {targetBill && (
+                  <p className="text-2xs text-slate-500">
+                    Bill balance: ₹{targetBal.toLocaleString()} · Reconciling updates bill balance without double-posting accounting vouchers.
+                  </p>
+                )}
+              </FormSection>
             </FormLayout>
           </div>
         );

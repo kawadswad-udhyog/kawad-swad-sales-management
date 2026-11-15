@@ -9,6 +9,9 @@ Integrates:
 - SupplierReturns & SupplierReturnItems
 """
 
+from contextlib import ExitStack
+import json
+import math
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,6 +22,7 @@ from app.permissions import is_manager, is_owner, require_manager, require_owner
 from app.sheets import db
 from app.timeutil import now_iso, business_today
 from app.calculations.units import to_decimal, round_money, round_stock
+from app.accounting.customer_ledger import CrossProcessLock
 from app.accounting.postings import (
     post_receipt_journal,
     post_supplier_payment_journal,
@@ -115,12 +119,21 @@ class SupplierBillCreate(BaseModel):
 
 
 class SupplierPaymentCreate(BaseModel):
-    bill_id: str
-    supplier_id: str
+    bill_id: Optional[str] = ""
+    supplier_id: str = Field(..., min_length=1)
     amount: float = Field(..., gt=0)
-    payment_method: str = "BANK_TRANSFER"  # BANK_TRANSFER, UPI, CASH, CHEQUE
-    reference_number: str = Field(..., min_length=2)
+    payment_method: str = "BANK_TRANSFER"  # BANK_TRANSFER, BANK, UPI, CASH, CHEQUE, NEFT, RTGS
+    reference_number: Optional[str] = ""
     payment_date: Optional[str] = ""
+    payment_type: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    notes: Optional[str] = ""
+
+
+class SupplierAdvanceApplyRequest(BaseModel):
+    bill_id: str = Field(..., min_length=1)
+    amount: Optional[float] = None
+    idempotency_key: Optional[str] = None
     notes: Optional[str] = ""
 
 
@@ -524,10 +537,68 @@ async def create_supplier_bill(req: SupplierBillCreate, user: dict = Depends(get
 # Supplier Payments Endpoints
 # ============================================================================
 
+def _parse_allocations(raw_val: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw_val, list):
+        return [dict(x) for x in raw_val if isinstance(x, dict)]
+    text = str(raw_val or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        return [dict(x) for x in parsed if isinstance(x, dict)] if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _enrich_payment_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    amt = round(float(row.get("amount", 0) or 0), 2)
+    bill_id = str(row.get("bill_id", "") or "").strip()
+    pay_type = str(row.get("payment_type", "") or "").strip().upper()
+    if not pay_type:
+        pay_type = "BILL_PAYMENT" if bill_id else "ON_ACCOUNT"
+    allocs = _parse_allocations(row.get("allocations_json"))
+    raw_alloc = row.get("allocated_amount")
+    raw_unalloc = row.get("unallocated_amount")
+    if raw_alloc is not None and str(raw_alloc).strip() != "":
+        alloc_amt = round(float(raw_alloc or 0), 2)
+    elif bill_id:
+        alloc_amt = amt
+    else:
+        alloc_amt = round(sum(float(a.get("amount", 0) or 0) for a in allocs), 2)
+    if raw_unalloc is not None and str(raw_unalloc).strip() != "":
+        unalloc_amt = max(0.0, round(float(raw_unalloc or 0), 2))
+    else:
+        unalloc_amt = max(0.0, round(amt - alloc_amt, 2))
+    return {
+        **row,
+        "bill_id": bill_id,
+        "payment_type": pay_type,
+        "allocated_amount": alloc_amt,
+        "unallocated_amount": unalloc_amt,
+        "allocations": allocs,
+    }
+
+
+def _normalize_supplier_payment_method(raw_method: str) -> str:
+    m = str(raw_method or "").strip().upper()
+    aliases = {
+        "CASH": "CASH",
+        "UPI": "UPI",
+        "BANK": "BANK_TRANSFER",
+        "BANK_TRANSFER": "BANK_TRANSFER",
+        "NEFT": "NEFT",
+        "RTGS": "RTGS",
+        "CHEQUE": "CHEQUE",
+    }
+    if m not in aliases:
+        raise HTTPException(400, f"Unsupported payment method '{raw_method}'. Allowed: CASH, UPI, BANK_TRANSFER, NEFT, RTGS, CHEQUE.")
+    return aliases[m]
+
+
 @router.get("/payments")
 async def list_supplier_payments(user: dict = Depends(get_current_user)):
     require_purchasing_access(user)
-    payments = db.get_records("SupplierPayments", fresh=True)
+    payments = [_enrich_payment_row(p) for p in db.get_records("SupplierPayments", fresh=True)]
     payments.sort(key=lambda x: str(x.get("payment_date", "")), reverse=True)
     return payments
 
@@ -535,57 +606,334 @@ async def list_supplier_payments(user: dict = Depends(get_current_user)):
 @router.post("/payments")
 async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depends(get_current_user)):
     actor, _ = require_owner_access(user)
-    bills = db.get_records("SupplierBills", fresh=True)
-    bill = next((b for b in bills if str(b.get("bill_id")) == req.bill_id), None)
-    if not bill:
-        raise HTTPException(404, f"Supplier bill {req.bill_id} not found.")
 
-    cur_bal = float(bill.get("balance_amount", 0) or 0)
-    if req.amount > cur_bal + 0.05:
-        raise HTTPException(400, f"Payment of ₹{req.amount:.2f} exceeds outstanding balance of ₹{cur_bal:.2f}.")
+    if not math.isfinite(req.amount) or req.amount <= 0:
+        raise HTTPException(400, "Payment amount must be greater than zero.")
 
-    pay_id = db.generate_id("SupplierPayments")
-    now = now_iso()
-    today = business_today()
-    supp_name = str(bill.get("supplier_name", "Supplier"))
+    clean_supplier_id = str(req.supplier_id or "").strip()
+    if not clean_supplier_id:
+        raise HTTPException(400, "Supplier ID is required.")
 
-    pay_row = {
-        "payment_id": pay_id,
-        "bill_id": req.bill_id,
-        "supplier_id": req.supplier_id,
-        "supplier_name": supp_name,
-        "payment_date": req.payment_date or today,
-        "amount": round_money(req.amount),
-        "payment_method": req.payment_method.upper(),
-        "reference_number": req.reference_number.strip(),
-        "status": "PAID",
-        "paid_by": actor,
-        "created_at": now,
-        "notes": (req.notes or "").strip(),
-    }
-    db.append_record("SupplierPayments", pay_row, raise_on_error=True)
+    clean_bill_id = str(req.bill_id or "").strip()
+    clean_method = _normalize_supplier_payment_method(req.payment_method)
+    clean_ref = str(req.reference_number or "").strip()
+    clean_idemp_key = str(req.idempotency_key or "").strip()
+    req_amount = round_money(req.amount)
 
-    # Update bill balance
-    old_paid = float(bill.get("paid_amount", 0) or 0)
-    new_paid = round(old_paid + req.amount, 2)
-    tot_amt = float(bill.get("total_amount", 0) or 0)
-    new_bal = max(0.0, round(tot_amt - new_paid, 2))
-    new_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
+    # Phase 2 Reference integrity:
+    # - CASH may leave external reference blank (""), never generate synthetic PAY-xxxxxx.
+    # - Non-cash modes require an actual bank/UPI/cheque reference number.
+    if clean_method != "CASH" and len(clean_ref) < 2:
+        raise HTTPException(
+            400,
+            f"External bank/UPI/cheque reference number is required for {clean_method} payment.",
+        )
 
-    db.update_record("SupplierBills", "bill_id", req.bill_id, {
-        "paid_amount": new_paid,
-        "balance_amount": new_bal,
-        "payment_status": new_status,
-    }, raise_on_error=True)
+    suppliers = db.get_records("Suppliers", fresh=True)
+    supp = next((s for s in suppliers if str(s.get("supplier_id", "")).strip() == clean_supplier_id), None)
+    if not supp:
+        raise HTTPException(404, f"Supplier {clean_supplier_id} not found.")
+    supp_name = str(supp.get("supplier_name") or clean_supplier_id)
 
-    # Post double-entry accounting journal
-    try:
+    with ExitStack() as stack:
+        stack.enter_context(CrossProcessLock("supplier", clean_supplier_id))
+        if clean_bill_id:
+            stack.enter_context(CrossProcessLock("supplier_bill", clean_bill_id))
+
+        bills = db.get_records("SupplierBills", fresh=True)
+        payments = db.get_records("SupplierPayments", fresh=True)
+
+        # Idempotent replay / partial-failure recovery check
+        existing_pay = None
+        if clean_idemp_key:
+            existing_pay = next(
+                (p for p in reversed(payments) if str(p.get("idempotency_key", "")).strip() == clean_idemp_key),
+                None,
+            )
+            if existing_pay:
+                ex_supp = str(existing_pay.get("supplier_id", "")).strip()
+                ex_bill = str(existing_pay.get("bill_id", "") or "").strip()
+                ex_amt = round(float(existing_pay.get("amount", 0) or 0), 2)
+                ex_ref = str(existing_pay.get("reference_number", "") or "").strip()
+                if (
+                    ex_supp != clean_supplier_id
+                    or ex_bill != clean_bill_id
+                    or abs(ex_amt - float(req_amount)) > 0.05
+                    or ex_ref != clean_ref
+                ):
+                    raise HTTPException(409, "Idempotency key already used with a different payment payload.")
+
+                ex_status = str(existing_pay.get("status", "")).strip().upper()
+                bill_row = next((b for b in bills if str(b.get("bill_id", "")).strip() == clean_bill_id), None) if clean_bill_id else None
+                if ex_status == "PAID":
+                    rem_bal = round(float(bill_row.get("balance_amount", 0) or 0), 2) if bill_row else 0.0
+                    b_status = str(bill_row.get("payment_status", "N/A")) if bill_row else "ON_ACCOUNT"
+                    return {
+                        "ok": True,
+                        "payment": _enrich_payment_row(existing_pay),
+                        "remaining_balance": rem_bal,
+                        "bill_status": b_status,
+                        "payment_type": "BILL_PAYMENT" if clean_bill_id else "ON_ACCOUNT",
+                        "is_replay": True,
+                    }
+
+        bill = None
+        if clean_bill_id:
+            bill = next((b for b in bills if str(b.get("bill_id", "")).strip() == clean_bill_id), None)
+            if not bill:
+                raise HTTPException(404, f"Supplier bill {clean_bill_id} not found.")
+            if str(bill.get("supplier_id", "")).strip() != clean_supplier_id:
+                raise HTTPException(
+                    400,
+                    f"Bill {clean_bill_id} belongs to supplier {bill.get('supplier_id')}, not {clean_supplier_id}.",
+                )
+            cur_bal = round(float(bill.get("balance_amount", 0) or 0), 2)
+            # Only enforce remaining balance on a brand-new attempt (not recovering an incomplete attempt that may already have updated the bill)
+            spay_marker_present = existing_pay is not None and f"[spay:{existing_pay.get('payment_id')}]" in str(bill.get("notes", ""))
+            if not spay_marker_present and float(req_amount) > cur_bal + 0.05:
+                raise HTTPException(
+                    400,
+                    f"Payment of ₹{float(req_amount):.2f} exceeds outstanding balance of ₹{cur_bal:.2f}.",
+                )
+
+        now = now_iso()
+        today = business_today()
+        pay_type = "BILL_PAYMENT" if clean_bill_id else "ON_ACCOUNT"
+
+        if existing_pay:
+            pay_id = str(existing_pay.get("payment_id", "")).strip()
+            pay_row = dict(existing_pay)
+        else:
+            pay_id = db.generate_id("SupplierPayments")
+            allocs_initial = (
+                [
+                    {
+                        "bill_id": clean_bill_id,
+                        "bill_number": str(bill.get("bill_number", "")) if bill else "",
+                        "amount": float(req_amount),
+                        "allocated_at": now,
+                        "allocated_by": actor,
+                    }
+                ]
+                if clean_bill_id
+                else []
+            )
+            pay_row = {
+                "payment_id": pay_id,
+                "bill_id": clean_bill_id,
+                "supplier_id": clean_supplier_id,
+                "supplier_name": supp_name,
+                "payment_date": (req.payment_date or today).strip(),
+                "amount": req_amount,
+                "payment_method": clean_method,
+                "reference_number": clean_ref,
+                "status": "INCOMPLETE",
+                "paid_by": actor,
+                "created_at": now,
+                "notes": (req.notes or "").strip(),
+                "payment_type": pay_type,
+                "allocated_amount": float(req_amount) if clean_bill_id else 0.0,
+                "unallocated_amount": 0.0 if clean_bill_id else float(req_amount),
+                "allocations_json": json.dumps(allocs_initial),
+                "idempotency_key": clean_idemp_key,
+            }
+            db.append_record("SupplierPayments", pay_row, raise_on_error=True)
+
+        # Apply bill deduction once (guarded by [spay:<pay_id>] marker for crash recovery)
+        new_bal = 0.0
+        new_status = "ON_ACCOUNT"
+        if bill is not None:
+            bill_notes = str(bill.get("notes", "") or "")
+            spay_tag = f"[spay:{pay_id}]"
+            if spay_tag in bill_notes:
+                new_bal = round(float(bill.get("balance_amount", 0) or 0), 2)
+                new_status = str(bill.get("payment_status", "PARTIALLY_PAID"))
+            else:
+                old_paid = float(bill.get("paid_amount", 0) or 0)
+                new_paid = round(old_paid + float(req_amount), 2)
+                tot_amt = float(bill.get("total_amount", 0) or 0)
+                new_bal = max(0.0, round(tot_amt - new_paid, 2))
+                new_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
+                updated_notes = f"{bill_notes} {spay_tag}".strip()
+                db.update_record(
+                    "SupplierBills",
+                    "bill_id",
+                    clean_bill_id,
+                    {
+                        "paid_amount": new_paid,
+                        "balance_amount": new_bal,
+                        "payment_status": new_status,
+                        "notes": updated_notes,
+                    },
+                    raise_on_error=True,
+                )
+
+        # Post double-entry accounting journal (fail-closed, idempotent by SUPPLIER_PAYMENT:<pay_id>)
         post_supplier_payment_journal(pay_row, actor=actor)
-    except Exception as acct_err:
-        pass
 
-    db.log_audit(actor, "RECORD_SUPPLIER_PAYMENT", "SupplierPayments", pay_id, reason=f"Paid ₹{req.amount:.2f} to {supp_name} for bill {bill.get('bill_number')}")
-    return {"ok": True, "payment": pay_row, "remaining_balance": new_bal, "bill_status": new_status}
+        # Mark payment record PAID after all downstream effects succeed
+        db.update_record("SupplierPayments", "payment_id", pay_id, {"status": "PAID"}, raise_on_error=True)
+        pay_row["status"] = "PAID"
+
+        audit_target = f"bill {bill.get('bill_number')}" if bill else "on-account advance"
+        db.log_audit(
+            actor,
+            "RECORD_SUPPLIER_PAYMENT",
+            "SupplierPayments",
+            pay_id,
+            reason=f"Paid ₹{float(req_amount):.2f} to {supp_name} ({audit_target})",
+        )
+        return {
+            "ok": True,
+            "payment": _enrich_payment_row(pay_row),
+            "remaining_balance": new_bal,
+            "bill_status": new_status,
+            "payment_type": pay_type,
+            "is_replay": bool(existing_pay),
+        }
+
+
+@router.post("/payments/{payment_id}/apply")
+async def apply_supplier_advance_to_bill(
+    payment_id: str,
+    req: SupplierAdvanceApplyRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Reconcile an existing On-Account / Advance supplier payment against a supplier bill.
+    Updates SupplierBills paid/balance amounts and SupplierPayments allocation tracking
+    WITHOUT creating a duplicate payment or double-posting accounting vouchers.
+    """
+    actor, _ = require_owner_access(user)
+    clean_pay_id = str(payment_id or "").strip()
+    clean_bill_id = str(req.bill_id or "").strip()
+    clean_idemp_key = str(req.idempotency_key or "").strip()
+
+    if not clean_bill_id:
+        raise HTTPException(400, "Target bill_id is required to apply advance payment.")
+    if req.amount is not None and (not math.isfinite(req.amount) or req.amount <= 0):
+        raise HTTPException(400, "Applied amount must be greater than zero.")
+
+    # Quick lookup to identify supplier_id for consistent lock ordering
+    pre_payments = db.get_records("SupplierPayments", fresh=True)
+    pre_pay = next((p for p in pre_payments if str(p.get("payment_id", "")).strip() == clean_pay_id), None)
+    if not pre_pay:
+        raise HTTPException(404, f"Supplier payment {clean_pay_id} not found.")
+    clean_supplier_id = str(pre_pay.get("supplier_id", "")).strip()
+
+    with ExitStack() as stack:
+        stack.enter_context(CrossProcessLock("supplier", clean_supplier_id))
+        stack.enter_context(CrossProcessLock("supplier_bill", clean_bill_id))
+
+        payments = db.get_records("SupplierPayments", fresh=True)
+        pay_raw = next((p for p in payments if str(p.get("payment_id", "")).strip() == clean_pay_id), None)
+        if not pay_raw:
+            raise HTTPException(404, f"Supplier payment {clean_pay_id} not found.")
+        if str(pay_raw.get("status", "")).strip().upper() != "PAID":
+            raise HTTPException(400, f"Payment {clean_pay_id} is in status '{pay_raw.get('status')}' and cannot be applied.")
+
+        bills = db.get_records("SupplierBills", fresh=True)
+        bill = next((b for b in bills if str(b.get("bill_id", "")).strip() == clean_bill_id), None)
+        if not bill:
+            raise HTTPException(404, f"Supplier bill {clean_bill_id} not found.")
+        if str(bill.get("supplier_id", "")).strip() != clean_supplier_id:
+            raise HTTPException(
+                400,
+                f"Bill {clean_bill_id} belongs to supplier {bill.get('supplier_id')}, not {clean_supplier_id}.",
+            )
+
+        enriched = _enrich_payment_row(pay_raw)
+        allocs = list(enriched["allocations"])
+
+        # Idempotent replay guard
+        if clean_idemp_key:
+            prior = next((a for a in allocs if str(a.get("idempotency_key", "")).strip() == clean_idemp_key), None)
+            if prior:
+                if str(prior.get("bill_id", "")).strip() != clean_bill_id or (
+                    req.amount is not None and abs(float(prior.get("amount", 0)) - float(req.amount)) > 0.05
+                ):
+                    raise HTTPException(409, "Idempotency key already used for a different allocation.")
+                return {
+                    "ok": True,
+                    "payment": enriched,
+                    "bill": bill,
+                    "applied_amount": float(prior.get("amount", 0)),
+                    "is_replay": True,
+                }
+
+        available_advance = float(enriched["unallocated_amount"])
+        if available_advance <= 0.005:
+            raise HTTPException(400, f"Payment {clean_pay_id} has no remaining unallocated advance balance.")
+
+        bill_bal = round(float(bill.get("balance_amount", 0) or 0), 2)
+        if bill_bal <= 0.005:
+            raise HTTPException(400, f"Supplier bill {bill.get('bill_number')} is already fully paid.")
+
+        apply_amt = round(float(req.amount), 2) if req.amount is not None else round(min(available_advance, bill_bal), 2)
+        if apply_amt > available_advance + 0.05:
+            raise HTTPException(
+                400,
+                f"Requested allocation ₹{apply_amt:.2f} exceeds remaining advance ₹{available_advance:.2f}.",
+            )
+        if apply_amt > bill_bal + 0.05:
+            raise HTTPException(
+                400,
+                f"Requested allocation ₹{apply_amt:.2f} exceeds bill balance ₹{bill_bal:.2f}.",
+            )
+
+        now = now_iso()
+        alloc_tag = f"[spay-alloc:{clean_pay_id}:{clean_idemp_key or len(allocs) + 1}]"
+        bill_notes = str(bill.get("notes", "") or "")
+        if alloc_tag not in bill_notes:
+            old_paid = float(bill.get("paid_amount", 0) or 0)
+            new_paid = round(old_paid + apply_amt, 2)
+            tot_amt = float(bill.get("total_amount", 0) or 0)
+            new_bal = max(0.0, round(tot_amt - new_paid, 2))
+            new_bill_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
+            bill_updates = {
+                "paid_amount": new_paid,
+                "balance_amount": new_bal,
+                "payment_status": new_bill_status,
+                "notes": f"{bill_notes} {alloc_tag}".strip(),
+            }
+            db.update_record("SupplierBills", "bill_id", clean_bill_id, bill_updates, raise_on_error=True)
+            bill = {**bill, **bill_updates}
+
+        new_alloc_entry = {
+            "bill_id": clean_bill_id,
+            "bill_number": str(bill.get("bill_number", "")),
+            "amount": apply_amt,
+            "allocated_at": now,
+            "allocated_by": actor,
+            "idempotency_key": clean_idemp_key,
+            "notes": (req.notes or "").strip(),
+        }
+        allocs.append(new_alloc_entry)
+        new_allocated = round(float(enriched["allocated_amount"]) + apply_amt, 2)
+        new_unallocated = max(0.0, round(float(enriched["amount"]) - new_allocated, 2))
+        pay_updates = {
+            "allocated_amount": new_allocated,
+            "unallocated_amount": new_unallocated,
+            "allocations_json": json.dumps(allocs),
+        }
+        db.update_record("SupplierPayments", "payment_id", clean_pay_id, pay_updates, raise_on_error=True)
+        updated_pay = _enrich_payment_row({**pay_raw, **pay_updates})
+
+        db.log_audit(
+            actor,
+            "APPLY_SUPPLIER_ADVANCE",
+            "SupplierPayments",
+            clean_pay_id,
+            reason=f"Applied ₹{apply_amt:.2f} advance from {clean_pay_id} to bill {bill.get('bill_number')} ({clean_bill_id})",
+        )
+        return {
+            "ok": True,
+            "payment": updated_pay,
+            "bill": bill,
+            "applied_amount": apply_amt,
+            "remaining_advance": new_unallocated,
+            "is_replay": False,
+        }
 
 
 # ============================================================================
@@ -720,16 +1068,31 @@ async def purchasing_summary(user: dict = Depends(get_current_user)):
     orders = db.get_records("PurchaseOrders", fresh=True)
     receipts = db.get_records("GoodsReceipts", fresh=True)
     bills = db.get_records("SupplierBills", fresh=True)
+    payments = db.get_records("SupplierPayments", fresh=True)
 
     total_suppliers = len(suppliers)
     open_orders = sum(1 for po in orders if str(po.get("status", "")).upper() in {"APPROVED", "PENDING"})
     unpaid_bills = [b for b in bills if str(b.get("payment_status", "")).upper() != "PAID"]
-    total_payable_balance = round(sum(float(b.get("balance_amount", 0) or 0) for b in unpaid_bills), 2)
+    total_billed = round(sum(float(b.get("total_amount", 0) or 0) for b in bills), 2)
+    bill_paid_total = round(sum(float(b.get("paid_amount", 0) or 0) for b in bills), 2)
+    bill_balance_total = round(sum(float(b.get("balance_amount", 0) or 0) for b in unpaid_bills), 2)
+
+    paid_payments = [_enrich_payment_row(p) for p in payments if str(p.get("status", "")).strip().upper() == "PAID"]
+    total_advances = round(sum(float(p.get("unallocated_amount", 0) or 0) for p in paid_payments), 2)
+    total_paid = round(bill_paid_total + total_advances, 2)
+    net_payable = max(0.0, round(bill_balance_total - total_advances, 2))
 
     return {
         "total_suppliers": total_suppliers,
         "open_orders_count": open_orders,
+        "open_pos": open_orders,
         "total_receipts_count": len(receipts),
         "unpaid_bills_count": len(unpaid_bills),
-        "total_accounts_payable": total_payable_balance,
+        "unpaid_bills": len(unpaid_bills),
+        "total_billed": total_billed,
+        "total_paid": total_paid,
+        "total_advances": total_advances,
+        "total_accounts_payable": net_payable,
+        "total_payables": net_payable,
+        "net_payable": net_payable,
     }

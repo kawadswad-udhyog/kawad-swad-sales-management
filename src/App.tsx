@@ -1,31 +1,39 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { useStore, StoreProvider } from './context/StoreContext';
 import { Header } from './components/Header';
 import { Navigation, ViewType } from './components/Navigation';
 import { LoginModal } from './components/LoginModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { DashboardView } from './views/DashboardView';
-import { ProductsView } from './views/ProductsView';
-import { CustomersView } from './views/CustomersView';
-import { SalesView } from './views/SalesView';
-import { StockView } from './views/StockView';
-import { ExpensesView } from './views/ExpensesView';
-import { VisitsView } from './views/VisitsView';
-import { ClosingView } from './views/ClosingView';
-import { SalaryView } from './views/SalaryView';
-import { ReportsView } from './views/ReportsView';
-import { AuditView } from './views/AuditView';
-import { UsersView } from './views/UsersView';
-import { ProductionView } from './views/ProductionView';
-import { AttendanceView } from './views/AttendanceView';
-import { ApprovalsView } from './views/ApprovalsView';
-import { AccountingView } from './views/AccountingView';
-import { PurchasingView } from './views/PurchasingView';
-import { QualityView } from './views/QualityView';
-import { WorkforceView } from './views/WorkforceView';
-import { EmployeePortal } from './employee/EmployeePortal';
 import { WorkspaceId, WORKSPACES, getWorkspaceForRole } from './utils/workspaces';
 import { AlertTriangle, AlertCircle, RefreshCw, X, ShieldAlert } from 'lucide-react';
+
+const DashboardView = lazy(() => import('./views/DashboardView').then((m) => ({ default: m.DashboardView })));
+const ProductsView = lazy(() => import('./views/ProductsView').then((m) => ({ default: m.ProductsView })));
+const CustomersView = lazy(() => import('./views/CustomersView').then((m) => ({ default: m.CustomersView })));
+const SalesView = lazy(() => import('./views/SalesView').then((m) => ({ default: m.SalesView })));
+const StockView = lazy(() => import('./views/StockView').then((m) => ({ default: m.StockView })));
+const ExpensesView = lazy(() => import('./views/ExpensesView').then((m) => ({ default: m.ExpensesView })));
+const VisitsView = lazy(() => import('./views/VisitsView').then((m) => ({ default: m.VisitsView })));
+const ClosingView = lazy(() => import('./views/ClosingView').then((m) => ({ default: m.ClosingView })));
+const SalaryView = lazy(() => import('./views/SalaryView').then((m) => ({ default: m.SalaryView })));
+const ReportsView = lazy(() => import('./views/ReportsView').then((m) => ({ default: m.ReportsView })));
+const AuditView = lazy(() => import('./views/AuditView').then((m) => ({ default: m.AuditView })));
+const UsersView = lazy(() => import('./views/UsersView').then((m) => ({ default: m.UsersView })));
+const ProductionView = lazy(() => import('./views/ProductionView').then((m) => ({ default: m.ProductionView })));
+const AttendanceView = lazy(() => import('./views/AttendanceView').then((m) => ({ default: m.AttendanceView })));
+const ApprovalsView = lazy(() => import('./views/ApprovalsView').then((m) => ({ default: m.ApprovalsView })));
+const AccountingView = lazy(() => import('./views/AccountingView').then((m) => ({ default: m.AccountingView })));
+const PurchasingView = lazy(() => import('./views/PurchasingView').then((m) => ({ default: m.PurchasingView })));
+const QualityView = lazy(() => import('./views/QualityView').then((m) => ({ default: m.QualityView })));
+const WorkforceView = lazy(() => import('./views/WorkforceView').then((m) => ({ default: m.WorkforceView })));
+const EmployeePortal = lazy(() => import('./employee/EmployeePortal').then((m) => ({ default: m.EmployeePortal })));
+
+const ViewLoadingFallback: React.FC = () => (
+  <div className="py-16 flex flex-col items-center justify-center text-slate-500 text-xs">
+    <div className="w-8 h-8 rounded-full border-2 border-emerald-700 border-t-transparent animate-spin mb-3" />
+    <span>Loading module…</span>
+  </div>
+);
 
 const MainAppContent: React.FC = () => {
   const {
@@ -139,10 +147,12 @@ const MainAppContent: React.FC = () => {
 
   if ((isEmployeeOnlyRole && !activeWorkspaceOverride) || isPreviewingEmployeePortal) {
     return (
-      <EmployeePortal
-        isOwnerPreviewing={isPreviewingEmployeePortal}
-        onExitPreview={() => setIsPreviewingEmployeePortal(false)}
-      />
+      <Suspense fallback={<ViewLoadingFallback />}>
+        <EmployeePortal
+          isOwnerPreviewing={isPreviewingEmployeePortal}
+          onExitPreview={() => setIsPreviewingEmployeePortal(false)}
+        />
+      </Suspense>
     );
   }
 
@@ -310,7 +320,9 @@ const MainAppContent: React.FC = () => {
         />
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
           <ErrorBoundary>
-            {renderView()}
+            <Suspense fallback={<ViewLoadingFallback />}>
+              {renderView()}
+            </Suspense>
           </ErrorBoundary>
         </main>
       </div>

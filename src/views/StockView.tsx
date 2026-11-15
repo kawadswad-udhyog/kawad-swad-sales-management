@@ -9,7 +9,6 @@ import {
   reportVanLoadingDiscrepancy,
   cancelVanLoadingPass,
 } from '../services/api';
-import { exportSheetToExcel } from '../utils/exportToExcel';
 import {
   Truck,
   CheckCircle2,
@@ -514,7 +513,7 @@ export const StockView: React.FC = () => {
     return true;
   });
 
-  const handleExportRegisterExcel = () => {
+  const handleExportRegisterExcel = async () => {
     const exportRows = filteredRegister.map((item) => ({
       'SKU': item.sku,
       'Product Name': item.product_name,
@@ -529,7 +528,8 @@ export const StockView: React.FC = () => {
       'Stock Status': item.stock_status,
       'Active': item.active ? 'YES' : 'NO',
     }));
-    exportSheetToExcel('Finished_Goods_Stock_Register', exportRows);
+    const { exportSheetToExcel } = await import('../utils/exportToExcel');
+    await exportSheetToExcel('Finished_Goods_Stock_Register', exportRows);
   };
 
   return (

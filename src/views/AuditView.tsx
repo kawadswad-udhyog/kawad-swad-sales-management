@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
-import { exportSheetToExcel } from '../utils/exportToExcel';
 
 export const AuditView: React.FC = () => {
   const { auditLogs } = useStore();
@@ -25,8 +24,9 @@ export const AuditView: React.FC = () => {
     return true;
   });
 
-  const handleExport = () => {
-    exportSheetToExcel('Audit_Log', filteredLogs);
+  const handleExport = async () => {
+    const { exportSheetToExcel } = await import('../utils/exportToExcel');
+    await exportSheetToExcel('Audit_Log', filteredLogs);
   };
 
   return (

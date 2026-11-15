@@ -1431,10 +1431,21 @@ export const AccountingView: React.FC = () => {
                 <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
                   {creditors.map((c) => (
                     <tr key={c.supplier_id} className="hover:bg-slate-50/80">
-                      <td className="px-4 py-3 font-semibold text-slate-900">{c.supplier_name}</td>
+                      <td className="px-4 py-3 font-semibold text-slate-900">
+                        <div>{c.supplier_name}</div>
+                        {Number(c.advance_balance || 0) > 0 && (
+                          <span className="inline-block mt-0.5 px-2 py-0.5 rounded-full text-2xs font-bold bg-blue-100 text-blue-800">
+                            Advance Credit: {formatCurrency(c.advance_balance)}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-right font-mono">{formatCurrency(c.total_billed)}</td>
                       <td className="px-4 py-3 text-right font-mono text-emerald-700">{formatCurrency(c.total_paid)}</td>
-                      <td className="px-4 py-3 text-right font-mono font-bold text-red-700">
+                      <td
+                        className={`px-4 py-3 text-right font-mono font-bold ${
+                          Number(c.outstanding_payable || 0) < 0 ? 'text-blue-700' : 'text-red-700'
+                        }`}
+                      >
                         {formatCurrency(c.outstanding_payable)}
                       </td>
                       <td className="px-4 py-3 text-center">

@@ -477,18 +477,22 @@ export const LoginModal: React.FC = () => {
               </span>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setShowServerConfig(!showServerConfig)}
-              className="inline-flex items-center gap-1 text-slate-400 hover:text-slate-700 text-[11px] font-medium transition-colors cursor-pointer"
-              title="Configure Backend Server Endpoint"
-            >
-              <Settings size={12} />
-              <span>{showServerConfig ? 'Close' : 'Server Config'}</span>
-            </button>
+            {typeof window !== 'undefined' &&
+              (['localhost', '127.0.0.1', '::1'].includes(window.location.hostname) ||
+                window.location.hostname.endsWith('.local')) && (
+                <button
+                  type="button"
+                  onClick={() => setShowServerConfig(!showServerConfig)}
+                  className="inline-flex items-center gap-1 text-slate-400 hover:text-slate-700 text-[11px] font-medium transition-colors cursor-pointer"
+                  title="Configure Local Development Backend Endpoint"
+                >
+                  <Settings size={12} />
+                  <span>{showServerConfig ? 'Close' : 'Server Config'}</span>
+                </button>
+              )}
           </div>
 
-          {/* Collapsible Server Configuration Panel */}
+          {/* Collapsible Server Configuration Panel (Local Development Only) */}
           {showServerConfig && (
             <form
               onSubmit={handleSaveBackendUrl}
@@ -502,8 +506,7 @@ export const LoginModal: React.FC = () => {
                 type="url"
                 value={customUrl}
                 onChange={(e) => setCustomUrl(e.target.value)}
-                placeholder="https://kawad-swad-sales-dev.onrender.com"
-                required
+                placeholder="http://127.0.0.1:8000 (blank = same-origin proxy)"
                 className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-[#0F2C23] font-mono"
               />
               <div className="flex items-center gap-2 pt-1">
@@ -516,8 +519,8 @@ export const LoginModal: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    setCustomUrl('https://kawad-swad-sales-dev.onrender.com');
-                    updateBackendUrl('https://kawad-swad-sales-dev.onrender.com');
+                    setCustomUrl('');
+                    updateBackendUrl('');
                     setShowServerConfig(false);
                   }}
                   className="px-3 py-1 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"

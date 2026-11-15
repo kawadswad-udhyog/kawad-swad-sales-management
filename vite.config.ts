@@ -3,16 +3,19 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 const envTarget = (process.env.VITE_API_URL || '').trim();
-const backendTarget =
-  envTarget && !envTarget.includes('example.com') && !envTarget.includes('your-backend')
-    ? envTarget.replace(/\/$/, '')
-    : 'https://kawad-swad-sales-dev.onrender.com';
+const isPlaceholderTarget =
+  !envTarget ||
+  envTarget.includes('example.com') ||
+  envTarget.includes('your-backend') ||
+  envTarget.includes('REPLACE-WITH-PROD') ||
+  envTarget.includes('kawad-swad-sales-dev.onrender.com');
+const backendTarget = isPlaceholderTarget ? 'http://127.0.0.1:8000' : envTarget.replace(/\/$/, '');
 
 function createProxyRule(prefix: string) {
   return {
     target: backendTarget,
     changeOrigin: true,
-    secure: true,
+    secure: backendTarget.startsWith('https://'),
     configure: (proxy: any) => {
       proxy.on('proxyReq', (proxyReq: any, req: any) => {
         const fullTarget = `${backendTarget}${req.url}`;
@@ -35,11 +38,11 @@ function createProxyRule(prefix: string) {
             res.end(
               JSON.stringify({
                 status: 'standby',
-                service: 'kawad-swad-sales-dev',
+                service: 'kawad-swad-erp-api',
                 google_sheets_connected: false,
                 persistent_writes_enabled: false,
                 last_connection_error: `Backend at ${backendTarget} is currently offline or sleeping. Operating in Standby Mode.`,
-                backend: { status: 'STANDBY', service: 'kawad-swad-sales-dev', version: '1.0.0' },
+                backend: { status: 'STANDBY', service: 'kawad-swad-erp-api', version: '1.0.0' },
                 google_sheets: { status: 'STANDBY', connected: false, message: 'Standby Mode active.' },
                 required_sheets: { status: 'STANDBY', total_managed_tabs: 49 },
               })

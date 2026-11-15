@@ -12,7 +12,6 @@ import {
   DalMillingHistoryItem,
 } from '../services/api';
 import { useStore } from '../context/StoreContext';
-import { exportSheetToExcel } from '../utils/exportToExcel';
 import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
 
 type Product = { product_id: string; product_name: string; sku: string; active: boolean; pack_weight_g: number };
@@ -3075,7 +3074,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             'Stock Status': item.stock_status,
             'Active in Master': item.active ? 'YES' : 'NO',
           }));
-          exportSheetToExcel('Kawad_Swad_Finished_Goods_Register', exportRows);
+          void import('../utils/exportToExcel').then(({ exportSheetToExcel }) =>
+            exportSheetToExcel('Kawad_Swad_Finished_Goods_Register', exportRows)
+          );
         };
 
         return (

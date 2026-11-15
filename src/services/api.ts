@@ -80,40 +80,61 @@ export function clearApiDebugLogs(): void {
   _apiDebugLogs.length = 0;
 }
 
+function isDisallowedBackendOverride(url: string): boolean {
+  const lower = url.toLowerCase();
+  return (
+    lower.includes('kawad-swad-sales-backend.onrender.com') ||
+    lower.includes('kawad-swad-sales-dev.onrender.com') ||
+    lower.includes('example.com') ||
+    lower.includes('your-backend') ||
+    lower.includes('replace-with-prod')
+  );
+}
+
 /**
  * Determine the active API base URL.
- * When running in development, preview, or local environments (e.g. localhost, 127.0.0.1, or .run.app),
- * relative path routing is preferred by default so Vite's proxy handles forwarding, logging, and CORS bypass.
+ * Deployed/production origins never honor stale localStorage overrides or -dev hosts;
+ * they use build-time VITE_API_URL (when valid and non-dev) or same-origin relative routing.
  */
 export function getApiBaseUrl(): string {
+  const rawDefault = (DEFAULT_API_BASE_URL || '').trim().replace(/\/+$/, '');
+  const cleanDefault = rawDefault && !isDisallowedBackendOverride(rawDefault) ? rawDefault : '';
+
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
-    const isProductionFrontend = hostname === 'kawad-swad-sales-frontend.onrender.com';
-
-    // Production must use the Render static site's configured rewrites. Never let a
-    // stale URL saved by Server Config redirect production traffic to an old/dev API.
-    if (isProductionFrontend) return '';
+    const isLocalHost =
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname.endsWith('.local');
 
     const saved = localStorage.getItem(STORAGE_API_KEY)?.trim().replace(/\/+$/, '');
-    if (saved) {
-      if (saved.includes('kawad-swad-sales-backend.onrender.com')) {
-        localStorage.removeItem(STORAGE_API_KEY);
-      } else {
-        return saved;
-      }
+    if (saved && isDisallowedBackendOverride(saved)) {
+      localStorage.removeItem(STORAGE_API_KEY);
     }
 
-    if (DEFAULT_API_BASE_URL) return DEFAULT_API_BASE_URL.replace(/\/+$/, '');
-    return '';
+    // Never allow stale localStorage overrides on deployed/production frontends.
+    if (!isLocalHost) {
+      if (saved) {
+        localStorage.removeItem(STORAGE_API_KEY);
+      }
+      return cleanDefault;
+    }
+
+    if (saved && !isDisallowedBackendOverride(saved)) {
+      return saved;
+    }
+
+    return cleanDefault;
   }
 
-  return (DEFAULT_API_BASE_URL || '').replace(/\/+$/, '');
+  return cleanDefault;
 }
 
 export function setApiBaseUrl(url: string): void {
   if (typeof window !== 'undefined') {
     const clean = url.trim().replace(/\/+$/, '');
-    if (clean) {
+    if (clean && !isDisallowedBackendOverride(clean)) {
       localStorage.setItem(STORAGE_API_KEY, clean);
     } else {
       localStorage.removeItem(STORAGE_API_KEY);
@@ -657,7 +678,7 @@ export async function fetchBackendHealth(): Promise<BackendHealthResponse> {
       allow_in_memory_fallback: true,
       backend: {
         status: 'STANDBY',
-        service: 'kawad-swad-sales-dev',
+        service: 'kawad-swad-erp-api',
         version: '1.0.0',
       },
       google_sheets: {
@@ -1217,28 +1238,53 @@ export async function recordSupplierPayment(payload: {
   amount: number;
   reference_no?: string;
   reference_number?: string;
+  idempotency_key?: string;
   notes?: string;
 }): Promise<SupplierPayment> {
   const methodMap: Record<string, string> = {
     BANK: 'BANK_TRANSFER',
-    NEFT: 'BANK_TRANSFER',
+    NEFT: 'NEFT',
   };
+  const externalRef = (payload.reference_number || payload.reference_no || '').trim();
   const normalized = {
-    ...payload,
-    bill_id: payload.bill_id || '',
+    supplier_id: payload.supplier_id,
+    bill_id: (payload.bill_id || '').trim(),
+    payment_date: payload.payment_date,
     payment_method:
       payload.payment_method ||
       methodMap[payload.payment_mode] ||
       payload.payment_mode ||
       'BANK_TRANSFER',
-    reference_number:
-      (payload.reference_number || payload.reference_no || '').trim().length >= 2
-        ? (payload.reference_number || payload.reference_no || '').trim()
-        : `PAY-${Date.now().toString().slice(-6)}`,
+    amount: Number(payload.amount || 0),
+    reference_number: externalRef,
+    idempotency_key: payload.idempotency_key,
+    notes: payload.notes || '',
   };
   return apiRequest<SupplierPayment>('/api/purchasing/payments', {
     method: 'POST',
     body: JSON.stringify(normalized),
+  });
+}
+
+export async function applySupplierAdvance(
+  paymentId: string,
+  payload: {
+    bill_id: string;
+    amount?: number;
+    idempotency_key?: string;
+    notes?: string;
+  }
+): Promise<{
+  ok: boolean;
+  payment: SupplierPayment;
+  bill: SupplierBill;
+  applied_amount: number;
+  remaining_advance: number;
+  is_replay?: boolean;
+}> {
+  return apiRequest(`/api/purchasing/payments/${encodeURIComponent(paymentId)}/apply`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }
 
@@ -1291,6 +1337,8 @@ export async function getPurchasingSummary(): Promise<{
   open_pos: number;
   unpaid_bills: number;
   total_payables: number;
+  total_advances?: number;
+  net_payable?: number;
 }> {
   return apiRequest('/api/purchasing/summary');
 }
