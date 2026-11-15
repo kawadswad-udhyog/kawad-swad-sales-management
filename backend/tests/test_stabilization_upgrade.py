@@ -174,10 +174,12 @@ class TestStabilizationUpgrade(unittest.TestCase):
         rev_res = asyncio.run(stock_router.review_stock_discrepancy(disc_id, rev_req, owner_user))
         self.assertEqual(rev_res["status"], "APPROVED")
 
-        # 3. Check that ledger adjustment was created
+        # 3. Check that ledger adjustment was created cleanly without crediting warehouse stock
         adj = next((st for st in db.memory_store["SalesmanStockLedger"] if f"DISC-{disc_id}" in str(st.get("reference_id"))), None)
         self.assertIsNotNone(adj, "Stock ledger adjustment must be recorded upon approval")
-        self.assertEqual(adj["quantity"], -2)
+        self.assertEqual(adj["txn_type"], "SALESMAN_NEGATIVE_ADJUSTMENT")
+        self.assertEqual(adj["quantity"], 2)
+        self.assertEqual(adj["salesman_user_id"], "USR-SALES-1")
 
     def test_required_tabs_contains_all_24_tables(self):
         """Workstream 8: REQUIRED_TABS must contain all core enterprise tables."""

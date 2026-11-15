@@ -491,6 +491,97 @@ export const StockView: React.FC = () => {
     ? stockTransactions.filter((t) => t.salesman_user_id === currentUser.user_id)
     : stockTransactions;
 
+  const userNameMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    users.forEach((u) => {
+      m[u.user_id] = u.full_name || u.user_id;
+    });
+    return m;
+  }, [users]);
+
+  const formatLocationLabel = (loc: string) => {
+    const norm = String(loc || '').trim().toUpperCase();
+    if (!norm || ['COMPANY_WAREHOUSE', 'WAREHOUSE', 'COMPANY', 'FACTORY'].includes(norm)) {
+      return norm === 'FACTORY' ? '🏭 Factory Storage' : '🏢 Central Warehouse';
+    }
+    const uName = userNameMap[String(loc).trim()];
+    return uName ? `🚶 ${uName} (${loc})` : String(loc);
+  };
+
+  const classifyDiscrepancy = (loc: string, diff: number) => {
+    const norm = String(loc || '').trim().toUpperCase();
+    const isWh = !norm || ['COMPANY_WAREHOUSE', 'WAREHOUSE', 'COMPANY', 'FACTORY'].includes(norm);
+    if (diff === 0) {
+      return {
+        label: 'No Difference',
+        impact: 'No stock change needed',
+        bg: '#f1f5f9',
+        color: '#475569',
+      };
+    }
+    if (isWh) {
+      return diff < 0
+        ? {
+            label: 'Warehouse Shortage',
+            impact: 'Reduces warehouse stock only (Salesman unchanged)',
+            bg: '#fee2e2',
+            color: '#b91c1c',
+          }
+        : {
+            label: 'Warehouse Surplus',
+            impact: 'Increases warehouse stock only (Salesman unchanged)',
+            bg: '#dcfce7',
+            color: '#15803d',
+          };
+    }
+    return diff < 0
+      ? {
+          label: 'Salesman Shortage',
+          impact: 'Reduces salesman stock only (Warehouse does NOT increase)',
+          bg: '#ffedd5',
+          color: '#c2410c',
+        }
+      : {
+          label: 'Salesman Surplus',
+          impact: 'Increases salesman stock only (Warehouse unchanged)',
+          bg: '#dbeafe',
+          color: '#1d4ed8',
+        };
+  };
+
+  const formatMovementBadge = (tType: string) => {
+    const kind = String(tType || '').toUpperCase();
+    switch (kind) {
+      case 'COMPANY_RECEIPT':
+        return { label: 'Warehouse Stock Receipt', bg: '#dcfce7', color: '#15803d' };
+      case 'ISSUED':
+      case 'ISSUE_TO_SALESMAN':
+        return { label: 'Issued to Van / Salesman', bg: '#e0f2fe', color: '#0369a1' };
+      case 'RETURNED':
+      case 'RETURN_FROM_SALESMAN':
+        return { label: 'Actual Return (Van → Warehouse)', bg: '#ede9fe', color: '#6d28d9' };
+      case 'SALESMAN_NEGATIVE_ADJUSTMENT':
+        return { label: 'Salesman Shortage (Van −)', bg: '#ffedd5', color: '#c2410c' };
+      case 'SALESMAN_POSITIVE_ADJUSTMENT':
+      case 'SALESMAN_ADJUSTMENT':
+        return { label: 'Salesman Surplus (Van +)', bg: '#dbeafe', color: '#1d4ed8' };
+      case 'NEGATIVE_ADJUSTMENT':
+        return { label: 'Warehouse Shortage (WH −)', bg: '#fee2e2', color: '#b91c1c' };
+      case 'POSITIVE_ADJUSTMENT':
+      case 'COMPANY_ADJUSTMENT':
+        return { label: 'Warehouse Surplus (WH +)', bg: '#dcfce7', color: '#15803d' };
+      case 'SOLD':
+      case 'SOLD_DELIVERY':
+      case 'SALE_DELIVERY':
+        return { label: 'Delivered / Sold', bg: '#f1f5f9', color: '#334155' };
+      default:
+        return { label: kind || 'MOVEMENT', bg: '#fef3c7', color: '#b45309' };
+    }
+  };
+
+  const liveDiscDiff = Number(discPhysical) - Number(discExpected);
+  const liveDiscClass = classifyDiscrepancy(discLocation, liveDiscDiff);
+
   const filteredRegister = registerItems.filter((item) => {
     const totalInternalOnHand = item.total_internal_on_hand_packets ?? item.total_internal_on_hand ?? 0;
     const channelsDispatched = item.channels_dispatched_packets ?? 0;
@@ -918,10 +1009,10 @@ export const StockView: React.FC = () => {
                         onChange={(e) => setTxnType(e.target.value as StockTxnType)}
                       >
                         <option value="COMPANY_RECEIPT">🏢 Company stock received / opening</option>
-                        <option value="ISSUED">🚶 Issue to salesman (Van Load)</option>
-                        <option value="RETURNED">↩️ Return from salesman (Van Return)</option>
-                        <option value="COMPANY_ADJUSTMENT">📈 Company stock positive adjustment</option>
-                        <option value="SALESMAN_ADJUSTMENT">📊 Salesman stock positive adjustment</option>
+                        <option value="ISSUED">🚶 Issue to salesman (Warehouse → Van)</option>
+                        <option value="RETURNED">↩️ Actual Goods Returned by Salesman (Van → Warehouse)</option>
+                        <option value="COMPANY_ADJUSTMENT">📈 Warehouse surplus / positive adjustment</option>
+                        <option value="SALESMAN_ADJUSTMENT">📊 Salesman surplus / positive adjustment</option>
                       </SelectInput>
                     </FormField>
 
@@ -979,6 +1070,14 @@ export const StockView: React.FC = () => {
                       </FormField>
                     </div>
                   </div>
+
+                  {txnType === 'RETURNED' && (
+                    <div className="p-3 rounded-xl bg-purple-50 border border-purple-200 text-xs text-purple-900">
+                      <strong>Actual Physical Return (Van → Warehouse):</strong> Use this only when packets physically come back into the Central Warehouse.
+                      It reduces salesman stock and increases warehouse stock. For missing or damaged salesman packets, use the{' '}
+                      <strong>Physical Stock Audit &amp; Discrepancy Workflow</strong> below instead.
+                    </div>
+                  )}
 
                   <div className="flex justify-end pt-2">
                     <SaveButton label="Record Stock Movement" />
@@ -1123,6 +1222,24 @@ export const StockView: React.FC = () => {
             </div>
           </div>
 
+          <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <strong style={{ color: liveDiscClass.color }}>{liveDiscClass.label}:</strong>{' '}
+              <span className="text-slate-700">{liveDiscClass.impact}</span>
+            </div>
+            <span
+              style={{
+                padding: '2px 8px',
+                borderRadius: '6px',
+                fontWeight: 700,
+                background: liveDiscClass.bg,
+                color: liveDiscClass.color,
+              }}
+            >
+              Difference: {liveDiscDiff > 0 ? `+${liveDiscDiff}` : liveDiscDiff} pkts
+            </span>
+          </div>
+
           <div className="flex justify-end pt-2">
             <SaveButton label="Record Physical Audit Count" />
           </div>
@@ -1136,6 +1253,7 @@ export const StockView: React.FC = () => {
                   <th>Date</th>
                   <th>Location</th>
                   <th>Product</th>
+                  <th>Type / Stock Impact</th>
                   <th>Expected</th>
                   <th>Physical</th>
                   <th>Difference</th>
@@ -1149,11 +1267,28 @@ export const StockView: React.FC = () => {
                 {stockDiscrepancies.map((d: any) => {
                   const diff = Number(d.difference || 0);
                   const isPending = d.status === 'PENDING_APPROVAL';
+                  const discClass = classifyDiscrepancy(d.location, diff);
                   return (
                     <tr key={d.discrepancy_id}>
                       <td>{d.discrepancy_date}</td>
-                      <td>{d.location}</td>
+                      <td>{formatLocationLabel(d.location)}</td>
                       <td>{d.product_name_snapshot}</td>
+                      <td>
+                        <span
+                          style={{
+                            fontSize: '0.75rem',
+                            padding: '2px 7px',
+                            borderRadius: '5px',
+                            fontWeight: 700,
+                            background: discClass.bg,
+                            color: discClass.color,
+                            display: 'inline-block',
+                          }}
+                          title={discClass.impact}
+                        >
+                          {discClass.label}
+                        </span>
+                      </td>
                       <td>{d.expected_stock}</td>
                       <td>{d.physical_count}</td>
                       <td>
@@ -1162,7 +1297,7 @@ export const StockView: React.FC = () => {
                         </strong>
                       </td>
                       <td className="muted">{d.reason || '—'}</td>
-                      <td>{d.counted_by_user_id}</td>
+                      <td>{userNameMap[d.counted_by_user_id] || d.counted_by_user_id}</td>
                       <td>
                         <span
                           className={`badge ${d.status === 'APPROVED' ? 'on' : d.status === 'REJECTED' ? 'off' : ''}`}
@@ -1227,42 +1362,36 @@ export const StockView: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {visibleTransactions.slice(0, 50).map((t) => (
-                  <tr key={t.stock_txn_id}>
-                    <td>{new Date(t.txn_datetime).toLocaleString('en-IN')}</td>
-                    <td>
-                      <span
-                        style={{
-                          fontSize: '0.8rem',
-                          padding: '3px 8px',
-                          borderRadius: '4px',
-                          fontWeight: 700,
-                          background:
-                            t.txn_type === 'ISSUED'
-                              ? '#e0f2fe'
-                              : t.txn_type === 'COMPANY_RECEIPT'
-                              ? '#dcfce7'
-                              : '#fef3c7',
-                          color:
-                            t.txn_type === 'ISSUED'
-                              ? '#0369a1'
-                              : t.txn_type === 'COMPANY_RECEIPT'
-                              ? '#15803d'
-                              : '#b45309',
-                        }}
-                      >
-                        {t.txn_type}
-                      </span>
-                    </td>
-                    <td>{t.sku_snapshot}</td>
-                    <td>{t.salesman_user_id || '—'}</td>
-                    <td>
-                      <strong>{t.quantity}</strong>
-                    </td>
-                    <td>{t.unit}</td>
-                    <td className="muted">{t.notes || '—'}</td>
-                  </tr>
-                ))}
+                {visibleTransactions.slice(0, 50).map((t) => {
+                  const badge = formatMovementBadge(t.txn_type);
+                  return (
+                    <tr key={t.stock_txn_id}>
+                      <td>{new Date(t.txn_datetime).toLocaleString('en-IN')}</td>
+                      <td>
+                        <span
+                          style={{
+                            fontSize: '0.8rem',
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            fontWeight: 700,
+                            background: badge.bg,
+                            color: badge.color,
+                          }}
+                          title={t.txn_type}
+                        >
+                          {badge.label}
+                        </span>
+                      </td>
+                      <td>{t.sku_snapshot}</td>
+                      <td>{t.salesman_user_id ? (userNameMap[t.salesman_user_id] || t.salesman_user_id) : 'Central Warehouse'}</td>
+                      <td>
+                        <strong>{t.quantity}</strong>
+                      </td>
+                      <td>{t.unit}</td>
+                      <td className="muted">{t.notes || '—'}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

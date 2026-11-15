@@ -5,6 +5,7 @@ from app.auth import get_current_user
 from app.permissions import is_manager, is_salesman, ui_role
 from app.timeutil import business_today, business_date_of
 from app.calculations.units import parse_currency_amount
+from app.stock_math import balances
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
@@ -109,24 +110,18 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
         if str(b.get("status", "")).upper() in {"PENDING", "PENDING_APPROVAL", "PENDING APPROVAL", "SUBMITTED"}
     ) if manager_view else 0
 
-    # Low stock items calculation
+    # Low stock items calculation via canonical stock_math balances
     products = db.get_records("Products")
-    company_stock = {str(p.get("product_id")): 0 for p in products}
-
-    for txn in stock_ledger:
-        p_id = str(txn.get("product_id", ""))
-        t_type = str(txn.get("txn_type", "")).upper()
-        qty = int(txn.get("quantity", 0) or 0)
-        s_id = str(txn.get("salesman_user_id", ""))
-
-        if manager_view:
-            if t_type in ["COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT", "RETURN_FROM_SALESMAN"]:
-                company_stock[p_id] = company_stock.get(p_id, 0) + abs(qty)
-            elif t_type in ["ISSUE_TO_SALESMAN"]:
-                company_stock[p_id] = company_stock.get(p_id, 0) - abs(qty)
-        else:
-            if s_id == user_id:
-                company_stock[p_id] = company_stock.get(p_id, 0) + qty
+    company_bal, salesman_bal = balances(stock_ledger)
+    if manager_view:
+        company_stock = {str(p.get("product_id")): int(company_bal.get(str(p.get("product_id")), 0) or 0) for p in products}
+        for p_id, bal in company_bal.items():
+            company_stock.setdefault(p_id, int(bal or 0))
+    else:
+        company_stock = {
+            str(p.get("product_id")): int(salesman_bal.get((user_id, str(p.get("product_id"))), 0) or 0)
+            for p in products
+        }
 
     low_stock_items = sum(1 for p_id, bal in company_stock.items() if 0 < bal < 50)
     zero_stock_items = sum(1 for p_id, bal in company_stock.items() if bal <= 0)

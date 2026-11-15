@@ -347,8 +347,8 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                 expected_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "NEGATIVE_ADJUSTMENT"
                 expected_qty = abs(diff)
             else:
-                expected_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "RETURN_FROM_SALESMAN"
-                expected_qty = abs(diff) if diff > 0 else -abs(diff)
+                expected_txn_type = "SALESMAN_POSITIVE_ADJUSTMENT" if diff > 0 else "SALESMAN_NEGATIVE_ADJUSTMENT"
+                expected_qty = abs(diff)
 
             ledger = db.get_records("SalesmanStockLedger", fresh=True)
             existing_txns = [
@@ -394,6 +394,21 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                         detail=f"Conflicting stock ledger movement already exists for discrepancy {discrepancy_id}. Manual review required.",
                     )
             else:
+                adj_kind_label = (
+                    ("Warehouse Surplus" if diff > 0 else "Warehouse Shortage")
+                    if is_company
+                    else ("Salesman Surplus" if diff > 0 else "Salesman Shortage")
+                )
+                orig_reason = str(match.get("reason", "")).strip()
+                exp_cnt = int(match.get("expected_stock", 0) or 0)
+                phys_cnt = int(match.get("physical_count", 0) or 0)
+                notes_parts = [
+                    f"{adj_kind_label} ({discrepancy_id}): expected {exp_cnt}, counted {phys_cnt}, diff {diff:+d}"
+                ]
+                if orig_reason:
+                    notes_parts.append(f"Reason: {orig_reason}")
+                if req.notes and req.notes.strip():
+                    notes_parts.append(f"Review: {req.notes.strip()}")
                 adj_record = {
                     "stock_txn_id": db.generate_id("SalesmanStockLedger"),
                     "txn_datetime": now_iso,
@@ -409,7 +424,7 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                     "received_by_user_id": "WAREHOUSE" if is_company else salesman_target,
                     "confirmed_by_user_id": user_id,
                     "reference_id": disc_ref,
-                    "notes": f"Approved physical count adjustment for {discrepancy_id}: {req.notes}".strip(),
+                    "notes": " | ".join(notes_parts),
                 }
                 try:
                     if not db.append_record("SalesmanStockLedger", adj_record, raise_on_error=True):

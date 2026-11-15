@@ -47,6 +47,7 @@ from app.models import (
     LoadingPassActionReq,
     StockIssueCreate,
 )
+from app.accounting.customer_ledger import CrossProcessLock
 from app.routers import stock
 
 
@@ -106,6 +107,42 @@ def _competing_reconcile_worker(test_dir: str, product_id: str, physical_count: 
         result_queue.put({"success": False, "op": "RECONCILE", "status_code": exc.status_code, "detail": exc.detail})
     except Exception as exc:
         result_queue.put({"success": False, "op": "RECONCILE", "status_code": 500, "error": str(exc)})
+
+
+def _lock_holder_worker(product_id: str, hold_seconds: float, locked_evt, result_queue: multiprocessing.Queue):
+    """Hold a product-level lock briefly and signal when acquired to test non-blocking across SKUs."""
+    try:
+        with CrossProcessLock("stock_product", product_id):
+            locked_evt.set()
+            time.sleep(hold_seconds)
+            released_at = time.monotonic()
+        result_queue.put({"success": True, "product_id": product_id, "released_at": released_at})
+    except Exception as exc:
+        locked_evt.set()
+        result_queue.put({"success": False, "product_id": product_id, "error": str(exc)})
+
+
+def _concurrent_issue_worker(test_dir: str, product_id: str, quantity: int, salesman_user_id: str, current_user: dict, result_queue: multiprocessing.Queue):
+    """Isolated worker process issuing stock for a different product and recording completion timestamp."""
+    try:
+        db.enable_shared_file_store(test_dir)
+        req = StockIssueCreate(
+            product_id=product_id,
+            salesman_user_id=salesman_user_id,
+            quantity=quantity,
+            txn_type="ISSUE_TO_SALESMAN",
+        )
+        res = asyncio.run(stock.record_stock_movement(req, current_user=current_user))
+        finished_at = time.monotonic()
+        result_queue.put({
+            "success": True,
+            "product_id": product_id,
+            "stock_txn_id": res.stock_txn_id,
+            "quantity": res.quantity,
+            "finished_at": finished_at,
+        })
+    except Exception as exc:
+        result_queue.put({"success": False, "product_id": product_id, "error": str(exc)})
 
 
 class TestPhase2AVanLoadingPass(unittest.TestCase):
@@ -1078,6 +1115,86 @@ class TestPhase2AVanLoadingPass(unittest.TestCase):
 
         ledger_after = db.get_records("SalesmanStockLedger", fresh=True)
         self.assertEqual(len(ledger_after), count_before, "Retry after over-transfer must not create new stock movements")
+
+    def test_23_concurrency_different_products_do_not_block_each_other(self):
+        """Concurrency: Holding lock on SKU A must NOT block stock issue on SKU B."""
+        ctx = multiprocessing.get_context("fork")
+        locked_evt = ctx.Event()
+        hold_q = ctx.Queue()
+        issue_q = ctx.Queue()
+
+        p_hold = ctx.Process(
+            target=_lock_holder_worker,
+            args=("PRD-MOONG-200G", 0.6, locked_evt, hold_q),
+        )
+        p_hold.start()
+        self.assertTrue(locked_evt.wait(timeout=5.0), "Lock holder did not acquire PRD-MOONG-200G lock in time")
+
+        p_issue = ctx.Process(
+            target=_concurrent_issue_worker,
+            args=(self.test_dir, "PRD-GARLIC-200G", 10, "USR-SALES-101", self.owner_user, issue_q),
+        )
+        p_issue.start()
+
+        issue_res = issue_q.get(timeout=5.0)
+        hold_res = hold_q.get(timeout=5.0)
+        p_issue.join(timeout=5.0)
+        p_hold.join(timeout=5.0)
+
+        self.assertTrue(hold_res.get("success"), f"Lock holder failed: {hold_res}")
+        self.assertTrue(issue_res.get("success"), f"Concurrent SKU B issue failed: {issue_res}")
+        self.assertLess(
+            issue_res["finished_at"],
+            hold_res["released_at"],
+            "Stock issue on PRD-GARLIC-200G should complete before PRD-MOONG-200G lock is released",
+        )
+
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        wh_bal, _ = balances(ledger)
+        self.assertEqual(wh_bal["PRD-GARLIC-200G"], 70)
+        self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-GARLIC-200G"), 10)
+
+    def test_24_exact_quantity_multi_sku_independent_and_repeated_retry(self):
+        """Multi-SKU exact quantity check: over-transfer on second SKU rejects 422 even when first SKU is under-transferred, and 3 retries add 0 rows."""
+        create_req = VanLoadingPassCreate(
+            loading_date="2026-11-12",
+            van_number="Van 1",
+            salesman_user_id="USR-SALES-101",
+            items=[
+                VanLoadingItem(product_id="PRD-MOONG-200G", quantity=30),
+                VanLoadingItem(product_id="PRD-GARLIC-200G", quantity=25),
+            ],
+        )
+        pass_resp = asyncio.run(stock.create_van_loading_pass(create_req, current_user=self.keeper_user))
+
+        # Simulate under-transfer on Moong (20 < 30) and over-transfer on Garlic (30 > 25)
+        for pid, qty in [("PRD-MOONG-200G", 20), ("PRD-GARLIC-200G", 30)]:
+            stk_id = db.generate_id("SalesmanStockLedger")
+            db.append_record("SalesmanStockLedger", {
+                "stock_txn_id": stk_id,
+                "movement_id": stk_id,
+                "txn_datetime": datetime.now(timezone.utc).isoformat(),
+                "salesman_user_id": "USR-SALES-101",
+                "product_id": pid,
+                "sku_snapshot": pid,
+                "txn_type": "ISSUE_TO_SALESMAN",
+                "quantity": qty,
+                "quantity_packets": qty,
+                "reference_id": pass_resp.pass_number,
+            })
+
+        count_before = len(db.get_records("SalesmanStockLedger", fresh=True))
+
+        for _ in range(3):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(stock.accept_van_loading_pass(pass_resp.pass_id, req=None, current_user=self.salesman_101))
+            self.assertEqual(ctx.exception.status_code, 422)
+            self.assertIn("Over-transfer detected", ctx.exception.detail)
+            curr = asyncio.run(stock.get_van_loading_pass(pass_resp.pass_id, current_user=self.keeper_user))
+            self.assertEqual(curr.status, "PENDING_ACCEPTANCE")
+
+        count_after = len(db.get_records("SalesmanStockLedger", fresh=True))
+        self.assertEqual(count_after, count_before, "Repeated retries after over-transfer must create 0 new ledger rows")
 
 
 if __name__ == "__main__":

@@ -34,7 +34,8 @@ os.environ["SALES_AUTH_MOCK"] = "1"
 
 from app.sheets import db
 from app.stock_math import balances, salesman_available
-from app.routers import stock
+from app.models import StockIssueCreate
+from app.routers import stock, dashboard
 
 
 def _concurrent_review_worker(
@@ -161,7 +162,11 @@ class TestStockDiscrepancyIdempotency(unittest.TestCase):
         ledger = db.get_records("SalesmanStockLedger", fresh=True)
         disc_txns = [tx for tx in ledger if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
         self.assertEqual(len(disc_txns), 1, f"Expected 1 adjustment, found {len(disc_txns)}")
-        self.assertEqual(disc_txns[0]["quantity"], -2)
+        self.assertEqual(disc_txns[0]["txn_type"], "SALESMAN_NEGATIVE_ADJUSTMENT")
+        self.assertEqual(disc_txns[0]["quantity"], 2)
+        self.assertEqual(disc_txns[0]["salesman_user_id"], "USR-SALES-101")
+        wh_bal, _ = balances(ledger)
+        self.assertEqual(wh_bal["PRD-MOONG-200G"], 100)
         self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-MOONG-200G"), 18)
 
     def test_B_concurrent_approval_multiprocessing(self):
@@ -388,10 +393,22 @@ class TestStockDiscrepancyIdempotency(unittest.TestCase):
         ledger = db.get_records("SalesmanStockLedger", fresh=True)
         disc_txns = [tx for tx in ledger if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
         self.assertEqual(len(disc_txns), 1)
-        self.assertEqual(disc_txns[0]["txn_type"], "RETURN_FROM_SALESMAN")
-        self.assertEqual(disc_txns[0]["quantity"], -2)
+        self.assertEqual(disc_txns[0]["txn_type"], "SALESMAN_NEGATIVE_ADJUSTMENT")
+        self.assertEqual(disc_txns[0]["quantity"], 2)
         self.assertEqual(disc_txns[0]["salesman_user_id"], "USR-SALES-101")
+
+        # Crucial invariant: salesman shortage decreases salesman stock (20->18) without increasing warehouse stock (stays 100)
+        wh_bal, _ = balances(ledger)
+        self.assertEqual(wh_bal["PRD-MOONG-200G"], 100)
         self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-MOONG-200G"), 18)
+
+        # Preserve original discrepancy fields + AuditLog entry
+        curr_disc = next(r for r in db.get_records("StockDiscrepancies", fresh=True) if r["discrepancy_id"] == disc_id)
+        self.assertEqual(curr_disc["expected_stock"], 20)
+        self.assertEqual(curr_disc["physical_count"], 18)
+        self.assertEqual(curr_disc["difference"], -2)
+        self.assertIn("2 packets missing from van", curr_disc["reason"])
+        self.assertEqual(len(self._approval_audits(disc_id)), 1)
 
     @staticmethod
     def _approval_audits(disc_id: str):
@@ -672,6 +689,157 @@ class TestStockDiscrepancyIdempotency(unittest.TestCase):
         self.assertEqual(len([tx for tx in ledger_f if str(tx.get("reference_id")) == f"DISC-{disc_id_fresh}"]), 1)
         self.assertEqual(len(self._approval_audits(disc_id_fresh)), 1)
         print(f"[Discrepancy Test K normal] PIDs={pids2} ledger_rows=1 audit_rows=1 status=APPROVED")
+
+    def test_L_company_warehouse_surplus_discrepancy(self):
+        """Test L: Company warehouse surplus (+4) creates POSITIVE_ADJUSTMENT and increases only warehouse balance."""
+        disc_req = stock.StockDiscrepancyCreate(
+            location="WAREHOUSE",
+            product_id="PRD-MOONG-200G",
+            expected_stock=100,
+            physical_count=104,
+            reason="4 extra packets found in rack",
+        )
+        sub = asyncio.run(stock.submit_stock_discrepancy(disc_req, self.owner_user))
+        disc_id = sub["discrepancy_id"]
+
+        res = asyncio.run(stock.review_stock_discrepancy(
+            disc_id,
+            stock.StockDiscrepancyReview(action="APPROVE", notes="Verified warehouse surplus"),
+            self.owner_user,
+        ))
+        self.assertEqual(res["status"], "APPROVED")
+
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        disc_txns = [tx for tx in ledger if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
+        self.assertEqual(len(disc_txns), 1)
+        self.assertEqual(disc_txns[0]["txn_type"], "POSITIVE_ADJUSTMENT")
+        self.assertEqual(disc_txns[0]["quantity"], 4)
+        self.assertEqual(disc_txns[0]["salesman_user_id"], "")
+
+        wh_bal, _ = balances(ledger)
+        self.assertEqual(wh_bal["PRD-MOONG-200G"], 104)
+        self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-MOONG-200G"), 20)
+
+    def test_M_salesman_surplus_discrepancy(self):
+        """Test M: Salesman surplus (+3) creates SALESMAN_POSITIVE_ADJUSTMENT and increases only salesman balance."""
+        disc_req = stock.StockDiscrepancyCreate(
+            location="USR-SALES-101",
+            product_id="PRD-MOONG-200G",
+            expected_stock=20,
+            physical_count=23,
+            reason="3 extra packets found in van",
+        )
+        sub = asyncio.run(stock.submit_stock_discrepancy(disc_req, self.salesman_user))
+        disc_id = sub["discrepancy_id"]
+
+        res = asyncio.run(stock.review_stock_discrepancy(
+            disc_id,
+            stock.StockDiscrepancyReview(action="APPROVE", notes="Verified salesman surplus"),
+            self.owner_user,
+        ))
+        self.assertEqual(res["status"], "APPROVED")
+
+        ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        disc_txns = [tx for tx in ledger if str(tx.get("reference_id")) == f"DISC-{disc_id}"]
+        self.assertEqual(len(disc_txns), 1)
+        self.assertEqual(disc_txns[0]["txn_type"], "SALESMAN_POSITIVE_ADJUSTMENT")
+        self.assertEqual(disc_txns[0]["quantity"], 3)
+        self.assertEqual(disc_txns[0]["salesman_user_id"], "USR-SALES-101")
+
+        wh_bal, _ = balances(ledger)
+        self.assertEqual(wh_bal["PRD-MOONG-200G"], 100)
+        self.assertEqual(salesman_available(ledger, "USR-SALES-101", "PRD-MOONG-200G"), 23)
+
+    def test_N_five_realistic_baseline_scenarios_100_wh_20_salesman(self):
+        """Verify isolated ledger rows, stock_math, summary, register, and dashboard for all 5 scenarios on WH=100, Salesman=20 baseline."""
+        def _assert_system_balances(expected_wh: int, expected_sm: int):
+            ledger = db.get_records("SalesmanStockLedger", fresh=True)
+            wh_bal, sm_bal = balances(ledger)
+            self.assertEqual(wh_bal["PRD-MOONG-200G"], expected_wh)
+            self.assertEqual(sm_bal[("USR-SALES-101", "PRD-MOONG-200G")], expected_sm)
+
+            summary = asyncio.run(stock.get_stock_summary(self.owner_user))
+            wh_item = next(c for c in summary.company_stock if c.product_id == "PRD-MOONG-200G")
+            sm_item = next(s for s in summary.salesman_stock if s.salesman_user_id == "USR-SALES-101" and s.product_id == "PRD-MOONG-200G")
+            self.assertEqual(wh_item.company_quantity, expected_wh)
+            self.assertEqual(sm_item.quantity, expected_sm)
+
+            reg = asyncio.run(stock.get_stock_finished_goods_register(self.owner_user))
+            reg_row = next(r for r in reg["register"] if r["product_id"] == "PRD-MOONG-200G")
+            self.assertEqual(reg_row["warehouse_stock"], expected_wh)
+            self.assertEqual(reg_row["salesmen_stock"], expected_sm)
+
+            # Verify owner and salesman dashboard metrics see exact balances
+            ow_dash = asyncio.run(dashboard.get_dashboard_metrics(self.owner_user))
+            self.assertEqual(ow_dash.available_finished_packets, expected_wh)
+            sm_dash = asyncio.run(dashboard.get_dashboard_metrics(self.salesman_user))
+            self.assertEqual(sm_dash.available_finished_packets, expected_sm)
+
+        # Scenario 1: Salesman shortage of 2 (WH 100, Salesman 20 -> WH 100, Salesman 18)
+        self.setUp()
+        sub1 = asyncio.run(stock.submit_stock_discrepancy(
+            stock.StockDiscrepancyCreate(location="USR-SALES-101", product_id="PRD-MOONG-200G", expected_stock=20, physical_count=18, reason="Van physical shortage 2"),
+            self.salesman_user,
+        ))
+        asyncio.run(stock.review_stock_discrepancy(sub1["discrepancy_id"], stock.StockDiscrepancyReview(action="APPROVE", notes="Verified shortage"), self.owner_user))
+        rows1 = [tx for tx in db.get_records("SalesmanStockLedger", fresh=True) if tx.get("reference_id") == f"DISC-{sub1['discrepancy_id']}"]
+        self.assertEqual(len(rows1), 1)
+        self.assertEqual(rows1[0]["txn_type"], "SALESMAN_NEGATIVE_ADJUSTMENT")
+        self.assertEqual(rows1[0]["quantity"], 2)
+        self.assertEqual(rows1[0]["salesman_user_id"], "USR-SALES-101")
+        _assert_system_balances(100, 18)
+
+        # Scenario 2: Salesman surplus of 3 (WH 100, Salesman 20 -> WH 100, Salesman 23)
+        self.setUp()
+        sub2 = asyncio.run(stock.submit_stock_discrepancy(
+            stock.StockDiscrepancyCreate(location="USR-SALES-101", product_id="PRD-MOONG-200G", expected_stock=20, physical_count=23, reason="Van physical surplus 3"),
+            self.salesman_user,
+        ))
+        asyncio.run(stock.review_stock_discrepancy(sub2["discrepancy_id"], stock.StockDiscrepancyReview(action="APPROVE", notes="Verified surplus"), self.owner_user))
+        rows2 = [tx for tx in db.get_records("SalesmanStockLedger", fresh=True) if tx.get("reference_id") == f"DISC-{sub2['discrepancy_id']}"]
+        self.assertEqual(len(rows2), 1)
+        self.assertEqual(rows2[0]["txn_type"], "SALESMAN_POSITIVE_ADJUSTMENT")
+        self.assertEqual(rows2[0]["quantity"], 3)
+        self.assertEqual(rows2[0]["salesman_user_id"], "USR-SALES-101")
+        _assert_system_balances(100, 23)
+
+        # Scenario 3: Actual return of 2 from van to warehouse (WH 100, Salesman 20 -> WH 102, Salesman 18)
+        self.setUp()
+        ret_res = asyncio.run(stock.record_stock_movement(
+            StockIssueCreate(product_id="PRD-MOONG-200G", salesman_user_id="USR-SALES-101", quantity=2, txn_type="RETURNED", notes="Actual unsold packets returned from van"),
+            self.owner_user,
+        ))
+        self.assertEqual(ret_res.txn_type, "RETURN_FROM_SALESMAN")
+        self.assertEqual(ret_res.quantity, 2)
+        _assert_system_balances(102, 18)
+
+        # Scenario 4: Warehouse shortage of 5 (WH 100, Salesman 20 -> WH 95, Salesman 20)
+        self.setUp()
+        sub4 = asyncio.run(stock.submit_stock_discrepancy(
+            stock.StockDiscrepancyCreate(location="WAREHOUSE", product_id="PRD-MOONG-200G", expected_stock=100, physical_count=95, reason="Warehouse shortage 5"),
+            self.owner_user,
+        ))
+        asyncio.run(stock.review_stock_discrepancy(sub4["discrepancy_id"], stock.StockDiscrepancyReview(action="APPROVE", notes="Verified WH shortage"), self.owner_user))
+        rows4 = [tx for tx in db.get_records("SalesmanStockLedger", fresh=True) if tx.get("reference_id") == f"DISC-{sub4['discrepancy_id']}"]
+        self.assertEqual(len(rows4), 1)
+        self.assertEqual(rows4[0]["txn_type"], "NEGATIVE_ADJUSTMENT")
+        self.assertEqual(rows4[0]["quantity"], 5)
+        self.assertEqual(rows4[0]["salesman_user_id"], "")
+        _assert_system_balances(95, 20)
+
+        # Scenario 5: Warehouse surplus of 3 (WH 100, Salesman 20 -> WH 103, Salesman 20)
+        self.setUp()
+        sub5 = asyncio.run(stock.submit_stock_discrepancy(
+            stock.StockDiscrepancyCreate(location="WAREHOUSE", product_id="PRD-MOONG-200G", expected_stock=100, physical_count=103, reason="Warehouse surplus 3"),
+            self.owner_user,
+        ))
+        asyncio.run(stock.review_stock_discrepancy(sub5["discrepancy_id"], stock.StockDiscrepancyReview(action="APPROVE", notes="Verified WH surplus"), self.owner_user))
+        rows5 = [tx for tx in db.get_records("SalesmanStockLedger", fresh=True) if tx.get("reference_id") == f"DISC-{sub5['discrepancy_id']}"]
+        self.assertEqual(len(rows5), 1)
+        self.assertEqual(rows5[0]["txn_type"], "POSITIVE_ADJUSTMENT")
+        self.assertEqual(rows5[0]["quantity"], 3)
+        self.assertEqual(rows5[0]["salesman_user_id"], "")
+        _assert_system_balances(103, 20)
 
 
 if __name__ == "__main__":
