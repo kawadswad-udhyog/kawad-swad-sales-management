@@ -83,7 +83,13 @@ from app.recipes_master import (
 
 class TestRecipeMasterV2(unittest.TestCase):
     def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
         db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
         for key in list(db.memory_store):
             db.memory_store[key] = []
         db.memory_store.update({
@@ -105,6 +111,13 @@ class TestRecipeMasterV2(unittest.TestCase):
         self.owner = {"user_id": "USR-OWNER", "role": "OWNER"}
         self.pa = {"user_id": "USR-PA", "role": "PA"}
         self.salesman = {"user_id": "USR-SALES", "role": "SALESMAN"}
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def test_moong_master_formula_exact_cost_and_yield(self):
         """Moong Master: exactly 1000g Moong flour, no sabudana/urad, ₹153.63/batch, ₹128.03/kg at 1.2kg yield."""

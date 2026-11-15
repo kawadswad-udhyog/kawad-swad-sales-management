@@ -35,6 +35,11 @@ class TestUpdateSheetsRecipeMaster(unittest.TestCase):
             def worksheet(self, tab_name):
                 return MockWorksheet(tab_name)
 
+        self._orig_connected = db.is_connected
+        self._orig_spreadsheet = db.spreadsheet
+        self._orig_fallback = db.allow_in_memory_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
         db.is_connected = True
         db.spreadsheet = MockSpreadsheet()
         for k in list(db.memory_store):
@@ -75,8 +80,11 @@ class TestUpdateSheetsRecipeMaster(unittest.TestCase):
         })
 
     def tearDown(self):
-        db.is_connected = False
-        db.spreadsheet = None
+        db.is_connected = self._orig_connected
+        db.spreadsheet = self._orig_spreadsheet
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
 
     def test_safe_sheets_update_execution(self):
         # Override SALES_GOOGLE_SPREADSHEET_ID for test execution

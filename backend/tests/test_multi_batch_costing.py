@@ -13,13 +13,21 @@ from app.calculations.inventory import (
 )
 from app.accounting.postings import post_packaging_batch_journal
 from app.routers.production import create_packaging, recover_packaging, PackagingCreate, BatchAllocationItem
-from app.sheets import db
+from app.sheets import db, ID_PREFIXES
 
 
 class TestMultiBatchCosting(unittest.TestCase):
     def setUp(self):
-        # Configure in-memory testing store
-        db.memory_store = {
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        # Configure in-memory testing store preserving all canonical tab keys
+        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store.update({
             "ProductionBatches": [],
             "ProductionStockLedger": [],
             "PackagingBatches": [],
@@ -58,8 +66,15 @@ class TestMultiBatchCosting(unittest.TestCase):
             "AuditLog": [],
             "IncompleteTransactions": [],
             "ApprovalRequests": [],
-        }
+        })
         self.user = {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER"}
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def test_multi_batch_explicit_allocation_calculation(self):
         """

@@ -63,7 +63,13 @@ from app.routers import stock as stock_router
 
 class TestFinishedGoodsInventory(unittest.TestCase):
     def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
         db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
         for key in list(db.memory_store):
             db.memory_store[key] = []
         db.memory_store.update({
@@ -110,6 +116,13 @@ class TestFinishedGoodsInventory(unittest.TestCase):
             "SaleItems": [],
             "AuditLog": [],
         })
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def test_consolidated_register_includes_zero_stock_active_skus(self):
         """Active SKUs with no movements must appear with 0 stock rather than being omitted."""

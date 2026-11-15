@@ -14,6 +14,9 @@ from app.sheets import db
 
 class TestSheetsQuotaHandling(unittest.TestCase):
     def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_spreadsheet = db.spreadsheet
+        self._orig_fallback = db.allow_in_memory_fallback
         db.is_connected = True
         for k in list(db.memory_store):
             db.memory_store[k] = []
@@ -21,8 +24,11 @@ class TestSheetsQuotaHandling(unittest.TestCase):
         db._worksheets.clear()
 
     def tearDown(self):
-        db.is_connected = False
-        db.spreadsheet = None
+        db.is_connected = self._orig_connected
+        db.spreadsheet = self._orig_spreadsheet
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
 
     def test_stale_cache_served_on_429_quota_exceeded_for_non_fresh_read(self):
         """When Google Sheets throws 429 Quota Exceeded and fresh=False, get_records serves cached data to prevent crash."""

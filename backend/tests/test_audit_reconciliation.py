@@ -87,10 +87,8 @@ if "fastapi.security" not in sys.modules:
     mock_sec.HTTPBearer = lambda **kwargs: None
     mock_sec.HTTPAuthorizationCredentials = MockCredentials
     sys.modules["fastapi.security"] = mock_sec
-else:
-    sys.modules["fastapi.security"].HTTPAuthorizationCredentials = MockCredentials
 
-HTTPAuthorizationCredentials = MockCredentials
+from fastapi.security import HTTPAuthorizationCredentials
 
 import base64
 
@@ -120,9 +118,10 @@ class SmartMockJWT:
         return {"sub": "USR-000001", "role": "SALESMAN"}
 
 if "jwt" not in sys.modules:
-    sys.modules["jwt"] = types.ModuleType("jwt")
-sys.modules["jwt"].encode = SmartMockJWT.encode
-sys.modules["jwt"].decode = SmartMockJWT.decode
+    mock_jwt = types.ModuleType("jwt")
+    mock_jwt.encode = SmartMockJWT.encode
+    mock_jwt.decode = SmartMockJWT.decode
+    sys.modules["jwt"] = mock_jwt
 
 if "pydantic" not in sys.modules:
     class MockBaseModel:

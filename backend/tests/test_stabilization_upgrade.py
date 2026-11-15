@@ -19,7 +19,7 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-from app.sheets import db, REQUIRED_TABS
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
 from app.auth import hash_password, create_access_token, get_current_user
 import app.routers.auth as auth_router
 import app.routers.sales as sales_router
@@ -35,13 +35,16 @@ from app.models import (
 
 class TestStabilizationUpgrade(unittest.TestCase):
     def setUp(self):
-        self.orig_connected = db.is_connected
-        self.orig_fallback = db.allow_in_memory_fallback
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        self._orig_spreadsheet = db.spreadsheet
         db.is_connected = True
         db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
-        for k in list(db.memory_store.keys()):
-            db.memory_store[k] = []
+        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         db.memory_store.setdefault("AuthUsers", [])
 
         # Clear brute force tracker
@@ -62,8 +65,12 @@ class TestStabilizationUpgrade(unittest.TestCase):
         })
 
     def tearDown(self):
-        db.is_connected = self.orig_connected
-        db.allow_in_memory_fallback = self.orig_fallback
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db.spreadsheet = self._orig_spreadsheet
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
         auth_router._LOGIN_ATTEMPTS.clear()
 
     def test_brute_force_password_guessing_lockout(self):

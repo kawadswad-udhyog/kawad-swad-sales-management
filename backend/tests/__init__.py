@@ -99,10 +99,17 @@ if "jwt" not in sys.modules:
     import json
     import hmac
     import hashlib
+    from datetime import datetime as _dt
     mock_jwt = types.ModuleType("jwt")
     def mock_encode(payload, secret, algorithm="HS256"):
+        safe_payload = {}
+        for k, v in payload.items():
+            if isinstance(v, _dt):
+                safe_payload[k] = int(v.timestamp())
+            else:
+                safe_payload[k] = v
         header = base64.urlsafe_b64encode(json.dumps({"alg": algorithm, "typ": "JWT"}).encode()).rstrip(b"=").decode()
-        body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+        body = base64.urlsafe_b64encode(json.dumps(safe_payload).encode()).rstrip(b"=").decode()
         sig = base64.urlsafe_b64encode(hmac.new(secret.encode(), f"{header}.{body}".encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
         return f"{header}.{body}.{sig}"
     def mock_decode(token, secret, algorithms=None):

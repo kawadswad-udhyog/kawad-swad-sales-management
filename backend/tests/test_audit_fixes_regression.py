@@ -38,8 +38,13 @@ from app.accounting.reconciliation import audit_and_reconcile_operational_events
 
 class TestAuditFixesRegression(unittest.TestCase):
     def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
         db.allow_in_memory_fallback = True
         db.is_connected = False
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
         # Reset DB tables
         for table in [
             "ProductionBatches",
@@ -55,6 +60,13 @@ class TestAuditFixesRegression(unittest.TestCase):
             "AccountingLedger",
         ]:
             db.memory_store[table] = []
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def test_1_negative_packing_tolerance_rejection(self):
         """Packing tolerance cannot be negative in calculation and schema."""

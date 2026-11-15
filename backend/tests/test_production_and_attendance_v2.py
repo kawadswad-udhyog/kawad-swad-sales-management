@@ -11,7 +11,7 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-from app.sheets import db
+from app.sheets import db, ID_PREFIXES
 from app.models import (
     BulkAttendanceCreate,
     BulkAttendanceItem,
@@ -32,7 +32,15 @@ from app.routers.dashboard import get_dashboard_metrics
 
 class TestProductionAndAttendanceV2(unittest.TestCase):
     def setUp(self):
-        db.memory_store = {
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store.update({
             "Users": [
                 {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER", "active": "true"},
                 {"user_id": "USR-PA-01", "username": "pa_user", "role": "PA", "active": "true"},
@@ -107,11 +115,18 @@ class TestProductionAndAttendanceV2(unittest.TestCase):
             "SaleItems": [],
             "Expenses": [],
             "DailyClosings": [],
-        }
+        })
 
         self.owner_user = {"user_id": "USR-OWNER-01", "role": "OWNER", "full_name": "Owner Admin"}
         self.pa_user = {"user_id": "USR-PA-01", "role": "PA", "full_name": "PA Manager"}
         self.sales_user = {"user_id": "USR-SALES-01", "role": "SALESMAN", "full_name": "Field Salesman"}
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def test_pa_can_create_batch_as_pending(self):
         req = ProductionCreate(

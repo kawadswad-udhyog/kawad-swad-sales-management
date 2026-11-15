@@ -1049,7 +1049,7 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
 
     attendances = db.get_records("EmployeeAttendance", fresh=True) or []
     sales = db.get_records("Sales", fresh=True) or []
-    all_sale_items = db.get_records("SaleItems", fresh=False) or []
+    all_sale_items = db.get_records("SaleItems", fresh=True) or []
 
     run_id = dup_run.get("payroll_run_id") if dup_run else db.get_next_id("PayrollRuns")
 

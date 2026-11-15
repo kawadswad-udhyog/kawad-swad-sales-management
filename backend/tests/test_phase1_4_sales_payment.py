@@ -30,7 +30,7 @@ BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from app.sheets import db
+from app.sheets import db, ID_PREFIXES
 from app.models import SaleCreate, SaleItemCreate, SalePaymentCreate
 from app.routers.sales import create_sale, cancel_sale, record_sale_payment, SaleCancelRequest
 from app.accounting.customer_ledger import (
@@ -38,13 +38,22 @@ from app.accounting.customer_ledger import (
     get_customer_transactions,
     get_customer_overdue_invoices,
     get_invoice_settlement_status,
+    reset_cross_process_state,
 )
 
 
 class TestPhase14SalesPayment(unittest.TestCase):
     def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        reset_cross_process_state()
         # Reset in-memory database
-        db.memory_store = {tab: [] for tab in db.memory_store}
+        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
 
         # Setup standard users
         self.owner_user = {
@@ -121,6 +130,14 @@ class TestPhase14SalesPayment(unittest.TestCase):
             "max_overdue_days": 30,
             "active": "true",
         })
+
+    def tearDown(self):
+        reset_cross_process_state()
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def _create_sale_req(self, qty=20, unit_price=180.0, **kwargs):
         # 20 packets * ₹180 = ₹3,600

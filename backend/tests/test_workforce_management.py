@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 from fastapi import HTTPException
 
-from app.sheets import db
+from app.sheets import db, ID_PREFIXES
 from app.routers import workforce
 from app.models import (
     EmployeeAttendanceCheckIn,
@@ -55,17 +55,18 @@ class TestWorkforceManagement(unittest.TestCase):
             "full_name": "Priya Designer",
         }
 
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        self._orig_spreadsheet = db.spreadsheet
+        db.is_connected = False
+        db.spreadsheet = None
         db.allow_in_memory_fallback = True
-        # Clear memory tabs before tests
-        for tab in [
-            "Users", "AuthUsers", "LabourMaster", "LabourAttendance",
-            "LabourWorkEntries", "WorkAssignments", "FreelancerProjects",
-            "FreelancerMilestones", "SalaryStructures", "PayrollRuns",
-            "PayrollItems", "WorkforcePayments", "SalaryReceipts",
-            "WorkforceAuditLogs", "EmployeeAttendance", "Sales",
-            "Workers", "WorkerAttendance", "JournalVouchers", "JournalLines"
-        ]:
-            db.memory_store[tab] = []
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        # Clear all canonical memory tabs before tests (prevents SaleItems/JournalHeaders bleed)
+        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store.setdefault("JournalVouchers", [])
 
         # Seed base users
         db.append_record("Users", {
@@ -93,6 +94,14 @@ class TestWorkforceManagement(unittest.TestCase):
             "designation": "Senior Packaging Designer",
             "department": "Creative",
         })
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db.spreadsheet = self._orig_spreadsheet
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def test_workforce_dashboard_metrics_and_permissions(self):
         """Owner and PA can access workforce metrics; standard employees are denied."""

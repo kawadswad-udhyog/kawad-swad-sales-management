@@ -12,7 +12,7 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-from app.sheets import db
+from app.sheets import db, ID_PREFIXES
 from app.models import (
     SaleCreate,
     SaleItemCreate,
@@ -41,7 +41,15 @@ from app.calculations.inventory import (
 
 class TestMasterRepairAndReadiness(unittest.TestCase):
     def setUp(self):
-        db.memory_store = {
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store.update({
             "Users": [
                 {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER", "active": "true", "full_name": "Test Owner"},
                 {"user_id": "USR-PA-01", "username": "pa_user", "role": "PA", "active": "true", "full_name": "Test PA"},
@@ -117,11 +125,18 @@ class TestMasterRepairAndReadiness(unittest.TestCase):
             "CustomRoles": [],
             "AuditLog": [],
             "ApprovalRequests": [],
-        }
+        })
 
         self.owner = {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER"}
         self.pa = {"user_id": "USR-PA-01", "username": "pa_user", "role": "PA"}
         self.salesman = {"user_id": "USR-SALES-01", "username": "sales_anand", "role": "SALESMAN"}
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     # -------------------------------------------------------------------------
     # 1. Production approval posts stock exactly once & 2. Pending production

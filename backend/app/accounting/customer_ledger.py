@@ -7,6 +7,7 @@ import math
 import os
 import json
 import logging
+import tempfile
 import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
@@ -25,8 +26,29 @@ from app.timeutil import now_iso
 from app.accounting.journal_engine import to_decimal, round_money
 from app.permissions import is_owner, is_manager, is_salesman
 
-_LOCK_DIR = "/tmp/ks_erp_locks"
-_STATE_FILE = "/tmp/ks_erp_cross_process_state.json"
+_DEFAULT_LOCK_DIR = "/tmp/ks_erp_locks"
+_DEFAULT_STATE_FILE = "/tmp/ks_erp_cross_process_state.json"
+_LOCK_DIR = _DEFAULT_LOCK_DIR
+_STATE_FILE = _DEFAULT_STATE_FILE
+
+
+def _get_lock_dir() -> str:
+    env_dir = os.getenv("KS_ERP_STATE_DIR") or os.getenv("SALES_SHARED_TEST_DIR")
+    if env_dir:
+        return os.path.join(env_dir, "locks")
+    if _LOCK_DIR != _DEFAULT_LOCK_DIR:
+        return _LOCK_DIR
+    return os.path.join(tempfile.gettempdir(), "ks_erp_locks")
+
+
+def _get_state_file() -> str:
+    env_dir = os.getenv("KS_ERP_STATE_DIR") or os.getenv("SALES_SHARED_TEST_DIR")
+    if env_dir:
+        return os.path.join(env_dir, "ks_erp_cross_process_state.json")
+    if _STATE_FILE != _DEFAULT_STATE_FILE:
+        return _STATE_FILE
+    return os.path.join(tempfile.gettempdir(), "ks_erp_cross_process_state.json")
+
 
 class CrossProcessLock:
     """
@@ -38,7 +60,7 @@ class CrossProcessLock:
         self.resource_type = resource_type
         self.resource_id = str(resource_id).strip()
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in self.resource_id)
-        self.lock_dir = _LOCK_DIR
+        self.lock_dir = _get_lock_dir()
         self.lock_path = os.path.join(self.lock_dir, f"{resource_type}_{safe_id}.lock")
         self.timeout = timeout
         self.fd = None
@@ -117,11 +139,12 @@ _REGISTRY_LOCK = threading.RLock()
 
 def get_cross_process_reservation(approval_id: str) -> Optional[Dict[str, Any]]:
     clean_id = str(approval_id).strip()
+    state_file = _get_state_file()
     with _REGISTRY_LOCK, CrossProcessLock("registry", "global"):
-        if not os.path.exists(_STATE_FILE):
+        if not os.path.exists(state_file):
             return None
         try:
-            with open(_STATE_FILE, "r") as f:
+            with open(state_file, "r") as f:
                 data = json.load(f)
                 return data.get("approvals", {}).get(clean_id)
         except json.JSONDecodeError as exc:
@@ -140,14 +163,15 @@ def get_cross_process_reservation(approval_id: str) -> Optional[Dict[str, Any]]:
 
 def set_cross_process_reservation(approval_id: str, state: Optional[Dict[str, Any]]) -> None:
     clean_id = str(approval_id).strip()
+    state_file = _get_state_file()
     with _REGISTRY_LOCK, CrossProcessLock("registry", "global"):
         try:
-            state_dir = os.path.dirname(_STATE_FILE) or "."
+            state_dir = os.path.dirname(state_file) or "."
             os.makedirs(state_dir, exist_ok=True)
             data = {}
-            if os.path.exists(_STATE_FILE):
+            if os.path.exists(state_file):
                 try:
-                    with open(_STATE_FILE, "r") as f:
+                    with open(state_file, "r") as f:
                         data = json.load(f)
                 except json.JSONDecodeError as exc:
                     logging.error("Corrupted cross-process state file during write: %s", exc)
@@ -165,10 +189,10 @@ def set_cross_process_reservation(approval_id: str, state: Optional[Dict[str, An
                 approvals.pop(clean_id, None)
             else:
                 approvals[clean_id] = state
-            tmp_file = f"{_STATE_FILE}.tmp.{os.getpid()}_{time.time_ns()}"
+            tmp_file = f"{state_file}.tmp.{os.getpid()}_{time.time_ns()}"
             with open(tmp_file, "w") as f:
                 json.dump(data, f)
-            os.replace(tmp_file, _STATE_FILE)
+            os.replace(tmp_file, state_file)
         except HTTPException:
             raise
         except Exception as exc:
@@ -181,10 +205,11 @@ def set_cross_process_reservation(approval_id: str, state: Optional[Dict[str, An
 
 def reset_cross_process_state() -> None:
     """Resets cross-process concurrency state file (used during test setup)."""
+    state_file = _get_state_file()
     with _REGISTRY_LOCK, CrossProcessLock("registry", "global"):
         try:
-            if os.path.exists(_STATE_FILE):
-                os.remove(_STATE_FILE)
+            if os.path.exists(state_file):
+                os.remove(state_file)
         except Exception as exc:
             logging.warning("Error resetting cross-process state: %s", exc)
 

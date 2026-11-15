@@ -19,10 +19,12 @@ from app.permissions import (
     require_manager,
 )
 
+import logging
 import uuid
 import time
 from typing import Optional, Dict, Any, Set, Tuple
 
+logger = logging.getLogger("kawad_swad.auth")
 security = HTTPBearer(auto_error=False)
 _PBKDF2_PREFIX = "pbkdf2:sha256:"
 

@@ -136,7 +136,12 @@ from app.routers import production as prod
 
 class TestRawMaterialIssuanceRecovery(unittest.TestCase):
     def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
         db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
         db._fail_once.clear()
         for k in list(REQUIRED_TABS.keys()):
             db.memory_store[k] = []
@@ -191,6 +196,13 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
 
         self.owner_user = {"user_id": "USR-OWNER-01", "role": "OWNER", "username": "owner"}
         self.pa_user = {"user_id": "USR-PA-01", "role": "PA", "username": "pa_user"}
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def _create_test_batch(self, qty_kg=10.0, product_id="PRD-TEST-PAPAD"):
         req = prod.ProductionCreate(

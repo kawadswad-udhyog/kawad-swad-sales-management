@@ -22,7 +22,7 @@ from decimal import Decimal
 os.environ["SALES_TESTING"] = "1"
 os.environ["SALES_AUTH_MOCK"] = "1"
 
-from app.sheets import db
+from app.sheets import db, ID_PREFIXES
 from app.timeutil import now_iso
 from app.models import SaleCreate, SaleItemCreate, SalePaymentCreate
 from app.routers.sales import create_sale, cancel_sale, record_sale_payment, get_sale_settlement, SaleCancelRequest
@@ -32,6 +32,7 @@ from app.accounting.customer_ledger import (
     get_customer_transactions,
     get_invoice_settlement_status,
     check_credit_control,
+    reset_cross_process_state,
 )
 from app.accounting.journal_engine import (
     calculate_trial_balance,
@@ -41,8 +42,24 @@ from app.accounting.journal_engine import (
 
 class TestPhase141SalesPayment(unittest.TestCase):
     def setUp(self):
-        db.memory_store = {tab: [] for tab in db.memory_store}
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        reset_cross_process_state()
+        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self._seed_core_data()
+
+    def tearDown(self):
+        reset_cross_process_state()
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     def _seed_core_data(self):
         # Users

@@ -46,7 +46,13 @@ from app.calculations import (
 
 class TestERPStabilization(unittest.TestCase):
     def setUp(self):
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
         db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
         for key in list(db.memory_store):
             db.memory_store[key] = []
         db.memory_store.update({
@@ -77,6 +83,13 @@ class TestERPStabilization(unittest.TestCase):
         self.pa_user = {"user_id": "USR-PA-1", "role": "PA"}
         self.salesman_user = {"user_id": "USR-SALES-1", "role": "SALESMAN"}
         self.worker_user = {"user_id": "USR-WORKER-1", "role": "FACTORY_WORKER"}
+
+    def tearDown(self):
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     # =========================================================
     # PART 3: RECIPE CALCULATION ENGINE TESTS
