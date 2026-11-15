@@ -122,8 +122,6 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
         "RETURN_FROM_SALESMAN": "RETURN_FROM_SALESMAN",
         "COMPANY_ADJUSTMENT": "POSITIVE_ADJUSTMENT",
         "POSITIVE_ADJUSTMENT": "POSITIVE_ADJUSTMENT",
-        "NEGATIVE_ADJUSTMENT": "NEGATIVE_ADJUSTMENT",
-        "COMPANY_NEGATIVE_ADJUSTMENT": "COMPANY_NEGATIVE_ADJUSTMENT",
         "SALESMAN_ADJUSTMENT": "SALESMAN_POSITIVE_ADJUSTMENT",
         "SALESMAN_POSITIVE_ADJUSTMENT": "SALESMAN_POSITIVE_ADJUSTMENT",
     }
@@ -131,7 +129,7 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     txn_type = aliases.get(requested_type)
     if not txn_type:
         raise HTTPException(status_code=422, detail=f"Unsupported stock movement type: {requested_type}")
-    if txn_type in {"COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT", "NEGATIVE_ADJUSTMENT", "COMPANY_NEGATIVE_ADJUSTMENT"} and role not in {"OWNER", "OWNER_ADMIN", "PA"}:
+    if txn_type in {"COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT"} and role not in {"OWNER", "OWNER_ADMIN", "PA"}:
         raise HTTPException(status_code=403, detail="Only Owner or PA can change company stock.")
     if txn_type in {"ISSUE_TO_SALESMAN", "RETURN_FROM_SALESMAN", "SALESMAN_POSITIVE_ADJUSTMENT"} and not req.salesman_user_id:
         raise HTTPException(status_code=422, detail="Select a salesman for this stock movement.")
@@ -139,6 +137,7 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
         raise HTTPException(status_code=403, detail="Salesmen can only record returns for their own assigned stock.")
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    stock_txn_id = db.generate_id("SalesmanStockLedger")
 
     products = db.get_records("Products")
     p_info = next((p for p in products if str(p.get("product_id")) == req.product_id), {})
@@ -148,24 +147,21 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     sku = str(p_info.get("sku", req.product_id))
     unit = str(p_info.get("selling_unit", "PACKET"))
     pack_weight_g = int(p_info.get("pack_weight_g", 500) or 500)
-
-    # Shared product lock protects all canonical warehouse stock movements
-    with CrossProcessLock("stock_product", req.product_id):
-        stock_txn_id = db.generate_id("SalesmanStockLedger")
+    pid = str(req.product_id).strip()
+    with CrossProcessLock("stock_product", pid):
         ledger = db.get_records("SalesmanStockLedger", fresh=True)
         company_balances, _pairs = balances(ledger)
         if txn_type == "ISSUE_TO_SALESMAN":
-            available = company_balances.get(req.product_id, 0)
+            available = int(company_balances.get(pid, 0) or 0)
             if req.quantity > available:
-                raise HTTPException(status_code=422, detail=f"Insufficient company warehouse stock. Available {available}, requested {req.quantity}.")
-        if txn_type == "RETURN_FROM_SALESMAN":
-            available = salesman_available(ledger, req.salesman_user_id, req.product_id)
+                raise HTTPException(status_code=422, detail=f"Insufficient company stock. Available {available}, requested {req.quantity}.")
+        elif txn_type == "RETURN_FROM_SALESMAN":
+            available = salesman_available(ledger, req.salesman_user_id, pid)
             if req.quantity > available:
                 raise HTTPException(status_code=422, detail=f"Insufficient salesman stock to return. Available {available}, requested {req.quantity}.")
-        if txn_type in {"NEGATIVE_ADJUSTMENT", "COMPANY_NEGATIVE_ADJUSTMENT"}:
-            available = company_balances.get(req.product_id, 0)
-            if req.quantity > available:
-                raise HTTPException(status_code=422, detail=f"Cannot reduce warehouse stock below zero. Available {available}, reduction requested {req.quantity}.")
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        stock_txn_id = db.generate_id("SalesmanStockLedger")
 
         record = {
             "stock_txn_id": stock_txn_id,
@@ -186,8 +182,13 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
             "reference_id": req.reference_id or "",
             "notes": req.notes or "",
         }
-        if not db.append_record("SalesmanStockLedger", record, raise_on_error=True):
-            raise HTTPException(status_code=503, detail="Stock movement was not saved. Check the Google Sheets connection and retry.")
+        try:
+            if not db.append_record("SalesmanStockLedger", record, raise_on_error=True):
+                raise HTTPException(status_code=503, detail="Stock movement was not saved. Check the Google Sheets connection and retry.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Stock movement was not saved: {exc}")
 
         # Also sync StockMovements sheet for canonical movement tracking
         try:
@@ -210,16 +211,15 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
         except Exception:
             pass
 
+        db.log_audit(
+            actor=user_id,
+            action="STOCK_MOVEMENT",
+            entity_type="SalesmanStockLedger",
+            entity_id=stock_txn_id,
+            reason=f"Stock {txn_type}: {req.quantity} {unit} of {sku} for {req.salesman_user_id}"
+        )
 
-    db.log_audit(
-        actor=user_id,
-        action="STOCK_MOVEMENT",
-        entity_type="SalesmanStockLedger",
-        entity_id=stock_txn_id,
-        reason=f"Stock {txn_type}: {req.quantity} {unit} of {sku} for {req.salesman_user_id}"
-    )
-
-    return StockTransaction(**record)
+        return StockTransaction(**record)
 
 
 class StockDiscrepancyCreate(BaseModel):
@@ -285,85 +285,6 @@ async def submit_stock_discrepancy(req: StockDiscrepancyCreate, current_user: di
     return record
 
 
-def _discrepancy_audit_key(discrepancy_id: str, status_str: str) -> str:
-    return f"AUDIT-DISC-{discrepancy_id}-{status_str.strip().upper()}"
-
-
-def _find_discrepancy_review_audit(audit_rows: list, discrepancy_id: str, status_str: str) -> Optional[dict]:
-    norm_status = status_str.strip().upper()
-    audit_action = f"{norm_status}_STOCK_DISCREPANCY"
-    audit_key = _discrepancy_audit_key(discrepancy_id, norm_status)
-    for row in audit_rows:
-        if str(row.get("related_record_id", "")).strip() == audit_key:
-            return row
-        if (
-            str(row.get("entity_type", "")).strip() == "StockDiscrepancies"
-            and str(row.get("entity_id", "")).strip() == discrepancy_id
-            and str(row.get("action", "")).strip().upper() == audit_action
-        ):
-            return row
-    return None
-
-
-def _ensure_discrepancy_review_audit(
-    discrepancy_id: str,
-    status_str: str,
-    actor_user_id: str,
-    approved_adjustment: int,
-    notes: str = "",
-) -> dict:
-    """
-    Idempotently verify or persist the required StockDiscrepancies review audit event.
-    Must be called while holding the discrepancy's CrossProcessLock.
-    Translates persistence failures into HTTP 503 so incomplete operations never report silent success.
-    """
-    norm_status = status_str.strip().upper()
-    audit_action = f"{norm_status}_STOCK_DISCREPANCY"
-    audit_key = _discrepancy_audit_key(discrepancy_id, norm_status)
-
-    existing_rows = db.get_records("AuditLog", fresh=True)
-    existing = _find_discrepancy_review_audit(existing_rows, discrepancy_id, norm_status)
-    if existing is not None:
-        return existing
-
-    try:
-        audit_id = db.generate_id("AuditLog")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Incomplete discrepancy {norm_status.lower()}: could not allocate audit log ID: {exc}",
-        )
-
-    record = {
-        "audit_id": audit_id,
-        "event_datetime": datetime.now(timezone.utc).isoformat(),
-        "actor_user_id": actor_user_id,
-        "action": audit_action,
-        "entity_type": "StockDiscrepancies",
-        "entity_id": discrepancy_id,
-        "field_changed": "status",
-        "old_value": "PENDING_APPROVAL",
-        "new_value": norm_status,
-        "reason": f"{norm_status} stock discrepancy {discrepancy_id}. Adjustment: {approved_adjustment}. Notes: {notes}",
-        "approved_by_user_id": actor_user_id,
-        "related_record_id": audit_key,
-    }
-    try:
-        if not db.append_record("AuditLog", record, raise_on_error=True):
-            raise HTTPException(
-                status_code=503,
-                detail=f"Incomplete discrepancy {norm_status.lower()}: required audit event could not be persisted.",
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Incomplete discrepancy {norm_status.lower()}: required audit event could not be persisted: {exc}",
-        )
-    return record
-
-
 @router.post("/discrepancies/{discrepancy_id}/review", dependencies=[Depends(require_sheets_connection)])
 async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyReview, current_user: dict = Depends(get_current_user)):
     if not is_manager(current_user):
@@ -374,196 +295,182 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
         raise HTTPException(status_code=422, detail="Action must be APPROVE or REJECT.")
 
     user_id = str(current_user.get("user_id", ""))
-    records = db.get_records("StockDiscrepancies", fresh=True)
-    match = next((r for r in records if str(r.get("discrepancy_id")) == discrepancy_id), None)
-    if not match:
+    initial_records = db.get_records("StockDiscrepancies", fresh=True)
+    initial_match = next((r for r in initial_records if str(r.get("discrepancy_id")) == discrepancy_id), None)
+    if not initial_match:
         raise HTTPException(status_code=404, detail="Discrepancy record not found.")
 
-    p_id_hint = str(match.get("product_id", "")).strip()
-    lock = CrossProcessLock("stock_product", p_id_hint) if p_id_hint else CrossProcessLock("stock_discrepancy", discrepancy_id)
+    p_id = str(initial_match.get("product_id", "")).strip()
 
-    with lock:
-        # 1. Re-read discrepancy using fresh storage data inside the shared lock
-        fresh_records = db.get_records("StockDiscrepancies", fresh=True)
-        curr = next((r for r in fresh_records if str(r.get("discrepancy_id")) == discrepancy_id), None)
-        if not curr:
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(CrossProcessLock("stock_discrepancy", discrepancy_id))
+        if p_id:
+            stack.enter_context(CrossProcessLock("stock_product", p_id))
+
+        records = db.get_records("StockDiscrepancies", fresh=True)
+        match = next((r for r in records if str(r.get("discrepancy_id")) == discrepancy_id), None)
+        if not match:
             raise HTTPException(status_code=404, detail="Discrepancy record not found.")
 
-        curr_status = str(curr.get("status", "PENDING_APPROVAL")).strip().upper()
-        diff = int(curr.get("difference", 0) or 0)
-        loc = str(curr.get("location", ""))
-        p_id = str(curr.get("product_id", "")).strip()
-        ref_id = f"DISC-{discrepancy_id}"
-        is_company = loc.strip().upper() in {"COMPANY_WAREHOUSE", "FACTORY", "WAREHOUSE", ""}
-
-        if is_company:
-            adj_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "NEGATIVE_ADJUSTMENT"
-            adj_qty = abs(diff)
-        else:
-            adj_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "RETURN_FROM_SALESMAN"
-            adj_qty = abs(diff) if diff > 0 else -abs(diff)
-        salesman_target = "" if is_company else loc
-
-        # 2. Verify current status before performing any stock ledger write
-        if curr_status == "REJECTED":
-            if action == "APPROVE":
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Cannot approve discrepancy {discrepancy_id}: discrepancy has already been REJECTED."
-                )
-            reviewer = str(curr.get("reviewed_by_user_id") or user_id)
-            _ensure_discrepancy_review_audit(
-                discrepancy_id=discrepancy_id,
-                status_str="REJECTED",
-                actor_user_id=reviewer,
-                approved_adjustment=0,
-                notes=req.notes,
-            )
-            return {"ok": True, "status": "REJECTED", "discrepancy_id": discrepancy_id}
-
-        if curr_status == "APPROVED":
-            if action == "REJECT":
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Cannot reject discrepancy {discrepancy_id}: discrepancy has already been APPROVED."
-                )
-            # Already approved -> verify/repair required approval audit event without creating another ledger movement
-            reviewer = str(curr.get("reviewed_by_user_id") or user_id)
-            try:
-                recorded_adj = int(float(curr.get("approved_adjustment", diff) or 0))
-            except (TypeError, ValueError):
-                recorded_adj = diff
-            _ensure_discrepancy_review_audit(
-                discrepancy_id=discrepancy_id,
-                status_str="APPROVED",
-                actor_user_id=reviewer,
-                approved_adjustment=recorded_adj,
-                notes=req.notes,
-            )
-            return {"ok": True, "status": "APPROVED", "discrepancy_id": discrepancy_id}
-
-        if curr_status != "PENDING_APPROVAL":
+        curr_status = str(match.get("status", "")).strip().upper()
+        if action == "APPROVE" and curr_status == "REJECTED":
             raise HTTPException(
                 status_code=422,
-                detail=f"Cannot {action.lower()} discrepancy {discrepancy_id} from status '{curr_status}'."
+                detail=f"Cannot approve discrepancy {discrepancy_id}: already REJECTED.",
+            )
+        if action == "REJECT" and curr_status == "APPROVED":
+            raise HTTPException(
+                status_code=422,
+                detail=f"Cannot reject discrepancy {discrepancy_id}: already APPROVED.",
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        diff = int(match.get("difference", 0) or 0)
+        loc = str(match.get("location", ""))
+        p_id = str(match.get("product_id", "")).strip()
+        status_str = "APPROVED" if action == "APPROVE" else "REJECTED"
+        disc_ref = f"DISC-{discrepancy_id}"
+        audit_related_id = f"AUDIT-DISC-{discrepancy_id}-{status_str}"
+        audit_action = f"{status_str}_STOCK_DISCREPANCY"
 
         if action == "APPROVE" and diff != 0:
+            products = {str(p.get("product_id")): p for p in db.get_records("Products")}
+            p_info = products.get(p_id, {})
+            sku = str(p_info.get("sku", p_id))
+            pack = int(p_info.get("pack_weight_g", 500) or 500)
+            unit = str(p_info.get("selling_unit", "PACKET"))
+
+            loc_norm = loc.strip().upper()
+            is_company = loc_norm in {"COMPANY_WAREHOUSE", "FACTORY", "WAREHOUSE", "COMPANY", ""}
+            salesman_target = "" if is_company else loc.strip()
+            if is_company:
+                expected_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "NEGATIVE_ADJUSTMENT"
+                expected_qty = abs(diff)
+            else:
+                expected_txn_type = "POSITIVE_ADJUSTMENT" if diff > 0 else "RETURN_FROM_SALESMAN"
+                expected_qty = abs(diff) if diff > 0 else -abs(diff)
+
             ledger = db.get_records("SalesmanStockLedger", fresh=True)
-            existing_disc_txns = [
+            existing_txns = [
                 tx for tx in ledger
-                if str(tx.get("reference_id", "")).strip() == ref_id
+                if str(tx.get("reference_id", "")).strip() == disc_ref
             ]
 
-            if len(existing_disc_txns) > 1:
-                db.log_audit(
-                    user_id,
-                    "DISCREPANCY_LEDGER_CONFLICT",
-                    "StockDiscrepancies",
-                    discrepancy_id,
-                    reason=f"Blocked approval of {discrepancy_id}: multiple ledger movements ({len(existing_disc_txns)}) already exist for reference {ref_id}.",
-                )
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Conflicting ledger state: {len(existing_disc_txns)} movements already exist for {ref_id}. Approval blocked."
-                )
+            if existing_txns:
+                conflict_reason = None
+                if len(existing_txns) > 1:
+                    conflict_reason = f"Multiple ledger rows ({len(existing_txns)}) found for {disc_ref}."
+                else:
+                    tx = existing_txns[0]
+                    tx_prod = str(tx.get("product_id", "")).strip()
+                    tx_salesman = str(tx.get("salesman_user_id", "")).strip()
+                    tx_type = str(tx.get("txn_type", "")).strip().upper()
+                    try:
+                        tx_qty = int(float(tx.get("quantity", 0) or 0))
+                    except (TypeError, ValueError):
+                        tx_qty = None
+                    if (
+                        tx_prod != p_id
+                        or tx_salesman != salesman_target
+                        or tx_type != expected_txn_type
+                        or tx_qty != expected_qty
+                    ):
+                        conflict_reason = (
+                            f"Existing ledger movement for {disc_ref} does not match discrepancy "
+                            f"(found product={tx_prod}, salesman={tx_salesman}, txn_type={tx_type}, qty={tx_qty}; "
+                            f"expected product={p_id}, salesman={salesman_target}, txn_type={expected_txn_type}, qty={expected_qty})."
+                        )
 
-            if len(existing_disc_txns) == 1:
-                ex = existing_disc_txns[0]
-                ex_pid = str(ex.get("product_id", "")).strip()
-                ex_type = str(ex.get("txn_type", "")).strip().upper()
-                try:
-                    ex_qty = int(float(ex.get("quantity", 0) or 0))
-                except (TypeError, ValueError):
-                    ex_qty = 0
-                ex_salesman = str(ex.get("salesman_user_id", "")).strip()
-
-                if not (ex_pid == p_id and ex_type == adj_txn_type and ex_qty == adj_qty and ex_salesman == salesman_target):
+                if conflict_reason:
                     db.log_audit(
                         user_id,
                         "DISCREPANCY_LEDGER_CONFLICT",
                         "StockDiscrepancies",
                         discrepancy_id,
-                        reason=f"Blocked approval of {discrepancy_id}: existing {ref_id} movement ({ex_pid}, {ex_type}, {ex_qty}, '{ex_salesman}') conflicts with expected ({p_id}, {adj_txn_type}, {adj_qty}, '{salesman_target}').",
+                        reason=conflict_reason,
                     )
                     raise HTTPException(
                         status_code=422,
-                        detail=f"Conflicting stock ledger movement already exists for {ref_id}: expected ({p_id}, {adj_txn_type}, {adj_qty}), found ({ex_pid}, {ex_type}, {ex_qty}). Approval blocked."
+                        detail=f"Conflicting stock ledger movement already exists for discrepancy {discrepancy_id}. Manual review required.",
                     )
-                # Exact matching movement already exists (recovery after status-update failure) -> proceed to update status without appending
             else:
-                if is_company and diff < 0:
-                    company_balances, _ = balances(ledger)
-                    available = company_balances.get(p_id, 0)
-                    if abs(diff) > available:
-                        raise HTTPException(
-                            status_code=422,
-                            detail=f"Cannot approve discrepancy reduction: warehouse stock available is {available}, reduction requested is {abs(diff)}."
-                        )
-
-                products = {str(p.get("product_id")): p for p in db.get_records("Products")}
-                p_info = products.get(p_id, {})
-                sku = str(p_info.get("sku", p_id))
-                pack = int(p_info.get("pack_weight_g", 500) or 500)
-                unit = str(p_info.get("selling_unit", "PACKET"))
-
                 adj_record = {
                     "stock_txn_id": db.generate_id("SalesmanStockLedger"),
                     "txn_datetime": now_iso,
                     "salesman_user_id": salesman_target,
                     "product_id": p_id,
                     "sku_snapshot": sku,
-                    "txn_type": adj_txn_type,
-                    "quantity": adj_qty,
+                    "txn_type": expected_txn_type,
+                    "quantity": expected_qty,
                     "unit": unit,
                     "pack_weight_g": pack,
                     "related_sale_id": "",
                     "issued_by_user_id": user_id,
-                    "received_by_user_id": salesman_target,
+                    "received_by_user_id": "WAREHOUSE" if is_company else salesman_target,
                     "confirmed_by_user_id": user_id,
-                    "reference_id": ref_id,
+                    "reference_id": disc_ref,
                     "notes": f"Approved physical count adjustment for {discrepancy_id}: {req.notes}".strip(),
                 }
                 try:
                     if not db.append_record("SalesmanStockLedger", adj_record, raise_on_error=True):
-                        raise HTTPException(status_code=503, detail="Could not record discrepancy stock adjustment.")
+                        raise HTTPException(status_code=503, detail="Could not record discrepancy ledger adjustment.")
                 except HTTPException:
                     raise
                 except Exception as exc:
-                    raise HTTPException(status_code=503, detail=f"Could not record discrepancy stock adjustment: {exc}")
+                    raise HTTPException(status_code=503, detail=f"Could not record discrepancy ledger adjustment: {exc}")
 
-        status_str = "APPROVED" if action == "APPROVE" else "REJECTED"
-        approved_adj_val = diff if action == "APPROVE" else 0
-        try:
-            updated = db.update_record(
-                "StockDiscrepancies",
-                "discrepancy_id",
-                discrepancy_id,
-                {
+        if curr_status != status_str:
+            try:
+                updated = db.update_record("StockDiscrepancies", "discrepancy_id", discrepancy_id, {
                     "status": status_str,
                     "reviewed_by_user_id": user_id,
-                    "approved_adjustment": approved_adj_val,
-                    "reason": f"{curr.get('reason', '')} [REVIEW:{status_str}:{user_id}:{req.notes}]".strip(),
-                },
-                expected_conditions={"status": "PENDING_APPROVAL"},
-                raise_on_error=True,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Could not update discrepancy status: {exc}")
-        if not updated:
-            raise HTTPException(status_code=503, detail="Could not update discrepancy status.")
+                    "approved_adjustment": diff if action == "APPROVE" else 0,
+                    "reason": f"{match.get('reason', '')} [REVIEW:{status_str}:{user_id}:{req.notes}]".strip(),
+                }, raise_on_error=True)
+                if not updated:
+                    raise HTTPException(status_code=503, detail="Could not update discrepancy status.")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Could not update discrepancy status: {exc}")
 
-        _ensure_discrepancy_review_audit(
-            discrepancy_id=discrepancy_id,
-            status_str=status_str,
-            actor_user_id=user_id,
-            approved_adjustment=approved_adj_val,
-            notes=req.notes,
+        audits = db.get_records("AuditLog", fresh=True)
+        existing_audit = next(
+            (
+                a for a in audits
+                if str(a.get("entity_type", "")).strip() == "StockDiscrepancies"
+                and str(a.get("entity_id", "")).strip() == discrepancy_id
+                and str(a.get("action", "")).strip().upper() == audit_action
+            ),
+            None,
         )
+        if not existing_audit:
+            try:
+                audit_id = db.generate_id("AuditLog")
+            except Exception:
+                audit_id = f"AUD-{discrepancy_id}-{status_str}"
+            audit_record = {
+                "audit_id": audit_id,
+                "event_datetime": now_iso,
+                "actor_user_id": user_id,
+                "action": audit_action,
+                "entity_type": "StockDiscrepancies",
+                "entity_id": discrepancy_id,
+                "field_changed": "status",
+                "old_value": curr_status or "PENDING_APPROVAL",
+                "new_value": status_str,
+                "reason": f"{status_str} stock discrepancy {discrepancy_id}. Adjustment: {diff if action == 'APPROVE' else 0}. Notes: {req.notes}",
+                "approved_by_user_id": user_id,
+                "related_record_id": audit_related_id,
+            }
+            try:
+                if not db.append_record("AuditLog", audit_record, raise_on_error=True):
+                    raise HTTPException(status_code=503, detail="Could not persist stock discrepancy audit log.")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Could not persist stock discrepancy audit log: {exc}")
+
         return {"ok": True, "status": status_str, "discrepancy_id": discrepancy_id}
 
 
@@ -681,13 +588,13 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
             "message": f"Factory stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
         }
 
-    # Warehouse or Salesman - Protected by shared product lock
-    with CrossProcessLock("stock_product", req.product_id):
-        salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
-        company_bal, salesman_bal = balances(salesman_ledger)
-
-        if loc in {"WAREHOUSE", "COMPANY_WAREHOUSE", "COMPANY"}:
-            current_wh = company_bal.get(req.product_id, 0)
+    # Warehouse or Salesman
+    pid = str(req.product_id).strip()
+    if loc in {"WAREHOUSE", "COMPANY_WAREHOUSE", "COMPANY"}:
+        with CrossProcessLock("stock_product", pid):
+            salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+            company_bal, salesman_bal = balances(salesman_ledger)
+            current_wh = int(company_bal.get(pid, 0) or 0)
             diff = req.physical_count - current_wh
             if diff == 0:
                 return {
@@ -716,8 +623,13 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
                 "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
                 "notes": f"Warehouse physical reconciliation: {req.reason}. {req.notes}".strip(),
             }
-            if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
-                raise HTTPException(status_code=503, detail="Could not record warehouse stock adjustment.")
+            try:
+                if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
+                    raise HTTPException(status_code=503, detail="Could not record warehouse stock adjustment.")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Could not record warehouse stock adjustment: {exc}")
 
             db.log_audit(
                 actor,
@@ -744,9 +656,11 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
                 "message": f"Warehouse stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
             }
 
-        # Otherwise, loc is salesman_user_id (e.g. USR-SALES-01)
-        salesman_id = req.location.strip()
-        current_s = salesman_available(salesman_ledger, salesman_id, req.product_id)
+    # Otherwise, loc is salesman_user_id (e.g. USR-SALES-01)
+    salesman_id = req.location.strip()
+    with CrossProcessLock("stock_product", pid):
+        salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+        current_s = salesman_available(salesman_ledger, salesman_id, pid)
         diff = req.physical_count - current_s
         if diff == 0:
             return {
@@ -775,8 +689,13 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
             "reference_id": f"PHYS_REC_{now_iso[:10].replace('-', '')}",
             "notes": f"Salesman {salesman_id} physical reconciliation: {req.reason}. {req.notes}".strip(),
         }
-        if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
-            raise HTTPException(status_code=503, detail="Could not record salesman stock adjustment.")
+        try:
+            if not db.append_record("SalesmanStockLedger", row, raise_on_error=True):
+                raise HTTPException(status_code=503, detail="Could not record salesman stock adjustment.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Could not record salesman stock adjustment: {exc}")
 
         db.log_audit(
             actor,
@@ -802,7 +721,6 @@ async def reconcile_physical_stock(req: PhysicalStockReconcile, current_user: di
             "reconciled_by": actor,
             "message": f"Salesman {salesman_id} stock reconciled to {req.physical_count} packets ({diff:+d} packets adjustment).",
         }
-
 
 
 @router.get("/bulk-batches")
@@ -1153,22 +1071,22 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
             if str(tx.get("reference_id", "")).strip() == pass_num and str(tx.get("txn_type", "")).upper() == "ISSUE_TO_SALESMAN":
                 transferred_by_prod[str(tx.get("product_id"))] += int(float(tx.get("quantity", 0) or 0))
 
+        # Check for pre-existing over-transfer before issuing any stock
+        over_transfers = []
+        for itm in items:
+            already = transferred_by_prod.get(itm.product_id, 0)
+            if already > itm.quantity:
+                over_transfers.append(f"{itm.product_name or itm.sku}: recorded {already} > expected {itm.quantity}")
+        if over_transfers:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Over-transfer detected: {'; '.join(over_transfers)}. Pass acceptance is blocked."
+            )
+
         # Track movement completion per product
         untransferred_items = []
         for itm in items:
             already = transferred_by_prod.get(itm.product_id, 0)
-            if already > itm.quantity:
-                db.log_audit(
-                    actor=user_id,
-                    action="VAN_LOADING_OVERTRANSFER_DETECTED",
-                    entity_type="VanLoadingPasses",
-                    entity_id=pass_id,
-                    reason=f"Pre-transfer check blocked pass {pass_num} for SKU {itm.sku} ({itm.product_id}): recorded {already} > requested {itm.quantity}. Pass kept out of ACCEPTED status; no compensating movement created."
-                )
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Over-transfer detected: Recorded movements ({already}) exceed required ({itm.quantity}) for {itm.product_name or itm.sku}. Acceptance blocked."
-                )
             if already < itm.quantity:
                 remaining = itm.quantity - already
                 untransferred_items.append((itm, remaining))
@@ -1214,7 +1132,7 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
                 except Exception as exc:
                     raise HTTPException(status_code=503, detail=f"Failed to record stock movement for {itm.product_name} in SalesmanStockLedger: {exc}")
 
-        # Post-transfer complete verification: Every expected product movement must match EXACTLY
+        # Post-transfer exact quantity verification: Every expected product movement must match EXACTLY
         verified_ledger = db.get_records("SalesmanStockLedger", fresh=True)
         verified_by_prod = collections.defaultdict(int)
         for tx in verified_ledger:
@@ -1223,32 +1141,16 @@ async def accept_van_loading_pass(pass_id_or_number: str, req: Optional[LoadingP
 
         for itm in items:
             total_done = verified_by_prod.get(itm.product_id, 0)
-            if total_done != itm.quantity:
-                if total_done < itm.quantity:
-                    db.log_audit(
-                        actor=user_id,
-                        action="VAN_LOADING_UNDERTRANSFER_DETECTED",
-                        entity_type="VanLoadingPasses",
-                        entity_id=pass_id,
-                        reason=f"Post-transfer verification failed on pass {pass_num} for SKU {itm.sku} ({itm.product_id}): verified {total_done} < requested {itm.quantity}. Pass remains PENDING_ACCEPTANCE."
-                    )
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Incomplete transfer: Verified {total_done} of {itm.quantity} packets for {itm.product_name}. Pass remains pending."
-                    )
-                else:
-                    db.log_audit(
-                        actor=user_id,
-                        action="VAN_LOADING_OVERTRANSFER_DETECTED",
-                        entity_type="VanLoadingPasses",
-                        entity_id=pass_id,
-                        reason=f"Post-transfer verification blocked pass {pass_num} for SKU {itm.sku} ({itm.product_id}): verified {total_done} > requested {itm.quantity}. Pass kept out of ACCEPTED status; no compensating movement created."
-                    )
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Over-transfer detected: Verified {total_done} packets exceeds expected {itm.quantity} packets for {itm.product_name}. Acceptance blocked."
-                    )
-
+            if total_done < itm.quantity:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Incomplete transfer: Verified {total_done} of {itm.quantity} packets for {itm.product_name}. Pass remains pending."
+                )
+            if total_done > itm.quantity:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Over-transfer detected: Verified {total_done} of {itm.quantity} packets for {itm.product_name}. Pass acceptance is blocked."
+                )
 
         # Update VanLoadingPasses status to ACCEPTED
         action_notes = (req.notes if req else "") or ""
