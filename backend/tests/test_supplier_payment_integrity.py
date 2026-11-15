@@ -22,6 +22,7 @@ Tests:
 import asyncio
 import os
 import sys
+import threading
 import unittest
 from fastapi import HTTPException
 
@@ -637,6 +638,565 @@ class TestSupplierPaymentIntegrity(unittest.TestCase):
         with open(api_ts_path, "r", encoding="utf-8") as f:
             api_src = f.read()
         self.assertNotIn("PAY-${Date.now()", api_src)
+
+    def _snapshot_supplier_payment_state(self, supplier_id: str, pay_id: str):
+        payments = [dict(p) for p in db.get_records("SupplierPayments", fresh=True)]
+        orig = next(p for p in payments if p["payment_id"] == pay_id)
+        journals = [dict(j) for j in db.get_records("JournalHeaders", fresh=True)]
+        creditors = asyncio.run(get_supplier_outstanding_balances(user=self.owner_user))
+        supp_bal = next((c["outstanding_payable"] for c in creditors if c["supplier_id"] == supplier_id), 0.0)
+        return {
+            "orig": orig,
+            "payment_count": len(payments),
+            "journal_count": len(journals),
+            "outstanding_payable": supp_bal,
+        }
+
+    def _assert_conflict_preserves_state(self, conflict_req: SupplierPaymentCreate, supplier_id: str, pay_id: str, before: dict):
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(record_supplier_payment(conflict_req, user=self.owner_user))
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        after = self._snapshot_supplier_payment_state(supplier_id, pay_id)
+        self.assertEqual(after["payment_count"], before["payment_count"])
+        self.assertEqual(after["journal_count"], before["journal_count"])
+        self.assertEqual(after["outstanding_payable"], before["outstanding_payable"])
+        for k in ("supplier_id", "bill_id", "amount", "payment_method", "reference_number", "payment_date", "payment_type", "status"):
+            self.assertEqual(after["orig"].get(k), before["orig"].get(k))
+        audits = db.get_records("AuditLog", fresh=True)
+        self.assertTrue(
+            any(
+                a.get("action") == "SUPPLIER_PAYMENT_IDEMPOTENCY_CONFLICT" and a.get("entity_id") == pay_id
+                for a in audits
+            )
+        )
+
+    def test_17_upi_followed_by_identical_upi_retry(self):
+        bill = self._create_bill("SUP-001", "INV-IDM-17", 2000.0)
+        req = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id=bill["bill_id"],
+            amount=500.0,
+            payment_method="UPI",
+            reference_number="REF-123",
+            payment_date="2026-11-15",
+            idempotency_key="idem-17-upi",
+        )
+        first = asyncio.run(record_supplier_payment(req, user=self.owner_user))
+        retry = asyncio.run(record_supplier_payment(req, user=self.owner_user))
+        self.assertFalse(first["is_replay"])
+        self.assertTrue(retry["is_replay"])
+        self.assertEqual(first["payment"]["payment_id"], retry["payment"]["payment_id"])
+        self.assertEqual(len(db.get_records("SupplierPayments", fresh=True)), 1)
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 1)
+        creditors = asyncio.run(get_supplier_outstanding_balances(user=self.owner_user))
+        sup1 = next(c for c in creditors if c["supplier_id"] == "SUP-001")
+        self.assertEqual(sup1["outstanding_payable"], 1500.0)
+
+    def test_18_upi_followed_by_cash_same_key_rejected_409(self):
+        # Exact reproduction from audit report
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=500.0,
+                    payment_method="UPI",
+                    reference_number="REF-123",
+                    payment_date="2026-11-15",
+                    idempotency_key="same-key",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        conflict = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id="",
+            amount=500.0,
+            payment_method="CASH",
+            reference_number="REF-123",
+            payment_date="2026-11-15",
+            idempotency_key="same-key",
+        )
+        self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+        # Bank (1120) must remain credited, Cash (1110) must NOT be touched
+        lines = db.get_records("JournalLines", fresh=True)
+        self.assertEqual(len([l for l in lines if l["account_code"] == "1120"]), 1)
+        self.assertEqual(len([l for l in lines if l["account_code"] == "1110"]), 0)
+
+    def test_19_cash_followed_by_upi_same_key_rejected_409(self):
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=500.0,
+                    payment_method="CASH",
+                    reference_number="",
+                    payment_date="2026-11-15",
+                    idempotency_key="idem-19-cash-upi",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        for ref in ("", "UPI-RETRY-19"):
+            conflict = SupplierPaymentCreate(
+                supplier_id="SUP-001",
+                bill_id="",
+                amount=500.0,
+                payment_method="UPI",
+                reference_number=ref,
+                payment_date="2026-11-15",
+                idempotency_key="idem-19-cash-upi",
+            )
+            self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+    def test_20_bank_transfer_followed_by_neft_same_key_rejected_409(self):
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=1500.0,
+                    payment_method="BANK_TRANSFER",
+                    reference_number="UTR-BANK-20",
+                    payment_date="2026-11-15",
+                    idempotency_key="idem-20-bank-neft",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        # Alias BANK -> BANK_TRANSFER must still replay cleanly
+        alias_retry = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=1500.0,
+                    payment_method="BANK",
+                    reference_number="UTR-BANK-20",
+                    payment_date="2026-11-15",
+                    idempotency_key="idem-20-bank-neft",
+                ),
+                user=self.owner_user,
+            )
+        )
+        self.assertTrue(alias_retry["is_replay"])
+        self.assertEqual(alias_retry["payment"]["payment_id"], pay_id)
+
+        # Distinct NEFT channel must be rejected 409
+        conflict = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id="",
+            amount=1500.0,
+            payment_method="NEFT",
+            reference_number="UTR-BANK-20",
+            payment_date="2026-11-15",
+            idempotency_key="idem-20-bank-neft",
+        )
+        self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+    def test_21_same_key_different_amount_including_sub_rupee_rejected_409(self):
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=500.00,
+                    payment_method="UPI",
+                    reference_number="UTR-AMT-21",
+                    payment_date="2026-11-15",
+                    idempotency_key="idem-21-amt",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        for bad_amt in (500.01, 600.00):
+            conflict = SupplierPaymentCreate(
+                supplier_id="SUP-001",
+                bill_id="",
+                amount=bad_amt,
+                payment_method="UPI",
+                reference_number="UTR-AMT-21",
+                payment_date="2026-11-15",
+                idempotency_key="idem-21-amt",
+            )
+            self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+    def test_22_same_key_different_supplier_rejected_409(self):
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=800.0,
+                    payment_method="UPI",
+                    reference_number="UTR-SUPP-22",
+                    payment_date="2026-11-15",
+                    idempotency_key="idem-22-supp",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        conflict = SupplierPaymentCreate(
+            supplier_id="SUP-002",
+            bill_id="",
+            amount=800.0,
+            payment_method="UPI",
+            reference_number="UTR-SUPP-22",
+            payment_date="2026-11-15",
+            idempotency_key="idem-22-supp",
+        )
+        self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+    def test_23_same_key_different_or_absent_bill_id_rejected_409(self):
+        bill_1 = self._create_bill("SUP-001", "INV-23A", 4000.0)
+        bill_2 = self._create_bill("SUP-001", "INV-23B", 4000.0)
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id=bill_1["bill_id"],
+                    amount=1000.0,
+                    payment_method="UPI",
+                    reference_number="UTR-BILL-23",
+                    payment_date="2026-11-15",
+                    idempotency_key="idem-23-bill",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        # Different bill_id -> 409
+        conflict_other_bill = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id=bill_2["bill_id"],
+            amount=1000.0,
+            payment_method="UPI",
+            reference_number="UTR-BILL-23",
+            payment_date="2026-11-15",
+            idempotency_key="idem-23-bill",
+        )
+        self._assert_conflict_preserves_state(conflict_other_bill, "SUP-001", pay_id, before)
+
+        # Absent bill_id -> 409
+        conflict_absent_bill = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id="",
+            amount=1000.0,
+            payment_method="UPI",
+            reference_number="UTR-BILL-23",
+            payment_date="2026-11-15",
+            idempotency_key="idem-23-bill",
+        )
+        self._assert_conflict_preserves_state(conflict_absent_bill, "SUP-001", pay_id, before)
+
+    def test_24_same_key_different_external_reference_rejected_409(self):
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=900.0,
+                    payment_method="UPI",
+                    reference_number="REF-ORIG-24",
+                    payment_date="2026-11-15",
+                    idempotency_key="idem-24-ref",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        for changed_ref in ("REF-OTHER-24", "ref-orig-24"):
+            conflict = SupplierPaymentCreate(
+                supplier_id="SUP-001",
+                bill_id="",
+                amount=900.0,
+                payment_method="UPI",
+                reference_number=changed_ref,
+                payment_date="2026-11-15",
+                idempotency_key="idem-24-ref",
+            )
+            self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+    def test_25_same_key_different_payment_date_rejected_409(self):
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=750.0,
+                    payment_method="UPI",
+                    reference_number="UTR-DATE-25",
+                    payment_date="2026-11-14",
+                    idempotency_key="idem-25-date",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        conflict = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id="",
+            amount=750.0,
+            payment_method="UPI",
+            reference_number="UTR-DATE-25",
+            payment_date="2026-11-15",
+            idempotency_key="idem-25-date",
+        )
+        self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+    def test_26_same_key_different_payment_type_rejected_409(self):
+        first = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id="",
+                    amount=1100.0,
+                    payment_method="UPI",
+                    reference_number="UTR-TYPE-26",
+                    payment_date="2026-11-15",
+                    payment_type="ON_ACCOUNT",
+                    idempotency_key="idem-26-type",
+                ),
+                user=self.owner_user,
+            )
+        )
+        pay_id = first["payment"]["payment_id"]
+        before = self._snapshot_supplier_payment_state("SUP-001", pay_id)
+
+        for other_type in ("ADVANCE", "BILL_PAYMENT"):
+            conflict = SupplierPaymentCreate(
+                supplier_id="SUP-001",
+                bill_id="",
+                amount=1100.0,
+                payment_method="UPI",
+                reference_number="UTR-TYPE-26",
+                payment_date="2026-11-15",
+                payment_type=other_type,
+                idempotency_key="idem-26-type",
+            )
+            self._assert_conflict_preserves_state(conflict, "SUP-001", pay_id, before)
+
+    def test_27_two_legitimate_payments_different_keys_succeed(self):
+        bill = self._create_bill("SUP-001", "INV-27", 3000.0)
+        p1 = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id=bill["bill_id"],
+                    amount=500.0,
+                    payment_method="UPI",
+                    reference_number="REF-LEGIT-1",
+                    payment_date="2026-11-15",
+                    idempotency_key="legit-key-1",
+                ),
+                user=self.owner_user,
+            )
+        )
+        p2 = asyncio.run(
+            record_supplier_payment(
+                SupplierPaymentCreate(
+                    supplier_id="SUP-001",
+                    bill_id=bill["bill_id"],
+                    amount=500.0,
+                    payment_method="CASH",
+                    reference_number="",
+                    payment_date="2026-11-15",
+                    idempotency_key="legit-key-2",
+                ),
+                user=self.owner_user,
+            )
+        )
+        self.assertNotEqual(p1["payment"]["payment_id"], p2["payment"]["payment_id"])
+        self.assertEqual(len(db.get_records("SupplierPayments", fresh=True)), 2)
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 2)
+        creditors = asyncio.run(get_supplier_outstanding_balances(user=self.owner_user))
+        sup1 = next(c for c in creditors if c["supplier_id"] == "SUP-001")
+        self.assertEqual(sup1["outstanding_payable"], 2000.0)
+
+    def test_28_concurrent_identical_requests_create_single_payment(self):
+        bill = self._create_bill("SUP-001", "INV-28-CONC", 5000.0)
+        barrier = threading.Barrier(4)
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def worker():
+            req = SupplierPaymentCreate(
+                supplier_id="SUP-001",
+                bill_id=bill["bill_id"],
+                amount=1200.0,
+                payment_method="UPI",
+                reference_number="UTR-CONC-28",
+                payment_date="2026-11-15",
+                idempotency_key="conc-identical-28",
+            )
+            barrier.wait(timeout=5)
+            try:
+                res = asyncio.run(record_supplier_payment(req, user=self.owner_user))
+                with lock:
+                    results.append(res)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 4)
+        pay_ids = {r["payment"]["payment_id"] for r in results}
+        self.assertEqual(len(pay_ids), 1)
+        self.assertEqual(sum(1 for r in results if not r["is_replay"]), 1)
+        self.assertEqual(sum(1 for r in results if r["is_replay"]), 3)
+        self.assertEqual(len(db.get_records("SupplierPayments", fresh=True)), 1)
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 1)
+        creditors = asyncio.run(get_supplier_outstanding_balances(user=self.owner_user))
+        sup1 = next(c for c in creditors if c["supplier_id"] == "SUP-001")
+        self.assertEqual(sup1["outstanding_payable"], 3800.0)
+
+    def test_29_concurrent_conflicting_requests_one_wins_other_409(self):
+        self._create_bill("SUP-001", "INV-29A", 5000.0)
+        self._create_bill("SUP-002", "INV-29B", 5000.0)
+        barrier = threading.Barrier(2)
+        outcomes = []
+        lock = threading.Lock()
+
+        req_upi = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id="",
+            amount=500.0,
+            payment_method="UPI",
+            reference_number="REF-CONC-29",
+            payment_date="2026-11-15",
+            idempotency_key="conc-conflict-29",
+        )
+        req_cash_other_supp = SupplierPaymentCreate(
+            supplier_id="SUP-002",
+            bill_id="",
+            amount=500.0,
+            payment_method="CASH",
+            reference_number="REF-CONC-29",
+            payment_date="2026-11-15",
+            idempotency_key="conc-conflict-29",
+        )
+
+        def run_req(payload):
+            barrier.wait(timeout=5)
+            try:
+                res = asyncio.run(record_supplier_payment(payload, user=self.owner_user))
+                with lock:
+                    outcomes.append(("OK", res))
+            except HTTPException as exc:
+                with lock:
+                    outcomes.append(("HTTP", exc.status_code))
+
+        t1 = threading.Thread(target=run_req, args=(req_upi,))
+        t2 = threading.Thread(target=run_req, args=(req_cash_other_supp,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        statuses = sorted([o[0] for o in outcomes])
+        self.assertEqual(statuses, ["HTTP", "OK"])
+        http_err = next(o[1] for o in outcomes if o[0] == "HTTP")
+        self.assertEqual(http_err, 409)
+        self.assertEqual(len(db.get_records("SupplierPayments", fresh=True)), 1)
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 1)
+
+    def test_30_retry_after_persistence_failure_and_conflicting_retry_409(self):
+        bill = self._create_bill("SUP-001", "INV-30-PERSIST", 4000.0)
+        req = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id=bill["bill_id"],
+            amount=1000.0,
+            payment_method="UPI",
+            reference_number="UTR-30-OK",
+            payment_date="2026-11-15",
+            idempotency_key="idem-30-persist",
+        )
+        db.inject_failure_once("SupplierBills", 1)
+        with self.assertRaises((RuntimeError, StorageIOError)):
+            asyncio.run(record_supplier_payment(req, user=self.owner_user))
+
+        # Even while INCOMPLETE, a conflicting payload with the same key must still return 409
+        conflicting_req = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id=bill["bill_id"],
+            amount=1000.0,
+            payment_method="CASH",
+            reference_number="UTR-30-OK",
+            payment_date="2026-11-15",
+            idempotency_key="idem-30-persist",
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(record_supplier_payment(conflicting_req, user=self.owner_user))
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        # Identical retry recovers cleanly
+        rec = asyncio.run(record_supplier_payment(req, user=self.owner_user))
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["payment"]["status"], "PAID")
+        self.assertEqual(len(db.get_records("SupplierPayments", fresh=True)), 1)
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 1)
+        creditors = asyncio.run(get_supplier_outstanding_balances(user=self.owner_user))
+        sup1 = next(c for c in creditors if c["supplier_id"] == "SUP-001")
+        self.assertEqual(sup1["outstanding_payable"], 3000.0)
+
+    def test_31_retry_after_accounting_posting_failure_recovers_without_double_charge(self):
+        bill = self._create_bill("SUP-001", "INV-31-ACCT", 4500.0)
+        req = SupplierPaymentCreate(
+            supplier_id="SUP-001",
+            bill_id=bill["bill_id"],
+            amount=1500.0,
+            payment_method="BANK_TRANSFER",
+            reference_number="UTR-31-ACCT",
+            payment_date="2026-11-15",
+            idempotency_key="idem-31-acct",
+        )
+        db.inject_failure_once("JournalHeaders", 1)
+        with self.assertRaises((RuntimeError, StorageIOError)):
+            asyncio.run(record_supplier_payment(req, user=self.owner_user))
+
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 0)
+        rec = asyncio.run(record_supplier_payment(req, user=self.owner_user))
+        self.assertTrue(rec["ok"])
+        self.assertEqual(rec["payment"]["status"], "PAID")
+        self.assertEqual(len(db.get_records("SupplierPayments", fresh=True)), 1)
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 1)
+        bills = db.get_records("SupplierBills", fresh=True)
+        self.assertEqual(float(bills[0]["paid_amount"]), 1500.0)
+        self.assertEqual(float(bills[0]["balance_amount"]), 3000.0)
+        tb = calculate_trial_balance()
+        self.assertTrue(tb["is_balanced"])
+        self.assertAlmostEqual(tb["variance"], 0.0, places=2)
 
 
 if __name__ == "__main__":

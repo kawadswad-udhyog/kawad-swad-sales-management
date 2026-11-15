@@ -10,6 +10,7 @@ Integrates:
 """
 
 from contextlib import ExitStack
+import hashlib
 import json
 import math
 from typing import List, Dict, Any, Optional
@@ -595,6 +596,105 @@ def _normalize_supplier_payment_method(raw_method: str) -> str:
     return aliases[m]
 
 
+def _normalize_payment_date(raw_date: Optional[str], fallback_today: str) -> str:
+    txt = str(raw_date or "").strip()
+    if not txt:
+        return str(fallback_today or "").strip()[:10]
+    if len(txt) >= 10 and txt[4:5] == "-" and txt[7:8] == "-":
+        return txt[:10]
+    return txt
+
+
+def _normalize_supplier_payment_type(raw_type: Optional[str], clean_bill_id: str) -> str:
+    txt = str(raw_type or "").strip().upper()
+    if txt:
+        return txt
+    return "BILL_PAYMENT" if clean_bill_id else "ON_ACCOUNT"
+
+
+def _canonical_supplier_payment_payload(
+    *,
+    supplier_id: str,
+    bill_id: str,
+    amount: Any,
+    payment_method: str,
+    reference_number: Optional[str],
+    payment_date: Optional[str],
+    payment_type: Optional[str],
+    fallback_today: str,
+) -> Dict[str, Any]:
+    clean_supp = str(supplier_id or "").strip()
+    clean_bill = str(bill_id or "").strip()
+    clean_method = _normalize_supplier_payment_method(payment_method)
+    clean_ref = str(reference_number if reference_number is not None else "").strip()
+    norm_date = _normalize_payment_date(payment_date, fallback_today)
+    norm_type = _normalize_supplier_payment_type(payment_type, clean_bill)
+    amt_dec = round_money(to_decimal(amount))
+    settlement_acct = "1110" if clean_method == "CASH" else "1120"
+    return {
+        "supplier_id": clean_supp,
+        "has_bill": bool(clean_bill),
+        "bill_id": clean_bill,
+        "amount": amt_dec,
+        "payment_method": clean_method,
+        "reference_number": clean_ref,
+        "payment_date": norm_date,
+        "payment_type": norm_type,
+        "settlement_account": settlement_acct,
+    }
+
+
+def _supplier_payment_payload_mismatches(
+    existing_row: Dict[str, Any],
+    incoming: Dict[str, Any],
+) -> List[str]:
+    ex_bill = str(existing_row.get("bill_id", "") or "").strip()
+    ex_raw_method = str(existing_row.get("payment_method", "") or "").strip()
+    try:
+        ex_method = _normalize_supplier_payment_method(ex_raw_method)
+    except HTTPException:
+        ex_method = ex_raw_method.upper()
+    ex_date_raw = str(existing_row.get("payment_date", "") or "").strip()
+    ex_date = _normalize_payment_date(ex_date_raw, incoming["payment_date"])
+    ex_type = _normalize_supplier_payment_type(existing_row.get("payment_type"), ex_bill)
+    ex_amt = round_money(to_decimal(existing_row.get("amount", 0) or 0))
+    ex_ref = str(existing_row.get("reference_number", "") or "").strip()
+    ex_supp = str(existing_row.get("supplier_id", "") or "").strip()
+    ex_acct = "1110" if ex_method == "CASH" else "1120"
+
+    existing_norm = {
+        "supplier_id": ex_supp,
+        "has_bill": bool(ex_bill),
+        "bill_id": ex_bill,
+        "amount": ex_amt,
+        "payment_method": ex_method,
+        "reference_number": ex_ref,
+        "payment_date": ex_date,
+        "payment_type": ex_type,
+        "settlement_account": ex_acct,
+    }
+
+    mismatches: List[str] = []
+    for field in (
+        "supplier_id",
+        "has_bill",
+        "bill_id",
+        "amount",
+        "payment_method",
+        "reference_number",
+        "payment_date",
+        "payment_type",
+        "settlement_account",
+    ):
+        if existing_norm[field] != incoming[field]:
+            mismatches.append(f"{field}: {existing_norm[field]!r} != {incoming[field]!r}")
+    return mismatches
+
+
+def _idemp_lock_token(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+
+
 @router.get("/payments")
 async def list_supplier_payments(user: dict = Depends(get_current_user)):
     require_purchasing_access(user)
@@ -614,36 +714,30 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
     if not clean_supplier_id:
         raise HTTPException(400, "Supplier ID is required.")
 
-    clean_bill_id = str(req.bill_id or "").strip()
-    clean_method = _normalize_supplier_payment_method(req.payment_method)
-    clean_ref = str(req.reference_number or "").strip()
+    today = business_today()
+    incoming = _canonical_supplier_payment_payload(
+        supplier_id=clean_supplier_id,
+        bill_id=req.bill_id or "",
+        amount=req.amount,
+        payment_method=req.payment_method,
+        reference_number=req.reference_number,
+        payment_date=req.payment_date,
+        payment_type=req.payment_type,
+        fallback_today=today,
+    )
+    clean_bill_id = incoming["bill_id"]
+    clean_method = incoming["payment_method"]
+    clean_ref = incoming["reference_number"]
+    pay_type = incoming["payment_type"]
+    payment_date_val = incoming["payment_date"]
+    req_amount = float(incoming["amount"])
     clean_idemp_key = str(req.idempotency_key or "").strip()
-    req_amount = round_money(req.amount)
-
-    # Phase 2 Reference integrity:
-    # - CASH may leave external reference blank (""), never generate synthetic PAY-xxxxxx.
-    # - Non-cash modes require an actual bank/UPI/cheque reference number.
-    if clean_method != "CASH" and len(clean_ref) < 2:
-        raise HTTPException(
-            400,
-            f"External bank/UPI/cheque reference number is required for {clean_method} payment.",
-        )
-
-    suppliers = db.get_records("Suppliers", fresh=True)
-    supp = next((s for s in suppliers if str(s.get("supplier_id", "")).strip() == clean_supplier_id), None)
-    if not supp:
-        raise HTTPException(404, f"Supplier {clean_supplier_id} not found.")
-    supp_name = str(supp.get("supplier_name") or clean_supplier_id)
 
     with ExitStack() as stack:
-        stack.enter_context(CrossProcessLock("supplier", clean_supplier_id))
-        if clean_bill_id:
-            stack.enter_context(CrossProcessLock("supplier_bill", clean_bill_id))
+        if clean_idemp_key:
+            stack.enter_context(CrossProcessLock("supplier_payment_idemp", _idemp_lock_token(clean_idemp_key)))
 
-        bills = db.get_records("SupplierBills", fresh=True)
         payments = db.get_records("SupplierPayments", fresh=True)
-
-        # Idempotent replay / partial-failure recovery check
         existing_pay = None
         if clean_idemp_key:
             existing_pay = next(
@@ -651,32 +745,85 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
                 None,
             )
             if existing_pay:
-                ex_supp = str(existing_pay.get("supplier_id", "")).strip()
-                ex_bill = str(existing_pay.get("bill_id", "") or "").strip()
-                ex_amt = round(float(existing_pay.get("amount", 0) or 0), 2)
-                ex_ref = str(existing_pay.get("reference_number", "") or "").strip()
-                if (
-                    ex_supp != clean_supplier_id
-                    or ex_bill != clean_bill_id
-                    or abs(ex_amt - float(req_amount)) > 0.05
-                    or ex_ref != clean_ref
-                ):
-                    raise HTTPException(409, "Idempotency key already used with a different payment payload.")
+                mismatches = _supplier_payment_payload_mismatches(existing_pay, incoming)
+                if mismatches:
+                    existing_pay_id = str(existing_pay.get("payment_id", "")).strip()
+                    db.log_audit(
+                        actor,
+                        "SUPPLIER_PAYMENT_IDEMPOTENCY_CONFLICT",
+                        "SupplierPayments",
+                        existing_pay_id,
+                        field_changed="idempotency_key",
+                        old_val=json.dumps({
+                            "supplier_id": existing_pay.get("supplier_id"),
+                            "bill_id": existing_pay.get("bill_id", ""),
+                            "amount": str(existing_pay.get("amount")),
+                            "payment_method": existing_pay.get("payment_method"),
+                            "reference_number": existing_pay.get("reference_number", ""),
+                            "payment_date": existing_pay.get("payment_date", ""),
+                            "payment_type": existing_pay.get("payment_type", ""),
+                        }),
+                        new_val=json.dumps({
+                            "supplier_id": incoming["supplier_id"],
+                            "bill_id": incoming["bill_id"],
+                            "amount": str(incoming["amount"]),
+                            "payment_method": incoming["payment_method"],
+                            "reference_number": incoming["reference_number"],
+                            "payment_date": incoming["payment_date"],
+                            "payment_type": incoming["payment_type"],
+                        }),
+                        reason=f"Conflicting retry on idempotency_key '{clean_idemp_key}': {'; '.join(mismatches)}",
+                    )
+                    raise HTTPException(
+                        409,
+                        f"Idempotency key already used with a different payment payload ({'; '.join(mismatches)}).",
+                    )
 
                 ex_status = str(existing_pay.get("status", "")).strip().upper()
-                bill_row = next((b for b in bills if str(b.get("bill_id", "")).strip() == clean_bill_id), None) if clean_bill_id else None
                 if ex_status == "PAID":
+                    bills_snapshot = db.get_records("SupplierBills", fresh=True) if clean_bill_id else []
+                    bill_row = (
+                        next((b for b in bills_snapshot if str(b.get("bill_id", "")).strip() == clean_bill_id), None)
+                        if clean_bill_id
+                        else None
+                    )
                     rem_bal = round(float(bill_row.get("balance_amount", 0) or 0), 2) if bill_row else 0.0
-                    b_status = str(bill_row.get("payment_status", "N/A")) if bill_row else "ON_ACCOUNT"
+                    b_status = str(bill_row.get("payment_status", "N/A")) if bill_row else pay_type
                     return {
                         "ok": True,
                         "payment": _enrich_payment_row(existing_pay),
                         "remaining_balance": rem_bal,
                         "bill_status": b_status,
-                        "payment_type": "BILL_PAYMENT" if clean_bill_id else "ON_ACCOUNT",
+                        "payment_type": pay_type,
                         "is_replay": True,
                     }
 
+        # Phase 2 Reference integrity (evaluated for new payments or incomplete recoveries):
+        # - CASH may leave external reference blank (""), never generate synthetic PAY-xxxxxx.
+        # - Non-cash modes require an actual bank/UPI/cheque reference number.
+        if clean_method != "CASH" and len(clean_ref) < 2:
+            raise HTTPException(
+                400,
+                f"External bank/UPI/cheque reference number is required for {clean_method} payment.",
+            )
+
+        if existing_pay is None and req.payment_type is not None and str(req.payment_type).strip():
+            if pay_type == "BILL_PAYMENT" and not clean_bill_id:
+                raise HTTPException(400, "bill_id is required when payment_type is BILL_PAYMENT.")
+            if pay_type in {"ON_ACCOUNT", "ADVANCE"} and clean_bill_id:
+                raise HTTPException(400, f"bill_id must be empty when payment_type is {pay_type}.")
+
+        suppliers = db.get_records("Suppliers", fresh=True)
+        supp = next((s for s in suppliers if str(s.get("supplier_id", "")).strip() == clean_supplier_id), None)
+        if not supp:
+            raise HTTPException(404, f"Supplier {clean_supplier_id} not found.")
+        supp_name = str(supp.get("supplier_name") or clean_supplier_id)
+
+        stack.enter_context(CrossProcessLock("supplier", clean_supplier_id))
+        if clean_bill_id:
+            stack.enter_context(CrossProcessLock("supplier_bill", clean_bill_id))
+
+        bills = db.get_records("SupplierBills", fresh=True)
         bill = None
         if clean_bill_id:
             bill = next((b for b in bills if str(b.get("bill_id", "")).strip() == clean_bill_id), None)
@@ -697,8 +844,6 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
                 )
 
         now = now_iso()
-        today = business_today()
-        pay_type = "BILL_PAYMENT" if clean_bill_id else "ON_ACCOUNT"
 
         if existing_pay:
             pay_id = str(existing_pay.get("payment_id", "")).strip()
@@ -723,7 +868,7 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
                 "bill_id": clean_bill_id,
                 "supplier_id": clean_supplier_id,
                 "supplier_name": supp_name,
-                "payment_date": (req.payment_date or today).strip(),
+                "payment_date": payment_date_val,
                 "amount": req_amount,
                 "payment_method": clean_method,
                 "reference_number": clean_ref,
@@ -741,7 +886,7 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
 
         # Apply bill deduction once (guarded by [spay:<pay_id>] marker for crash recovery)
         new_bal = 0.0
-        new_status = "ON_ACCOUNT"
+        new_status = pay_type
         if bill is not None:
             bill_notes = str(bill.get("notes", "") or "")
             spay_tag = f"[spay:{pay_id}]"
@@ -822,6 +967,10 @@ async def apply_supplier_advance_to_bill(
     clean_supplier_id = str(pre_pay.get("supplier_id", "")).strip()
 
     with ExitStack() as stack:
+        if clean_idemp_key:
+            stack.enter_context(
+                CrossProcessLock("supplier_advance_apply_idemp", _idemp_lock_token(f"{clean_pay_id}:{clean_idemp_key}"))
+            )
         stack.enter_context(CrossProcessLock("supplier", clean_supplier_id))
         stack.enter_context(CrossProcessLock("supplier_bill", clean_bill_id))
 
@@ -845,13 +994,24 @@ async def apply_supplier_advance_to_bill(
         enriched = _enrich_payment_row(pay_raw)
         allocs = list(enriched["allocations"])
 
-        # Idempotent replay guard
+        # Idempotent replay guard with Decimal-safe comparison
         if clean_idemp_key:
             prior = next((a for a in allocs if str(a.get("idempotency_key", "")).strip() == clean_idemp_key), None)
             if prior:
-                if str(prior.get("bill_id", "")).strip() != clean_bill_id or (
-                    req.amount is not None and abs(float(prior.get("amount", 0)) - float(req.amount)) > 0.05
-                ):
+                prior_bill = str(prior.get("bill_id", "")).strip()
+                prior_amt = round_money(to_decimal(prior.get("amount", 0) or 0))
+                req_amt_dec = round_money(to_decimal(req.amount)) if req.amount is not None else None
+                if prior_bill != clean_bill_id or (req_amt_dec is not None and prior_amt != req_amt_dec):
+                    db.log_audit(
+                        actor,
+                        "APPLY_SUPPLIER_ADVANCE_IDEMPOTENCY_CONFLICT",
+                        "SupplierPayments",
+                        clean_pay_id,
+                        field_changed="idempotency_key",
+                        old_val=f"bill_id={prior_bill},amount={prior_amt}",
+                        new_val=f"bill_id={clean_bill_id},amount={req_amt_dec}",
+                        reason=f"Conflicting advance allocation retry on key '{clean_idemp_key}'",
+                    )
                     raise HTTPException(409, "Idempotency key already used for a different allocation.")
                 return {
                     "ok": True,
