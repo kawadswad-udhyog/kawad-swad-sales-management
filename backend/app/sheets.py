@@ -356,10 +356,13 @@ REQUIRED_TABS = {
 }
 
 
+DEFAULT_GSPREAD_TIMEOUT = (5.0, 15.0)
+
+
 class SheetsDatabase:
     """Google Sheets adapter with persistent write enforcement and isolated testing support."""
 
-    def __init__(self):
+    def __init__(self, connect_on_init: bool = False):
         self.client = None
         self.spreadsheet = None
         self.is_connected = False
@@ -372,12 +375,22 @@ class SheetsDatabase:
         self._diagnostic_scan_lock = threading.Lock()
         self._worksheets: Dict[str, Any] = {}
         self._lock = threading.RLock()
+        self._connect_state_lock = threading.Lock()
+        self._connect_exec_lock = threading.Lock()
+        self._connect_in_progress = False
+        self._connect_done_event = threading.Event()
+        self._background_thread: Optional[threading.Thread] = None
+        self._request_timeout = DEFAULT_GSPREAD_TIMEOUT
+        self._reconnect_cooldown_seconds = 15.0
+        self._max_auto_backoff_seconds = 120.0
+        self._consecutive_failures = 0
         self._inflight: Dict[str, threading.Event] = {}
         self._fail_once: Dict[str, int] = {}
         self.shared_file_dir: Optional[str] = os.getenv("SALES_SHARED_TEST_DIR") or None
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self._last_conn_attempt_time: float = 0.0
-        self.init_connection()
+        if connect_on_init:
+            self.init_connection()
 
     def enable_shared_file_store(self, directory_path: str) -> None:
         """Enables multi-process shared persistent file storage for testing."""
@@ -502,11 +515,138 @@ class SheetsDatabase:
                     pass
             raise StorageIOError(f"Atomic replacement failed for storage file {path}: {exc}") from exc
 
+    @staticmethod
+    def _validate_timeout(timeout: Any) -> tuple:
+        """Ensure gspread connect/read timeouts are strictly finite and never None."""
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and float(timeout) > 0:
+            val = float(timeout)
+            return (val, val)
+        if (
+            isinstance(timeout, (tuple, list))
+            and len(timeout) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) > 0 for v in timeout)
+        ):
+            return (float(timeout[0]), float(timeout[1]))
+        return DEFAULT_GSPREAD_TIMEOUT
+
+    def _configure_client_timeouts(self, client: Any) -> tuple:
+        """Apply finite connect/read timeouts to a gspread client; never allow timeout=None."""
+        timeout = self._validate_timeout(getattr(self, "_request_timeout", DEFAULT_GSPREAD_TIMEOUT))
+        if hasattr(client, "set_timeout"):
+            client.set_timeout(timeout)
+        http_client = getattr(client, "http_client", None)
+        if http_client is not None:
+            current = getattr(http_client, "timeout", None)
+            if current is None or current != timeout:
+                http_client.timeout = timeout
+        return timeout
+
+    def _auto_reconnect_cooldown_seconds(self) -> float:
+        """Compute bounded exponential backoff cooldown for automatic reconnect attempts."""
+        if self._consecutive_failures <= 0:
+            return self._reconnect_cooldown_seconds
+        exponent = min(self._consecutive_failures - 1, 3)
+        return min(self._reconnect_cooldown_seconds * (2 ** exponent), self._max_auto_backoff_seconds)
+
+    def start_background_init(self) -> bool:
+        """Start Google Sheets initialization on a single background daemon thread after port bind."""
+        if self.is_connected and self.spreadsheet is not None:
+            return False
+        if not SALES_GOOGLE_SPREADSHEET_ID:
+            with self._connect_state_lock:
+                self._last_conn_attempt_time = time.monotonic()
+                self.is_connected = False
+                self.spreadsheet = None
+                self.last_connection_error = (
+                    "SALES_GOOGLE_SPREADSHEET_ID is not configured in environment. "
+                    "Persistent storage cannot initialize."
+                )
+            if self.allow_in_memory_fallback:
+                logger.warning("%s Operating in-memory for testing.", self.last_connection_error)
+            else:
+                logger.error("%s Business writes are disabled to prevent data loss.", self.last_connection_error)
+            return False
+
+        with self._connect_state_lock:
+            if self._connect_in_progress or (self._background_thread is not None and self._background_thread.is_alive()):
+                return False
+            self._connect_in_progress = True
+            self._connect_done_event.clear()
+            self._last_conn_attempt_time = time.monotonic()
+
+            def _worker() -> None:
+                try:
+                    with self._connect_exec_lock:
+                        self._run_init_connection_impl()
+                finally:
+                    with self._connect_state_lock:
+                        self._connect_in_progress = False
+                        self._connect_done_event.set()
+
+            thread = threading.Thread(target=_worker, name="sheets-init", daemon=True)
+            self._background_thread = thread
+            thread.start()
+            return True
+
+    def attempt_auto_reconnect(self) -> bool:
+        """
+        Safely attempt a single-flight automatic reconnection respecting bounded backoff.
+        Concurrent callers never trigger duplicate network storms and fail closed immediately.
+        """
+        if self.is_connected and self.spreadsheet is not None:
+            return True
+        if not SALES_GOOGLE_SPREADSHEET_ID or self.allow_in_memory_fallback:
+            return False
+
+        now = time.monotonic()
+        with self._connect_state_lock:
+            if self.is_connected and self.spreadsheet is not None:
+                return True
+            if self._connect_in_progress:
+                return False
+            cooldown = self._auto_reconnect_cooldown_seconds()
+            if self._last_conn_attempt_time > 0.0 and (now - self._last_conn_attempt_time) < cooldown:
+                return False
+            self._connect_in_progress = True
+            self._connect_done_event.clear()
+            self._last_conn_attempt_time = now
+
+        try:
+            if not self._connect_exec_lock.acquire(blocking=False):
+                return False
+            try:
+                return self._run_init_connection_impl()
+            finally:
+                self._connect_exec_lock.release()
+        finally:
+            with self._connect_state_lock:
+                self._connect_in_progress = False
+                self._connect_done_event.set()
+
     def init_connection(self) -> bool:
         """Attempt to connect to Google Sheets using configured service account credentials."""
-        import time
-        self._last_conn_attempt_time = time.monotonic()
+        acquired = self._connect_exec_lock.acquire(timeout=20.0)
+        if not acquired:
+            logger.warning("Timed out waiting for in-flight Google Sheets connection attempt.")
+            return False
+        try:
+            with self._connect_state_lock:
+                self._last_conn_attempt_time = time.monotonic()
+                self._connect_in_progress = True
+                self._connect_done_event.clear()
+            return self._run_init_connection_impl()
+        finally:
+            with self._connect_state_lock:
+                self._connect_in_progress = False
+                self._connect_done_event.set()
+            self._connect_exec_lock.release()
+
+    def _run_init_connection_impl(self) -> bool:
+        """Serialized implementation of Google Sheets connection and tab discovery."""
+        with self._connect_state_lock:
+            self._last_conn_attempt_time = time.monotonic()
         self.is_connected = False
+        self.spreadsheet = None
         self.last_connection_error = None
         self.invalidate_diagnostic_cache()
 
@@ -537,6 +677,8 @@ class SheetsDatabase:
                 except Exception as exc:
                     self.last_connection_error = f"Invalid SALES_GOOGLE_SERVICE_ACCOUNT_JSON format: {exc}"
                     logger.error(self.last_connection_error)
+                    with self._connect_state_lock:
+                        self._consecutive_failures += 1
                     return False
 
             if not creds and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE):
@@ -545,6 +687,8 @@ class SheetsDatabase:
                 except Exception as exc:
                     self.last_connection_error = f"Failed to load service account file {SALES_GOOGLE_SERVICE_ACCOUNT_FILE}: {exc}"
                     logger.error(self.last_connection_error)
+                    with self._connect_state_lock:
+                        self._consecutive_failures += 1
                     return False
 
             if not creds:
@@ -556,20 +700,40 @@ class SheetsDatabase:
                     logger.warning("%s Operating in-memory for testing.", self.last_connection_error)
                 else:
                     logger.error("%s Business writes are disabled to prevent data loss.", self.last_connection_error)
+                with self._connect_state_lock:
+                    self._consecutive_failures += 1
                 return False
 
-            self.client = gspread.authorize(creds)
-            self.spreadsheet = self.client.open_by_key(SALES_GOOGLE_SPREADSHEET_ID)
+            client = gspread.authorize(creds)
+            self._configure_client_timeouts(client)
+            self.client = client
+            spreadsheet = client.open_by_key(SALES_GOOGLE_SPREADSHEET_ID)
+            if not self.ensure_required_tabs(spreadsheet=spreadsheet):
+                self.is_connected = False
+                self.spreadsheet = None
+                self.last_connection_error = (
+                    "Google Sheets worksheet discovery failed during startup verification; "
+                    "persistent storage remains disconnected to avoid unsafe tab creation."
+                )
+                logger.error("%s Persistent writes disabled.", self.last_connection_error)
+                with self._connect_state_lock:
+                    self._consecutive_failures += 1
+                return False
+
+            self.spreadsheet = spreadsheet
             self.is_connected = True
             self.last_connection_error = None
+            with self._connect_state_lock:
+                self._consecutive_failures = 0
             logger.info("Connected to configured Google Spreadsheet.")
-            self.ensure_required_tabs()
             return True
         except Exception as exc:
             self.is_connected = False
             self.spreadsheet = None
             self.last_connection_error = f"Failed to connect to Google Sheets: {exc}"
             logger.error("%s. Persistent writes disabled.", self.last_connection_error)
+            with self._connect_state_lock:
+                self._consecutive_failures += 1
             return False
 
     def invalidate_diagnostic_cache(self) -> None:
@@ -914,31 +1078,39 @@ class SheetsDatabase:
             "tabs": results,
         }
 
-    def ensure_required_tabs(self):
-        """Create missing bookkeeping tabs and append missing headers. Never clears rows."""
-        if not (self.is_connected and self.spreadsheet):
-            return
+    def ensure_required_tabs(self, spreadsheet: Any = None) -> bool:
+        """Create missing bookkeeping tabs and append missing headers. Never clears rows or creates tabs on failed discovery."""
+        ss = spreadsheet if spreadsheet is not None else self.spreadsheet
+        if ss is None or (spreadsheet is None and not self.is_connected):
+            return False
         try:
             # Single API call to retrieve all existing worksheets at once
-            existing_ws = {ws.title: ws for ws in self.spreadsheet.worksheets()}
+            existing_ws = {ws.title: ws for ws in ss.worksheets()}
             with self._lock:
                 for title, ws in existing_ws.items():
                     self._worksheets[title] = ws
         except Exception as exc:
-            logger.warning("Could not list worksheets in bulk: %s", exc)
-            existing_ws = {}
+            logger.error(
+                "Worksheet discovery failed; aborting ensure_required_tabs safely without creating tabs: %s",
+                exc,
+            )
+            return False
 
         for tab, headers in REQUIRED_TABS.items():
             try:
                 worksheet = existing_ws.get(tab)
                 if worksheet is None:
-                    worksheet = self.spreadsheet.add_worksheet(title=tab, rows=1000, cols=max(26, len(headers) + 2))
+                    worksheet = ss.add_worksheet(title=tab, rows=1000, cols=max(26, len(headers) + 2))
                     worksheet.update("A1", [headers])
                     with self._lock:
                         self._worksheets[tab] = worksheet
                     self.invalidate_diagnostic_cache()
             except Exception as exc:
                 logger.error("Could not ensure tab %s: %s", tab, exc)
+                if self._is_quota_exception(exc) or self._classify_sheets_exception(exc) == "NETWORK_ERROR":
+                    logger.error("Stopping ensure_required_tabs safely due to Google Sheets quota/network error.")
+                    return False
+        return True
 
     def _ensure_headers(self, worksheet, headers: List[str]):
         current = worksheet.row_values(1)
@@ -1091,14 +1263,10 @@ class SheetsDatabase:
             return parsed
 
     def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
-        import time
-        now = time.monotonic()
-
-        # If disconnected but configured, attempt lazy self-healing reconnect after a cooldown
+        # If disconnected but configured, attempt single-flight self-healing reconnect with bounded backoff
         if not (self.is_connected and self.spreadsheet) and SALES_GOOGLE_SPREADSHEET_ID:
-            if not self.allow_in_memory_fallback and (now - self._last_conn_attempt_time > 15.0):
-                logger.info("Attempting automatic reconnection to Google Sheets for '%s'...", tab_name)
-                self.init_connection()
+            if not self.allow_in_memory_fallback:
+                self.attempt_auto_reconnect()
 
         if not (self.is_connected and self.spreadsheet):
             shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")

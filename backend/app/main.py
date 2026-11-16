@@ -1,4 +1,7 @@
+import asyncio
 import logging
+from contextlib import asynccontextmanager
+from typing import Optional
 from fastapi import FastAPI, Depends
 try:
     from fastapi import Request
@@ -41,10 +44,44 @@ from app.routers import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kawad_swad")
 
+
+def _check_configuration():
+    import os
+    if os.getenv("SALES_TESTING", "").strip() == "1":
+        return
+    try:
+        assert_runtime_config()
+    except Exception as exc:
+        if SALES_ENV == "production":
+            logger.critical("FATAL: Invalid production configuration: %s", exc)
+            raise exc
+        logger.error("Configuration warning on startup: %s", exc)
+
+
+def _schedule_post_bind_sheets_init() -> None:
+    """Schedule Google Sheets initialization strictly after Uvicorn binds $PORT."""
+    import os
+    if os.getenv("SALES_TESTING", "").strip() == "1":
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, db.start_background_init)
+    except RuntimeError:
+        db.start_background_init()
+
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    _check_configuration()
+    _schedule_post_bind_sheets_init()
+    yield
+
+
 app = FastAPI(
     title="Kawad Swad Sales Management API",
     description="FastAPI Google Sheets backend for Kawad Swad Udhyog sales, billing, stock, and expenses.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 if hasattr(app, "exception_handler"):
@@ -108,20 +145,7 @@ app.include_router(quality.router)
 app.include_router(workforce.router)
 
 
-@app.on_event("startup")
-def _check_configuration():
-    import os
-    if os.getenv("SALES_TESTING", "").strip() == "1":
-        return
-    try:
-        assert_runtime_config()
-    except Exception as exc:
-        if SALES_ENV == "production":
-            logger.critical("FATAL: Invalid production configuration: %s", exc)
-            raise exc
-        logger.error("Configuration warning on startup: %s", exc)
-
-def _sanitize_diagnostic_error(err: str | None) -> str | None:
+def _sanitize_diagnostic_error(err: Optional[str]) -> Optional[str]:
     """Redact spreadsheet IDs, file paths, service-account emails, and secret keys from diagnostic messages."""
     if not err:
         return None
