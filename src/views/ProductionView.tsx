@@ -2621,7 +2621,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           <div style={card}>
             <h3>Custom Recipe Editor for Automatic Consumption</h3>
             <p style={{ color: '#64748b' }}>
-              Enter one ingredient per line: <code>Material name | quantity per 1 kg papad | unit</code>. Enter the expected dry yield for this product and use exact active RawMaterials master names.
+              Enter one ingredient per line: <code>Material name | quantity per 1 kg papad | unit</code>. Enter the expected dry yield (kg) from 1.0 kg of the recipe's main flour base, and use exact active RawMaterials master names.
             </p>
             <form
               onSubmit={e => {
@@ -2660,7 +2660,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   type="number"
                   min="0.001"
                   step="0.001"
-                  placeholder="Expected dry yield for this product (kg) *"
+                  placeholder="Expected dry yield per 1 kg main flour base (kg) *"
                   value={recipe.expected_yield_kg}
                   onChange={e => setRecipe({ ...recipe, expected_yield_kg: e.target.value })}
                   required
