@@ -52,7 +52,7 @@ class TestProductionWorkflow(unittest.TestCase):
         })
         db.memory_store["RawMaterials"].append({
             "raw_material_id": "RM-1", "material_name": "Moong Flour",
-            "current_stock": 100, "unit": "kg", "opening_stock_verified": "true",
+            "current_stock": 100, "unit": "kg", "opening_stock_verified": "true", "active": "true",
         })
 
     def tearDown(self):
@@ -63,23 +63,29 @@ class TestProductionWorkflow(unittest.TestCase):
         db._fail_once.clear()
 
     def test_production_requires_approved_recipe_and_consumes_materials(self):
+        # A product cannot be scheduled until a persisted approved recipe exists.
+        with self.assertRaises(HTTPException) as missing_recipe:
+            asyncio.run(prod.create_batch(
+                prod.ProductionCreate(
+                    product_id="PRD-000001", production_date="2026-10-17", quantity_kg=10, wastage_kg=1
+                ),
+                {"user_id": "USR-1", "role": "OWNER"},
+            ))
+        self.assertEqual(missing_recipe.exception.status_code, 422)
+
+        db.memory_store["Recipes"].append({
+            "recipe_id": "RCP-TEST-MOONG",
+            "product_id": "PRD-000001",
+            "product_name_snapshot": "Moong Master Papad",
+            "version": "1",
+            "approved": "true",
+            "expected_yield_kg": "1.2",
+            "items_json": '[{"material_name":"Moong Flour","quantity_per_kg":0.96,"unit":"kg"}]',
+        })
         batch = asyncio.run(prod.create_batch(
             prod.ProductionCreate(
-                product_id="PRD-000001", production_date="2026-10-17", quantity_kg=10, wastage_kg=1
-            ),
-            {"user_id": "USR-1", "role": "OWNER"},
-        ))
-        with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.approve_batch(
-                batch["production_id"], prod.ApprovalRequest(approved=True), {"user_id": "USR-1", "role": "OWNER"}
-            ))
-        self.assertEqual(ctx.exception.status_code, 400)
-
-        asyncio.run(prod.save_recipe(
-            prod.RecipeSave(
-                product_id="PRD-000001",
-                items=[prod.RecipeItemInput(material_name="Moong Flour", quantity_per_kg=0.8, unit="kg")],
-                approved=True,
+                product_id="PRD-000001", production_date="2026-10-17", quantity_kg=10, wastage_kg=1,
+                flour_base_used_kg=8.333333
             ),
             {"user_id": "USR-1", "role": "OWNER"},
         ))
@@ -88,7 +94,8 @@ class TestProductionWorkflow(unittest.TestCase):
         ))
         self.assertEqual(approved["status"], "APPROVED")
         self.assertEqual(len(db.memory_store["RawMaterialLedger"]), 1)
-        self.assertAlmostEqual(db.memory_store["RawMaterialLedger"][0]["quantity"], 7.2)
+        # quantity_per_kg is defined per kg of saleable output: 0.96 x 9.0 kg = 8.64 kg.
+        self.assertAlmostEqual(db.memory_store["RawMaterialLedger"][0]["quantity"], 8.64)
         self.assertTrue(any(
             r["movement_type"] == "BULK_PRODUCED" and abs(r["quantity_kg"] - 9.0) < 0.01
             for r in db.memory_store["ProductionStockLedger"]

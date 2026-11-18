@@ -21,8 +21,12 @@ def calculate_production_requirements(
     Calculate ingredient requirements for a planned finished dried papad output.
     """
     items = recipe.get("items") or []
-    expected_yield_kg = float(recipe.get("expected_yield_kg", 1.2) or 1.2)
-    flour_base_kg = float(recipe.get("flour_base_used_kg", 1.0) or 1.0)
+    expected_yield_value = recipe.get("expected_yield_kg")
+    if expected_yield_value in (None, "") or float(expected_yield_value) <= 0:
+        raise ValueError("Recipe must specify a product-specific positive expected_yield_kg.")
+    expected_yield_kg = float(expected_yield_value)
+    flour_base_value = recipe.get("flour_base_used_kg")
+    flour_base_kg = float(flour_base_value) if flour_base_value not in (None, "") else 1.0
 
     scaled = scale_recipe(
         recipe_items=items,
@@ -39,7 +43,7 @@ def reconcile_production_output(
     rejected_output_kg: float = 0.0,
     process_loss_kg: float = 0.0,
     flour_base_used_kg: Optional[float] = None,
-    benchmark_yield_ratio: float = 1.2,
+    benchmark_yield_ratio: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Reconcile actual production output:
@@ -64,10 +68,11 @@ def reconcile_production_output(
         gross_dec = saleable_dec + rejected_dec + loss_dec
     else:
         gross_dec = to_decimal(gross_output_kg)
-        if gross_dec < (saleable_dec + rejected_dec):
+        accounted_dec = saleable_dec + rejected_dec + loss_dec
+        if gross_dec < accounted_dec:
             raise ValueError(
                 f"Gross output ({gross_output_kg} kg) cannot be less than saleable ({saleable_output_kg} kg) "
-                f"+ rejected output ({rejected_output_kg} kg)"
+                f"+ rejected output ({rejected_output_kg} kg) + process loss ({process_loss_kg} kg)"
             )
 
     # Unexplained variance = gross - (saleable + rejected + process_loss)
@@ -80,10 +85,13 @@ def reconcile_production_output(
 
     if flour_base_used_kg is not None and flour_base_used_kg > 0:
         flour_dec = to_decimal(flour_base_used_kg)
-        benchmark_dec = to_decimal(benchmark_yield_ratio)
         actual_yield_ratio = round_ratio(saleable_dec / flour_dec)
-        expected_benchmark_kg = round_stock(flour_dec * benchmark_dec)
-        yield_variance_kg = round_stock(saleable_dec - to_decimal(expected_benchmark_kg))
+        if benchmark_yield_ratio is not None:
+            benchmark_dec = to_decimal(benchmark_yield_ratio)
+            if benchmark_dec <= 0:
+                raise ValueError("Recipe benchmark yield ratio must be greater than zero.")
+            expected_benchmark_kg = round_stock(flour_dec * benchmark_dec)
+            yield_variance_kg = round_stock(saleable_dec - to_decimal(expected_benchmark_kg))
 
     return {
         "saleable_output_kg": round_stock(saleable_dec),

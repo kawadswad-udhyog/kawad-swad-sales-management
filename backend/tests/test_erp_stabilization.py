@@ -24,6 +24,7 @@ import unittest
 from fastapi import HTTPException
 from app.sheets import db
 from app.routers import production as prod
+from tests.phase4_fixtures import seed_basic_moong_recipe
 from app.calculations import (
     normalize_to_canonical_unit,
     convert_unit,
@@ -325,6 +326,7 @@ class TestERPStabilization(unittest.TestCase):
     # =========================================================
 
     def test_owner_only_production_access_enforcement(self):
+        seed_basic_moong_recipe(db, "PRD-M-200", "Moong Master Papad", ingredient_name="Moong Flour")
         # 1. Owner CAN access summary
         summary = asyncio.run(prod.summary(self.owner_user))
         self.assertIn("bulk_stock", summary)

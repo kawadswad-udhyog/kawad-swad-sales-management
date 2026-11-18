@@ -300,9 +300,10 @@ def resolve_product_recipe(
       4. Canonical deterministic mapping dictionary on `product_id` / `sku` (and pack-suffix-stripped codes).
       5. Normalized base `product_name` (pack sizes stripped) or explicit `(product_family, variant)` structural match.
     """
+    # Static template formulas are not production records.
+    # Only persisted recipes or explicitly supplied data are eligible.
     if master_recipes is None:
-        from app.recipes_master import MASTER_RECIPES_DEFINITION
-        master_recipes = MASTER_RECIPES_DEFINITION
+        master_recipes = []
 
     sheet_recipes, master_fallback = _merge_recipe_sources(recipes_records, master_recipes)
     all_recipes = sheet_recipes + master_fallback
@@ -438,9 +439,10 @@ def audit_product_recipe_mappings(
     Read-only diagnostic audit of every product in Products against Recipes & Master Recipes.
     Returns per-product mapping status and summary counts. Never mutates sheets.
     """
+    # Static template formulas are not production records.
+    # Only persisted recipes or explicitly supplied data are eligible.
     if master_recipes is None:
-        from app.recipes_master import MASTER_RECIPES_DEFINITION
-        master_recipes = MASTER_RECIPES_DEFINITION
+        master_recipes = []
 
     items: List[Dict[str, Any]] = []
     counts = {

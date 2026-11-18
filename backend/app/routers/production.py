@@ -15,13 +15,6 @@ from app.sheets import db
 from app.config import SALES_GOOGLE_SPREADSHEET_ID
 from app.accounting.customer_ledger import CrossProcessLock
 from app.models import BulkAttendanceCreate, BulkAttendanceResponse, BulkAttendanceItem
-from app.recipes_master import (
-    MASTER_RECIPES_DEFINITION,
-    RAW_MATERIALS_SEED,
-    STANDARD_RATES,
-    calculate_recipe_cost,
-    normalize_quantity_to_std_unit,
-)
 
 logger = logging.getLogger(__name__)
 _ATTENDANCE_LOCK = threading.Lock()
@@ -33,6 +26,7 @@ from app.calculations import (
     round_money,
     round_ratio,
     validate_recipe_formulation,
+    calculate_recipe_cost_estimate,
     calculate_production_requirements,
     reconcile_production_output,
     calculate_packed_weight,
@@ -200,7 +194,7 @@ class RecipeSave(BaseModel):
     product_id: str
     items: List[RecipeItemInput] = Field(min_length=1)
     approved: bool = False
-    expected_yield_kg: float = Field(gt=0, default=1.2)
+    expected_yield_kg: float = Field(..., gt=0)
     notes: str = ""
 
 
@@ -240,7 +234,7 @@ class RecipeConfirmRequest(BaseModel):
 
 class RecipeCalculateRequest(BaseModel):
     items: List[Dict[str, Any]]
-    expected_yield_kg: float = Field(gt=0, default=1.2)
+    expected_yield_kg: float = Field(..., gt=0)
 
 
 class ApprovalRequest(BaseModel):
@@ -293,6 +287,20 @@ class DispatchCreate(BaseModel):
     quantity_packets: int = Field(gt=0)
     reference: str = ""
     notes: str = ""
+
+
+class RawMaterialMasterCreate(BaseModel):
+    material_name: str = Field(..., min_length=2, max_length=150)
+    unit: str = Field("kg", description="Canonical stock unit: kg for solids or L for liquids")
+    category: str = Field("RAW_MATERIAL", min_length=2, max_length=40)
+    rate_per_unit: Optional[float] = Field(None, gt=0)
+    rate_status: str = Field("PENDING", description="PENDING, ESTIMATED or CONFIRMED")
+
+
+class RawMaterialRateUpdate(BaseModel):
+    rate_per_unit: Optional[float] = Field(None, gt=0)
+    rate_status: str = Field(..., description="PENDING, ESTIMATED or CONFIRMED")
+    reason: str = Field(..., min_length=3, max_length=300)
 
 
 class RawMaterialReceiveRequest(BaseModel):
@@ -387,11 +395,11 @@ class DalMillingCreate(BaseModel):
     whole_dal_id: Optional[str] = None
     flour_id: Optional[str] = None
     target_flour_id: Optional[str] = None
-    input_quantity_kg: float = Field(..., description="Gross Whole Dal quantity fed into mill (kg)")
-    flour_output_kg: Optional[float] = Field(None, description="Actual Flour output produced from mill (kg)")
-    output_flour_kg: Optional[float] = None
-    milling_expenses: Optional[float] = Field(0.0, description="Actual processing/milling expenses (₹)")
-    milling_charge_per_kg: Optional[float] = None
+    input_quantity_kg: float = Field(..., gt=0, description="Gross Whole Dal quantity fed into mill (kg)")
+    flour_output_kg: Optional[float] = Field(None, gt=0, description="Actual Flour output produced from mill (kg)")
+    output_flour_kg: Optional[float] = Field(None, gt=0)
+    milling_expenses: Optional[float] = Field(0.0, ge=0, description="Actual processing/milling expenses (₹)")
+    milling_charge_per_kg: Optional[float] = Field(None, ge=0)
     operator_name: Optional[str] = None
     milling_date: Optional[str] = Field("", description="Milling batch date (YYYY-MM-DD)")
     batch_reference: Optional[str] = Field("", description="External batch ref or machine run number")
@@ -487,31 +495,104 @@ _RAW_MATERIAL_MUTEX = threading.RLock()
 # Endpoints
 # -------------------------------------------------------------
 
+@router.post("/raw-materials")
+async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = Depends(get_current_user)):
+    """Explicit Owner-only master creation. Never creates stock or imports default material records."""
+    actor, _ = require_owner(user)
+    require_persistent_store()
+
+    name = " ".join(req.material_name.strip().split())
+    unit = req.unit.strip()
+    category = req.category.strip().upper()
+    rate_status = req.rate_status.strip().upper()
+    if unit not in {"kg", "L"}:
+        raise HTTPException(422, "Canonical raw-material unit must be kg or L.")
+    if rate_status not in {"PENDING", "ESTIMATED", "CONFIRMED"}:
+        raise HTTPException(422, "rate_status must be PENDING, ESTIMATED or CONFIRMED.")
+    if rate_status in {"CONFIRMED", "ESTIMATED"} and (req.rate_per_unit is None or req.rate_per_unit <= 0):
+        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED or ESTIMATED status.")
+    if rate_status == "PENDING" and req.rate_per_unit is not None:
+        raise HTTPException(422, "Do not store a rate value with PENDING status. Use ESTIMATED or CONFIRMED.")
+
+    with _RAW_MATERIAL_MUTEX:
+        existing = db.get_records("RawMaterials", fresh=True)
+        duplicate = next((row for row in existing
+            if str(field(row, "material_name", default="")).strip().casefold() == name.casefold()), None)
+        if duplicate:
+            raise HTTPException(409, f"Raw material '{name}' already exists as {field(duplicate, 'raw_material_id', default='')}.")
+        raw_material_id = db.generate_id("RawMaterials")
+        created = {
+            "raw_material_id": raw_material_id,
+            "material_name": name,
+            "current_stock": 0,
+            "unit": unit,
+            "rate_per_unit": req.rate_per_unit if req.rate_per_unit is not None else "",
+            "rate_status": rate_status,
+            "category": category,
+            "active": "true",
+            "notes": "",
+            "created_at": now(),
+            "created_by": actor,
+        }
+        if not db.append_record("RawMaterials", created, raise_on_error=True):
+            raise HTTPException(503, "Raw material master could not be saved.")
+        stored = next((row for row in db.get_records("RawMaterials", fresh=True)
+            if str(field(row, "raw_material_id", default="")).strip() == raw_material_id), None)
+        required_values = ("raw_material_id", "material_name", "unit", "rate_status", "category", "active")
+        if not stored or any(str(field(stored, key, default="")).strip() != str(created[key]).strip() for key in required_values):
+            raise HTTPException(503, "Raw material master write did not pass read-back verification. Review the sheet before retrying.")
+        db.log_audit(actor, "CREATE_RAW_MATERIAL_MASTER", "RawMaterials", raw_material_id, reason=f"Created clean master record: {name}; initial stock set to zero.")
+        return created
+
+
+@router.patch("/raw-materials/{raw_material_id}/rate")
+async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpdate, user: dict = Depends(get_current_user)):
+    """Owner-only explicit reference-rate update. Purchase receipt rates remain transaction ledger facts."""
+    actor, _ = require_owner(user)
+    require_persistent_store()
+    rate_status = req.rate_status.strip().upper()
+    if rate_status not in {"PENDING", "ESTIMATED", "CONFIRMED"}:
+        raise HTTPException(422, "rate_status must be PENDING, ESTIMATED or CONFIRMED.")
+    if rate_status in {"CONFIRMED", "ESTIMATED"} and (req.rate_per_unit is None or req.rate_per_unit <= 0):
+        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED or ESTIMATED status.")
+    if rate_status == "PENDING" and req.rate_per_unit is not None:
+        raise HTTPException(422, "A PENDING rate must not include a numeric value.")
+    with _RAW_MATERIAL_MUTEX:
+        rows = db.get_records("RawMaterials", fresh=True)
+        material = next((row for row in rows if str(field(row, "raw_material_id", default="")).strip() == raw_material_id.strip()), None)
+        if not material:
+            raise HTTPException(404, "Raw material master not found.")
+        updates = {
+            "rate_per_unit": req.rate_per_unit if req.rate_per_unit is not None else "",
+            "rate_status": rate_status,
+        }
+        if not db.update_record("RawMaterials", "raw_material_id", raw_material_id, updates, raise_on_error=True):
+            raise HTTPException(503, "Raw material rate update could not be saved.")
+        stored = next((row for row in db.get_records("RawMaterials", fresh=True)
+            if str(field(row, "raw_material_id", default="")).strip() == raw_material_id.strip()), None)
+        if not stored or str(field(stored, "rate_status", default="")).upper() != rate_status:
+            raise HTTPException(503, "Raw material rate update failed read-back verification.")
+        db.log_audit(actor, "UPDATE_RAW_MATERIAL_RATE", "RawMaterials", raw_material_id, reason=req.reason.strip())
+        return {**material, **updates}
+
+
 @router.get("/raw-materials", response_model=List[RawMaterialBalanceItem])
 async def list_raw_materials(user: dict = Depends(get_current_user)):
     require_production_access(user)
-    raw_master = db.get_records("RawMaterials", fresh=False)
+    raw_master = db.get_records("RawMaterials", fresh=True)
     if not raw_master:
-        raw_master = RAW_MATERIALS_SEED
-
-    known_names = {str(field(r, "material_name", "name", default="")).strip().lower() for r in raw_master}
-    combined_master = list(raw_master)
-    for s in RAW_MATERIALS_SEED:
-        if s["material_name"].strip().lower() not in known_names:
-            combined_master.append(s)
-            known_names.add(s["material_name"].strip().lower())
-
-    raw_ledger = db.get_records("RawMaterialLedger", fresh=False)
+        return []
+    raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
 
     results = []
-    for rm in combined_master:
+    for rm in raw_master:
         mat_id = str(field(rm, "raw_material_id", default="")).strip()
         mat_name = str(field(rm, "material_name", "name", default="")).strip()
         cat = str(field(rm, "category", default="RAW_MATERIAL")).strip()
         unit = str(field(rm, "unit", default="kg")).strip()
 
-        bal = calculate_raw_material_balance(mat_name, combined_master, raw_ledger)
-        rate_info = get_latest_purchase_rate(mat_name, combined_master, raw_ledger)
+        bal = calculate_raw_material_balance(mat_name, raw_master, raw_ledger)
+        rate_info = get_latest_purchase_rate(mat_name, raw_master, raw_ledger)
         latest_rate = rate_info.get("rate_per_canonical_unit")
         rate_status = rate_info.get("status", "CONFIRMED") if latest_rate is not None else "PENDING"
 
@@ -644,18 +725,8 @@ async def verify_raw_material_opening_stock(
 
     with _RAW_MATERIAL_MUTEX:
         raw_master_hint = db.get_records("RawMaterials", fresh=True)
-        if not raw_master_hint:
-            raw_master_hint = list(RAW_MATERIALS_SEED)
-
-        known_names_hint = {str(field(r, "material_name", "name", default="")).strip().lower() for r in raw_master_hint}
-        combined_hint = list(raw_master_hint)
-        for s in RAW_MATERIALS_SEED:
-            if s["material_name"].strip().lower() not in known_names_hint:
-                combined_hint.append(s)
-                known_names_hint.add(s["material_name"].strip().lower())
-
         mat_hint = next(
-            (r for r in combined_hint
+            (r for r in raw_master_hint
              if str(field(r, "raw_material_id", default="")).strip().lower() == target_id.lower()
              or str(field(r, "material_name", "name", default="")).strip().lower() == target_id.lower()),
             None,
@@ -667,18 +738,8 @@ async def verify_raw_material_opening_stock(
 
         with CrossProcessLock("raw_material", lock_mat_id):
             raw_master = db.get_records("RawMaterials", fresh=True)
-            if not raw_master:
-                raw_master = list(RAW_MATERIALS_SEED)
-
-            known_names = {str(field(r, "material_name", "name", default="")).strip().lower() for r in raw_master}
-            combined_master = list(raw_master)
-            for s in RAW_MATERIALS_SEED:
-                if s["material_name"].strip().lower() not in known_names:
-                    combined_master.append(s)
-                    known_names.add(s["material_name"].strip().lower())
-
             mat_row = next(
-                (r for r in combined_master
+                (r for r in raw_master
                  if str(field(r, "raw_material_id", default="")).strip().lower() == target_id.lower()
                  or str(field(r, "material_name", "name", default="")).strip().lower() == target_id.lower()),
                 None,
@@ -832,11 +893,11 @@ async def verify_raw_material_opening_stock(
                     "message": f"[Idempotent Replay] Physical stock for {mat_name} already confirmed at {ex_phys if ex_phys is not None else physical_val} {unit}.",
                 }
 
-            bal = calculate_raw_material_balance(mat_name, combined_master, raw_ledger)
+            bal = calculate_raw_material_balance(mat_name, raw_master, raw_ledger)
             recorded_available = float(bal.get("available", 0.0))
             recorded_opening = float(bal.get("recorded_opening_stock", 0.0))
             variance = round_stock(physical_val - recorded_available)
-            rate_info = get_latest_purchase_rate(mat_name, combined_master, raw_ledger)
+            rate_info = get_latest_purchase_rate(mat_name, raw_master, raw_ledger)
             latest_rate = rate_info.get("rate_per_canonical_unit")
 
             verified_at = now()
@@ -1012,31 +1073,8 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
             None
         )
 
-        # Fallback to RAW_MATERIALS_SEED if master has not been seeded with this item yet
         if not mat_row:
-            seed_row = next(
-                (s for s in RAW_MATERIALS_SEED
-                 if s["raw_material_id"].strip().lower() == clean_mat_id.lower()
-                 or s["material_name"].strip().lower() == clean_mat_id.lower()),
-                None
-            )
-            if seed_row:
-                new_row = {
-                    "raw_material_id": seed_row["raw_material_id"],
-                    "material_name": seed_row["material_name"],
-                    "current_stock": 0.0,
-                    "unit": seed_row["unit"],
-                    "rate_per_unit": seed_row["rate_per_unit"] if seed_row["rate_per_unit"] is not None else "",
-                    "rate_status": seed_row["rate_status"],
-                    "category": seed_row["category"],
-                    "created_at": now(),
-                    "created_by": actor,
-                }
-                db.append_record("RawMaterials", new_row, raise_on_error=True)
-                raw_master = db.get_records("RawMaterials", fresh=True)
-                mat_row = new_row
-            else:
-                raise HTTPException(422, f"Raw material '{clean_mat_id}' not found in RawMaterials master.")
+            raise HTTPException(422, f"Raw material '{clean_mat_id}' not found in RawMaterials master. Create and approve the master record first.")
 
         resolved_mat_id = str(field(mat_row, "raw_material_id", default=clean_mat_id)).strip()
         canonical_mat_name = str(field(mat_row, "material_name", default=clean_mat_id)).strip()
@@ -1354,6 +1392,16 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             _rm_lock_stack.enter_context(CrossProcessLock("raw_material", _mid))
         raw_master = db.get_records("RawMaterials", fresh=True)
         raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+        source_master = next((row for row in raw_master
+            if str(field(row, "raw_material_id", default="")).strip().lower() == dal_id.lower()
+            or str(field(row, "material_name", "name", default="")).strip().lower() == mapping["canonical_dal_name"].lower()), None)
+        flour_master = next((row for row in raw_master
+            if str(field(row, "raw_material_id", default="")).strip().lower() == mapping["target_flour_id"].lower()
+            or str(field(row, "material_name", "name", default="")).strip().lower() == mapping["target_flour_name"].lower()), None)
+        if not source_master or not flour_master:
+            raise HTTPException(404, "Milling requires both source dal and target flour to exist in RawMaterials master.")
+        if not truthy(field(source_master, "active", default="true")) or not truthy(field(flour_master, "active", default="true")):
+            raise HTTPException(409, "Milling is blocked because source or target raw material is inactive.")
 
         # 2. Check Idempotency and Replay in RawMaterialLedger (Completed Output)
         existing_milling_out = next(
@@ -1620,8 +1668,11 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
 
         # 6. Compute Landed Cost Math using Decimal
         dal_rate_info = get_latest_purchase_rate(mapping["canonical_dal_name"], raw_master, raw_ledger)
-        default_dal_rate = 110.0 if "MOONG" in dal_id else (120.0 if "URAD" in dal_id else 75.0)
-        dal_unit_rate = float(dal_rate_info.get("rate_per_canonical_unit") or default_dal_rate)
+        if dal_rate_info.get("status") != "CONFIRMED" or dal_rate_info.get("rate_per_canonical_unit") in (None, ""):
+            raise HTTPException(422, f"Confirmed source dal rate is required for {mapping['canonical_dal_name']}.")
+        dal_unit_rate = float(dal_rate_info["rate_per_canonical_unit"])
+        if not math.isfinite(dal_unit_rate) or dal_unit_rate <= 0:
+            raise HTTPException(422, "Confirmed dal rate must be greater than zero.")
 
         in_qty_dec = to_decimal(round_stock(req.input_quantity_kg))
         out_qty_dec = to_decimal(round_stock(req.flour_output_kg))
@@ -2478,6 +2529,17 @@ async def save_recipe(req: RecipeSave, user: dict = Depends(get_current_user)):
     except ValueError as val_err:
         raise HTTPException(422, detail=str(val_err))
 
+    if req.approved:
+        raw_master = db.get_records("RawMaterials", fresh=True)
+        missing = []
+        for item in raw_items:
+            name = str(item.get("raw_material_id") or item.get("material_name") or "").strip().lower()
+            master = next((m for m in raw_master if name in {str(field(m, "raw_material_id", default="")).strip().lower(), str(field(m, "material_name", "name", default="")).strip().lower()}), None)
+            if not master or not truthy(field(master, "active", default="true")):
+                missing.append(name or "(blank ingredient)")
+        if missing:
+            raise HTTPException(422, "Approved recipes require active RawMaterials master rows: " + ", ".join(sorted(set(missing))))
+
     with _RECIPE_LOCK:
         existing_recipes = db.get_records("Recipes", fresh=True)
         existing_versions = [
@@ -2504,180 +2566,170 @@ async def save_recipe(req: RecipeSave, user: dict = Depends(get_current_user)):
         }
         if not db.append_record("Recipes", rec, raise_on_error=True):
             raise HTTPException(503, "Could not save recipe")
+        stored = next((r for r in db.get_records("Recipes", fresh=True) if str(field(r, "recipe_id", default="")).strip() == recipe_id), None)
+        if not stored or str(field(stored, "items_json", default="")) != str(rec["items_json"]):
+            raise HTTPException(503, "Recipe write could not be verified by read-back. Check Recipes before retrying.")
         db.log_audit(actor, "CREATE_RECIPE", "Recipes", recipe_id, reason=f"Recipe version {version} for {prod_name}")
         return rec
 
 
 @router.get("/recipes/master")
 async def get_master_recipes(user: dict = Depends(get_current_user)):
+    """Return saved recipe records only. Static examples are not operational master data."""
     require_production_access(user)
-    custom_recipes = db.get_records("Recipes")
-    enriched = []
-    for master in MASTER_RECIPES_DEFINITION:
-        matching = [
-            r for r in custom_recipes
-            if str(field(r, "recipe_id")) == master["recipe_id"]
-            or (str(field(r, "product_id")) == master["product_id"] and truthy(field(r, "approved")))
-        ]
-        status = master.get("status", "DRAFT")
-        approved = master.get("approved", False)
-        yield_kg = float(master.get("expected_yield_kg", 1.2))
-        notes = master.get("change_notes", "")
-
-        if matching:
-            latest = matching[-1]
-            if truthy(field(latest, "approved")):
-                status = "APPROVED"
-                approved = True
-            if field(latest, "notes"):
-                notes = str(field(latest, "notes"))
-
-        cost_info = calculate_recipe_cost(master["items"], yield_kg)
-        enriched.append({
-            **master,
+    rows = db.get_records("Recipes", fresh=True)
+    if not rows:
+        return []
+    raw_master = db.get_records("RawMaterials", fresh=True)
+    raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+    products_master = db.get_records("Products", fresh=True)
+    output = []
+    for row in rows:
+        try:
+            items = json.loads(field(row, "items_json", default="[]") or "[]")
+        except (TypeError, ValueError):
+            items = []
+        expected_yield = to_decimal(field(row, "expected_yield_kg", default="0") or "0")
+        pending = []
+        enriched_items = []
+        total_cost = Decimal("0")
+        for item in items if isinstance(items, list) else []:
+            material_name = str(item.get("material_name") or item.get("raw_material_id") or "").strip()
+            rate_info = get_latest_purchase_rate(material_name, raw_master, raw_ledger)
+            rate = rate_info.get("rate_per_canonical_unit") if rate_info.get("status") == "CONFIRMED" else None
+            quantity = to_decimal(item.get("quantity_per_kg", 0) or 0) * expected_yield
+            line_cost = None
+            if rate is None:
+                pending.append(material_name)
+            else:
+                try:
+                    stock_quantity, stock_unit = normalize_to_canonical_unit(quantity, item.get("unit") or "kg")
+                    master_item = next((m for m in raw_master if str(field(m, "material_name", "name", default="")).strip().lower() == material_name.lower() or str(field(m, "raw_material_id", default="")).strip().lower() == material_name.lower()), {})
+                    _, master_unit = normalize_to_canonical_unit(1, str(field(master_item, "unit", default=item.get("unit") or "kg")))
+                    if stock_unit != master_unit:
+                        pending.append(material_name)
+                    else:
+                        line_cost = (to_decimal(stock_quantity) * to_decimal(rate)).quantize(Decimal("0.01"))
+                        total_cost += line_cost
+                except (TypeError, ValueError):
+                    pending.append(material_name)
+            enriched_items.append({**item, "material_name": material_name, "ingredient_cost": float(line_cost) if line_cost is not None else None, "rate_per_unit": float(rate) if rate is not None and line_cost is not None else None, "rate_status": "CONFIRMED" if line_cost is not None else "PENDING"})
+        product = next((p for p in products_master if str(field(p, "product_id", default="")).strip() == str(field(row, "product_id", default="")).strip()), {})
+        name = str(field(row, "product_name_snapshot", default=field(product, "product_name", default="")))
+        family = next((v for v in ("MOONG", "CHANA", "URAD") if v in name.upper()), "OTHER")
+        status = "APPROVED" if truthy(field(row, "approved", default="false")) else "DRAFT"
+        has_complete_cost = not pending and expected_yield > 0
+        output.append({
+            **row,
+            "product_name_snapshot": name,
+            "product_family": family,
+            "variant_name": field(product, "variant", default=""),
             "status": status,
-            "approved": approved,
-            "expected_yield_kg": yield_kg,
-            "change_notes": notes,
-            **cost_info,
+            "approved": status == "APPROVED",
+            "change_notes": field(row, "notes", default=""),
+            "items": enriched_items,
+            "expected_yield_kg": float(expected_yield),
+            "cost_status": "CONFIRMED_REFERENCE" if has_complete_cost else "PENDING_RATES",
+            "pending_ingredients": sorted(set(pending)),
+            "cost_per_batch": float(total_cost) if has_complete_cost else None,
+            "cost_per_kg": float(total_cost / expected_yield) if has_complete_cost else None,
+            "cost_basis": "CURRENT_REFERENCE_RATES_NOT_BATCH_ACTUAL",
         })
-    return enriched
+    return output
 
 
 @router.post("/recipes/master/bootstrap")
 async def bootstrap_master_recipes(user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
-    require_persistent_store()
-
-    existing_raw = db.get_records("RawMaterials")
-    existing_raw_names = {str(field(r, "material_name", "raw_material_name", "name")).strip().lower() for r in existing_raw}
-    added_materials = 0
-    for rm in RAW_MATERIALS_SEED:
-        if rm["material_name"].strip().lower() not in existing_raw_names:
-            row = {
-                "raw_material_id": rm["raw_material_id"],
-                "material_name": rm["material_name"],
-                "current_stock": rm["current_stock"],
-                "unit": rm["unit"],
-                "rate_per_unit": rm["rate_per_unit"] if rm["rate_per_unit"] is not None else "",
-                "rate_status": rm["rate_status"],
-                "category": rm["category"],
-                "created_at": now(),
-                "created_by": actor,
-            }
-            db.append_record("RawMaterials", row, raise_on_error=True)
-            existing_raw_names.add(rm["material_name"].strip().lower())
-            added_materials += 1
-
-    existing_recipes = db.get_records("Recipes")
-    existing_recipe_ids = {str(field(r, "recipe_id")) for r in existing_recipes}
-    added_recipes = 0
-    for m in MASTER_RECIPES_DEFINITION:
-        if m["recipe_id"] not in existing_recipe_ids:
-            items_for_storage = []
-            for item in m["items"]:
-                raw_qty = float(item["quantity"])
-                unit = item["unit"]
-                std_qty, std_unit = normalize_quantity_to_std_unit(raw_qty, unit)
-                qty_per_kg = round(std_qty / float(m["expected_yield_kg"]), 4) if float(m["expected_yield_kg"]) > 0 else 0
-                items_for_storage.append({
-                    "material_name": item["material_name"],
-                    "quantity_per_kg": qty_per_kg,
-                    "unit": std_unit,
-                    "raw_quantity": raw_qty,
-                    "raw_unit": unit,
-                    "rate_per_unit": item.get("rate_per_unit"),
-                    "rate_status": item.get("rate_status", "CONFIRMED"),
-                })
-            rec = {
-                "recipe_id": m["recipe_id"],
-                "product_id": m["product_id"],
-                "product_name_snapshot": m["product_name_snapshot"],
-                "product_family": m["product_family"],
-                "version": m["version"],
-                "approved": str(m["approved"]).lower(),
-                "expected_yield_kg": m["expected_yield_kg"],
-                "items_json": json.dumps(items_for_storage),
-                "notes": m["change_notes"],
-                "created_at": now(),
-                "created_by": actor,
-            }
-            db.append_record("Recipes", rec, raise_on_error=True)
-            added_recipes += 1
-
-    db.log_audit(actor, "BOOTSTRAP_MASTER_RECIPES", "Recipes", "ALL", reason=f"Bootstrapped {added_recipes} recipes, {added_materials} raw materials")
-    return {
-        "status": "success",
-        "added_materials": added_materials,
-        "added_recipes": added_recipes,
-        "message": "Successfully synced Version 2.0 master recipes and raw materials.",
-    }
+    require_owner(user)
+    raise HTTPException(
+        410,
+        "Bulk recipe/raw-material bootstrap is disabled. Create active RawMaterials master rows and save explicit recipe versions instead.",
+    )
 
 
 @router.post("/recipes/master/{recipe_id}/confirm")
 async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, user: dict = Depends(get_current_user)):
     actor, _ = require_owner(user)
     require_persistent_store()
+    if not req.approved:
+        raise HTTPException(422, "Owner confirmation endpoint only accepts approved=true. Create a draft with POST /recipes.")
 
-    master = next((m for m in MASTER_RECIPES_DEFINITION if m["recipe_id"] == recipe_id), None)
-    if not master:
-        raise HTTPException(status_code=404, detail="Master recipe not found")
+    records = db.get_records("Recipes", fresh=True)
+    draft = next((r for r in records if str(field(r, "recipe_id", default="")).strip() == recipe_id.strip()), None)
+    if not draft:
+        raise HTTPException(404, "Persisted draft recipe not found. Static templates cannot be approved.")
+    if truthy(field(draft, "approved", default="false")):
+        raise HTTPException(409, "This recipe version is already approved and immutable.")
 
-    yield_kg = req.expected_yield_kg if req.expected_yield_kg and req.expected_yield_kg > 0 else master["expected_yield_kg"]
-    notes = req.change_notes or f"Confirmed by Owner on {business_today()}"
+    product_id = str(field(draft, "product_id", default="")).strip()
+    product = next((p for p in db.get_records("Products", fresh=True) if str(field(p, "product_id", default="")).strip() == product_id), None)
+    if not product or not truthy(field(product, "active", default="true")):
+        raise HTTPException(422, "Recipe approval requires an existing active Products master row.")
 
-    items_for_storage = []
-    for item in master["items"]:
-        raw_qty = float(item["quantity"])
-        unit = item["unit"]
-        std_qty, std_unit = normalize_quantity_to_std_unit(raw_qty, unit)
-        qty_per_kg = round(std_qty / yield_kg, 4) if yield_kg > 0 else 0
-        items_for_storage.append({
-            "material_name": item["material_name"],
-            "quantity_per_kg": qty_per_kg,
-            "unit": std_unit,
-            "raw_quantity": raw_qty,
-            "raw_unit": unit,
-            "rate_per_unit": item.get("rate_per_unit"),
-            "rate_status": item.get("rate_status", "CONFIRMED"),
-        })
+    try:
+        items = json.loads(field(draft, "items_json", default="[]") or "[]")
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Draft recipe items_json is invalid.")
+    if not isinstance(items, list) or not items:
+        raise HTTPException(422, "Draft recipe must contain at least one ingredient.")
+    expected_yield = req.expected_yield_kg if req.expected_yield_kg is not None else field(draft, "expected_yield_kg", default=None)
+    if expected_yield in (None, "") or not math.isfinite(float(expected_yield)) or float(expected_yield) <= 0:
+        raise HTTPException(422, "An explicit positive product-specific expected_yield_kg is required.")
+    try:
+        validate_recipe_formulation(str(field(product, "product_name", default="")), items, float(expected_yield))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
-    existing = next((r for r in db.get_records("Recipes") if str(field(r, "recipe_id")) == recipe_id), None)
-    if existing:
-        db.update_record("Recipes", "recipe_id", recipe_id, {
-            "approved": str(req.approved).lower(),
-            "expected_yield_kg": yield_kg,
-            "notes": notes,
-            "approved_by": actor,
-            "approved_at": now(),
-            "items_json": json.dumps(items_for_storage),
-        })
-    else:
-        rec = {
-            "recipe_id": recipe_id,
-            "product_id": master["product_id"],
-            "product_name_snapshot": master["product_name_snapshot"],
-            "product_family": master["product_family"],
-            "version": master["version"],
-            "approved": str(req.approved).lower(),
-            "expected_yield_kg": yield_kg,
-            "items_json": json.dumps(items_for_storage),
-            "notes": notes,
-            "created_at": now(),
+    raw_master = db.get_records("RawMaterials", fresh=True)
+    missing = []
+    for item in items:
+        name = str(item.get("raw_material_id") or item.get("material_name") or "").strip().lower()
+        master = next((m for m in raw_master if name in {str(field(m, "raw_material_id", default="")).strip().lower(), str(field(m, "material_name", "name", default="")).strip().lower()}), None)
+        if not master or not truthy(field(master, "active", default="true")):
+            missing.append(name or "(blank ingredient)")
+    if missing:
+        raise HTTPException(422, "Recipe approval requires active RawMaterials masters: " + ", ".join(sorted(set(missing))))
+
+    with _RECIPE_LOCK:
+        records = db.get_records("Recipes", fresh=True)
+        source_marker = f"SOURCE_DRAFT_RECIPE:{recipe_id}"
+        already_created = next(
+            (row for row in records
+             if truthy(field(row, "approved", default="false"))
+             and source_marker in str(field(row, "notes", default=""))),
+            None,
+        )
+        if already_created:
+            return {**already_created, "already_approved": True}
+
+        versions = [int(float(field(r, "version", default=0) or 0)) for r in records if str(field(r, "product_id", default="")).strip() == product_id]
+        next_version = max(versions, default=0) + 1
+        now_value = now()
+        approved = {
+            **draft,
+            "recipe_id": make_id("Recipes"),
+            "version": next_version,
+            "approved": "true",
+            "expected_yield_kg": float(expected_yield),
+            "created_at": now_value,
             "created_by": actor,
             "approved_by": actor,
-            "approved_at": now(),
+            "approved_at": now_value,
+            "notes": f"{source_marker} | " + (req.change_notes or f"Approved as immutable version {next_version} from draft {recipe_id}."),
         }
-        db.append_record("Recipes", rec, raise_on_error=True)
-
-    db.log_audit(actor, "CONFIRM_MASTER_RECIPE", "Recipes", recipe_id, reason=f"Approved: {req.approved}, Yield: {yield_kg} kg")
-    return {"status": "success", "recipe_id": recipe_id, "approved": req.approved, "expected_yield_kg": yield_kg}
+        if not db.append_record("Recipes", approved, raise_on_error=True):
+            raise HTTPException(503, "Approved recipe version could not be saved.")
+        stored = next((r for r in db.get_records("Recipes", fresh=True) if str(field(r, "recipe_id", default="")).strip() == approved["recipe_id"]), None)
+        if not stored:
+            raise HTTPException(503, "Approved recipe write could not be verified by read-back.")
+        db.log_audit(actor, "APPROVE_RECIPE_VERSION", "Recipes", approved["recipe_id"], reason=f"Approved new immutable version {next_version} from draft {recipe_id}.")
+        return approved
 
 
 @router.post("/recipes/calculate")
 async def calculate_custom_recipe_cost(req: RecipeCalculateRequest, user: dict = Depends(get_current_user)):
     require_production_access(user)
-    return calculate_recipe_cost(req.items, req.expected_yield_kg)
+    return calculate_recipe_cost_estimate(req.items, req.expected_yield_kg)
 
 
 @router.get("/recipes/mapping-audit")
@@ -2686,7 +2738,7 @@ async def get_recipe_mapping_audit(user: dict = Depends(get_current_user)):
     require_production_access(user)
     products_list = db.get_records("Products", fresh=False)
     recipes_list = db.get_records("Recipes", fresh=False)
-    return audit_product_recipe_mappings(products_list, recipes_list, MASTER_RECIPES_DEFINITION)
+    return audit_product_recipe_mappings(products_list, recipes_list, [])
 
 
 # -------------------------------------------------------------
@@ -2714,31 +2766,30 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
         None
     )
     if not product:
-        if req_pid or req_pname:
-            product = {
-                "product_id": req_pid or "PRD-BULK-PAPAD",
-                "product_name": req_pname or "Bulk Chana Masala Papad",
-                "sku": "BULK-PAPAD",
-                "active": "true",
-                "selling_unit": "KG",
-            }
-        else:
-            raise HTTPException(404, "Product not found")
+        raise HTTPException(404, "Product not found in the Products master. Create the product master before production.")
 
     target_pid = str(field(product, "product_id"))
     req.product_id = target_pid
+    if not truthy(field(product, "active", default="true")):
+        raise HTTPException(409, "Cannot produce an inactive product.")
+    if req.ingredients:
+        raise HTTPException(422, "Inline batch ingredients are not accepted. Save and approve a persisted recipe version first.")
     if not req.production_date:
         req.production_date = now()[:10]
     if req.quantity_kg is None:
-        req.quantity_kg = float(req.target_yield_kg or 100.0)
+        if req.target_yield_kg is None:
+            raise HTTPException(422, "Specify an explicit gross quantity_kg or target_yield_kg before creating a production batch.")
+        req.quantity_kg = float(req.target_yield_kg)
+    if not math.isfinite(float(req.quantity_kg)) or float(req.quantity_kg) <= 0:
+        raise HTTPException(422, "Gross production quantity must be finite and greater than zero.")
 
-    # Reconcile quantities using the production calculation engine
+    # Reconcile gross, rejected, process-loss and saleable outputs separately.
     gross_kg = req.gross_output_kg if req.gross_output_kg is not None else req.quantity_kg
-    saleable_kg = req.saleable_output_kg if req.saleable_output_kg is not None else (req.quantity_kg - req.wastage_kg)
+    saleable_kg = req.saleable_output_kg if req.saleable_output_kg is not None else (gross_kg - req.wastage_kg - req.process_loss_kg)
     if saleable_kg < 0:
-        raise HTTPException(400, "Saleable quantity cannot be negative")
-    if req.wastage_kg >= req.quantity_kg and req.gross_output_kg is None:
-        raise HTTPException(400, "Wastage must be less than produced quantity")
+        raise HTTPException(422, "Saleable output cannot be negative.")
+    if req.process_loss_kg > 0 and not str(req.loss_reason or "").strip():
+        raise HTTPException(422, "A reason is required for recorded process loss.")
 
     reconciliation = reconcile_production_output(
         saleable_output_kg=saleable_kg,
@@ -2746,36 +2797,37 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
         rejected_output_kg=req.wastage_kg,
         process_loss_kg=req.process_loss_kg,
         flour_base_used_kg=req.flour_base_used_kg,
-        benchmark_yield_ratio=1.2,
+        benchmark_yield_ratio=None,
     )
 
-    # Resolve and preserve recipe version deterministically for this batch
+    # A production batch can only be linked to a persisted, approved recipe version.
     target_recipe_id = (req.recipe_id or "").strip()
-    target_recipe_ver = ""
     all_recipes = db.get_records("Recipes", fresh=True)
-    # Only fall back to hardcoded MASTER_RECIPES_DEFINITION when the sheet Recipes tab
-    # already has recipes, or when product_id/recipe_id directly references a master definition.
-    direct_master_match = any(
-        (target_recipe_id and m.get("recipe_id") == target_recipe_id)
-        or m.get("product_id") == req.product_id
-        for m in MASTER_RECIPES_DEFINITION
-    )
-    master_pool = MASTER_RECIPES_DEFINITION if (all_recipes or direct_master_match) else []
     try:
-        resolved_rec = resolve_product_recipe(
+        resolved = resolve_product_recipe(
             product=product,
             recipes_records=all_recipes,
-            master_recipes=master_pool,
+            master_recipes=[],
             requested_recipe_id=target_recipe_id or None,
-            require_approved=False,
+            require_approved=True,
         )
-        target_recipe_id = str(resolved_rec.get("recipe_id", target_recipe_id) or target_recipe_id).strip()
-        target_recipe_ver = str(resolved_rec.get("version", "1") or "1").strip()
-    except AmbiguousRecipeMappingError as amb_err:
-        raise HTTPException(409, str(amb_err))
-    except MissingRecipeMappingError:
-        # Draft or custom inline-ingredient batches may resolve recipe later prior to material issuance.
-        target_recipe_ver = target_recipe_ver or ""
+    except AmbiguousRecipeMappingError as exc:
+        raise HTTPException(409, str(exc))
+    except MissingRecipeMappingError as exc:
+        raise HTTPException(422, f"An approved persisted recipe is required before production: {exc}")
+    target_recipe_id = str(field(resolved, "recipe_id", default="")).strip()
+    target_recipe_ver = str(field(resolved, "version", default="")).strip()
+    expected_yield = float(field(resolved, "expected_yield_kg", default=0) or 0)
+    if expected_yield <= 0:
+        raise HTTPException(422, "Approved recipe must contain a positive expected_yield_kg.")
+    reconciliation = reconcile_production_output(
+        saleable_output_kg=saleable_kg,
+        gross_output_kg=gross_kg,
+        rejected_output_kg=req.wastage_kg,
+        process_loss_kg=req.process_loss_kg,
+        flour_base_used_kg=req.flour_base_used_kg,
+        benchmark_yield_ratio=expected_yield,
+    )
 
     batch_id = make_id("ProductionBatches")
     rec = {
@@ -2811,6 +2863,9 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
 
     if not db.append_record("ProductionBatches", rec, raise_on_error=True):
         raise HTTPException(503, "Could not save production batch")
+    stored_batch = next((row for row in db.get_records("ProductionBatches", fresh=True) if str(field(row, "production_id", "batch_id", default="")).strip() == batch_id), None)
+    if not stored_batch:
+        raise HTTPException(503, "Production batch append could not be verified by read-back. No material issue was started.")
 
     # If auto_issue_materials is requested, execute immediate explicit issuance
     if req.auto_issue_materials:
@@ -2932,15 +2987,14 @@ def execute_material_issue(
              if (prod_id and str(field(p, "product_id", default="")).strip() == prod_id)
              or (prod_name and str(field(p, "product_name", default="")).strip().lower() == prod_name.lower())),
             None,
-        ) or {"product_id": prod_id, "product_name": prod_name, "sku": prod_id}
+        )
+        if not prod_obj:
+            raise HTTPException(404, f"Product '{prod_id or prod_name}' is missing from Products master.")
+        if not truthy(field(prod_obj, "active", default="true")):
+            raise HTTPException(409, f"Product '{prod_id or prod_name}' is inactive; material issue is blocked.")
 
         all_recipes = db.get_records("Recipes", fresh=True)
-        direct_master_match = any(
-            (locked_recipe_id and m.get("recipe_id") == locked_recipe_id)
-            or (prod_id and m.get("product_id") == prod_id)
-            for m in MASTER_RECIPES_DEFINITION
-        )
-        master_pool = MASTER_RECIPES_DEFINITION if (all_recipes or direct_master_match) else []
+        master_pool = []  # Persisted Recipes sheet only; static templates cannot authorize production.
 
         active_recipe = None
         active_mapping_error = None
@@ -2978,18 +3032,6 @@ def execute_material_issue(
 
         if not target_recipe and active_recipe:
             target_recipe = active_recipe
-
-        if not target_recipe and batch.get("ingredients"):
-            try:
-                ing = json.loads(batch["ingredients"]) if isinstance(batch["ingredients"], str) else batch["ingredients"]
-                target_recipe = {
-                    "recipe_id": locked_recipe_id or "RCP-DIRECT-BATCH",
-                    "version": "1",
-                    "expected_yield_kg": production_kg or 100.0,
-                    "items": ing,
-                }
-            except Exception:
-                pass
 
         if not target_recipe:
             if isinstance(active_mapping_error, AmbiguousRecipeMappingError):
@@ -3065,7 +3107,9 @@ def execute_material_issue(
                 item_qty_per_kg = float(item["quantity_per_kg"] or 0)
                 item_unit = str(item.get("unit", stock_unit)).strip()
             elif item.get("quantity") is not None:
-                exp_yield = float(field(target_recipe, "expected_yield_kg", default=1.2) or 1.2)
+                exp_yield = float(field(target_recipe, "expected_yield_kg", default=0) or 0)
+                if exp_yield <= 0:
+                    raise HTTPException(422, "Approved recipe must contain a positive expected_yield_kg.")
                 item_qty_per_kg = float(item["quantity"] or 0) / exp_yield if exp_yield > 0 else float(item["quantity"] or 0)
                 item_unit = str(item.get("unit", stock_unit)).strip()
             else:
@@ -3466,105 +3510,98 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
 
         db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
 
-        # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+        # Production valuation is assessed without fabricating missing rates,
+        # assigning the day's wages to one batch, or using formula estimates as actual.
         try:
-            from app.accounting.postings import post_production_batch_journal
-            from app.calculations.costing import get_latest_purchase_rate
-            from app.calculations.recipes import calculate_recipe_cost_estimate
-
             raw_deductions = [
-                x for x in db.get_records("RawMaterialLedger", fresh=True)
-                if str(field(x, "production_id", default="")).strip() == prod_id_clean
-                and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+                row for row in db.get_records("RawMaterialLedger", fresh=True)
+                if str(field(row, "production_id", default="")).strip() == prod_id_clean
+                and str(field(row, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
             ]
-            f_cost = Decimal("0")
-            s_cost = Decimal("0")
-            rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
-            pur_ledger = db.get_records("RawMaterialLedger", fresh=True)
+            raw_master = db.get_records("RawMaterials", fresh=True)
+            purchase_ledger = db.get_records("RawMaterialLedger", fresh=True)
+            missing_rates = []
+            material_total = Decimal("0")
+            for deduction in raw_deductions:
+                name = str(field(deduction, "material_name", default="")).strip()
+                material_id = str(field(deduction, "raw_material_id", default="")).strip()
+                quantity = to_decimal(field(deduction, "quantity", default=0) or 0)
+                unit = str(field(deduction, "unit", default="kg")).strip()
+                canonical_qty, _ = normalize_to_canonical_unit(quantity, unit)
+                rate = field(deduction, "rate_per_unit", default=None)
+                if rate in (None, "") or str(rate).strip().lower() in {"0", "0.0", "pending", "none", "null"}:
+                    rate_lookup = get_latest_purchase_rate(name or material_id, raw_master, purchase_ledger)
+                    rate = rate_lookup.get("rate_per_canonical_unit") if rate_lookup.get("status") == "CONFIRMED" else None
+                if rate is None:
+                    missing_rates.append(name or material_id or "Unknown material")
+                    continue
+                rate_value = to_decimal(rate)
+                if rate_value <= 0:
+                    missing_rates.append(name or material_id or "Unknown material")
+                    continue
+                material_total += to_decimal(canonical_qty) * rate_value
 
-            for d in raw_deductions:
-                m_name = str(field(d, "material_name", default="")).lower()
-                m_id = str(field(d, "raw_material_id", default=""))
-                q = to_decimal(field(d, "quantity", default=0) or 0)
-                r_val = field(d, "rate_per_unit", default=None)
-                if r_val is not None and str(r_val).strip() not in {"", "0", "none", "null", "pending"}:
-                    r = to_decimal(r_val)
-                else:
-                    # Look up confirmed rate from master / purchase ledger
-                    rate_lookup = get_latest_purchase_rate(m_name or m_id, rm_master, pur_ledger)
-                    if rate_lookup.get("rate_per_canonical_unit") is not None:
-                        r = to_decimal(rate_lookup["rate_per_canonical_unit"])
-                    else:
-                        r = Decimal("0")
-                c = q * r
-                if "flour" in m_name or "atta" in m_name:
-                    f_cost += c
-                else:
-                    s_cost += c
+            labour_rows = [
+                row for row in db.get_records("LabourWorkEntries", fresh=True)
+                if str(field(row, "batch_id", default="")).strip() == prod_id_clean
+                and str(field(row, "approved_by", default="")).strip()
+            ]
+            labour_total = sum(
+                (to_decimal(field(row, "total_amount", default=0) or 0) for row in labour_rows),
+                Decimal("0"),
+            )
 
-            l_cost = to_decimal(field(rec, "labour_cost", default=0) or field(rec, "labor_cost", default=0) or 0)
+            if not raw_deductions:
+                valuation_status = "PENDING_MATERIAL_ISSUE_EVIDENCE"
+            elif missing_rates:
+                valuation_status = "PENDING_CONFIRMED_MATERIAL_RATES"
+            elif not labour_rows:
+                valuation_status = "PENDING_BATCH_LABOUR_ALLOCATION"
+            else:
+                valuation_status = "PENDING_APPROVED_OVERHEAD_ALLOCATION"
 
-            # If deduction rates were unrecorded, check recipe standard formulation deterministically
-            if f_cost == Decimal("0") and s_cost == Decimal("0"):
-                p_name = str(field(rec, "product_name_snapshot", default="")).strip()
-                p_id = str(field(rec, "product_id", default="")).strip()
-                rec_id_hint = str(field(rec, "recipe_id", default="")).strip()
-                recipes_list = db.get_records("Recipes", fresh=True)
-                matching_recipe = None
-                try:
-                    matching_recipe = resolve_product_recipe(
-                        product={"product_id": p_id, "product_name": p_name},
-                        recipes_records=recipes_list,
-                        master_recipes=MASTER_RECIPES_DEFINITION,
-                        requested_recipe_id=rec_id_hint or None,
-                        require_approved=False,
-                    )
-                except Exception:
-                    matching_recipe = None
-                if matching_recipe:
-                    items_raw = matching_recipe.get("items") or matching_recipe.get("items_json")
-                    if isinstance(items_raw, str):
-                        try:
-                            items_raw = json.loads(items_raw)
-                        except Exception:
-                            items_raw = []
-                    yield_kg = float(field(matching_recipe, "expected_yield_kg", default=1.2) or 1.2)
-                    recipe_cost = calculate_recipe_cost_estimate(items_raw, yield_kg)
-                    if recipe_cost.get("cost_per_kg"):
-                        tot_rec_cost = to_decimal(recipe_cost["cost_per_kg"]) * to_decimal(production_kg)
-                        f_cost = tot_rec_cost * Decimal("0.85")
-                        s_cost = tot_rec_cost * Decimal("0.15")
-
-            total_batch_cost = f_cost + s_cost + l_cost
-            actual_cost_per_kg = (total_batch_cost / to_decimal(production_kg)) if production_kg > 0 else Decimal("0")
-
-            # Persist batch actual cost on record for downstream packaging and accounting
-            cost_updates = {
-                "actual_cost_per_kg": float(round_money(actual_cost_per_kg)),
-                "total_batch_cost": float(round_money(total_batch_cost)),
-                "flour_cost": float(round_money(f_cost)),
-                "ingredient_cost": float(round_money(s_cost)),
-                "labor_cost": float(round_money(l_cost)),
-            }
-            db.update_record("ProductionBatches", "production_id", prod_id_clean, cost_updates)
-            updates.update(cost_updates)
-
-            # Update bulk stock ledger movement with unit_cost_per_kg
-            bulk_mvts = [m for m in db.get_records("ProductionStockLedger", fresh=True) if str(field(m, "reference_id")) == prod_id_clean and str(field(m, "movement_type")).upper() == "BULK_PRODUCED"]
-            for bm in bulk_mvts:
-                db.update_record("ProductionStockLedger", "movement_id", str(field(bm, "movement_id")), {
-                    "unit_cost_per_kg": float(round_money(actual_cost_per_kg)),
-                    "total_cost": float(round_money(total_batch_cost)),
-                })
-
-            batch_dict = {
+            review = {
                 "production_id": prod_id_clean,
-                "net_quantity_kg": production_kg,
-                "product_name_snapshot": field(rec, "product_name_snapshot", default="Papad"),
-                "production_date": field(rec, "production_date", default="") or now()[:10],
+                "status": valuation_status,
+                "measured_material_cost": str(round_money(material_total)) if raw_deductions and not missing_rates else None,
+                "approved_batch_labour_cost": str(round_money(labour_total)),
+                "electricity_cost": None,
+                "factory_overhead": None,
+                "total_actual_cost": None,
+                "missing_rate_materials": sorted(set(missing_rates)),
+                "labour_entry_count": len(labour_rows),
+                "scope": "DIRECT MATERIAL AND BATCH-LINKED LABOUR ONLY. FULL ACTUAL COST AND INVENTORY JOURNAL BLOCKED UNTIL APPROVED OVERHEAD ALLOCATION EXISTS.",
             }
-            post_production_batch_journal(batch_dict, f_cost, s_cost, l_cost, actor)
+            updates["cost_status"] = valuation_status
+            updates["cost_review"] = review
+
+            review_key = f"PRODUCTION_COSTING:{prod_id_clean}"
+            review_rows = db.get_records("IncompleteTransactions", fresh=True)
+            existing = next((row for row in review_rows if str(field(row, "idempotency_key", default="")).strip() == review_key), None)
+            review_fields = {
+                "transaction_type": "PRODUCTION_COSTING_REVIEW",
+                "status": valuation_status,
+                "payload_json": json.dumps(review, sort_keys=True),
+                "error_details": "",
+                "updated_at": now(),
+            }
+            if existing:
+                db.update_record("IncompleteTransactions", "transaction_id", str(field(existing, "transaction_id")), review_fields, raise_on_error=True)
+            else:
+                db.append_record("IncompleteTransactions", {
+                    "transaction_id": make_id("IncompleteTransactions"),
+                    "transaction_type": "PRODUCTION_COSTING_REVIEW",
+                    "idempotency_key": review_key,
+                    "status": valuation_status,
+                    "payload_json": json.dumps(review, sort_keys=True),
+                    "error_details": "",
+                    "created_at": now(),
+                    "updated_at": now(),
+                    "resolved_by": "",
+                    "resolved_at": "",
+                }, raise_on_error=True)
         except Exception as acct_err:
+
             logger.error("Non-fatal accounting posting error for batch %s: %s", prod_id_clean, acct_err)
             try:
                 db.append_record("IncompleteTransactions", {
@@ -4826,36 +4863,59 @@ async def dispatches(user: dict = Depends(get_current_user)):
 
 @router.get("/costing/batch/{production_id}")
 async def get_batch_costing(production_id: str, user: dict = Depends(get_current_user)):
-    """
-    Get attributable actual batch production cost from issued materials and attendance expenses.
-    """
+    """Read batch-attributed direct cost only; never allocate the whole day's wages."""
     require_production_access(user)
-    batch = next((b for b in db.get_records("ProductionBatches") if str(field(b, "production_id")) == production_id), None)
+    batch = next((b for b in db.get_records("ProductionBatches", fresh=True)
+                  if str(field(b, "production_id", "batch_id")) == production_id), None)
     if not batch:
         raise HTTPException(404, "Production batch not found")
 
-    raw_ledger = db.get_records("RawMaterialLedger")
-    materials_issued = [x for x in raw_ledger if str(field(x, "production_id")) == production_id and str(field(x, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"]
-
+    raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+    materials_issued = [
+        row for row in raw_ledger
+        if str(field(row, "production_id")) == production_id
+        and str(field(row, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"
+    ]
+    labour_rows = [
+        row for row in db.get_records("LabourWorkEntries", fresh=True)
+        if str(field(row, "batch_id", default="")).strip() == production_id
+        and str(field(row, "approved_by", default="")).strip()
+    ]
+    labour_cost = sum(
+        (to_decimal(field(row, "total_amount", default=0) or 0) for row in labour_rows),
+        Decimal("0"),
+    )
     saleable_kg = float(field(batch, "net_quantity_kg", default=field(batch, "saleable_output_kg", default=0)) or 0)
 
-    # Calculate labor cost accrued on batch date if applicable
-    batch_date = str(field(batch, "production_date"))
-    attendance_records = db.get_records("WorkerAttendance")
-    labor_for_date = sum(float(field(a, "wage_accrued", default=0) or 0) for a in attendance_records if str(field(a, "attendance_date")) == batch_date)
-
-    cost_result = calculate_batch_actual_cost(
+    result = calculate_batch_actual_cost(
         materials_issued=materials_issued,
         actual_saleable_output_kg=saleable_kg,
-        labour_cost=labor_for_date,
+        labour_cost=float(labour_cost),
     )
+    if not materials_issued:
+        status = "PENDING_MATERIAL_ISSUE_EVIDENCE"
+    elif result.get("status") == "PENDING_RATES":
+        status = "PENDING_CONFIRMED_MATERIAL_RATES"
+    elif not labour_rows:
+        status = "PENDING_BATCH_LABOUR_ALLOCATION"
+    else:
+        status = "PENDING_APPROVED_OVERHEAD_ALLOCATION"
+
+    direct_cost_per_kg = result.get("cost_per_kg")
+    result["direct_cost_per_kg"] = direct_cost_per_kg
+    result["cost_per_kg"] = None
+    result["status"] = status
+    result["total_production_cost"] = None
+    result["labour_entry_count"] = len(labour_rows)
+    result["labour_cost_source"] = "APPROVED_LabourWorkEntries.batch_id"
+    result["cost_scope"] = "DIRECT MATERIAL AND BATCH-LINKED LABOUR ONLY. FULL ACTUAL COST IS PENDING APPROVED ELECTRICITY AND FACTORY OVERHEAD ALLOCATION."
 
     return {
         "production_id": production_id,
         "product_id": field(batch, "product_id"),
         "product_name": field(batch, "product_name_snapshot"),
-        "production_date": batch_date,
-        **cost_result,
+        "production_date": field(batch, "production_date"),
+        **result,
     }
 
 
@@ -4876,7 +4936,7 @@ async def get_sku_costing(product_id: str, user: dict = Depends(get_current_user
     batches_data = db.get_records("ProductionBatches", fresh=True)
     recipes_data = db.get_records("Recipes", fresh=True)
     stock_ledger_data = db.get_records("ProductionStockLedger", fresh=True)
-    rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True) or list(RAW_MATERIALS_SEED)
+    rm_master = db.get_records("RawMaterials", fresh=True)
 
     bulk_cost_per_kg = None
     try:
@@ -4910,5 +4970,8 @@ async def get_sku_costing(product_id: str, user: dict = Depends(get_current_user
         "product_name": field(product, "product_name"),
         "sku": field(product, "sku"),
         "benchmark_production_cost_per_kg": bulk_cost_per_kg,
+        "cost_basis": "APPROVED_RECIPE_REFERENCE_NOT_BATCH_ACTUAL",
+        "cost_status": "REFERENCE_ESTIMATE" if bulk_cost_per_kg is not None else "PENDING_ACTUAL_BATCH_VALUATION",
+        "actual_cost_available": False,
         **sku_cost,
     }

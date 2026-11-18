@@ -1,0 +1,565 @@
+KAWAD SWAD ERP
+PHASE 4 - RISK AND CONTROL DESIGN
+Version 1.0 | 18 November 2026
+Status: DESIGN READY; OWNER / ACCOUNTS APPROVAL PENDING
+
+1. PURPOSE AND AUTHORITY
+The governing Business Database Blueprint defines Phase 4 as Risk and
+Control Design: approvals, separation of duties, traceability, financial
+controls, exceptions and recovery. This document records control objectives,
+risk treatments, authority, evidence, testing and release gates.
+
+Confirmed project architecture:
+- Google Sheets is the authoritative business record.
+- FastAPI owns business logic/API behavior.
+- MongoDB is optional cache/processing only.
+- The post-reset database remains empty. No restoration, import or implicit
+  business-data seeding is permitted.
+- Employee personal/internal policy data is confidential and Owner-only by
+  default.
+- This design does not authorize live schema changes, IDs, data writes or
+  production deployment.
+
+Workbook baseline (uploaded export only):
+- 295 visible worksheets, 218 canonical Phase 1 table names, all present.
+- 77 non-canonical tabs include operational extensions, audit artefacts and
+  repair staging; none approved for deletion.
+- 13 current tabs absent from Phase 3 inventory/mapping; one stale repair
+  tab mapping name.
+- Phase 3 field mapping: 3,074 rows, approvals pending.
+- Phase 1 relationship proposal: 41; Phase 3 audit contains only 11.
+- RawMaterialLedger_ID_Repair_Pre contains 56 proposed rows. Do not write
+  these proposed IDs to the live ledger without source evidence and approval.
+
+Current implementation evidence:
+- Security PR #1 and documentation PRs #3/#4 merged to GitHub main.
+- Manufacturing hardening PR #5 remains draft/open/unmerged.
+- Latest PR #5 CI run 44321081402: 12 security tests PASS, 17 clean-data /
+  production contract tests PASS, 73 manufacturing regression tests PASS,
+  frontend TypeScript/production build PASS.
+- CI does not prove live Sheets behavior, restore capability, multi-instance
+  safety, legal compliance, physical stock or Render deployment.
+
+2. CONTROL OBJECTIVES
+C01 Access: only authenticated scoped users read/write business data.
+C02 Approval: high-risk transactions require authorized approval.
+C03 Segregation: requester, approver, payer/releaser and reconciler split.
+C04 Master data: one approved definition, unique IDs and valid references.
+C05 Traceability: receipt-to-lot-to-production-to-sale/return/recall.
+C06 Inventory: all changes via movement ledger; derived balance reconciles.
+C07 Manufacturing/quality: approved recipes, measured yield, hold/release.
+C08 Finance: source-linked balanced journals, allocation and reconciliation.
+C09 Reliability: idempotency, verified writes and safe recovery.
+C10 Audit: actor, time, reason, approver and source evidence.
+C11 Recovery: independent backups and restore-tested procedures.
+C12 Oversight: Owner dashboards and exception accountability.
+
+3. RISK REGISTER
+Scoring: likelihood HIGH/MEDIUM/LOW; impact CRITICAL/HIGH/MODERATE.
+P0 = before affected workflow enabled; P1 = before broad rollout.
+
+R01 Unauthorized employee/customer/supplier data access
+MEDIUM / CRITICAL / P0. Owner-only default for employee identity, bank,
+salary and policy. Role- and field-level filtering. Restrict spreadsheet
+sharing to Owner/service account. Evidence: sharing inventory, role tests,
+access review. Test PA/Accountant/Salesman/Worker/custom roles cannot access
+unapproved fields.
+
+R02 Weak/public Owner bootstrap or account takeover
+MEDIUM / CRITICAL / P0. No public first-Owner route. Controlled Owner
+bootstrap with empty Users/AuthUsers check, exact headers, strong password,
+forced change and read-back; MFA where supported. Evidence access/bootstrap
+logs. Test public route unavailable.
+
+R03 Self-approval or conflicting authority
+MEDIUM / CRITICAL / P0. Protected actions cannot be assigned to custom roles.
+Separate requester and approver for payment, salary, write-off and quality
+release. Evidence approval history and post-event review. Test same-user
+approval is blocked where separation is required.
+
+R04 Role privilege creep
+MEDIUM / HIGH / P0. Deny-by-default, least privilege, custom-role review,
+immediate deactivation on exit. Evidence role matrix and periodic review.
+Test each built-in/custom role on protected endpoints.
+
+R05 Duplicate IDs / business records
+MEDIUM / CRITICAL / P0. One shared ID allocator; duplicate/reference
+validation before ID allocation; idempotency keys and unique business keys.
+Never use sheet row as ID. Evidence allocation ledger and duplicate audit.
+Test concurrent creates, retries and collision handling. Process-local locks
+do not protect multiple Render instances; keep one instance until distributed
+claim/CAS is tested.
+
+R06 Silent dropped fields or failed writes reported as success
+HIGH / CRITICAL / P0. Strict per-tab header contract; no silent omission or
+automatic header growth; fresh read-back for required fields. Evidence
+contract preflight and read-back. Test missing header/unmapped field fails
+closed.
+
+R07 Empty DB repopulated by implicit seeds
+MEDIUM / HIGH / P0. Empty master returns empty; unknown master references
+reject; initialization is a separate Owner action. No seeds in GET/receipt/
+production/recipe view. Test zero rows means zero returned rows and no
+implicit appends.
+
+R08 SKU/recipe mapping error
+MEDIUM / HIGH / P0. Owner approves Products row grain; recommended one
+Products row per sellable SKU/pack; unique SKU; Recipes link product_id and
+immutable version. Avoid duplicate SKU authority. Test duplicate SKU and
+ambiguous recipe are blocked.
+
+R09 Customer PII / credit-limit misuse
+MEDIUM / HIGH / P0. Separate profile from receivable/credit authority;
+mobile not globally unique; no API defaults used as actual balance/credit.
+Test unauthorized reads and unapproved credit override.
+
+R10 Supplier identity/AP opening balance misuse
+MEDIUM / HIGH / P0. Detect duplicate names/GSTINs as policy requires.
+Supplier opening_balance is legacy/no-write; AP opening balance only through
+approved journal. Test master edit cannot change payable.
+
+R11 Raw-material stock diverges from ledger
+HIGH / CRITICAL / P0. RawMaterialLedger movement history authoritative;
+opening stock only by authorized verification; current_stock read-only/
+derived. Test independent balance calculation and physical count variance.
+
+R12 Receipt without source proof
+MEDIUM / HIGH / P0. Active material/supplier, PO, invoice, unit, accepted/
+rejected qty, rate/tax and invoice-line idempotency. Test duplicate invoice
+line does not duplicate receipt.
+
+R13 Recipe drift in historic production
+MEDIUM / CRITICAL / P0. Draft vs immutable Owner-approved version; batch
+snapshots recipe/version; retry uses locked version or manual reconciliation.
+Test draft blocked and version drift blocked.
+
+R14 Unmeasured output/loss/rejection
+MEDIUM / HIGH / P0. Record gross, saleable, rejected and process loss
+separately, require reason, use product-specific yield. Test reconciliation
+and boundary cases.
+
+R15 Milling conversion/rate error
+MEDIUM / HIGH / P0. Active source and target masters, confirmed rate, input/
+output/loss and cost linked by milling_batch_id. No fallback rate. Test
+missing master/rate blocks.
+
+R16 Estimated cost presented as actual
+HIGH / HIGH / P0. Separate material issue, batch-linked labour, approved
+overhead and estimates. No arbitrary same-day labour or 85:15 split as
+actual. Incomplete cost stays PENDING. Test missing rate/allocation.
+
+R17 Packaging / finished-goods discrepancy
+MEDIUM / HIGH / P0. Link bulk used, SKU packet counts, weights, rejects,
+QC and discrepancy approval. Test mass and packet reconciliation.
+
+R18 Unsafe lot released
+MEDIUM / CRITICAL / P0. Controlled quality states, quarantine/hold/reject/
+release, authorized release, QC evidence, shelf life and complaint/recall.
+Test held/rejected lot cannot be issued, dispatched or sold.
+
+R19 Lot genealogy incomplete
+MEDIUM / CRITICAL / P0. Link supplier invoice/GRN/raw lot/milling/recipe/
+production/issue/packaging/finished lot/dispatch/sale. Preserve split/blend
+quantities. Test forward and backward trace. Missing links are exceptions.
+
+R20 Price override / wrong effective price
+HIGH / HIGH / P0. ProductPrices effective-dated by SKU/channel/customer type;
+no overlapping active windows; server lookup; sale snapshots price/discount.
+Test no or multiple matches reject sale. Not yet integrated.
+
+R21 Tax/HSN error or fixed rate
+MEDIUM / CRITICAL / P0. Accounts/CA-approved ProductTaxRules, effective
+dates, HSN text, tax-type text, explicit numeric rate representation and
+sale tax snapshot. Replace legacy fixed 5% only after approved mapping.
+No rate assigned by this document.
+
+R22 Payment allocation/advance error
+MEDIUM / CRITICAL / P0. Receipt separate from invoice; partial/multiple/
+unallocated amounts; allocation limits; webhook idempotency; linked refunds.
+Test duplicates, partials, over-allocation.
+
+R23 Supplier advance/payment error
+MEDIUM / CRITICAL / P0. Owner payment release; PO/bill/GRN/payment linked;
+advance distinct; independent review. Test unsupported payment/over-allocation.
+
+R24 Unbalanced/duplicate journal
+MEDIUM / CRITICAL / P0. Balanced posting engine, unique source reference,
+open period, immutable posted lines, linked reversals. Test imbalance,
+duplicate and missing source blocked.
+
+R25 Cash/UPI/bank/marketplace close unreconciled
+MEDIUM / HIGH / P1. Daily close by mode/channel and independent review.
+Evidence bank/cash/gateway settlement. Mismatch remains exception.
+
+R26 Expense/journal adjustment misuse
+MEDIUM / HIGH / P0. Evidence, purpose, category, requester/approver/payer
+separation and signed approval thresholds. Test unsupported/high-limit
+expense and journal blocked.
+
+R27 Payroll/workforce privacy and error
+MEDIUM / CRITICAL / P0. Employee master private to Owner; attendance, work,
+wage, incentive, payroll and payout distinct; Owner-only salary structure/
+payroll approval. Test non-Owner cannot see another employee salary/bank/
+identity data.
+
+R28 Dispatch/salesman stock chain break
+MEDIUM / HIGH / P1. Dispatch pass/load/acceptance/stock/sale/return linked.
+Dispatch is not a sale. Returns quarantined pending QC. Test dispatch does
+not create revenue.
+
+R29 Return/complaint/recall disconnected from lot
+MEDIUM / CRITICAL / P0. Link original invoice, sale line, batch/lot, quantity,
+inspection and disposition. Recall traces downstream customer. Test forward
+and backward recall chain.
+
+R30 Partial multi-tab write / blind retry
+HIGH / CRITICAL / P0. Durable PENDING/EXECUTING/POSTED/
+EXECUTION_REVIEW_REQUIRED states, idempotency key + payload hash, ordered
+writes, fresh read-back. Uncertain outcomes require reconciliation. Test
+failure after each write boundary and safe replay.
+
+R31 Cross-process concurrency
+MEDIUM / CRITICAL / P0. Single Render instance until distributed locks/
+claims or approved transactional coordination are implemented and tested.
+Test multi-worker ID, payment, stock and approval. Do not autoscale now.
+
+R32 Backup inaccessible/unrestorable
+MEDIUM / CRITICAL / P0. Independent versioned backup, least privilege,
+encryption where supported, backup manifest and restore tests. RPO/RTO,
+frequency and retention are undecided. Test restore to disposable target.
+
+R33 Unapproved schema change
+MEDIUM / HIGH / P0. Versioned dictionary, Owner/technical approval, dry run,
+backup, rollback; no automatic tab/header delete/rename/reorder. Test
+preflight detects drift without auto-repair.
+
+R34 Unverified legal/food/tax/labour applicability
+MEDIUM / CRITICAL / P0. CA/legal/food-safety adviser validates GST/HSN,
+FSSAI, factory/labour/local/environment requirements. Evidence current
+licence/filing and adviser sign-off.
+
+R35 Unowned/unproven exception closure
+MEDIUM / HIGH / P0. Every exception has ID, severity, linked event, owner,
+due date, containment, root cause, resolution, approval and evidence.
+Test cannot close without review and closure proof.
+
+4. ROLE / DATA ACCESS DESIGN
+OWNER: full business access and protected approval authority; still uses
+evidence, reason and audit.
+PA: operational coordination, sales/production/packaging/inventory and
+assigned attendance/tasks; no Owner-only approval, bootstrap, private
+employee bank/salary or unrestricted customer export.
+ACCOUNTANT: accounting read/voucher preparation/reconciliation, sales read
+and approved expense work; no Owner-only payment release or approval of own
+exceptional journal.
+SALESMAN: assigned customer/sales/own stock/attendance/own portal only.
+FACTORY WORKER: assigned production/attendance only; no recipe approval,
+rates, supplier/customer bank, payroll or accounting.
+DISPATCH: assigned dispatch and stock transfer only; no quality release,
+write-off or invoice posting.
+PRODUCTION: production/packaging view/create; no Owner approval or financial
+release.
+FREELANCER/SOCIAL/ECOMMERCE: own projects/tasks/submissions only.
+CUSTOM ROLE: least privilege, Owner approval, protected Owner-only actions
+cannot be granted, periodic review.
+
+Field policy: employee identity/bank/salary/personal/policy Owner-only;
+customer contact/GSTIN/map scoped to assigned sales/accounts purpose;
+supplier contact/GSTIN limited to purchasing/accounts; bank change Owner
+verified; material rates/costing limited; audit log Owner read/trusted server
+write; passwords/tokens never stored in normal Sheets/logs.
+
+Route review finding: Customers master endpoints were accessible to any
+authenticated user in the audited source and expose contact data. This is
+P0. Route-by-route API tests are mandatory; hiding UI controls is not access
+control.
+
+5. APPROVAL MATRIX - OWNER VALUES REQUIRED
+No monetary or quantity thresholds are invented. Until signed, high-risk
+uncertain actions are held for Owner approval.
+
+Approval setup fields for every item: requester role, first approver, final
+approver, amount/quantity limit, required evidence, emergency delegate and
+independent reviewer.
+
+Items requiring explicit policy:
+- Purchase order create/amend/cancel.
+- Goods receipt shortage/rejection/price variance.
+- Supplier advance and payment release.
+- Raw-material opening verification, adjustment and write-off.
+- Milling output/loss variance.
+- Recipe create/change.
+- Production rejection/loss/process variance.
+- Packaging discrepancy.
+- Quality hold/release/quarantine release.
+- Finished-goods adjustment.
+- Customer credit limit and overdue override.
+- Discount/promo price override by role/channel.
+- Return/refund/credit note.
+- Marketplace settlement deduction/write-off.
+- Expense approval/payment.
+- Journal adjustment/suspense/write-off.
+- Salary/wage/incentive change and payroll approval.
+- User-role, supplier bank and payment beneficiary change.
+- Emergency override with scope, expiry and post-review.
+
+OWNER SIGN-OFF:
+PO limit: ______________________
+Supplier advance/payment: _______
+Goods receipt variance: _________
+Raw material adjustment: _______
+Milling yield/loss: _____________
+Production loss/rejection: ______
+Packaging discrepancy: _________
+Finished stock adjustment: ______
+Customer credit/overdue: ________
+Discount by role/channel: _______
+Return/refund: __________________
+Marketplace write-off: __________
+Expense limits: _________________
+Journal/write-off: ______________
+Wage/payroll authority: __________
+Emergency delegate/expiry: _______
+
+6. SEPARATION OF DUTIES
+- Supplier master/bank change, bill approval, bank release and reconciliation
+  are split; if team size prevents this, Owner performs documented second
+  review.
+- Cash receiver is not sole cash reconciler; refund initiator is not sole
+  releaser/reconciler.
+- Journal preparer is not sole approver; posted journal never edited.
+- Stock counter is not sole write-off approver; opening count distinct from
+  receipt; adjustment has reason/source.
+- Production target owner should not self-release food-safety hold.
+- Payroll input, rate change, approval and payment distinct.
+- Code deployer does not self-certify business acceptance; Owner approves
+  exact production release.
+
+7. TRACEABILITY CHAIN
+Supplier -> purchase order -> supplier invoice -> goods receipt and QC ->
+raw lot -> RawMaterialLedger receipt -> milling input/source lot -> milling
+batch -> flour output lot -> approved recipe version -> production batch ->
+material issue ledger -> gross/saleable/reject/loss reconciliation ->
+bulk stock ledger -> packaging batch -> SKU/weight/packet/quality checks ->
+finished lot -> warehouse/dispatch pass -> salesman/channel stock ->
+sale/invoice -> payment/allocation -> returns/complaints/recall.
+
+Each record retains unique ID, parent/reference, lot/material/product ID,
+quantity/unit, event date/time, actor, approval/status/reason and idempotency
+reference where relevant. Split/blend quantities must be retained. A missing
+historical link becomes an exception, never a fabricated link.
+
+8. FINANCIAL CONTROLS
+- Journal debits equal credits; source reference and open period required;
+  posted journal immutable, corrections via linked reversals/adjustments.
+- Sales invoice separate from receipts; support partial/multiple/unallocated
+  receipts, prevent over-allocation and webhook duplicates.
+- Supplier bill matches GRN and accepted quantity; supplier advance separate.
+- Supplier master opening_balance is not AP authority.
+- Inventory valuation method requires Owner/Accounts approval.
+- Actual purchase/landed/reference/last purchase rate not conflated.
+- Batch actual cost requires measured issue, linked labour and approved
+  overhead. Incomplete input -> PENDING/ESTIMATE, not final actual.
+- Daily close reconciles cash/UPI/bank/marketplace separately.
+- Tax uses Accounts/CA-approved effective ProductTaxRules; no invented rate.
+
+9. INVENTORY / FOOD SAFETY
+- RawMaterialLedger is stock movement authority; current_stock derived/
+  read-only. Opening quantity only via Owner verified ledger event.
+- Empty RawMaterials returns empty; unknown material is rejected; master
+  creation is explicit Owner operation.
+- Milling requires active source and target masters and confirmed rate.
+- Production requires active Product and persisted Owner-approved recipe.
+- Record actual gross/saleable/rejected/process loss, reason and yield.
+- Packaging consumes bulk, counts SKU packets and weighs output; no generic
+  packet-to-kg conversion.
+- Held/rejected lots cannot be issued, packed, dispatched or sold.
+- Quality status vocabulary, shelf-life, testing, release role and recall
+  notification process require Owner/Quality approval.
+
+10. EXCEPTIONS AND RECOVERY
+Exception fields: ID, category, severity, detected time, linked transaction,
+description, containment, business/technical owner, due date, status, root
+cause, correction, approval, evidence and closure actor/time.
+
+Statuses: OPEN -> ACKNOWLEDGED -> CONTAINED -> INVESTIGATING ->
+RESOLVED_PENDING_REVIEW -> CLOSED. Reopen if verification fails.
+
+Transaction states: PENDING, EXECUTING, POSTED/COMPLETED,
+EXECUTION_REVIEW_REQUIRED, FAILED_SAFE (exact module enums may differ but
+meaning must remain consistent).
+
+Same idempotency key + same payload returns existing result. Same key +
+different payload is conflict. After timeout, fresh-read before retry. Never
+allocate a new ID for the same accepted operation. If a write is uncertain,
+stop automatic retry and assign manual reconciliation.
+
+Partial failure playbook:
+1 Stop retrying client.
+2 Locate key/reference.
+3 Fresh-read parent, child and ledger rows.
+4 Compare intended vs persisted data.
+5 Identify completed/missing writes.
+6 Assign owner and contain.
+7 Complete only missing work through idempotent recovery.
+8 Reverse incorrect postings with linked evidence.
+9 Read back all related rows.
+10 Close after independent reconciliation.
+
+Process-local locks do not protect multiple Render instances. Keep one
+instance until distributed lock/claim or approved transactional coordination
+is implemented/tested.
+
+11. BACKUP / CONTINUITY
+Backup workbook, Apps Script version, backend commit, schema/control docs and
+configuration manifest without secrets. Store independently, least privilege,
+encrypt where supported, retention owner-approved, alert on failure. Restore
+only to disposable destination for test; do not restore pre-reset business
+rows into clean production without separate explicit migration decision.
+
+Backup frequency: ______________________
+Retention: _____________________________
+RPO (maximum data loss): ________________
+RTO (maximum outage): ___________________
+Restore test frequency: _________________
+No values supplied in current owner decisions. Do not invent them.
+
+Restore test: compare manifest, tabs/headers, integrity, connect API to
+sandbox, provision secrets separately, sign evidence. Live production remains
+untouched.
+
+12. CONTROL MONITORING
+DAILY: pending approvals, incomplete/uncertain transactions, sales/collection
+by channel/mode, unallocated payments/advances, reconciliation exceptions,
+raw/bulk/finished stock, yield/loss, quality holds/complaints, dispatch vs
+salesman stock, expenses, backup status, access anomalies.
+WEEKLY: duplicates, SKU/price/tax gaps, negative stock, PO/GRN/bill mismatch,
+pending batch costs, ageing, settlements, aged exceptions, role changes,
+backup failures.
+MONTHLY: trial balance/subledgers, AR/AP, SKU/channel margin, stock valuation,
+production yields/rejects, marketplace deductions, payroll, CA/tax review,
+compliance calendar, access review, restore evidence.
+All reports carry as-of time, sources and PASS/EXCEPTION/INCOMPLETE.
+
+13. CONTROL TEST REGISTER
+CT-001 Bootstrap/public route: security PR #1 CI PASS; sandbox bootstrap pending.
+CT-002 Owner-only audit/client audit write: security PR #1 CI PASS.
+CT-003 PA PII redaction: security PR #1 CI PASS.
+CT-004 Approval retry/reconciliation: CI PASS; crash/restart staging pending.
+CT-005 Empty master/no phantom seeds: PR #5 clean-data CI PASS; live Sheets
+       sandbox pending.
+CT-006 Unknown material receipt/verification: PR #5 CI PASS; live Sheets test pending.
+CT-007 Owner raw master create/read-back: code present; sandbox proof pending.
+CT-008 Recipe draft/immutable Owner approval: manufacturing CI PASS.
+CT-009 Recipe drift on retry: CI coverage; multi-instance pending.
+CT-010 Active product/persisted recipe required: CI PASS.
+CT-011 Product-specific yield: CI PASS; policy approval pending.
+CT-012 Milling master/rate validation: CI PASS; real lot acceptance pending.
+CT-013 Batch issue idempotency: regression CI PASS; multi-instance pending.
+CT-014 Incomplete actual cost remains pending: CI PASS; overhead policy pending.
+CT-015 Labour entry batch validation: code/test; field acceptance pending.
+CT-016 Frontend build: PR #5 CI PASS.
+CT-017 Duplicate SKU pre-ID check: NOT IMPLEMENTED.
+CT-018 Customer PII route access: NOT PASS.
+CT-019 Suppliers REQUIRED_TABS: NOT PASS.
+CT-020 Strict header contract/read-back: NOT PASS.
+CT-021 ProductPrices integration: NOT STARTED.
+CT-022 ProductTaxRules / legacy tax removal: NOT STARTED.
+CT-023 PO-GRN-bill-payment: staging acceptance pending.
+CT-024 Gateway duplicate payment: end-to-end test pending.
+CT-025 Balanced journal/reversal: acceptance pending.
+CT-026 Daily close: NOT STARTED.
+CT-027 Quality hold/release: NOT STARTED.
+CT-028 Full 41-relationship/lot genealogy: NOT COMPLETE.
+CT-029 All employee-sensitive routes: partial; full audit pending.
+CT-030 Backup restore: NOT VERIFIED.
+CT-031 Multi-instance concurrency: NOT VERIFIED; single-instance constraint.
+CT-032 Render deployed SHA/smoke test: NOT VERIFIED.
+
+PR #5 CI run 44321081402: security 12/12, clean-data/contracts 17/17,
+manufacturing regression 73/73 and frontend build all PASS. PR #5 remains
+open/draft/unmerged/undeployed.
+
+14. IMPLEMENTATION AND RELEASE GATES
+G0 Business facts/owners: legal entity, registrations, locations, channels,
+settlement accounts, workforce and quality owners signed.
+G1 Baseline: fresh live workbook/source/Apps Script, backup verification,
+reset history and 56-row ledger repair staging disposition.
+G2 Control approval: thresholds, roles/segregation, privacy, QC, accounting,
+RPO/RTO and retention approved.
+G3 Schema freeze: mappings, 41 relationships or waivers, headers, fields,
+IDs, Supplier contract, strict read-back and no-seed behavior approved.
+G4 Controlled implementation: PR/code review/CI/sandbox failure, retry,
+permission, stock and finance tests; no live business data in test.
+G5 Integrated acceptance: purchase-to-sale/payment/accounting, returns,
+QC/recall, daily close, payroll privacy, backup restore; no P0 defects.
+G6 Production release: Owner approves exact SHA, backup/rollback verified,
+Render environment/instance count confirmed, deploy and smoke test logged.
+G7 Handover: SOPs, training, exception owners, reports and support accepted.
+
+15. OWNER / ACCOUNTS / ADVISER DECISIONS
+D-001 Legal entity/invoice name.
+D-002 Factory/warehouse/stock locations.
+D-003 Active sales channels and settlement accounts.
+D-004 Customer types/credit practices.
+D-005 Supplier terms and bank verification.
+D-006 Product row grain (sellable SKU vs family/variant/SKU).
+D-007 ProductVariants / Products_SKU disposition.
+D-008 SKU naming/duplicate rule.
+D-009 UOM/conversion policy.
+D-010 Raw material rate_per_unit meaning.
+D-011 rate_status enum.
+D-012 Opening stock verification policy.
+D-013 All approval thresholds in section 5.
+D-014 Emergency delegate/expiry.
+D-015 Employee privacy/retention.
+D-016 Small-team separation exceptions.
+D-017 Product expected yields/variance limits.
+D-018 Milling yield/loss tolerance.
+D-019 Batch labour allocation basis.
+D-020 Factory/electricity overhead allocation.
+D-021 Inventory valuation method.
+D-022 Shelf-life/expiry.
+D-023 QC tests/acceptance limits/frequency.
+D-024 Quality release/recall workflow.
+D-025 Pricing effective date/override.
+D-026 HSN/tax classification/rates, CA-confirmed.
+D-027 Payment/advance allocation.
+D-028 Supplier payment matching/release.
+D-029 Journal approvals/period close.
+D-030 Backup frequency/retention.
+D-031 RPO/RTO.
+D-032 Route/role/field-scope matrix.
+D-033 Single-instance constraint exit test.
+D-034 Current Render deployed SHA/environment.
+D-035 56 proposed raw ledger rows disposition.
+
+No thresholds or legal values are assumed.
+
+16. PHASE 4 STATUS
+Completed design/documentation:
+- Phase 4.1 workbook reconciliation for uploaded export.
+- Phase 4.2-A security hardening merged into main.
+- Phase 4.2-B schema/route audit PRs #3/#4 merged into main.
+- Risk register, approval matrix, segregation, traceability, finance,
+  exception/recovery, backup, test register and release gates consolidated.
+
+Not complete as live operational release:
+- Owner/Accounts decisions and thresholds.
+- Fresh live workbook/backup verification.
+- 56-row repair staging disposition.
+- Customer PII route remediation.
+- Suppliers REQUIRED_TABS and strict header/write/read-back.
+- SKU duplicate prevention; pricing/tax integration.
+- Accounting/daily close/QC/recall/lot genealogy acceptance.
+- Multi-instance safety, restore, RPO/RTO and retention.
+- PR #5 review/merge and Render deploy, followed by smoke test/handover.
+
+No live workbook rows/headers changed; no pre-reset data imported; no proposed
+ledger IDs written; no production ID allocated; no Render deployment done.
+
+CONCLUSION
+The Phase 4 risk-and-control design package is consolidated and ready for
+Owner, Accounts, Technical and operational review. Phase 4 is not operationally
+closed until decisions, live baseline/backup, sandbox acceptance, exact
+release approval and post-deployment verification are complete.

@@ -35,6 +35,13 @@ def get_latest_purchase_rate(
     if purchase_ledger:
         candidates = []
         for entry in purchase_ledger:
+            # Only accepted supplier receipts establish a purchase rate. Milling
+            # transfers, production consumption, opening verification and stock
+            # adjustments must never become new purchase-rate observations.
+            movement_type = str(entry.get("movement_type", "")).strip().upper()
+            if movement_type != "PURCHASE_RECEIPT":
+                continue
+
             # Match material
             m_name = str(entry.get("material_name", "")).strip().lower()
             m_id = str(entry.get("raw_material_id", "")).strip().lower()
@@ -89,7 +96,7 @@ def get_latest_purchase_rate(
         if m_name == clean_target or m_id == clean_target:
             rate = rm.get("rate_per_unit")
             rate_status = str(rm.get("rate_status", "CONFIRMED")).upper()
-            if rate is not None and str(rate).strip() not in {"", "pending", "none", "null", "rate to confirm"} and rate_status != "PENDING":
+            if rate is not None and str(rate).strip().lower() not in {"", "pending", "estimated", "unconfirmed", "none", "null", "rate to confirm", "0", "0.0"} and rate_status in {"", "CONFIRMED"}:
                 try:
                     rate_val = float(rate)
                     if rate_val > 0:
@@ -142,8 +149,10 @@ def calculate_batch_actual_cost(
         std_qty, std_unit = normalize_to_canonical_unit(qty_dec, unit)
         std_qty_dec = to_decimal(std_qty)
 
-        rate = mat.get("rate_per_unit") or mat.get("applicable_unit_rate")
-        if rate is None or str(rate).strip() in {"", "none", "null", "pending"}:
+        rate = mat.get("rate_per_unit")
+        if rate in (None, ""):
+            rate = mat.get("applicable_unit_rate")
+        if rate is None or str(rate).strip().lower() in {"", "none", "null", "pending", "0", "0.0"}:
             has_missing_rates = True
             missing_rate_materials.append(name)
             line_breakdown.append({
@@ -387,7 +396,10 @@ def get_authoritative_bulk_cost_per_kg(
                     except Exception:
                         items_raw = []
                 if items_raw:
-                    expected_yield = float(r.get("expected_yield_kg", 1.2) or 1.2)
+                    expected_yield_value = r.get("expected_yield_kg")
+                    if expected_yield_value in (None, "") or float(expected_yield_value) <= 0:
+                        continue
+                    expected_yield = float(expected_yield_value)
                     recipe_cost = calculate_recipe_cost_estimate(items_raw, expected_yield)
                     if recipe_cost.get("cost_per_kg") is not None:
                         dec = to_decimal(recipe_cost["cost_per_kg"])
@@ -407,7 +419,10 @@ def get_authoritative_bulk_cost_per_kg(
             if isinstance(items_raw, str):
                 items_raw = json.loads(items_raw)
             if items_raw:
-                expected_yield = float(mapped_rec.get("expected_yield_kg", 1.2) or 1.2)
+                expected_yield_value = mapped_rec.get("expected_yield_kg")
+                if expected_yield_value in (None, "") or float(expected_yield_value) <= 0:
+                    raise ValueError("Approved recipe has no product-specific expected yield.")
+                expected_yield = float(expected_yield_value)
                 recipe_cost = calculate_recipe_cost_estimate(items_raw, expected_yield)
                 if recipe_cost.get("cost_per_kg") is not None:
                     dec = to_decimal(recipe_cost["cost_per_kg"])
