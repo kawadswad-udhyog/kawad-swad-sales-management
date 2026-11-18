@@ -5,7 +5,7 @@ Maps operational ERP business events to balanced double-entry journal vouchers.
 
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Optional
-from app.calculations.units import to_decimal, round_money, MONEY_PRECISION
+from app.calculations.units import to_decimal, round_money, MONEY_PRECISION, normalize_to_canonical_unit
 from app.accounting.journal_engine import post_journal_voucher
 
 
@@ -139,7 +139,8 @@ def post_production_batch_journal(
     qty_kg = to_decimal(batch_data.get("net_quantity_kg") or batch_data.get("quantity_kg", 0) or 0)
     p_name = str(batch_data.get("product_name_snapshot", "Papad"))
 
-    # Dynamically extract or resolve costs if not explicitly passed
+    # Resolve only measured ledger costs. Do not substitute standard recipe estimates
+    # or arbitrary ingredient percentage splits for actual batch consumption.
     if flour_cost is None or spice_cost is None:
         f_cost_val = batch_data.get("flour_cost")
         s_cost_val = batch_data.get("ingredient_cost")
@@ -147,69 +148,61 @@ def post_production_batch_journal(
             flour_cost = to_decimal(f_cost_val)
             spice_cost = to_decimal(s_cost_val)
         else:
-            # Query RawMaterialLedger deductions for this batch
             from app.sheets import db
             from app.calculations.costing import get_latest_purchase_rate
-            from app.calculations.recipes import calculate_recipe_cost_estimate
+
             raw_deductions = [
-                x for x in db.get_records("RawMaterialLedger", fresh=True)
-                if str(x.get("production_id", "")).strip() == prod_id
-                and str(x.get("movement_type", "")).strip().upper() == "PRODUCTION_CONSUMPTION"
+                row for row in db.get_records("RawMaterialLedger", fresh=True)
+                if str(row.get("production_id", "")).strip() == prod_id
+                and str(row.get("movement_type", "")).strip().upper() == "PRODUCTION_CONSUMPTION"
             ]
-            rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
-            pur_ledger = db.get_records("RawMaterialLedger", fresh=True)
-            f_calc = Decimal("0")
-            s_calc = Decimal("0")
-            for d in raw_deductions:
-                m_name = str(d.get("material_name", "")).lower()
-                m_id = str(d.get("raw_material_id", ""))
-                q = to_decimal(d.get("quantity", 0) or 0)
-                r_val = d.get("rate_per_unit")
-                if r_val is not None and str(r_val).strip() not in {"", "0", "none", "null", "pending"}:
-                    r = to_decimal(r_val)
-                else:
-                    rate_lookup = get_latest_purchase_rate(m_name or m_id, rm_master, pur_ledger)
-                    r = to_decimal(rate_lookup.get("rate_per_canonical_unit") or 0)
-                c = q * r
-                if "flour" in m_name or "atta" in m_name:
-                    f_calc += c
-                else:
-                    s_calc += c
+            if not raw_deductions:
+                raise ValueError(f"Cannot post production journal for {prod_id}: no material-issue ledger evidence exists.")
 
-            # If deduction rates are completely absent, evaluate approved recipe formula cost
-            if f_calc == Decimal("0") and s_calc == Decimal("0"):
-                recipes = db.get_records("Recipes", fresh=True)
-                m_rec = None
-                req_rid = str(batch_data.get("recipe_id", "")).strip() or None
-                try:
-                    from app.calculations.recipe_mapping import resolve_product_recipe
-                    pid_b = str(batch_data.get("product_id", "")).strip()
-                    prods_list = db.get_records("Products", fresh=False)
-                    prod_obj = next((p for p in prods_list if str(p.get("product_id", "")).strip() == pid_b), None) or {
-                        "product_id": pid_b,
-                        "product_name": p_name,
-                        "recipe_id": req_rid or "",
-                    }
-                    m_rec = resolve_product_recipe(prod_obj, recipes, requested_recipe_id=req_rid, require_approved=True)
-                except Exception:
-                    m_rec = next((r for r in recipes if str(r.get("product_name_snapshot", "")).strip().lower() == p_name.lower() and str(r.get("approved", "")).lower() in {"true", "1"}), None)
-                if m_rec:
-                    import json
-                    items_raw = m_rec.get("items") or m_rec.get("items_json")
-                    if isinstance(items_raw, str):
-                        try:
-                            items_raw = json.loads(items_raw)
-                        except Exception:
-                            items_raw = []
-                    yield_kg = float(m_rec.get("expected_yield_kg", 1.2) or 1.2)
-                    rec_cost = calculate_recipe_cost_estimate(items_raw, yield_kg)
-                    if rec_cost.get("cost_per_kg"):
-                        tot_c = to_decimal(rec_cost["cost_per_kg"]) * qty_kg
-                        f_calc = tot_c * Decimal("0.85")
-                        s_calc = tot_c * Decimal("0.15")
+            rm_master = db.get_records("RawMaterials", fresh=True)
+            purchase_ledger = db.get_records("RawMaterialLedger", fresh=True)
+            flour_total = Decimal("0")
+            ingredient_total = Decimal("0")
+            missing_rates = []
 
-            flour_cost = f_calc
-            spice_cost = s_calc
+            for deduction in raw_deductions:
+                material_name = str(deduction.get("material_name", "")).strip()
+                material_id = str(deduction.get("raw_material_id", "")).strip()
+                quantity, unit = normalize_to_canonical_unit(
+                    deduction.get("quantity", 0) or 0,
+                    deduction.get("unit", "kg"),
+                )
+                rate_value = deduction.get("rate_per_unit")
+                rate = None
+                if rate_value not in (None, "") and str(rate_value).strip().lower() not in {"0", "0.0", "none", "null", "pending"}:
+                    try:
+                        rate = to_decimal(rate_value)
+                        if rate <= 0:
+                            rate = None
+                    except Exception:
+                        rate = None
+                if rate is None:
+                    rate_info = get_latest_purchase_rate(material_name or material_id, rm_master, purchase_ledger)
+                    canonical_rate = rate_info.get("rate_per_canonical_unit")
+                    if rate_info.get("status") == "CONFIRMED" and canonical_rate not in (None, ""):
+                        rate = to_decimal(canonical_rate)
+                if rate is None or rate <= 0:
+                    missing_rates.append(material_name or material_id or "Unknown material")
+                    continue
+
+                line_cost = to_decimal(quantity) * rate
+                if "flour" in material_name.lower() or "atta" in material_name.lower():
+                    flour_total += line_cost
+                else:
+                    ingredient_total += line_cost
+
+            if missing_rates:
+                raise ValueError(
+                    "Cannot post production journal with incomplete material rates: "
+                    + ", ".join(sorted(set(missing_rates)))
+                )
+            flour_cost = flour_total
+            spice_cost = ingredient_total
 
     if labor_cost is None:
         labor_cost = to_decimal(batch_data.get("labor_cost") or batch_data.get("labour_cost") or 0)
