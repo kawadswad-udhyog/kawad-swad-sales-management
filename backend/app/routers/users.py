@@ -43,6 +43,16 @@ async def list_users(current_user: dict = Depends(get_current_user)):
     """List all employees with real username from AuthUsers and verified active status."""
     require_manager(current_user)
     users = get_all_users_with_auth()
+    if not is_owner(current_user):
+        # PA may see the operational directory needed to route requests, but not
+        # personal contact details, login names, or free-text employee notes.
+        redacted_users = []
+        for user in users:
+            safe_user = dict(user)
+            for field in ("username", "mobile", "email", "notes"):
+                safe_user[field] = ""
+            redacted_users.append(safe_user)
+        users = redacted_users
     return [UserProfile(**u) for u in users]
 
 
@@ -82,8 +92,8 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
             "username": req.username,
             "full_name": req.full_name,
             "role": requested_role,
-            "mobile": req.mobile,
-            "email": req.email,
+            "mobile": req.mobile if is_owner(current_user) else "",
+            "email": req.email if is_owner(current_user) else "",
             "employment_type": req.employment_type,
             "designation": req.designation,
             "department": req.department,
@@ -91,10 +101,10 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
             "joining_date": req.joining_date,
             "salary_frequency": req.salary_frequency,
             "salary_structure_id": req.salary_structure_id,
-            "address": req.address,
-            "emergency_contact": req.emergency_contact,
-            "bank_details": req.bank_details,
-            "notes": req.notes,
+            "address": req.address if is_owner(current_user) else "",
+            "emergency_contact": req.emergency_contact if is_owner(current_user) else "",
+            "bank_details": req.bank_details if is_owner(current_user) else "",
+            "notes": req.notes if is_owner(current_user) else "",
         }
         app_req = create_approval_request(
             request_type="CREATE_USER",
@@ -138,6 +148,16 @@ async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depend
         updated = execute_update_user(user_id, update_data, actor_id)
         return {"ok": True, "user": updated}
     else:
+        # PA may request operational updates, but not private employee, contact,
+        # banking, identity, or compensation changes.
+        owner_only_fields = {
+            "username", "mobile", "email", "address", "emergency_contact",
+            "bank_details", "document_references", "salary_frequency",
+            "salary_structure_id",
+        }
+        update_data = {k: v for k, v in update_data.items() if k not in owner_only_fields}
+        if not update_data:
+            raise HTTPException(status_code=403, detail="Only the Owner can change private employee or authentication details.")
         # PA submits approval request
         app_req = create_approval_request(
             request_type="UPDATE_USER",
