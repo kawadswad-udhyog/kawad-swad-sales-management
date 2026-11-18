@@ -147,6 +147,55 @@ def _reset_db():
         db.memory_store[tab] = []
 
 
+def _install_recipe_test_fixture(recipe_id, approved=True):
+    """Create explicit test-only persisted recipe and ingredient rows in the isolated memory store."""
+    template = next(row for row in MASTER_RECIPES_DEFINITION if row["recipe_id"] == recipe_id)
+    raw_rows = db.memory_store.setdefault("RawMaterials", [])
+    items = []
+    for item in template["items"]:
+        unit = str(item.get("unit") or "kg")
+        expected_yield = float(template["expected_yield_kg"])
+        qty_per_kg = float(item.get("quantity", 0)) / expected_yield
+        raw_seed = next((row for row in RAW_MATERIALS_SEED if row["material_name"].strip().lower() == item["material_name"].strip().lower()), {})
+        items.append({
+            "material_name": item["material_name"],
+            "quantity_per_kg": qty_per_kg,
+            "unit": unit,
+            "rate_per_unit": item.get("rate_per_unit", raw_seed.get("rate_per_unit")),
+            "rate_status": item.get("rate_status", raw_seed.get("rate_status", "PENDING")),
+        })
+        raw_row = next((row for row in raw_rows if str(row.get("material_name", "")).strip().lower() == item["material_name"].strip().lower()), None)
+        if raw_row:
+            raw_row.setdefault("active", "true")
+            raw_row.setdefault("rate_status", raw_seed.get("rate_status", "PENDING"))
+            if not raw_row.get("rate_per_unit"):
+                raw_row["rate_per_unit"] = raw_seed.get("rate_per_unit", "")
+        else:
+            raw_rows.append({
+                "raw_material_id": raw_seed.get("raw_material_id") or f"RM-TEST-{len(raw_rows)+1:03d}",
+                "material_name": item["material_name"],
+                "unit": unit,
+                "current_stock": 1000.0,
+                "opening_stock_verified": "true",
+                "active": "true",
+                "rate_per_unit": raw_seed.get("rate_per_unit", ""),
+                "rate_status": raw_seed.get("rate_status", "PENDING"),
+                "category": raw_seed.get("category", "RAW_MATERIAL"),
+            })
+    recipe = {
+        "recipe_id": template["recipe_id"],
+        "product_id": template["product_id"],
+        "product_name_snapshot": template["product_name_snapshot"],
+        "version": str(template.get("version", 1)),
+        "approved": "true" if approved else "false",
+        "expected_yield_kg": str(template["expected_yield_kg"]),
+        "items_json": json.dumps(items),
+        "notes": "Explicit isolated test fixture only; not created by any application bootstrap route.",
+    }
+    db.memory_store.setdefault("Recipes", []).append(recipe)
+    return recipe
+
+
 class TestRecipeMappingAndSkuCosting(unittest.TestCase):
     def setUp(self):
         self._orig_connected = db.is_connected
@@ -165,9 +214,8 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
 
     def test_prd_0001_and_sku_variants_resolve_deterministically_without_collisions(self):
         """Sequential PRD-0001 IDs and pack-size SKU variants resolve cleanly to exact master formulas."""
-        asyncio.run(prod.bootstrap_master_recipes(self.owner))
-        # Confirm Garlic variant so both Master and Garlic are approved
-        asyncio.run(prod.confirm_master_recipe("RCP-MOONG-GARLIC-V2", prod.RecipeConfirmRequest(approved=True), self.owner))
+        _install_recipe_test_fixture("RCP-MOONG-MASTER-V2", approved=True)
+        _install_recipe_test_fixture("RCP-MOONG-GARLIC-V2", approved=True)
 
         products = [
             {"product_id": "PRD-0001", "sku": "KS-MM-200", "product_name": "Moong Master Papad (200g)", "pack_weight_g": 200, "active": "true"},
@@ -178,10 +226,10 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
         db.memory_store["Products"] = products
         recipes = db.get_records("Recipes", fresh=True)
 
-        r1 = resolve_product_recipe(products[0], recipes, MASTER_RECIPES_DEFINITION, require_approved=True)
-        r2 = resolve_product_recipe(products[1], recipes, MASTER_RECIPES_DEFINITION, require_approved=True)
-        r3 = resolve_product_recipe(products[2], recipes, MASTER_RECIPES_DEFINITION, require_approved=True)
-        r4 = resolve_product_recipe(products[3], recipes, MASTER_RECIPES_DEFINITION, require_approved=True)
+        r1 = resolve_product_recipe(products[0], recipes, [], require_approved=True)
+        r2 = resolve_product_recipe(products[1], recipes, [], require_approved=True)
+        r3 = resolve_product_recipe(products[2], recipes, [], require_approved=True)
+        r4 = resolve_product_recipe(products[3], recipes, [], require_approved=True)
 
         self.assertEqual(r1["recipe_id"], "RCP-MOONG-MASTER-V2")
         self.assertEqual(r2["recipe_id"], "RCP-MOONG-MASTER-V2")
@@ -191,7 +239,7 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
 
     def test_ambiguous_mapping_raises_409_and_unapproved_draft_blocks_issuance(self):
         """Ambiguous recipes raise HTTP 409; unapproved Chana draft blocks issuance until Owner confirms."""
-        asyncio.run(prod.bootstrap_master_recipes(self.owner))
+        _install_recipe_test_fixture("RCP-CHANA-CHOTU-V2", approved=False)
         db.memory_store["Products"] = [
             {"product_id": "PRD-0010", "sku": "KS-AMB-200", "product_name": "Ambiguous Spice Papad (200g)", "pack_weight_g": 200, "active": "true"},
             {"product_id": "PRD-0011", "sku": "CHANA-250G", "product_name": "Chana Chotu Papad (250g)", "pack_weight_g": 250, "active": "true"},
@@ -226,16 +274,14 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
         self.assertEqual(amb_ctx.exception.status_code, 409)
         self.assertIn("Ambiguous recipe mapping", str(amb_ctx.exception.detail))
 
-        # Chana Chotu is DRAFT/unapproved initially -> batch planning succeeds, but issuance blocks with 400
-        chana_batch = asyncio.run(prod.create_batch(
-            prod.ProductionCreate(product_id="PRD-0011", production_date="2026-11-10", quantity_kg=12.0),
-            self.pa,
-        ))
-        self.assertEqual(chana_batch["recipe_id"], "RCP-CHANA-CHOTU-V2")
+        # An unapproved draft cannot create a production batch.
         with self.assertRaises(HTTPException) as draft_ctx:
-            asyncio.run(prod.issue_materials(chana_batch["production_id"], self.pa))
-        self.assertEqual(draft_ctx.exception.status_code, 400)
-        self.assertIn("unapproved", str(draft_ctx.exception.detail).lower())
+            asyncio.run(prod.create_batch(
+                prod.ProductionCreate(product_id="PRD-0011", production_date="2026-11-10", quantity_kg=12.0),
+                self.pa,
+            ))
+        self.assertEqual(draft_ctx.exception.status_code, 422)
+        self.assertIn("approved persisted recipe", str(draft_ctx.exception.detail).lower())
 
         # Audit endpoint detects approved, draft, ambiguous, and unmapped without mutating sheets
         db.memory_store["Products"].append(
@@ -248,7 +294,7 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
 
     def test_get_sku_costing_uses_bulk_cost_per_kg_without_nameerror(self):
         """Regression check for get_sku_costing using defined bulk_cost_per_kg variable."""
-        asyncio.run(prod.bootstrap_master_recipes(self.owner))
+        _install_recipe_test_fixture("RCP-MOONG-MASTER-V2", approved=True)
         db.memory_store["Products"] = [
             {"product_id": "PRD-0001", "sku": "KS-MM-200", "product_name": "Moong Master Papad", "pack_weight_g": 200, "active": "true"}
         ]
@@ -607,8 +653,8 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
         RM Receipt -> Opening Verification -> Dal Milling -> Master Recipe -> Batch -> Material Issue -> Approve
         -> Packaging -> Finished Goods Register -> Central Warehouse Dispatch -> Van Loading Pass -> Sale Billing
         """
-        # 1. Bootstrap master recipes into Recipes sheet & confirm Moong Master
-        asyncio.run(prod.bootstrap_master_recipes(self.owner))
+        # 1. Install a persisted in-memory recipe fixture. No bootstrap endpoint or data import is run.
+        _install_recipe_test_fixture("RCP-MOONG-MASTER-V2", approved=True)
 
         # 2. Verify physical opening stock for minor spices/oil/packaging (e.g., 20 kg Salt, 50 kg other ingredients)
         for mat in db.memory_store["RawMaterials"]:
