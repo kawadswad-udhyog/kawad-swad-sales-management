@@ -529,6 +529,8 @@ async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = 
             "rate_per_unit": req.rate_per_unit if req.rate_per_unit is not None else "",
             "rate_status": rate_status,
             "category": category,
+            "active": "true",
+            "notes": "",
             "created_at": now(),
             "created_by": actor,
         }
@@ -536,7 +538,7 @@ async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = 
             raise HTTPException(503, "Raw material master could not be saved.")
         stored = next((row for row in db.get_records("RawMaterials", fresh=True)
             if str(field(row, "raw_material_id", default="")).strip() == raw_material_id), None)
-        required_values = ("raw_material_id", "material_name", "unit", "rate_status", "category")
+        required_values = ("raw_material_id", "material_name", "unit", "rate_status", "category", "active")
         if not stored or any(str(field(stored, key, default="")).strip() != str(created[key]).strip() for key in required_values):
             raise HTTPException(503, "Raw material master write did not pass read-back verification. Review the sheet before retrying.")
         db.log_audit(actor, "CREATE_RAW_MATERIAL_MASTER", "RawMaterials", raw_material_id, reason=f"Created clean master record: {name}; initial stock set to zero.")
