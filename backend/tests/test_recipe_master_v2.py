@@ -98,7 +98,12 @@ class TestRecipeMasterV2(unittest.TestCase):
                 {"product_id": "PRD-CHANA-CHOTU", "sku": "KS-CC-200", "product_name": "Chana Chotu Papad", "active": "true", "pack_weight_g": 200},
                 {"product_id": "PRD-URAD-GURU", "sku": "KS-UG-200", "product_name": "Urad Guru Papad", "active": "true", "pack_weight_g": 200},
             ],
-            "RawMaterials": [],
+            "RawMaterials": [
+                {"raw_material_id": "RM-MOONG-FLOUR", "material_name": "Moong Dal Flour", "unit": "kg", "current_stock": 100.0, "rate_per_unit": 100.0, "rate_status": "CONFIRMED", "active": "true", "opening_stock_verified": "true"},
+                {"raw_material_id": "RM-CHANA-FLOUR", "material_name": "Chana Dal Flour", "unit": "kg", "current_stock": 100.0, "rate_per_unit": 90.0, "rate_status": "CONFIRMED", "active": "true", "opening_stock_verified": "true"},
+                {"raw_material_id": "RM-URAD-FLOUR", "material_name": "Urad Dal Flour", "unit": "kg", "current_stock": 100.0, "rate_per_unit": 120.0, "rate_status": "CONFIRMED", "active": "true", "opening_stock_verified": "true"},
+                {"raw_material_id": "RM-SMOS", "material_name": "SMOS", "unit": "kg", "current_stock": 100.0, "rate_per_unit": 1500.0, "rate_status": "CONFIRMED", "active": "true", "opening_stock_verified": "true"},
+            ],
             "Workers": [],
             "Recipes": [],
             "ProductionBatches": [],
@@ -177,46 +182,61 @@ class TestRecipeMasterV2(unittest.TestCase):
         self.assertIn("Tomato Powder", cost_calc["pending_ingredients"])
 
     def test_master_recipes_api_endpoints_and_bootstrap(self):
-        """Test GET /recipes/master and POST /recipes/master/bootstrap."""
-        # Get master recipes
+        """The clean system returns no recipes and the legacy bulk-seed endpoint is disabled."""
         recipes = asyncio.run(prod.get_master_recipes(self.owner))
-        self.assertEqual(len(recipes), 15)
+        self.assertEqual(recipes, [])
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.bootstrap_master_recipes(self.owner))
+        self.assertEqual(ctx.exception.status_code, 410)
+        self.assertEqual(db.memory_store["Recipes"], [])
+        self.assertEqual(len(db.memory_store["RawMaterials"]), 4)
 
-        # Bootstrap into Sheets store
-        res = asyncio.run(prod.bootstrap_master_recipes(self.owner))
-        self.assertEqual(res["status"], "success")
-        self.assertGreater(res["added_materials"], 0)
-        self.assertGreater(res["added_recipes"], 0)
+    def test_owner_confirmation_creates_new_immutable_recipe_version(self):
+        """Owner approval appends a new immutable approved version from a stored draft."""
+        draft = asyncio.run(prod.save_recipe(
+            prod.RecipeSave(
+                product_id="PRD-CHANA-CHOTU",
+                items=[
+                    prod.RecipeItemInput(material_name="Chana Dal Flour", quantity_per_kg=0.75, unit="kg"),
+                    prod.RecipeItemInput(material_name="Urad Dal Flour", quantity_per_kg=0.25, unit="kg"),
+                    prod.RecipeItemInput(material_name="SMOS", quantity_per_kg=0.001, unit="kg"),
+                ],
+                approved=False,
+                expected_yield_kg=1.2,
+                notes="Draft for owner confirmation test",
+            ),
+            self.pa,
+        ))
 
-        # Check stored RawMaterials
-        raw_rows = db.get_records("RawMaterials")
-        self.assertTrue(any(r["material_name"] == "Moong Dal Flour" for r in raw_rows))
-
-        # Check stored Recipes
-        recipe_rows = db.get_records("Recipes")
-        self.assertTrue(any(r["recipe_id"] == "RCP-MOONG-MASTER-V2" for r in recipe_rows))
-
-    def test_owner_confirmation_mechanism(self):
-        """Only owner can confirm or adjust proposed recipes."""
-        # Salesman cannot confirm
         with self.assertRaises(HTTPException):
-            asyncio.run(prod.confirm_master_recipe("RCP-CHANA-CHOTU-V2", prod.RecipeConfirmRequest(approved=True), self.salesman))
-
-        # PA cannot confirm (only OWNER)
+            asyncio.run(prod.confirm_master_recipe(draft["recipe_id"], prod.RecipeConfirmRequest(approved=True), self.salesman))
         with self.assertRaises(HTTPException):
-            asyncio.run(prod.confirm_master_recipe("RCP-CHANA-CHOTU-V2", prod.RecipeConfirmRequest(approved=True), self.pa))
+            asyncio.run(prod.confirm_master_recipe(draft["recipe_id"], prod.RecipeConfirmRequest(approved=True), self.pa))
 
-        # Owner can confirm
-        res = asyncio.run(prod.confirm_master_recipe(
-            "RCP-CHANA-CHOTU-V2",
+        approved = asyncio.run(prod.confirm_master_recipe(
+            draft["recipe_id"],
             prod.RecipeConfirmRequest(approved=True, expected_yield_kg=1.22, change_notes="Confirmed after trial batch"),
             self.owner,
         ))
-        self.assertTrue(res["approved"])
-        self.assertEqual(res["expected_yield_kg"], 1.22)
+        self.assertTrue(approved["approved"])
+        self.assertEqual(float(approved["expected_yield_kg"]), 1.22)
+        self.assertNotEqual(approved["recipe_id"], draft["recipe_id"])
+        rows = db.get_records("Recipes", fresh=True)
+        original = next(row for row in rows if row["recipe_id"] == draft["recipe_id"])
+        self.assertEqual(original["approved"], "false")
+        self.assertEqual(len([row for row in rows if row["product_id"] == "PRD-CHANA-CHOTU"]), 2)
 
     def test_production_batch_yield_benchmark_comparison(self):
-        """Production batch records flour base used, actual yield, benchmark yield, and variance."""
+        """Production batch records flour base used, actual yield and the product-specific recipe benchmark."""
+        asyncio.run(prod.save_recipe(
+            prod.RecipeSave(
+                product_id="PRD-MOONG-MASTER",
+                items=[prod.RecipeItemInput(material_name="Moong Dal Flour", quantity_per_kg=0.833333, unit="kg")],
+                approved=True,
+                expected_yield_kg=1.2,
+            ),
+            self.owner,
+        ))
         batch = asyncio.run(prod.create_batch(
             prod.ProductionCreate(
                 product_id="PRD-MOONG-MASTER",
