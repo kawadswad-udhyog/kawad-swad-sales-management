@@ -1,0 +1,198 @@
+KAWAD SWAD ERP
+PHASE 4.2-B - MASTER DATA SCHEMA FINALIZATION
+Version: 0.2
+Date: 18 November 2026
+Status: PROPOSED SCHEMA BASELINE - OWNER / TECHNICAL SIGN-OFF PENDING
+
+SOURCE BASELINE
+Workbook: Kawad_Swad_Sales_Management_Google_Sheets (22)(2).xlsx
+Backend main commit after Phase 4.2-A security PR merge:
+79331c0e3c19e3743bebae77ed7a221ec6bbcb6b
+Render deployment of this merged commit: NOT YET VERIFIED.
+
+BINDING PROJECT RULES
+1. Build the clean empty-database system. Do not recover, restore, import, seed, or reconstruct pre-reset business records.
+2. Google Sheets is the authoritative business data store.
+3. FastAPI is the business logic/API layer.
+4. MongoDB is optional cache/processing support only.
+5. This document is design-only. It does not authorize sheet/header changes, seed writes, ID allocation, migration, code deployment, or live business record creation.
+6. Preserve all current tabs and headers until an approved migration plan is separately signed off.
+
+1. MASTER-DATA BASELINE
+The uploaded workbook snapshot shows zero non-empty business records in Products, Customers, Suppliers, RawMaterials, ProductVariants, Products_SKU, ProductPrices, ProductTaxRules, SalesChannels and UnitsOfMeasurement.
+Physical headers: Products 10; Customers 14; Suppliers 14; RawMaterials 13. The six proposed reference tabs each currently have generic 7-column placeholder headers, not approved operational schemas.
+
+2. RECOMMENDED PRODUCT DATA MODEL
+MD-01 proposal: one Products row represents one sellable SKU / pack combination.
+Reason: current Products API reads/writes SKU, product_name, category, variant, pack_weight_g and selling_unit on one Products row; Sales routes select product by product_id and snapshot SKU/name/pack size into sale items. This minimizes backend redesign and avoids two SKU authorities. This differs from Phase 1's proposed ProductVariants and Products_SKU separation, so owner approval is pending.
+Illustrative record grain only, not data to seed: Moong Master Papad 200 g, 500 g and 1,000 g would each be separate product records.
+
+Products proposed canonical fields:
+1 product_id TEXT required unique server-generated.
+2 sku TEXT required unique normalized/trimmed.
+3 product_name TEXT required.
+4 category TEXT required/controlled.
+5 variant TEXT optional only when genuinely not applicable; otherwise controlled.
+6 pack_weight_g DECIMAL required > 0 for weight-based packs.
+7 selling_unit TEXT required approved UOM code.
+8 retail_pack_only BOOLEAN required explicit true/false.
+9 active BOOLEAN required, true on creation.
+10 notes TEXT optional.
+11 created_at DATETIME required backend-generated.
+12 created_by TEXT required authenticated actor.
+13 updated_at DATETIME optional until update.
+14 updated_by TEXT optional until update.
+
+Physical Products has first 10 fields only; proposed metadata fields 11-14 are absent. Backend REQUIRED_TABS matches the 10 physical headers. Do not change headers yet. ProductCreate accepts recipe_id, but it is not a physical header or Phase 1 Products field; append_record omits unmapped fields by default. Recommendation: do not store recipe_id in Products; Recipes links through product_id and recipe version.
+Products_SKU: DEFER under Products-as-SKU model.
+ProductVariants: DEFER; keep variant as controlled value on Products until separate variant catalog is justified.
+
+3. CUSTOMERS
+Record grain: one customer/business account. Person is a contact on that account, not automatically a separate customer.
+Proposed fields:
+customer_id TEXT required unique; customer_type TEXT required controlled; shop_name TEXT required; shopkeeper_name TEXT optional; mobile TEXT optional/conditional (not unique); alternate_mobile TEXT optional; address TEXT optional; locality_area TEXT optional; city TEXT required; gstin TEXT optional validated when supplied; map_location TEXT optional; active BOOLEAN required; created_at DATETIME required; notes TEXT optional; created_by TEXT required; updated_at DATETIME optional; updated_by TEXT optional.
+Physical Customers has 14 fields including notes and GSTIN. Phase 1 has 16, omits notes and proposes created_by/updated_at/updated_by. Backend REQUIRED_TABS declares 13 and omits notes. Current route writes notes and created_at, but does not write created_by/updated_at/updated_by. Proposed resolution: preserve notes; add actor/timestamp fields only through an approved coordinated schema migration; update REQUIRED_TABS and route together.
+Remove hard-coded Bhilwara city default. Proposed customer_type vocabulary for owner review: RETAILER, WHOLESALER, DISTRIBUTOR, INSTITUTIONAL, DIRECT_CONSUMER, OTHER. No value list is approved yet.
+Privacy: mobile, address, GSTIN and map location are customer business/contact data; scope access by role. Mobile is not a global unique key.
+
+4. SUPPLIERS
+Record grain: one supplier business/legal account.
+Proposed fields:
+supplier_id TEXT required unique; supplier_name TEXT required; contact_person TEXT optional; mobile TEXT optional; email TEXT optional; address TEXT optional; city TEXT optional (no hard-coded default); gstin TEXT optional; payment_terms_days INTEGER optional >=0; active BOOLEAN required; notes TEXT optional; created_at DATETIME required; created_by TEXT required; updated_at DATETIME optional; updated_by TEXT optional.
+Physical Suppliers includes payment_terms_days and opening_balance, but lacks updated_at/updated_by. Phase 1 dictionary proposes updated_at/updated_by but omits payment_terms_days/opening_balance. SupplierCreate API does not accept or write payment_terms_days/opening_balance; it hard-codes Barwani for missing city.
+Recommendation: retain payment_terms_days as canonical business field. Keep opening_balance physical header for now but classify LEGACY / DO NOT WRITE / DO NOT USE FOR AP BALANCE. Future opening payable/advance must be accounting opening transactions, not mutable supplier master balance. Add update metadata only through approved migration.
+Uniqueness: supplier_id unique. Supplier name should be duplicate-checked with manual resolution. GSTIN can be unique among active legal entities if valid and present; mobile/email are not global unique keys.
+
+5. RAW MATERIALS
+Record grain: one raw-material master item with one canonical stock unit/category.
+Proposed fields:
+raw_material_id TEXT required unique; material_name TEXT required; unit TEXT required approved UOM code; category TEXT required controlled; rate_per_unit DECIMAL optional reference rate; rate_status TEXT controlled (not DECIMAL); minimum_stock DECIMAL optional >=0; active BOOLEAN required; notes TEXT optional; created_at DATETIME required; created_by TEXT required; updated_at DATETIME optional; updated_by TEXT optional.
+Physical RawMaterials has raw_material_id, material_name, unit, opening_stock, current_stock, minimum_stock, active, notes, rate_per_unit, rate_status, category, created_at, created_by.
+Phase 1 dictionary has current_stock, but not opening_stock/minimum_stock/active/notes; it adds updated_at/updated_by. Backend REQUIRED_TABS declares only nine fields and omits opening_stock, minimum_stock, active and notes. Dictionary incorrectly types rate_status as DECIMAL; proposed type is TEXT/controlled enum.
+Stock source of truth:
+- RawMaterialLedger is authoritative movement history.
+- On-hand balance derives from approved opening verification, receipts, issues, returns and adjustments.
+- current_stock must not be manually edited as authoritative stock. It can remain temporarily as a read-only derived/cache display only if reconciliation proves agreement.
+- opening_stock must not be a second independently maintained opening balance. New database starts at zero. Future physical opening quantity, if approved, must be an authorized RawMaterialLedger opening verification event with audit trail.
+- Preserve current physical headers until a coordinated migration is approved.
+Critical clean-empty issue in current source:
+- GET /raw-materials falls back to RAW_MATERIALS_SEED when no master rows exist and appends seed rows to the returned list.
+- Raw-material receive can create a seed master row when a recognized seed is supplied.
+- Opening-stock verification also uses RAW_MATERIALS_SEED fallback.
+These behaviors conflict with the owner's clean empty-database instruction. Before enabling RawMaterials workflows, remove implicit seed fallback; GET returns only actual sheet master rows; receive/verification require an actual active master; any seed bootstrap must be separate, explicit, Owner-authorized and audited. No seed rows should be inserted during Phase 4.2.
+Proposed rate_status values for owner review: CONFIRMED, ESTIMATED, PENDING, NOT_SET. Still unapproved.
+MD-10: define rate_per_unit as either standard/estimated reference rate OR read-only last accepted landed rate derived from purchase receipt/ledger. Never mix the two. Actual purchase rate and landed cost remain transaction facts.
+
+6. PRODUCT PRICES
+Required for controlled pricing but not wired to current sales routes. Do not activate until price lookup and sale snapshot behavior are implemented and tested.
+Record grain: one effective-dated price for one sellable SKU, one channel, one customer type (or approved ALL customer type), and one start date.
+Proposed fields:
+price_id TEXT unique (not DECIMAL); product_id TEXT FK Products; channel_id TEXT FK SalesChannels; customer_type TEXT; selling_price DECIMAL(12,2) INR; mrp DECIMAL(12,2) INR; valid_from DATE; valid_to DATE optional; approved_by TEXT; status TEXT; created_at/by; updated_at/by.
+Remove duplicate sku field if product_id references the unique SKU product row.
+Lifecycle candidate: DRAFT, ACTIVE, SUPERSEDED, CANCELLED.
+No overlapping ACTIVE price ranges for same product + channel + customer_type. Price changes are effective-dated; do not rewrite historical prices.
+Sale item must snapshot product name, SKU, pack size, applied price, channel, customer type, price_id and tax rule.
+Current sales route accepts actual_unit_price in the request and does not perform ProductPrices lookup. Sales also contains hard-coded pack-size policy and a legacy order route with fixed 5% tax calculation. Pricing/tax integration is a later code change.
+
+7. PRODUCT TAX RULES
+Required before tax automation. Current sales code has tax logic requiring separate reconciliation.
+Record grain proposal: effective-dated tax classification for a sellable SKU, or an explicitly approved shared HSN rule.
+Fields:
+tax_rule_id TEXT unique; product_id TEXT FK Products; hsn_code TEXT; tax_rate DECIMAL; tax_type TEXT controlled (not DECIMAL); effective_from DATE; effective_to DATE; approved_by TEXT; created_at/by; updated_at/by.
+Keep HSN as TEXT (preserve leading zeros). Define whether tax_rate stores percentage points, recommend values like 5.00 rather than fraction 0.05. Do not populate legal tax values by assumption. Accounts/Owner approval required and every sale line must snapshot applicable tax.
+
+8. SALES CHANNELS
+One distinct order-origin channel.
+Fields: channel_id TEXT unique; channel_name TEXT unique; channel_type TEXT; external_platform TEXT optional; settlement_cycle_days INTEGER optional >=0; active BOOLEAN; created_at/by; updated_at/by.
+Candidate channel names for owner review only: WEBSITE, AMAZON, FLIPKART, MEESHO, ONDC, DIRECT, RETAIL, WHOLESALE, DISTRIBUTOR, EXHIBITION. Do not seed rows now.
+ProductPrices depends on a valid SalesChannels entry. Actual settlement events belong in financial transaction tables.
+
+9. UNITS OF MEASUREMENT
+One approved operational unit code.
+Fields: uom_id TEXT unique; unit_code TEXT unique; unit_name TEXT; unit_type TEXT controlled; base_unit TEXT; conversion_factor DECIMAL >0; active BOOLEAN; created_at/by; updated_at/by.
+Only convert within the same physical dimension (e.g. g/kg; ml/L). Do not create global packet-to-kg conversion because pack mass depends on SKU; use Products.pack_weight_g. Stock movements use the RawMaterials canonical unit.
+
+10. TABLE DISPOSITION
+Products KEEP; proposed one-row-per-sellable-SKU, pending approval.
+Customers KEEP; metadata alignment pending.
+Suppliers KEEP; retain payment_terms_days; opening_balance deprecated operationally.
+RawMaterials KEEP; ledger source of truth; implicit seeds removed before activation.
+ProductVariants DEFER.
+Products_SKU DEFER as redundant under Products-as-SKU.
+ProductPrices REQUIRED FUTURE TABLE; schema and API integration pending.
+ProductTaxRules REQUIRED FUTURE TABLE; accounts/tax approval and API integration pending.
+SalesChannels REQUIRED REFERENCE TABLE before ProductPrices activation.
+UnitsOfMeasurement REQUIRED REFERENCE TABLE before inventory UOM standardization.
+
+11. RELATIONSHIPS
+Products.product_id -> ProductPrices.product_id (1:M)
+SalesChannels.channel_id -> ProductPrices.channel_id (1:M)
+Products.product_id -> ProductTaxRules.product_id (1:M, pending tax policy)
+Products.product_id -> Recipes.product_id (1:M, versioned)
+Products.product_id -> SaleItems.product_id (1:M)
+Customers.customer_id -> Sales.customer_id (1:M)
+Suppliers.supplier_id -> PurchaseOrders.supplier_id (1:M)
+Suppliers.supplier_id -> GoodsReceipts.supplier_id (1:M)
+RawMaterials.raw_material_id -> PurchaseOrderItems.raw_material_id (1:M)
+RawMaterials.raw_material_id -> GoodsReceiptItems.raw_material_id (1:M)
+RawMaterials.raw_material_id -> RawMaterialLedger.raw_material_id (1:M)
+All relationships require parent existence checks, orphan policy, and no cascading delete by default.
+
+12. COMMON API / DATA RULES
+- Never use row numbers as IDs.
+- Validate required fields, duplicates, ranges and relationships before ID allocation.
+- Use authenticated actor/timestamp metadata.
+- Store phone, GSTIN, SKU, IDs and HSN as TEXT.
+- Use Decimal for money and measured quantities; do not use binary float for accounting totals.
+- Normalize controlled codes consistently.
+- Do not globally unique mobile/email without a specific business rule.
+- Soft-disable referenced master records; do not physically delete them.
+- Sheets append/update currently omits fields absent from physical headers unless header update is authorized. Add strict preflight so API fails closed rather than silently dropping fields.
+- Verify every accepted create/update by read-back.
+- No ID claims before payload validation and uniqueness checks.
+
+13. REQUIRED REMEDIATION BEFORE MASTER-DATA ACTIVATION
+P0:
+1. Remove automatic RAW_MATERIALS_SEED fallback from GET.
+2. Prevent receive/opening verification from silently creating missing master rows.
+3. Provide explicit Owner-only raw-material create/activate path; no default seeding.
+4. Add strict header-contract validation for Products, Customers, Suppliers and RawMaterials.
+5. Validate duplicates before ID allocation.
+6. Read-back verify every master write.
+7. Remove hard-coded Bhilwara and Barwani city defaults.
+P1:
+8. Enforce SKU uniqueness and normalization.
+9. Standardize created_by / updated_at / updated_by.
+10. Implement effective-dated ProductPrices lookup and immutable price snapshots.
+11. Implement ProductTaxRules lookup and immutable tax snapshots.
+12. Align pack weight/UOM; remove hard-coded pack-size policy where appropriate.
+13. Define controlled vocabularies in shared API/frontend validation.
+No code changes authorized by this design document; separate implementation PR after sign-off.
+
+14. EXIT CHECKLIST
+[ ] Approve Products row grain (one sellable SKU per Products row).
+[ ] Approve ProductVariants / Products_SKU deferral.
+[ ] Approve customer_type vocabulary.
+[ ] Approve supplier payment_terms_days and opening_balance deprecation.
+[ ] Approve RawMaterialLedger as stock source of truth and seed removal.
+[ ] Decide rate_per_unit meaning.
+[ ] Approve ProductPrices matching key and lifecycle.
+[ ] Accounts/Owner approve tax rule grain and tax values separately.
+[ ] Approve channel list and UOM code system.
+[ ] Technical review validates fields against routes/models/REQUIRED_TABS/physical headers.
+[ ] Sandbox contract tests pass.
+[ ] Header migration plan and rollback documented.
+[ ] Owner signs schema version before live schema or code changes.
+
+FINAL STATUS
+Detailed design baseline: PREPARED.
+Owner schema approval: PENDING.
+Technical approval: PENDING.
+Code changes: NONE in this stage.
+Workbook changes: NONE.
+IDs allocated: NONE.
+Master records created: NONE.
+Historical data restored: NONE.
+Render deployment: NONE.
+
+END OF DOCUMENT
