@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.sheets import db
+from app.sheets import db, REQUIRED_TABS
 from app.auth import hash_password
 
 
@@ -33,6 +33,20 @@ def bootstrap_owner():
 
     if not db.init_connection() or not db.is_connected or db.spreadsheet is None:
         raise RuntimeError(f"Google Sheets connection failed: {db.last_connection_error or 'unknown error'}")
+
+    # This utility must never trigger append/header auto-expansion. Require an
+    # already-approved exact header contract and abort on any mismatch.
+    for tab_name in ("Users", "AuthUsers"):
+        expected_headers = REQUIRED_TABS.get(tab_name)
+        try:
+            actual_headers = db.spreadsheet.worksheet(tab_name).row_values(1)
+        except Exception as exc:
+            raise RuntimeError(f"Required sheet {tab_name} is unavailable. No sheet will be created: {exc}") from exc
+        if not expected_headers or actual_headers != expected_headers:
+            raise RuntimeError(
+                f"{tab_name} headers do not exactly match the approved backend contract. "
+                "Schema finalization is required; this utility will not add or rewrite headers."
+            )
 
     users = _read_rows("Users")
     auth_users = _read_rows("AuthUsers")
@@ -93,7 +107,7 @@ def bootstrap_owner():
         "role": "OWNER",
         "active": "true",
         "created_at": now_iso,
-        "must_change_password": "false",
+        "must_change_password": "true",
         "sessions_revoked_at": "",
     }
 
