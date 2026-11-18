@@ -509,8 +509,8 @@ async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = 
         raise HTTPException(422, "Canonical raw-material unit must be kg or L.")
     if rate_status not in {"PENDING", "ESTIMATED", "CONFIRMED"}:
         raise HTTPException(422, "rate_status must be PENDING, ESTIMATED or CONFIRMED.")
-    if rate_status == "CONFIRMED" and (req.rate_per_unit is None or req.rate_per_unit <= 0):
-        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED status.")
+    if rate_status in {"CONFIRMED", "ESTIMATED"} and (req.rate_per_unit is None or req.rate_per_unit <= 0):
+        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED or ESTIMATED status.")
     if rate_status == "PENDING" and req.rate_per_unit is not None:
         raise HTTPException(422, "Do not store a rate value with PENDING status. Use ESTIMATED or CONFIRMED.")
 
@@ -553,8 +553,8 @@ async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpd
     rate_status = req.rate_status.strip().upper()
     if rate_status not in {"PENDING", "ESTIMATED", "CONFIRMED"}:
         raise HTTPException(422, "rate_status must be PENDING, ESTIMATED or CONFIRMED.")
-    if rate_status == "CONFIRMED" and (req.rate_per_unit is None or req.rate_per_unit <= 0):
-        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED status.")
+    if rate_status in {"CONFIRMED", "ESTIMATED"} and (req.rate_per_unit is None or req.rate_per_unit <= 0):
+        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED or ESTIMATED status.")
     if rate_status == "PENDING" and req.rate_per_unit is not None:
         raise HTTPException(422, "A PENDING rate must not include a numeric value.")
     with _RAW_MATERIAL_MUTEX:
