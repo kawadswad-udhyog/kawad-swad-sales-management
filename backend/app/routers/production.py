@@ -289,6 +289,20 @@ class DispatchCreate(BaseModel):
     notes: str = ""
 
 
+class RawMaterialMasterCreate(BaseModel):
+    material_name: str = Field(..., min_length=2, max_length=150)
+    unit: str = Field("kg", description="Canonical stock unit: kg for solids or L for liquids")
+    category: str = Field("RAW_MATERIAL", min_length=2, max_length=40)
+    rate_per_unit: Optional[float] = Field(None, gt=0)
+    rate_status: str = Field("PENDING", description="PENDING, ESTIMATED or CONFIRMED")
+
+
+class RawMaterialRateUpdate(BaseModel):
+    rate_per_unit: Optional[float] = Field(None, gt=0)
+    rate_status: str = Field(..., description="PENDING, ESTIMATED or CONFIRMED")
+    reason: str = Field(..., min_length=3, max_length=300)
+
+
 class RawMaterialReceiveRequest(BaseModel):
     raw_material_id: Optional[str] = None
     material_id: Optional[str] = None  # alias
@@ -381,11 +395,11 @@ class DalMillingCreate(BaseModel):
     whole_dal_id: Optional[str] = None
     flour_id: Optional[str] = None
     target_flour_id: Optional[str] = None
-    input_quantity_kg: float = Field(..., description="Gross Whole Dal quantity fed into mill (kg)")
-    flour_output_kg: Optional[float] = Field(None, description="Actual Flour output produced from mill (kg)")
-    output_flour_kg: Optional[float] = None
-    milling_expenses: Optional[float] = Field(0.0, description="Actual processing/milling expenses (₹)")
-    milling_charge_per_kg: Optional[float] = None
+    input_quantity_kg: float = Field(..., gt=0, description="Gross Whole Dal quantity fed into mill (kg)")
+    flour_output_kg: Optional[float] = Field(None, gt=0, description="Actual Flour output produced from mill (kg)")
+    output_flour_kg: Optional[float] = Field(None, gt=0)
+    milling_expenses: Optional[float] = Field(0.0, ge=0, description="Actual processing/milling expenses (₹)")
+    milling_charge_per_kg: Optional[float] = Field(None, ge=0)
     operator_name: Optional[str] = None
     milling_date: Optional[str] = Field("", description="Milling batch date (YYYY-MM-DD)")
     batch_reference: Optional[str] = Field("", description="External batch ref or machine run number")
@@ -481,6 +495,87 @@ _RAW_MATERIAL_MUTEX = threading.RLock()
 # Endpoints
 # -------------------------------------------------------------
 
+@router.post("/raw-materials")
+async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = Depends(get_current_user)):
+    """Explicit Owner-only master creation. Never creates stock or imports default material records."""
+    actor, _ = require_owner(user)
+    require_persistent_store()
+
+    name = " ".join(req.material_name.strip().split())
+    unit = req.unit.strip()
+    category = req.category.strip().upper()
+    rate_status = req.rate_status.strip().upper()
+    if unit not in {"kg", "L"}:
+        raise HTTPException(422, "Canonical raw-material unit must be kg or L.")
+    if rate_status not in {"PENDING", "ESTIMATED", "CONFIRMED"}:
+        raise HTTPException(422, "rate_status must be PENDING, ESTIMATED or CONFIRMED.")
+    if rate_status == "CONFIRMED" and (req.rate_per_unit is None or req.rate_per_unit <= 0):
+        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED status.")
+    if rate_status == "PENDING" and req.rate_per_unit is not None:
+        raise HTTPException(422, "Do not store a rate value with PENDING status. Use ESTIMATED or CONFIRMED.")
+
+    with _RAW_MATERIAL_MUTEX:
+        existing = db.get_records("RawMaterials", fresh=True)
+        duplicate = next((row for row in existing
+            if str(field(row, "material_name", default="")).strip().casefold() == name.casefold()), None)
+        if duplicate:
+            raise HTTPException(409, f"Raw material '{name}' already exists as {field(duplicate, 'raw_material_id', default='')}.")
+        raw_material_id = db.generate_id("RawMaterials")
+        created = {
+            "raw_material_id": raw_material_id,
+            "material_name": name,
+            "current_stock": 0,
+            "unit": unit,
+            "rate_per_unit": req.rate_per_unit if req.rate_per_unit is not None else "",
+            "rate_status": rate_status,
+            "category": category,
+            "created_at": now(),
+            "created_by": actor,
+        }
+        if not db.append_record("RawMaterials", created, raise_on_error=True):
+            raise HTTPException(503, "Raw material master could not be saved.")
+        stored = next((row for row in db.get_records("RawMaterials", fresh=True)
+            if str(field(row, "raw_material_id", default="")).strip() == raw_material_id), None)
+        required_values = ("raw_material_id", "material_name", "unit", "rate_status", "category")
+        if not stored or any(str(field(stored, key, default="")).strip() != str(created[key]).strip() for key in required_values):
+            raise HTTPException(503, "Raw material master write did not pass read-back verification. Review the sheet before retrying.")
+        db.log_audit(actor, "CREATE_RAW_MATERIAL_MASTER", "RawMaterials", raw_material_id, reason=f"Created clean master record: {name}; initial stock set to zero.")
+        return created
+
+
+@router.patch("/raw-materials/{raw_material_id}/rate")
+async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpdate, user: dict = Depends(get_current_user)):
+    """Owner-only explicit reference-rate update. Purchase receipt rates remain transaction ledger facts."""
+    actor, _ = require_owner(user)
+    require_persistent_store()
+    rate_status = req.rate_status.strip().upper()
+    if rate_status not in {"PENDING", "ESTIMATED", "CONFIRMED"}:
+        raise HTTPException(422, "rate_status must be PENDING, ESTIMATED or CONFIRMED.")
+    if rate_status == "CONFIRMED" and (req.rate_per_unit is None or req.rate_per_unit <= 0):
+        raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED status.")
+    if rate_status == "PENDING" and req.rate_per_unit is not None:
+        raise HTTPException(422, "A PENDING rate must not include a numeric value.")
+    async with _async_null_context():
+        pass
+    with _RAW_MATERIAL_MUTEX:
+        rows = db.get_records("RawMaterials", fresh=True)
+        material = next((row for row in rows if str(field(row, "raw_material_id", default="")).strip() == raw_material_id.strip()), None)
+        if not material:
+            raise HTTPException(404, "Raw material master not found.")
+        updates = {
+            "rate_per_unit": req.rate_per_unit if req.rate_per_unit is not None else "",
+            "rate_status": rate_status,
+        }
+        if not db.update_record("RawMaterials", "raw_material_id", raw_material_id, updates, raise_on_error=True):
+            raise HTTPException(503, "Raw material rate update could not be saved.")
+        stored = next((row for row in db.get_records("RawMaterials", fresh=True)
+            if str(field(row, "raw_material_id", default="")).strip() == raw_material_id.strip()), None)
+        if not stored or str(field(stored, "rate_status", default="")).upper() != rate_status:
+            raise HTTPException(503, "Raw material rate update failed read-back verification.")
+        db.log_audit(actor, "UPDATE_RAW_MATERIAL_RATE", "RawMaterials", raw_material_id, reason=req.reason.strip())
+        return {**material, **updates}
+
+
 @router.get("/raw-materials", response_model=List[RawMaterialBalanceItem])
 async def list_raw_materials(user: dict = Depends(get_current_user)):
     require_production_access(user)
@@ -489,7 +584,7 @@ async def list_raw_materials(user: dict = Depends(get_current_user)):
         return []
     raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
 
-    results = []    results = []
+    results = []
     for rm in raw_master:
         mat_id = str(field(rm, "raw_material_id", default="")).strip()
         mat_name = str(field(rm, "material_name", "name", default="")).strip()
