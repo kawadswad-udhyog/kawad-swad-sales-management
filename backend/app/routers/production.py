@@ -2690,6 +2690,16 @@ async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, user:
 
     with _RECIPE_LOCK:
         records = db.get_records("Recipes", fresh=True)
+        source_marker = f"SOURCE_DRAFT_RECIPE:{recipe_id}"
+        already_created = next(
+            (row for row in records
+             if truthy(field(row, "approved", default="false"))
+             and source_marker in str(field(row, "notes", default=""))),
+            None,
+        )
+        if already_created:
+            return {**already_created, "already_approved": True}
+
         versions = [int(float(field(r, "version", default=0) or 0)) for r in records if str(field(r, "product_id", default="")).strip() == product_id]
         next_version = max(versions, default=0) + 1
         now_value = now()
@@ -2703,7 +2713,7 @@ async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, user:
             "created_by": actor,
             "approved_by": actor,
             "approved_at": now_value,
-            "notes": req.change_notes or f"Approved as immutable version {next_version} from draft {recipe_id}.",
+            "notes": f"{source_marker} | " + (req.change_notes or f"Approved as immutable version {next_version} from draft {recipe_id}."),
         }
         if not db.append_record("Recipes", approved, raise_on_error=True):
             raise HTTPException(503, "Approved recipe version could not be saved.")
