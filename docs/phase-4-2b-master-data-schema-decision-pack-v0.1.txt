@@ -1,0 +1,84 @@
+KAWAD SWAD ERP
+PHASE 4.2-B - MASTER DATA SCHEMA DECISION PACK v0.1
+Status: DESIGN ONLY. OWNER AND TECHNICAL APPROVAL REQUIRED.
+Baseline: Render-confirmed deployed commit 786560efd3a2895c0a822b083943e809ef4cdecc.
+
+BINDING DIRECTIVES
+- Preserve clean empty database. Do not restore or import pre-reset business data.
+- Google Sheets remains authoritative; FastAPI is business logic/API; MongoDB optional cache only.
+- No live header changes, data writes, ID allocation, migration, or deployment from this design PR.
+
+SNAPSHOT FACTS
+Current uploaded XLSX snapshot has zero actual non-empty data rows in Products, Customers, Suppliers, RawMaterials, ProductVariants, Products_SKU, ProductPrices, ProductTaxRules, SalesChannels, and UnitsOfMeasurement.
+Current physical headers do not fully match Phase 1 dictionary or backend contracts.
+
+CORE TABLE FINDINGS
+
+Products
+- Physical: 10 headers; Phase 1 dictionary: 14; backend REQUIRED_TABS: 10 and matches physical.
+- API model also accepts recipe_id, but this is not a physical header and append_record silently omits unmapped fields unless header expansion is explicitly authorized.
+- Current route uses SKU, variant, and pack_weight_g on Products rows, and does not enforce duplicate SKU.
+- Recommendation: for compatibility, define one Products row as one sellable SKU/pack combination, with unique product_id and unique SKU. Owner must approve because Phase 1 labels Products as a product-family master and also proposes Products_SKU.
+
+Customers
+- Physical: 14 headers; dictionary: 16; backend REQUIRED_TABS: 13.
+- Physical has notes and GSTIN, but not created_by/updated_at/updated_by. Current API writes notes and created_at but does not write those audit metadata fields.
+- Customer city currently defaults to Bhilwara in API code. Remove hard-coded default from schema; require explicit value or approved configurable default.
+- Grain: one customer/business account. Contact and address information is PII; mobile should not be globally unique.
+
+Suppliers
+- Physical: 14 headers; dictionary: 14, but 2 field differences.
+- Physical has payment_terms_days and opening_balance. Dictionary expects updated_at and updated_by.
+- Purchasing API accepts/writes neither payment_terms_days nor opening_balance; it does write created_at, created_by and notes.
+- Recommendation: retain payment_terms_days as optional supplier term. Do not use opening_balance as mutable AP balance; future opening liability/advance must be an approved accounting opening transaction.
+
+RawMaterials
+- Physical: 13 headers; dictionary: 11; backend REQUIRED_TABS: 9.
+- Physical-only fields: opening_stock, minimum_stock, active, notes. Dictionary-only: updated_at, updated_by.
+- Dictionary incorrectly types rate_status as DECIMAL; it should be TEXT/controlled enum.
+- Backend inventory calculation currently mixes current_stock/opening_stock from master with ledger movements.
+- Recommendation: RawMaterialLedger becomes source of truth for movements and balance derivation. Start clean database at zero; any physical opening stock is recorded only by explicit, authorized opening-stock verification transaction. Do not manually maintain current_stock as the authoritative balance.
+- Current production receive flow can create seed RawMaterials when a seed name is recognized, and Owner-only recipe bootstrap can create seed materials/recipes. For strict empty-database policy, automatic/implicit seed creation must remain disabled unless separately authorized.
+
+REFERENCE TABLES
+ProductVariants, Products_SKU, ProductPrices, ProductTaxRules, SalesChannels and UnitsOfMeasurement currently have generic 7-column placeholder headers (record_id, created_at, created_by, updated_at, updated_by, status, notes). Their proposed dictionary definitions are not active physical schemas. No references to these table names were found in the inspected source ZIP.
+Do not activate or rewrite these placeholders until record grain, relationships, API ownership, and field contracts are approved.
+
+PROPOSED DISPOSITIONS
+- ProductVariants: defer or approve as the single controlled variant catalog; avoid parallel free-text and reference-table authorities.
+- Products_SKU: defer/redundancy review if Products itself remains one row per saleable SKU.
+- ProductPrices: required before effective-dated channel pricing; key to approved product grain and channel/customer type.
+- ProductTaxRules: required before tax automation; fix tax_rule_id to TEXT, tax_type to TEXT, tax_rate to DECIMAL, effective dates to DATE.
+- SalesChannels: define before ProductPrices because channel_id depends on it.
+- UnitsOfMeasurement: approve controlled UOM codes/conversion factors before inventory expansion.
+
+FIELD DICTIONARY TYPE CORRECTIONS
+- ProductPrices.price_id DECIMAL -> TEXT.
+- ProductPrices.mrp TEXT -> DECIMAL/money.
+- ProductPrices.valid_from/valid_to TEXT -> DATE or DATETIME.
+- ProductTaxRules.tax_rule_id DECIMAL -> TEXT.
+- ProductTaxRules.tax_type DECIMAL -> TEXT/controlled enum.
+- RawMaterials.rate_status DECIMAL -> TEXT/controlled enum.
+
+OWNER DECISIONS REQUIRED
+MD-01: Products row = sellable SKU/pack (recommended for current API) or normalized Product family -> Variant -> SKU.
+MD-02: Products_SKU disposition.
+MD-03: ProductVariants controlled table or variant value on Products.
+MD-04: ProductPrices ownership, channels, customer-type pricing, effective-date rules, and money precision.
+MD-05: ProductTaxRules owner, approval and effective-date rules.
+MD-06: SalesChannels list.
+MD-07: UOM codes and conversions.
+MD-08: Supplier opening_balance deprecation / accounting opening transaction.
+MD-09: RawMaterialLedger as stock source of truth and opening verification policy.
+MD-10: rate_per_unit meaning (standard reference cost vs last purchase reference).
+MD-11: audit metadata fields vs current physical headers.
+
+EXIT GATES
+- Approve record grains and table dispositions.
+- Approve exact physical headers, types, requiredness, uniqueness and relationships for core master tables.
+- Align backend REQUIRED_TABS, Pydantic models and route reads/writes.
+- Validate before ID allocation; verify every accepted write by read-back.
+- Sandbox contract tests pass.
+- Keep clean empty database; no automatic seeded records.
+
+This PR contains design documentation only. It does not change application code or workbook schema.
