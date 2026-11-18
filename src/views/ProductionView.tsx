@@ -978,6 +978,87 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             </div>
           </div>
 
+          {isOwner && (
+            <div style={{ ...card, borderColor: '#93c5fd', background: '#f8fbff' }}>
+              <h3 style={{ margin: '0 0 6px', color: '#1e3a8a' }}>Create Raw Material Master (Owner Only)</h3>
+              <p style={{ margin: '0 0 12px', fontSize: 12, color: '#475569' }}>
+                This creates a master record only. Opening stock starts at zero. Enter a confirmed rate only when you have a verified rate source.
+              </p>
+              <form
+                onSubmit={async event => {
+                  event.preventDefault();
+                  const rate = rawMasterForm.rate_per_unit.trim() ? Number(rawMasterForm.rate_per_unit) : undefined;
+                  if (rawMasterForm.rate_status === 'CONFIRMED' && !(rate && rate > 0)) {
+                    showError('A positive confirmed rate is required for CONFIRMED status.');
+                    return;
+                  }
+                  if (rawMasterForm.rate_status === 'PENDING' && rate !== undefined) {
+                    showError('Leave the rate blank when status is PENDING.');
+                    return;
+                  }
+                  const ok = await runAction(
+                    () => apiRequest('/api/production/raw-materials', {
+                      method: 'POST',
+                      body: JSON.stringify({
+                        material_name: rawMasterForm.material_name.trim(),
+                        unit: rawMasterForm.unit,
+                        category: rawMasterForm.category,
+                        rate_status: rawMasterForm.rate_status,
+                        rate_per_unit: rate,
+                      }),
+                    }),
+                    'Raw material master created with zero opening stock.',
+                    refreshRawMaterials
+                  );
+                  if (ok) {
+                    setRawMasterForm({ material_name: '', unit: 'kg', category: 'RAW_MATERIAL', rate_per_unit: '', rate_status: 'PENDING' });
+                  }
+                }}
+                style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, alignItems: 'center' }}
+              >
+                <input
+                  style={input}
+                  placeholder="Material name"
+                  value={rawMasterForm.material_name}
+                  onChange={event => setRawMasterForm({ ...rawMasterForm, material_name: event.target.value })}
+                  minLength={2}
+                  required
+                />
+                <select style={input} value={rawMasterForm.unit} onChange={event => setRawMasterForm({ ...rawMasterForm, unit: event.target.value })}>
+                  <option value="kg">kg (solid)</option>
+                  <option value="L">L (liquid)</option>
+                </select>
+                <select style={input} value={rawMasterForm.category} onChange={event => setRawMasterForm({ ...rawMasterForm, category: event.target.value })}>
+                  <option value="RAW_MATERIAL">Raw Material</option>
+                  <option value="WHOLE_GRAIN">Whole Grain</option>
+                  <option value="FLOUR">Flour</option>
+                  <option value="SPICE">Spice</option>
+                  <option value="PACKAGING">Packaging</option>
+                  <option value="OTHER">Other</option>
+                </select>
+                <select style={input} value={rawMasterForm.rate_status} onChange={event => setRawMasterForm({ ...rawMasterForm, rate_status: event.target.value })}>
+                  <option value="PENDING">Rate pending</option>
+                  <option value="ESTIMATED">Estimated rate</option>
+                  <option value="CONFIRMED">Confirmed rate</option>
+                </select>
+                <input
+                  style={input}
+                  type="number"
+                  min="0.001"
+                  step="0.001"
+                  placeholder={rawMasterForm.rate_status === 'PENDING' ? 'Rate not required' : 'Rate per canonical unit'}
+                  value={rawMasterForm.rate_per_unit}
+                  onChange={event => setRawMasterForm({ ...rawMasterForm, rate_per_unit: event.target.value })}
+                  disabled={rawMasterForm.rate_status === 'PENDING'}
+                  required={rawMasterForm.rate_status === 'CONFIRMED'}
+                />
+                <button type="submit" style={{ ...btn, background: '#1d4ed8' }} disabled={busy || rawMasterForm.material_name.trim().length < 2}>
+                  Create Master
+                </button>
+              </form>
+            </div>
+          )}
+
           {rawMaterials.some(m => m.opening_stock_verified === false || m.verification_status === 'UNVERIFIED') && (
             <div style={{ ...card, background: '#fffbeb', borderColor: '#f59e0b', color: '#92400e', fontSize: 13 }}>
               <b>⚠️ Unverified Opening Balances Notice:</b>{' '}
