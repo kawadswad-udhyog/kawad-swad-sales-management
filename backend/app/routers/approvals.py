@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import secrets
+import threading
 from typing import List, Optional, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
@@ -20,6 +21,37 @@ from app.user_service import (
 logger = logging.getLogger("kawad_swad.approvals")
 
 router = APIRouter(prefix="/api/approvals", tags=["Approvals"])
+
+# Process-local serialization. The current Render release runs one Uvicorn worker.
+# Production must remain single-instance until a distributed claim/CAS mechanism
+# is implemented and verified for Google Sheets.
+_APPROVAL_EXECUTION_LOCK = threading.Lock()
+
+_SENSITIVE_APPROVAL_KEYS = {
+    "address", "emergency_contact", "bank_details", "document_references",
+    "document_reference", "identity_document", "account_number", "ifsc",
+    "password", "password_hash", "mobile", "alternate_mobile", "email",
+}
+
+
+def _redact_approval_payload(payload_json: str) -> str:
+    """Return safely redacted JSON for non-Owner approval-request views."""
+    try:
+        payload = json.loads(payload_json or "{}")
+    except (TypeError, ValueError):
+        return json.dumps({"redacted": True, "reason": "invalid_payload"})
+
+    def redact(value):
+        if isinstance(value, dict):
+            return {
+                key: ("[REDACTED]" if str(key).strip().lower() in _SENSITIVE_APPROVAL_KEYS else redact(item))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    return json.dumps(redact(payload), ensure_ascii=False)
 
 
 def create_approval_request(
@@ -79,12 +111,20 @@ async def list_approval_requests(current_user: dict = Depends(get_current_user))
             requested_by=req_by,
             requested_by_name=str(r.get("requested_by_name") or req_by),
             requested_at=str(r.get("requested_at") or ""),
-            payload_json=str(r.get("payload_json") or "{}"),
+            payload_json=(
+                str(r.get("payload_json") or "{}")
+                if is_owner(current_user)
+                else _redact_approval_payload(str(r.get("payload_json") or "{}"))
+            ),
             status=str(r.get("status") or "PENDING"),
             decided_by=str(r.get("decided_by") or ""),
             decided_at=str(r.get("decided_at") or ""),
             decision_notes=str(r.get("decision_notes") or ""),
-            execution_error=str(r.get("execution_error") or ""),
+            execution_error=(
+                str(r.get("execution_error") or "")
+                if is_owner(current_user)
+                else ("Manual review required." if str(r.get("status") or "").upper() in {"EXECUTING", "EXECUTION_FAILED", "EXECUTION_REVIEW_REQUIRED"} else "")
+            ),
             executed_at=str(r.get("executed_at") or ""),
         ))
 
@@ -159,74 +199,104 @@ async def decide_approval_request(
     require_owner(current_user)
     owner_id = str(current_user.get("user_id") or "")
     now_iso = datetime.now(timezone.utc).isoformat()
-
-    records = db.get_records("ApprovalRequests", fresh=True)
-    target = next((r for r in records if str(r.get("request_id") or "").strip() == request_id.strip()), None)
-    if not target:
-        raise HTTPException(status_code=404, detail="Approval request not found.")
-
-    current_status = str(target.get("status") or "PENDING").upper()
-    if current_status not in {"PENDING", "EXECUTION_FAILED"}:
-        raise HTTPException(status_code=400, detail=f"Cannot decide request currently in status {current_status}.")
-
     decision = decision_req.decision.strip().upper()
     if decision not in {"APPROVED", "REJECTED"}:
         raise HTTPException(status_code=422, detail="Decision must be APPROVED or REJECTED.")
 
-    if decision == "REJECTED":
+    # Claim the request before any side effect. The lock serializes claims inside
+    # this process; Google Sheets does not provide a cross-instance compare-and-swap.
+    with _APPROVAL_EXECUTION_LOCK:
+        records = db.get_records("ApprovalRequests", fresh=True)
+        target = next((r for r in records if str(r.get("request_id") or "").strip() == request_id.strip()), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Approval request not found.")
+
+        current_status = str(target.get("status") or "PENDING").upper()
+        if current_status != "PENDING":
+            if current_status in {"EXECUTING", "EXECUTION_FAILED", "EXECUTION_REVIEW_REQUIRED"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This request may have partially executed. Automatic retry is disabled; reconcile the target business record before taking further action.",
+                )
+            raise HTTPException(status_code=400, detail=f"Cannot decide request currently in status {current_status}.")
+
+        if decision == "REJECTED":
+            updates = {
+                "status": "REJECTED",
+                "decided_by": owner_id,
+                "decided_at": now_iso,
+                "decision_notes": decision_req.notes or "",
+            }
+            db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
+            # If it was a PRODUCTION_BATCH, also update ProductionBatches.
+            if target.get("request_type") == "PRODUCTION_BATCH":
+                target_batch_id = str(target.get("target_user_id") or "").strip()
+                if target_batch_id:
+                    batch_updates = {
+                        "status": "REJECTED",
+                        "approved_by": owner_id,
+                        "approved_at": now_iso,
+                        "approval_notes": decision_req.notes or "Rejected via Approval Request",
+                    }
+                    db.update_record("ProductionBatches", "production_id", target_batch_id, batch_updates)
+                    db.update_record("ProductionBatches", "batch_id", target_batch_id, batch_updates)
+
+            db.log_audit(owner_id, "REJECT_APPROVAL", "ApprovalRequests", request_id, reason=decision_req.notes or "Owner rejected request")
+            updated_dict = dict(target)
+            updated_dict.update(updates)
+            return ApprovalRequestModel(**updated_dict)
+
+        # Persist EXECUTING before performing any business write. If the process
+        # stops mid-operation, the row remains blocked for manual reconciliation.
         updates = {
-            "status": "REJECTED",
+            "status": "EXECUTING",
             "decided_by": owner_id,
             "decided_at": now_iso,
             "decision_notes": decision_req.notes or "",
+            "execution_error": "",
         }
         db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
-        # If it was a PRODUCTION_BATCH, also update ProductionBatches
-        if target.get("request_type") == "PRODUCTION_BATCH":
-            target_batch_id = str(target.get("target_user_id") or "").strip()
-            if target_batch_id:
-                batch_updates = {
-                    "status": "REJECTED",
-                    "approved_by": owner_id,
-                    "approved_at": now_iso,
-                    "approval_notes": decision_req.notes or "Rejected via Approval Request",
-                }
-                db.update_record("ProductionBatches", "production_id", target_batch_id, batch_updates)
-                db.update_record("ProductionBatches", "batch_id", target_batch_id, batch_updates)
 
-        db.log_audit(owner_id, "REJECT_APPROVAL", "ApprovalRequests", request_id, reason=decision_req.notes or "Owner rejected request")
+    # The request is now claimed. Never blindly repeat it if outcome is uncertain.
+    temp_pw = None
+    try:
+        _, temp_pw = _run_request_execution(target, owner_id, decision_req.initial_password)
+    except Exception:
+        logger.exception("Execution failed or outcome is uncertain for approval request %s", request_id)
+        review_updates = {
+            "status": "EXECUTION_REVIEW_REQUIRED",
+            "execution_error": "Execution outcome is uncertain. Manual reconciliation is required; automatic retry is disabled.",
+        }
+        # If this status update also fails, EXECUTING remains and is still blocked.
+        db.update_record("ApprovalRequests", "request_id", request_id, review_updates, raise_on_error=True)
+        db.log_audit(
+            owner_id,
+            "APPROVAL_REQUIRES_RECONCILIATION",
+            "ApprovalRequests",
+            request_id,
+            reason="Execution failed or outcome uncertain; automatic retry disabled",
+        )
         updated_dict = dict(target)
         updated_dict.update(updates)
+        updated_dict.update(review_updates)
         return ApprovalRequestModel(**updated_dict)
 
-    # Decision is APPROVED: attempt execution
-    updates = {
-        "decided_by": owner_id,
-        "decided_at": now_iso,
-        "decision_notes": decision_req.notes or "",
+    # A failure to persist EXECUTED leaves the request in EXECUTING, not retryable.
+    completed_updates = {
+        "status": "EXECUTED",
+        "executed_at": datetime.now(timezone.utc).isoformat(),
+        "execution_error": "",
     }
-
-    temp_credentials_to_show = ""
-    try:
-        res, temp_pw = _run_request_execution(target, owner_id, decision_req.initial_password)
-        updates["status"] = "EXECUTED"
-        updates["executed_at"] = datetime.now(timezone.utc).isoformat()
-        updates["execution_error"] = ""
-        if temp_pw:
-            temp_credentials_to_show = f"Temporary Password: {temp_pw}"
-        db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
-        db.log_audit(owner_id, "APPROVE_AND_EXECUTE", "ApprovalRequests", request_id, reason=f"Executed {target.get('request_type')}")
-    except Exception as exc:
-        logger.error(f"Execution failed for approved request {request_id}: {exc}")
-        updates["status"] = "EXECUTION_FAILED"
-        updates["execution_error"] = str(exc)
-        db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
-        db.log_audit(owner_id, "APPROVAL_EXECUTION_FAILED", "ApprovalRequests", request_id, reason=str(exc))
+    db.update_record("ApprovalRequests", "request_id", request_id, completed_updates, raise_on_error=True)
+    db.log_audit(owner_id, "APPROVE_AND_EXECUTE", "ApprovalRequests", request_id, reason=f"Executed {target.get('request_type')}")
 
     updated_dict = dict(target)
     updated_dict.update(updates)
-    if temp_credentials_to_show:
-        updated_dict["temporary_credentials"] = temp_credentials_to_show
+    updated_dict.update(completed_updates)
+    if temp_pw:
+        # Transient one-time credential is returned only to the Owner who approved
+        # this request; it is never persisted in ApprovalRequests or audit records.
+        updated_dict["temporary_credentials"] = f"Temporary Password: {temp_pw}"
     return ApprovalRequestModel(**updated_dict)
 
 
@@ -236,36 +306,14 @@ async def retry_failed_execution(
     current_user: dict = Depends(get_current_user),
 ):
     require_owner(current_user)
-    owner_id = str(current_user.get("user_id") or "")
-    now_iso = datetime.now(timezone.utc).isoformat()
-
     records = db.get_records("ApprovalRequests", fresh=True)
     target = next((r for r in records if str(r.get("request_id") or "").strip() == request_id.strip()), None)
     if not target:
         raise HTTPException(status_code=404, detail="Approval request not found.")
-
-    current_status = str(target.get("status") or "").upper()
-    if current_status != "EXECUTION_FAILED":
-        raise HTTPException(status_code=400, detail="Only requests with status EXECUTION_FAILED can be retried.")
-
-    updates = {}
-    try:
-        _run_request_execution(target, owner_id)
-        updates["status"] = "EXECUTED"
-        updates["executed_at"] = now_iso
-        updates["execution_error"] = ""
-        db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
-        db.log_audit(owner_id, "RETRY_EXECUTION_SUCCESS", "ApprovalRequests", request_id, reason="Execution retry succeeded")
-    except Exception as exc:
-        logger.error(f"Execution retry failed for request {request_id}: {exc}")
-        updates["status"] = "EXECUTION_FAILED"
-        updates["execution_error"] = str(exc)
-        db.update_record("ApprovalRequests", "request_id", request_id, updates, raise_on_error=True)
-        db.log_audit(owner_id, "RETRY_EXECUTION_FAILED", "ApprovalRequests", request_id, reason=str(exc))
-
-    updated_dict = dict(target)
-    updated_dict.update(updates)
-    return ApprovalRequestModel(**updated_dict)
+    raise HTTPException(
+        status_code=409,
+        detail="Automatic execution retry is disabled for safety. Verify whether the business action already occurred, reconcile the target record, and then resolve the request manually.",
+    )
 
 
 @router.post("/requests/{request_id}/cancel", response_model=ApprovalRequestModel)
