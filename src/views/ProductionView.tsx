@@ -156,7 +156,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     }
   }, [initialTab]);
   const [worker, setWorker] = useState({ worker_name: '', mobile: '', daily_wage: '', notes: '' });
-  const [recipe, setRecipe] = useState({ product_id: '', ingredients: '', notes: '' });
+  const [recipe, setRecipe] = useState({ product_id: '', ingredients: '', expected_yield_kg: '', notes: '' });
+  const [rawMasterForm, setRawMasterForm] = useState({ material_name: '', unit: 'kg', category: 'RAW_MATERIAL', rate_per_unit: '', rate_status: 'PENDING' });
   const [production, setProduction] = useState({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });
   const [pack, setPack] = useState({ product_id: '', packaging_date: today, bulk_kg_used: '', packets_200g: '0', packets_500g: '0', packets_1000g: '0', notes: '' });
   const [dispatch, setDispatch] = useState({ product_id: '', channel: 'ECOMMERCE', destination: '', quantity_packets: '', reference: '', notes: '' });
@@ -544,13 +545,6 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     return String(r.product_family).toUpperCase() === selectedFamily;
   });
 
-  // Calculate live benchmark yield for current production form input
-  const flourBaseNum = parseFloat(production.flour_base_used_kg || '0');
-  const liveBenchmarkYield = flourBaseNum > 0 ? (flourBaseNum * 1.2).toFixed(2) : null;
-  const grossNum = parseFloat(production.quantity_kg || '0');
-  const wastageNum = parseFloat(production.wastage_kg || '0');
-  const liveNetYield = grossNum > wastageNum ? (grossNum - wastageNum).toFixed(2) : null;
-  const liveVariance = liveBenchmarkYield && liveNetYield ? (parseFloat(liveNetYield) - parseFloat(liveBenchmarkYield)).toFixed(2) : null;
 
   return (
     <section className="space-y-6 max-w-7xl mx-auto">
@@ -660,50 +654,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       {tab === 'master_recipes' && (
         <>
           <div style={{ ...card, background: '#f8fafc', borderColor: '#cbd5e1' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-              <div>
-                <h3 style={{ margin: '0 0 4px', color: '#1e293b' }}>Kawad Swad Papad Formula Master — Version 2.0</h3>
-                <p style={{ margin: 0, fontSize: 13, color: '#475569' }}>
-                  Official standard formulas: <b>Moong Family</b> (8 variants), <b>Chana Family</b> (5 variants), <b>Urad Family</b> (2 variants).
-                </p>
-              </div>
-              <button
-                style={{ ...btn, background: '#0284c7' }}
-                disabled={busy}
-                onClick={() =>
-                  runAction(
-                    () => apiRequest('/api/production/recipes/master/bootstrap', { method: 'POST' }),
-                    'Version 2.0 Master Recipes and Raw Materials synchronized to system successfully.',
-                    refreshMasterRecipes
-                  )
-                }
-              >
-                🔄 Sync Master Recipes & Raw Materials to System
-              </button>
+            <h3 style={{ margin: '0 0 4px', color: '#1e293b' }}>Stored Recipe Versions</h3>
+            <p style={{ margin: 0, fontSize: 13, color: '#475569' }}>
+              This register displays only recipe versions saved in the ERP. No sample formulas or raw-material records are imported automatically.
+            </p>
+            <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: '#eff6ff', color: '#1e40af', fontSize: 12 }}>
+              Create a draft recipe against an active product and active raw-material masters. The Owner approves by creating a new immutable version.
             </div>
-
-            {/* Benchmark Highlights */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10, marginTop: 14 }}>
-              <div style={{ background: '#ecfdf5', padding: 12, borderRadius: 8, border: '1px solid #a7f3d0' }}>
-                <b style={{ color: '#065f46' }}>✓ Confirmed Moong Master Formula</b>
-                <p style={{ margin: '4px 0 0', fontSize: 12, color: '#047857' }}>
-                  1,000 g Moong Dal Flour • 0 Sabudana • 0 Urad • ₹153.63 / batch • 1.2 kg yield • <b>₹128.03 / kg</b>
-                </p>
-              </div>
-              <div style={{ background: '#fffbeb', padding: 12, borderRadius: 8, border: '1px solid #fde68a' }}>
-                <b style={{ color: '#92400e' }}>⚠️ Chana Family (Proposed Base)</b>
-                <p style={{ margin: '4px 0 0', fontSize: 12, color: '#b45309' }}>
-                  750 g Chana Dal Flour : 250 g Urad Dal Flour • 1 g SMOS (pending owner sign-off) • Unverified yield
-                </p>
-              </div>
-              <div style={{ background: '#f5f3ff', padding: 12, borderRadius: 8, border: '1px solid #ddd6fe' }}>
-                <b style={{ color: '#5b21b6' }}>⚠️ Urad Family (Proposed Base)</b>
-                <p style={{ margin: '4px 0 0', fontSize: 12, color: '#6d28d9' }}>
-                  850 g Urad Dal Flour : 150 g Sabudana Flour • 1 g SMOS (pending owner sign-off) • Unverified yield
-                </p>
-              </div>
-            </div>
-
             {/* Filter Chips */}
             <div style={{ marginTop: 14, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: '#334155' }}>Filter by Family:</span>
@@ -775,6 +732,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           </div>
 
           {/* RECIPES GRID */}
+          {filteredMasterRecipes.length === 0 && (
+            <div style={{ ...card, padding: 24, textAlign: 'center', color: '#475569' }}>
+              <b>No stored recipe versions found.</b>
+              <p style={{ margin: '8px 0 0', fontSize: 13 }}>The clean database remains empty until authorised users create recipes from approved master records.</p>
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 16 }}>
             {filteredMasterRecipes.map(r => {
               const isApproved = r.approved || String(r.status).toUpperCase() === 'APPROVED';
@@ -860,8 +823,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       }}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                        <span>Flour Base:</span>
-                        <b>{r.batch_size} g</b>
+                        <span>Product:</span>
+                        <b>{r.product_name_snapshot || r.product_id}</b>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                         <span>Expected Dry Yield:</span>
@@ -963,32 +926,24 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       📋 Use in Production
                     </button>
 
-                    {isOwner && (
+                    {isOwner && !isApproved && (
                       <button
                         type="button"
-                        style={{
-                          ...btn,
-                          flex: 1,
-                          padding: '7px 10px',
-                          fontSize: 12,
-                          background: isApproved ? '#047857' : '#d97706',
-                        }}
+                        style={{ ...btn, flex: 1, padding: '7px 10px', fontSize: 12, background: '#d97706' }}
                         disabled={busy}
                         onClick={() =>
                           runAction(
                             () =>
                               apiRequest(`/api/production/recipes/master/${encodeURIComponent(r.recipe_id)}/confirm`, {
                                 method: 'POST',
-                                body: JSON.stringify({ approved: !isApproved }),
+                                body: JSON.stringify({ approved: true }),
                               }),
-                            isApproved
-                              ? `Formula ${r.product_name_snapshot} marked as draft.`
-                              : `Formula ${r.product_name_snapshot} confirmed & approved by Owner.`,
+                            `A new immutable approved version was created from ${r.product_name_snapshot}.`,
                             refreshMasterRecipes
                           )
                         }
                       >
-                        {isApproved ? '✓ Owner Approved' : '✅ Confirm as Owner'}
+                        ✅ Approve New Version
                       </button>
                     )}
                   </div>
@@ -2585,8 +2540,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           <div style={card}>
             <h3>Custom Recipe Editor for Automatic Consumption</h3>
             <p style={{ color: '#64748b' }}>
-              Enter one ingredient per line: <code>Material name | quantity per 1 kg papad | unit</code>. Example:{' '}
-              <code>Moong Dal Flour | 0.833 | kg</code>. Use exact material names from RawMaterials.
+              Enter one ingredient per line: <code>Material name | quantity per 1 kg papad | unit</code>. Enter the expected dry yield for this product and use exact active RawMaterials master names.
             </p>
             <form
               onSubmit={e => {
@@ -2604,16 +2558,32 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   () =>
                     apiRequest('/api/production/recipes', {
                       method: 'POST',
-                      body: JSON.stringify({ product_id: recipe.product_id, items, approved: true, notes: recipe.notes }),
+                      body: JSON.stringify({
+                        product_id: recipe.product_id,
+                        items,
+                        approved: false,
+                        expected_yield_kg: Number(recipe.expected_yield_kg),
+                        notes: recipe.notes,
+                      }),
                     }),
-                  'Approved recipe saved.',
-                  refreshRecipes
+                  'Draft recipe saved for Owner review.',
+                  refreshMasterRecipes
                 );
-                setRecipe({ product_id: '', ingredients: '', notes: '' });
+                setRecipe({ product_id: '', ingredients: '', expected_yield_kg: '', notes: '' });
               }}
             >
               <div style={{ display: 'grid', gap: 10 }}>
                 {productSelect(recipe.product_id, v => setRecipe({ ...recipe, product_id: v }))}
+                <input
+                  style={input}
+                  type="number"
+                  min="0.001"
+                  step="0.001"
+                  placeholder="Expected dry yield for this product (kg) *"
+                  value={recipe.expected_yield_kg}
+                  onChange={e => setRecipe({ ...recipe, expected_yield_kg: e.target.value })}
+                  required
+                />
                 <textarea
                   style={{ ...input, minHeight: 110 }}
                   placeholder={'Moong Dal Flour | 0.833 | kg\nBlack Pepper | 0.0125 | kg\nHing | 0.0042 | kg\nSalt | 0.0417 | kg'}
@@ -2628,7 +2598,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   onChange={e => setRecipe({ ...recipe, notes: e.target.value })}
                 />
                 <button style={btn} disabled={busy}>
-                  Save & approve recipe
+                  Save Draft for Owner Approval
                 </button>
               </div>
             </form>
@@ -2652,8 +2622,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           <div style={card}>
             <h3>Record Daily Bulk Production Batch</h3>
             <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 12px' }}>
-              Record flour base used and actual finished dry yield. Benchmark dry yield is automatically compared at{' '}
-              <b>1.2 kg per 1.0 kg flour base</b>.
+              Record gross dry output, rejected output and separately measured process loss. Yield comparison follows the approved product-specific recipe, not a universal ratio.
             </p>
 
             <form
