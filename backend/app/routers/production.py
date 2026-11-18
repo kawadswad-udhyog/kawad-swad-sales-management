@@ -555,8 +555,6 @@ async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpd
         raise HTTPException(422, "A positive rate_per_unit is required for CONFIRMED status.")
     if rate_status == "PENDING" and req.rate_per_unit is not None:
         raise HTTPException(422, "A PENDING rate must not include a numeric value.")
-    async with _async_null_context():
-        pass
     with _RAW_MATERIAL_MUTEX:
         rows = db.get_records("RawMaterials", fresh=True)
         material = next((row for row in rows if str(field(row, "raw_material_id", default="")).strip() == raw_material_id.strip()), None)
