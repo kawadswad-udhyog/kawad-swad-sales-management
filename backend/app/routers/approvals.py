@@ -29,8 +29,11 @@ _APPROVAL_EXECUTION_LOCK = threading.Lock()
 
 _SENSITIVE_APPROVAL_KEYS = {
     "address", "emergency_contact", "bank_details", "document_references",
-    "document_reference", "identity_document", "account_number", "ifsc",
-    "password", "password_hash", "mobile", "alternate_mobile", "email",
+    "document_reference", "identity_document", "account_number", "account_no",
+    "bank_account", "ifsc", "ifsc_code", "aadhaar", "aadhaar_number",
+    "pan", "pan_number", "passport_number", "date_of_birth", "dob",
+    "password", "password_hash", "mobile", "alternate_mobile",
+    "personal_mobile", "phone", "phone_number", "email", "personal_email",
 }
 
 
