@@ -44,6 +44,21 @@ jobs:
           SALES_JWT_SECRET: "test-only-secret-do-not-use-for-deployment-32"
         run: python -m unittest tests.test_phase4_clean_data_contracts -v
 
+      - name: Run manufacturing workflow regression suite
+        env:
+          SALES_TESTING: "1"
+          SALES_JWT_SECRET: "test-only-secret-do-not-use-for-deployment-32"
+        run: >-
+          python -m unittest
+          tests.test_recipe_master_v2
+          tests.test_production_module
+          tests.test_daily_operations_readiness
+          tests.test_master_repair_and_readiness
+          tests.test_erp_stabilization
+          tests.test_raw_material_issuance_recovery
+          tests.test_raw_material_receiving_stage1
+          -v
+
   frontend-build:
     name: Frontend TypeScript and production build
     runs-on: ubuntu-latest
