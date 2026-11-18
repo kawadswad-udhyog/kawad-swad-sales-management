@@ -204,13 +204,13 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
         db._worksheets.clear()
         db._fail_once.clear()
 
-    def _create_test_batch(self, qty_kg=10.0, product_id="PRD-TEST-PAPAD"):
+    def _create_test_batch(self, qty_kg=10.0, product_id="PRD-TEST-PAPAD", recipe_id="RCP-TP-V1"):
         req = prod.ProductionCreate(
             product_id=product_id,
             production_date="2026-10-25",
             quantity_kg=qty_kg,
             wastage_kg=0.0,
-            recipe_id="RCP-TP-V1",
+            recipe_id=recipe_id,
         )
         return asyncio.run(prod.create_batch(req, self.pa_user))
 
@@ -461,7 +461,7 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
         }
         db.memory_store["Recipes"] = [dup_recipe]
 
-        batch = self._create_test_batch(qty_kg=10.0)
+        batch = self._create_test_batch(qty_kg=10.0, recipe_id="RCP-DUP-LINES")
         p_id = batch["production_id"]
 
         res = asyncio.run(prod.issue_materials(p_id, self.pa_user))
@@ -513,7 +513,7 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
         }
         db.memory_store["Recipes"] = [missing_mat_recipe]
 
-        batch = self._create_test_batch(qty_kg=10.0)
+        batch = self._create_test_batch(qty_kg=10.0, recipe_id="RCP-MISSING-MAT")
         p_id = batch["production_id"]
 
         with self.assertRaises(HTTPException) as ctx:
@@ -543,7 +543,7 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
         }
         db.memory_store["Recipes"] = [mixed_unit_recipe]
 
-        batch = self._create_test_batch(qty_kg=10.0)
+        batch = self._create_test_batch(qty_kg=10.0, recipe_id="RCP-MIXED-UNITS")
         p_id = batch["production_id"]
 
         res = asyncio.run(prod.issue_materials(p_id, self.pa_user))
