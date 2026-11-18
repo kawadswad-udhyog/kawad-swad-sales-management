@@ -24,7 +24,7 @@ import unittest
 from fastapi import HTTPException
 from app.sheets import db
 from app.routers import production as prod
-from backend.tests.phase4_fixtures import seed_basic_moong_recipe
+from tests.phase4_fixtures import seed_basic_moong_recipe
 from app.calculations import (
     normalize_to_canonical_unit,
     convert_unit,
