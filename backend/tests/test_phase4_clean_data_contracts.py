@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from app.sheets import db, ID_PREFIXES, REQUIRED_TABS
 from app.routers import production as prod
 from app.calculations.production import reconcile_production_output
+from app.calculations.costing import get_latest_purchase_rate
 
 
 class PhaseFourCleanDataContracts(unittest.TestCase):
@@ -159,6 +160,40 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(prod.create_batch(prod.ProductionCreate(product_id="PRD-P4-001"), self.pa))
         self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_milling_requires_actual_source_and_flour_master_records(self):
+        request = prod.DalMillingCreate(
+            source_material_id="RM-WHOLE-MOONG-DAL",
+            input_quantity_kg=10,
+            flour_output_kg=9,
+            milling_expenses=0,
+            idempotency_key="P4-MILL-NO-MASTERS",
+        )
+        allocation_count = len(db.memory_store["IdAllocations"])
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.record_dal_milling_batch(request, self.pa))
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(db.memory_store["RawMaterialLedger"], [])
+        self.assertEqual(len(db.memory_store["IdAllocations"]), allocation_count)
+
+    def test_production_consumption_movement_cannot_be_used_as_purchase_rate(self):
+        master = [{
+            "raw_material_id": "RM-TEST-01",
+            "material_name": "Test Flour",
+            "unit": "kg",
+            "rate_per_unit": "",
+            "rate_status": "PENDING",
+        }]
+        movements = [{
+            "raw_material_id": "RM-TEST-01",
+            "material_name": "Test Flour",
+            "movement_type": "PRODUCTION_CONSUMPTION",
+            "rate_per_unit": 200,
+            "quantity": 1,
+        }]
+        result = get_latest_purchase_rate("RM-TEST-01", master, movements)
+        self.assertNotEqual(result.get("status"), "CONFIRMED")
+        self.assertIsNone(result.get("rate_per_canonical_unit"))
 
     def test_process_loss_is_part_of_mass_reconciliation(self):
         result = reconcile_production_output(
