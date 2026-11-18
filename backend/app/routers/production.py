@@ -3405,150 +3405,98 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
 
         db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
 
-        # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
+        # Production valuation is assessed without fabricating missing rates,
+        # assigning the day's wages to one batch, or using formula estimates as actual.
         try:
-            from app.accounting.postings import post_production_batch_journal
-            from app.calculations.costing import get_latest_purchase_rate
-            from app.calculations.recipes import calculate_recipe_cost_estimate
-
             raw_deductions = [
-                x for x in db.get_records("RawMaterialLedger", fresh=True)
-                if str(field(x, "production_id", default="")).strip() == prod_id_clean
-                and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+                row for row in db.get_records("RawMaterialLedger", fresh=True)
+                if str(field(row, "production_id", default="")).strip() == prod_id_clean
+                and str(field(row, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
             ]
-            f_cost = Decimal("0")
-            s_cost = Decimal("0")
-            rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
-            pur_ledger = db.get_records("RawMaterialLedger", fresh=True)
-
-            for d in raw_deductions:
-                m_name = str(field(d, "material_name", default="")).lower()
-                m_id = str(field(d, "raw_material_id", default=""))
-                q = to_decimal(field(d, "quantity", default=0) or 0)
-                r_val = field(d, "rate_per_unit", default=None)
-                if r_val is not None and str(r_val).strip() not in {"", "0", "none", "null", "pending"}:
-                    r = to_decimal(r_val)
-                else:
-                    # Look up confirmed rate from master / purchase ledger
-                    rate_lookup = get_latest_purchase_rate(m_name or m_id, rm_master, pur_ledger)
-                    if rate_lookup.get("rate_per_canonical_unit") is not None:
-                        r = to_decimal(rate_lookup["rate_per_canonical_unit"])
-                    else:
-                        r = Decimal("0")
-                c = q * r
-                if "flour" in m_name or "atta" in m_name:
-                    f_cost += c
-                else:
-                    s_cost += c
-
-            l_cost = to_decimal(field(rec, "labour_cost", default=0) or field(rec, "labor_cost", default=0) or 0)
-
-            batch_labour_rows = [
-                row for row in db.get_records("LabourWorkEntries", fresh=True)
-                if str(field(row, "batch_id", default="")).strip() == prod_id_clean
-                and str(field(row, "approved_by", default="")).strip()
-            ]
-            batch_labour_cost = sum(
-                (to_decimal(field(row, "total_amount", default=0) or 0) for row in batch_labour_rows),
-                Decimal("0"),
-            )
+            raw_master = db.get_records("RawMaterials", fresh=True)
+            purchase_ledger = db.get_records("RawMaterialLedger", fresh=True)
             missing_rates = []
             material_total = Decimal("0")
             for deduction in raw_deductions:
-                material_name = str(field(deduction, "material_name", default="")).strip()
+                name = str(field(deduction, "material_name", default="")).strip()
                 material_id = str(field(deduction, "raw_material_id", default="")).strip()
                 quantity = to_decimal(field(deduction, "quantity", default=0) or 0)
                 unit = str(field(deduction, "unit", default="kg")).strip()
                 canonical_qty, _ = normalize_to_canonical_unit(quantity, unit)
                 rate = field(deduction, "rate_per_unit", default=None)
                 if rate in (None, "") or str(rate).strip().lower() in {"0", "0.0", "pending", "none", "null"}:
-                    rate_lookup = get_latest_purchase_rate(material_name or material_id, rm_master, pur_ledger)
+                    rate_lookup = get_latest_purchase_rate(name or material_id, raw_master, purchase_ledger)
                     rate = rate_lookup.get("rate_per_canonical_unit") if rate_lookup.get("status") == "CONFIRMED" else None
                 if rate is None:
-                    missing_rates.append(material_name or material_id or "Unknown material")
+                    missing_rates.append(name or material_id or "Unknown material")
                     continue
-                rate_dec = to_decimal(rate)
-                if rate_dec <= 0:
-                    missing_rates.append(material_name or material_id or "Unknown material")
+                rate_value = to_decimal(rate)
+                if rate_value <= 0:
+                    missing_rates.append(name or material_id or "Unknown material")
                     continue
-                material_total += to_decimal(canonical_qty) * rate_dec
+                material_total += to_decimal(canonical_qty) * rate_value
+
+            labour_rows = [
+                row for row in db.get_records("LabourWorkEntries", fresh=True)
+                if str(field(row, "batch_id", default="")).strip() == prod_id_clean
+                and str(field(row, "approved_by", default="")).strip()
+            ]
+            labour_total = sum(
+                (to_decimal(field(row, "total_amount", default=0) or 0) for row in labour_rows),
+                Decimal("0"),
+            )
 
             if not raw_deductions:
                 valuation_status = "PENDING_MATERIAL_ISSUE_EVIDENCE"
             elif missing_rates:
                 valuation_status = "PENDING_CONFIRMED_MATERIAL_RATES"
-            elif not batch_labour_rows:
+            elif not labour_rows:
                 valuation_status = "PENDING_BATCH_LABOUR_ALLOCATION"
             else:
                 valuation_status = "PENDING_APPROVED_OVERHEAD_ALLOCATION"
 
-            cost_review = {
+            review = {
                 "production_id": prod_id_clean,
                 "status": valuation_status,
                 "measured_material_cost": str(round_money(material_total)) if raw_deductions and not missing_rates else None,
-                "approved_batch_labour_cost": str(round_money(batch_labour_cost)),
+                "approved_batch_labour_cost": str(round_money(labour_total)),
                 "electricity_cost": None,
                 "factory_overhead": None,
                 "total_actual_cost": None,
                 "missing_rate_materials": sorted(set(missing_rates)),
-                "labour_entry_count": len(batch_labour_rows),
+                "labour_entry_count": len(labour_rows),
                 "scope": "DIRECT MATERIAL AND BATCH-LINKED LABOUR ONLY. FULL ACTUAL COST AND INVENTORY JOURNAL BLOCKED UNTIL APPROVED OVERHEAD ALLOCATION EXISTS.",
             }
             updates["cost_status"] = valuation_status
-            updates["cost_review"] = cost_review
+            updates["cost_review"] = review
+
             review_key = f"PRODUCTION_COSTING:{prod_id_clean}"
             review_rows = db.get_records("IncompleteTransactions", fresh=True)
-            existing_review = next((row for row in review_rows if str(field(row, "idempotency_key", default="")).strip() == review_key), None)
+            existing = next((row for row in review_rows if str(field(row, "idempotency_key", default="")).strip() == review_key), None)
             review_fields = {
                 "transaction_type": "PRODUCTION_COSTING_REVIEW",
                 "status": valuation_status,
-                "payload_json": json.dumps(cost_review, sort_keys=True),
+                "payload_json": json.dumps(review, sort_keys=True),
                 "error_details": "",
                 "updated_at": now(),
             }
-            if existing_review:
-                db.update_record("IncompleteTransactions", "transaction_id", str(field(existing_review, "transaction_id")), review_fields, raise_on_error=True)
+            if existing:
+                db.update_record("IncompleteTransactions", "transaction_id", str(field(existing, "transaction_id")), review_fields, raise_on_error=True)
             else:
                 db.append_record("IncompleteTransactions", {
                     "transaction_id": make_id("IncompleteTransactions"),
                     "transaction_type": "PRODUCTION_COSTING_REVIEW",
                     "idempotency_key": review_key,
                     "status": valuation_status,
-                    "payload_json": json.dumps(cost_review, sort_keys=True),
+                    "payload_json": json.dumps(review, sort_keys=True),
                     "error_details": "",
                     "created_at": now(),
                     "updated_at": now(),
                     "resolved_by": "",
                     "resolved_at": "",
                 }, raise_on_error=True)
-
-            # Persist batch actual cost on record for downstream packaging and accounting
-            cost_updates = {
-                "actual_cost_per_kg": float(round_money(actual_cost_per_kg)),
-                "total_batch_cost": float(round_money(total_batch_cost)),
-                "flour_cost": float(round_money(f_cost)),
-                "ingredient_cost": float(round_money(s_cost)),
-                "labor_cost": float(round_money(l_cost)),
-            }
-            db.update_record("ProductionBatches", "production_id", prod_id_clean, cost_updates)
-            updates.update(cost_updates)
-
-            # Update bulk stock ledger movement with unit_cost_per_kg
-            bulk_mvts = [m for m in db.get_records("ProductionStockLedger", fresh=True) if str(field(m, "reference_id")) == prod_id_clean and str(field(m, "movement_type")).upper() == "BULK_PRODUCED"]
-            for bm in bulk_mvts:
-                db.update_record("ProductionStockLedger", "movement_id", str(field(bm, "movement_id")), {
-                    "unit_cost_per_kg": float(round_money(actual_cost_per_kg)),
-                    "total_cost": float(round_money(total_batch_cost)),
-                })
-
-            batch_dict = {
-                "production_id": prod_id_clean,
-                "net_quantity_kg": production_kg,
-                "product_name_snapshot": field(rec, "product_name_snapshot", default="Papad"),
-                "production_date": field(rec, "production_date", default="") or now()[:10],
-            }
-            post_production_batch_journal(batch_dict, f_cost, s_cost, l_cost, actor)
         except Exception as acct_err:
+
             logger.error("Non-fatal accounting posting error for batch %s: %s", prod_id_clean, acct_err)
             try:
                 db.append_record("IncompleteTransactions", {
