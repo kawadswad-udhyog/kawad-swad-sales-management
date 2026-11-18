@@ -893,11 +893,11 @@ async def verify_raw_material_opening_stock(
                     "message": f"[Idempotent Replay] Physical stock for {mat_name} already confirmed at {ex_phys if ex_phys is not None else physical_val} {unit}.",
                 }
 
-            bal = calculate_raw_material_balance(mat_name, combined_master, raw_ledger)
+            bal = calculate_raw_material_balance(mat_name, raw_master, raw_ledger)
             recorded_available = float(bal.get("available", 0.0))
             recorded_opening = float(bal.get("recorded_opening_stock", 0.0))
             variance = round_stock(physical_val - recorded_available)
-            rate_info = get_latest_purchase_rate(mat_name, combined_master, raw_ledger)
+            rate_info = get_latest_purchase_rate(mat_name, raw_master, raw_ledger)
             latest_rate = rate_info.get("rate_per_canonical_unit")
 
             verified_at = now()
