@@ -134,5 +134,102 @@ class TestApprovalGuards(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
 
 
+class TestPrivateEmployeeFields(unittest.TestCase):
+    def test_pa_create_request_does_not_include_private_or_compensation_fields(self):
+        captured = {}
+        class FakeRequest:
+            request_id = "REQ-NEW"
+
+        def fake_create_approval_request(**kwargs):
+            captured.update(kwargs)
+            return FakeRequest()
+
+        req = users_router.UserCreate(
+            username="new.staff",
+            full_name="New Staff",
+            role="SALESMAN",
+            mobile="9876543210",
+            email="staff@example.com",
+            salary_frequency="MONTHLY",
+            salary_structure_id="SST-001",
+            address="Private address",
+            emergency_contact="Private contact",
+            bank_details="Private bank",
+            notes="Private note",
+        )
+        with (
+            patch.object(users_router, "validate_unique_username"),
+            patch.object(users_router, "create_approval_request", side_effect=fake_create_approval_request),
+        ):
+            result = asyncio.run(users_router.create_user(
+                req, current_user={"user_id": "pa-1", "full_name": "PA", "role": "PA"}
+            ))
+
+        self.assertTrue(result["pending_approval"])
+        payload = captured["payload"]
+        for key in (
+            "mobile", "email", "salary_frequency", "salary_structure_id",
+            "address", "emergency_contact", "bank_details", "notes",
+        ):
+            self.assertEqual(payload[key], "", f"{key} must not be included in a PA request")
+
+    def test_pa_update_request_drops_private_fields(self):
+        captured = {}
+        class FakeRequest:
+            request_id = "REQ-UPD"
+
+        def fake_create_approval_request(**kwargs):
+            captured.update(kwargs)
+            return FakeRequest()
+
+        req = users_router.UserUpdate(
+            full_name="Updated Name",
+            mobile="9876543210",
+            email="staff@example.com",
+            salary_structure_id="SST-001",
+            bank_details="Private bank",
+        )
+        with (
+            patch.object(users_router, "_get_target_user_role", return_value="SALESMAN"),
+            patch.object(users_router, "create_approval_request", side_effect=fake_create_approval_request),
+        ):
+            result = asyncio.run(users_router.update_user(
+                "USR-000001", req, current_user={"user_id": "pa-1", "full_name": "PA", "role": "PA"}
+            ))
+        self.assertTrue(result["pending_approval"])
+        self.assertEqual(captured["payload"], {"full_name": "Updated Name"})
+
+
+class TestApprovalExecutionClaim(unittest.TestCase):
+    def test_action_failure_is_marked_for_manual_reconciliation(self):
+        rows = [{
+            "request_id": "REQ-000009",
+            "request_type": "UPDATE_USER",
+            "target_user_id": "USR-000001",
+            "requested_by": "pa-1",
+            "payload_json": "{}",
+            "status": "PENDING",
+        }]
+        updates = []
+        def fake_update(tab, key, value, values, **kwargs):
+            updates.append(dict(values))
+            return True
+
+        with (
+            patch.object(approvals_router.db, "get_records", return_value=rows),
+            patch.object(approvals_router.db, "update_record", side_effect=fake_update),
+            patch.object(approvals_router.db, "log_audit"),
+            patch.object(approvals_router, "_run_request_execution", side_effect=RuntimeError("simulated ambiguous write")),
+        ):
+            result = asyncio.run(approvals_router.decide_approval_request(
+                "REQ-000009",
+                approvals_router.ApprovalDecisionRequest(decision="APPROVED"),
+                current_user={"user_id": "owner-1", "role": "OWNER"},
+            ))
+
+        self.assertEqual([u.get("status") for u in updates], ["EXECUTING", "EXECUTION_REVIEW_REQUIRED"])
+        self.assertEqual(result.status, "EXECUTION_REVIEW_REQUIRED")
+
+
 if __name__ == "__main__":
     unittest.main()
