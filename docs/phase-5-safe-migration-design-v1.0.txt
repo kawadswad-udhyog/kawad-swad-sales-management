@@ -1,0 +1,336 @@
+KAWAD SWAD ERP
+PHASE 5 - SAFE MIGRATION DESIGN
+Version 1.0 | 18 November 2026
+Status: DESIGN ONLY / NO PRODUCTION MIGRATION AUTHORIZED
+
+OWNER PROGRESSION
+The Owner instruction "APPROVE MOVE ON" is recorded as approval to proceed
+from Phase 4 into Phase 5 design. It is not approval to restore historical
+business records, change production headers, allocate live IDs, enforce
+foreign keys, or deploy a migration.
+
+1. PHASE 5 PURPOSE
+The Business Database Blueprint defines Phase 5 as safe migration design:
+per-change mapping, affected records, backup, dry-run, validation and
+rollback design approved before implementation.
+
+This plan preserves the Owner's clean-empty-database direction:
+- Google Sheets remains the authoritative business record.
+- FastAPI implements business logic and API validation.
+- MongoDB is optional cache/processing, never the sole business source.
+- Do not restore, recover, import or seed pre-reset business records.
+- Do not perform live sheet/header/tab/ID changes in Phase 5 design work.
+
+2. BASELINE EVIDENCE
+Inspected post-reset workbook:
+Kawad_Swad_Sales_Management_Google_Sheets (22)(2).xlsx
+
+Observed:
+- 295 physical worksheets; all visible in the inspected export.
+- 218 canonical table names exist.
+- 77 tabs are outside the canonical 218-table registry.
+- Phase 3 inventory/table map has 283 entries: 218 canonical plus 65
+  extra-tab review entries.
+- One extra-tab entry is stale: RawMaterialLedger_ID_Repair_Preview.
+- Thirteen current workbook tabs are absent from the Phase 3 mapping:
+  12 audit/control artefacts and RawMaterialLedger_ID_Repair_Pre.
+- The 77 current extras reconcile as 64 mapped current extras plus 13
+  unmapped current tabs. The stale mapped name is not a current physical tab.
+- The 283 table-map entries remain PENDING OWNER + TECHNICAL REVIEW.
+- All 3,074 field-map rows remain PENDING OWNER + TECHNICAL APPROVAL.
+
+Field-map counts from KS_P3_FIELD_MAPPING:
+- 3,074 rows total.
+- 1,307 exact header-name matches.
+- 1,767 alias-or-missing review rows.
+- 585 backend REQUIRED_TABS fields requiring route validation.
+- 2,489 fields marked NOT APPROVED FOR EXECUTION.
+- Requiredness: 1,011 YES; 1,477 CONDITIONAL; 586 NO.
+- Dictionary types: 1,940 TEXT; 429 DECIMAL; 34 BOOLEAN; 471 DATETIME;
+  190 DATE; 10 JSON_TEXT.
+
+Interpretation:
+An exact header match is not proof of correct cell values or route behavior.
+An unmatched field is not automatically a missing column. It may be an alias,
+legacy field, unused proposal or workflow-specific field.
+No field/type conversion or bulk column creation is approved.
+
+Relationships:
+- 41 proposed relationships in Phase 1.
+- 11 relationship checks recorded in Phase 3.
+- Those 11 read-only checks reported zero orphans in their scanned scope.
+- 30 proposed relationships still require field/key validation.
+- No foreign-key enforcement, cascade delete or ID rewriting is approved.
+
+Business data:
+- The inspected post-reset export has no business records in its registered
+  business tables; Products, Customers, Suppliers and RawMaterials each have
+  zero actual records in the snapshot.
+- START_HERE contains instruction content.
+- Actual non-empty cells/records must be counted, not worksheet dimensions,
+  formatting or pre-expanded ranges.
+- This observation applies to the uploaded export only; a fresh live
+  read-only export is required before a production migration.
+
+3. PRE-RESET DATA AND RAW MATERIAL LEDGER DISPOSITION
+The uploaded pre-reset XLSX was inspected locally in a prior preservation
+review. That report records a SHA-256 of
+513f4f039085656ec1584dae5f8fbeab9fc6cbdd510d50192ff164da6efd6c6a and
+reports 46 old Products rows, 19 old RawMaterials rows and 56 old
+RawMaterialLedger rows.
+
+The Drive provenance is not fully verified: the reset-log file ID is
+1x1mH0BWoNuvOZ6zD1zmK09Bt_xrvEk6W34xdT9naJwc, but cloud identity,
+sharing permissions and retention were not independently verified by the
+available access path. A readable uploaded local XLSX does not prove it is
+the same cloud object.
+
+The current post-reset workbook has zero populated RawMaterialLedger rows.
+RawMaterialLedger_ID_Repair_Pre contains 56 proposal rows. A previous
+report matched the proposal against the uploaded pre-reset data on ID and
+selected transaction fields; another audit tab incorrectly claims those
+56 rows are currently in the post-reset ledger. That claim is not supported
+by the actual populated cells in the inspected post-reset export.
+
+OWNER DIRECTION:
+- Keep the business database empty.
+- Exclude the 46 historical Products rows, 19 RawMaterials rows, old
+  customer test row and 56 historical ledger rows from import.
+- Keep RawMaterialLedger_ID_Repair_Pre unchanged as archival evidence.
+- Do not write the proposed RML IDs into RawMaterialLedger.
+- Do not regenerate or reserve those historical IDs.
+- Do not repeat the Phase 3 reset.
+- New current business masters must be created through approved clean intake.
+
+4. MIGRATION CHANGE CLASSES
+CLASS 0 - READ-ONLY OBSERVATION
+Inventory, checksums, counts, mappings and diagnostics. Permitted now.
+
+CLASS 1 - APPLICATION-ONLY COMPATIBILITY
+Explicit header aliases, strict validation, fail-closed writes and read-back.
+Development branch and sandbox only; production needs separate release
+approval.
+
+CLASS 2 - ADDITIVE SHEET SCHEMA
+Only individually approved fields/tabs with business reason, route mapping,
+backup, dry-run and rollback. Design only; not executable now.
+
+CLASS 3 - DESTRUCTIVE / STRUCTURAL
+Rename, reorder, delete, merge, archive, replace data. Not authorized.
+
+CLASS 4 - BUSINESS DATA RESTORE / IMPORT / BACKFILL
+Historical business data or IDs. Explicitly excluded by the clean-empty
+database direction. No execution planned.
+
+CLASS 5 - ID / FOREIGN-KEY ENFORCEMENT
+Design and isolated tests only until generator inventory, uniqueness,
+parent-key proof, concurrency and retry behavior pass.
+
+5. NINE MIGRATION WORK PACKAGES
+
+MIG-00 BASELINE FREEZE
+- Fresh read-only export from the actual live Google Sheet.
+- Confirm spreadsheet ID, title and export timestamp.
+- Capture all sheet names, visibility, headers, actual data rows, formulas,
+  validations, named ranges, protected ranges and Apps Script dependencies.
+- Hash export and preserve an unmodified copy.
+- Verify the backup in Drive and restore it into a disposable destination.
+Exit: signed manifest with checksum and independently checked inventory.
+
+MIG-01 TABLE INVENTORY
+- Reconcile all 295 current tab names to the 218 canonical table register
+  and the Phase 3 inventory/mapping.
+- Add the 13 missing current tabs to a refreshed read-only inventory.
+- Replace the stale RawMaterialLedger_ID_Repair_Preview reference with an
+  evidence-backed classification of the actual current staging tab.
+- Classify every extra as operational extension, control/audit, historical,
+  configuration, repair staging or retirement candidate.
+- No tab delete/rename/merge in this package.
+Exit: one inventory row per real physical tab, no stale names.
+
+MIG-02 FIELD CONTRACTS
+For every one of the 3,074 fields, classify:
+EXACT_HEADER_AND_ROUTE_MATCH; ALIAS_TO_PHYSICAL_FIELD;
+REQUIRED_BUT_MISSING; PROPOSED_NOT_IN_USE; LEGACY_KEEP;
+DUPLICATE_SEMANTIC_FIELD; TYPE_REVIEW; or NOT_APPLICABLE.
+Record physical field, API model, route reads/writes, UI form, Apps Script
+consumer, type/units, requiredness, sensitivity, relationship, affected rows,
+decision and approver.
+Exit: every accepted write field maps to a persisted field or explicit
+read-only/non-persistent rule; no silent omission.
+
+MIG-03 RELATIONSHIPS AND IDS
+- Validate all 41 parent-child pairs against physical headers.
+- Prove parent-key uniqueness, child-key completeness and orphan handling.
+- Inventory every backend and Apps Script ID generator.
+- Use one shared allocation strategy across all writers.
+- Test concurrent claims, duplicate requests, timeouts, interrupted writes
+  and retries.
+Exit: every relationship verified or individually waived; ID uniqueness
+proved under concurrent requests. No historical ID is rewritten.
+
+MIG-04 MASTER DATA
+- Approve Products, Customers, Suppliers, RawMaterials, Users/AuthUsers,
+  UnitsOfMeasurement, SalesChannels, ProductPrices and ProductTaxRules.
+- Current Products API treats each Products row as a sellable SKU/pack.
+  Keep ProductVariants and Products_SKU deferred unless Owner approves a
+  normalized model.
+- Keep supplier opening_balance as legacy/do-not-use for AP truth.
+- Treat RawMaterialLedger as raw-material movement authority.
+- Keep ProductPrices/ProductTaxRules inactive until server-side effective
+  lookup and immutable sales snapshots are implemented.
+- Restrict customer/supplier/workforce PII.
+Exit: strict master create/read validation and full read-back in sandbox.
+
+MIG-05 PROCUREMENT / INVENTORY / PRODUCTION / QUALITY
+- Link supplier invoice, receipt, accepted quantities and material lots.
+- Link milling input/output/loss and flour lot genealogy.
+- Link approved recipe version, production batch and material issues.
+- Link bulk, packaging batch, SKU output and quality disposition.
+- Derive stock from ledgers and authorized opening verification.
+- Held/rejected lots cannot flow to issue, packaging, dispatch or sale.
+Exit: stock, batch, quality and forward/backward traceability tests pass.
+
+MIG-06 SALES / PAYMENTS / ACCOUNTING
+- Price and tax are server-resolved, effective-dated and snapshotted.
+- Separate payment receipt from invoice and allocation.
+- Explicit unallocated/advance balances.
+- Balanced journal header/lines with unique source references.
+- Retry-safe receipts, sales, refunds, marketplace settlements and journals.
+- Daily cash/UPI/bank/marketplace reconciliation.
+Exit: invoice/payment/allocation/bank/journal totals reconcile.
+
+MIG-07 WORKFORCE / CONFIDENTIAL DATA
+- Confirm worker/person/employee/login identity model.
+- Restrict private identity, bank, salary and internal policy data to Owner,
+  except explicitly approved minimal-purpose access.
+- Separate attendance, work, payroll calculation, approval and payout.
+- Test Owner, PA, Accountant, Salesman, Worker, Dispatch and custom roles.
+Exit: route-level authorization and payroll reconciliation pass.
+
+MIG-08 FINAL ACCEPTANCE / RELEASE
+- Fresh backup and restore proof.
+- Disposable workbook migration dry-run.
+- Backend and frontend CI.
+- Live Sheets sandbox read/write/read-back.
+- Duplicate, retry, partial failure and concurrency tests.
+- Stock, finance, quality and lot genealogy tests.
+- Exact commit and schema version Owner-approved.
+Exit: no open P0 defect; migration manifest and release sign-off.
+
+6. FIELD-LEVEL DECISION RULES
+- Exact match: preserve; verify route read/write and semantics.
+- Alias: map API field to physical header; do not duplicate the column.
+- Missing mandatory field: block the operation until approved and supported.
+- Proposed unused field: do not create a column without workflow approval.
+- Legacy field: retain values and consumers until mapped and approved.
+- Duplicate semantic field: do not merge automatically.
+- Type review: no bulk conversion; test values, units, money precision and
+  date/time interpretation in a sandbox.
+- Not applicable: document reason and waiver; do not silently delete.
+
+Every per-field ticket must identify table, canonical and physical field,
+route reads/writes, frontend/Apps Script consumers, type/unit, requiredness,
+unique/reference rules, sensitivity, affected rows, decision, approvers,
+sandbox result, rollback and post-migration verification.
+
+7. BACKUP / DRY-RUN / ROLLBACK
+Before a production migration, record:
+- Exact workbook ID and title.
+- Fresh export timestamp and SHA-256.
+- Sheet inventory, headers and actual non-empty record counts.
+- Formulas, validations, protections, named ranges, triggers and scripts.
+- Backend commit and Render deployment record.
+- Backup location, access list and restore-test result.
+
+Dry-run must report:
+- Source/target field and proposed operation.
+- Actual affected records.
+- Header and ID effects.
+- Uniqueness/reference conflicts.
+- Type conversion exceptions.
+- Formula/script/API dependencies.
+- Financial and inventory before/after totals.
+- Warnings, stop conditions and rollback.
+No dry-run may write to the live workbook.
+
+Rollback:
+- Application-only: restore the previous approved code/config and reconcile
+  pending operations.
+- Additive schema: disable new code path; retain unused columns; do not
+  delete potentially populated columns.
+- Posted stock/finance: linked reversal/adjustment, never overwrite history.
+- Uncertain transaction: mark review-required and reconcile before retry.
+- Restore tests use a disposable workbook only, never the live workbook.
+
+8. RELEASE GATES
+G5.0 Owner scope: ACCEPTED FOR PHASE PROGRESSION ONLY.
+G5.1 Fresh live baseline and cloud backup verification: BLOCKED.
+G5.2 Table/field/relationship approvals: BLOCKED.
+G5.3 App compatibility and strict sheet contracts: PARTIAL.
+G5.4 Disposable workbook dry-run and rollback proof: NOT STARTED.
+G5.5 Integrated Google Sheets acceptance: NOT STARTED.
+G5.6 Exact production migration authorization: NOT AUTHORIZED.
+G5.7 Render deployment and post-deploy verification: NOT VERIFIED.
+
+9. ACCEPTANCE TESTS
+P5-001 Fresh live workbook identity. BLOCKED.
+P5-002 Reconciled tab inventory. BLOCKED.
+P5-003 Drive backup identity and permissions. BLOCKED.
+P5-004 Disposable restore test. BLOCKED.
+P5-005 218 table approvals. BLOCKED.
+P5-006 77 extra-tab classifications. BLOCKED.
+P5-007 13 missing inventory entries. BLOCKED.
+P5-008 3,074 field dispositions. BLOCKED.
+P5-009 41 relationships verified/waived. BLOCKED.
+P5-010 Every API field maps or explicitly fails. BLOCKED.
+P5-011 No silent field omission. BLOCKED.
+P5-012 Duplicate checks before ID allocation. BLOCKED.
+P5-013 Shared ID concurrency/retry. BLOCKED.
+P5-014 Empty master GET has no seed fallback. CI PASS; Sheets sandbox pending.
+P5-015 Unknown material is rejected. CI PASS; Sheets sandbox pending.
+P5-016 Approved persisted recipe required. CI PASS; Sheets sandbox pending.
+P5-017 Material issue retry safety. CI PASS; live concurrency pending.
+P5-018 Milling master/rate checks. CI PASS; sample lot pending.
+P5-019 Costing does not label estimates actual. CI PASS; overhead policy open.
+P5-020 Server-side effective price snapshot. NOT STARTED.
+P5-021 Approved tax rule and sale snapshot. NOT STARTED.
+P5-022 Payment allocation and settlement. NOT STARTED.
+P5-023 Balanced journal and reversal. NOT STARTED.
+P5-024 Forward/backward lot genealogy. NOT STARTED.
+P5-025 Quality hold enforcement. NOT STARTED.
+P5-026 Full employee PII route audit. PARTIAL.
+P5-027 Daily cash/UPI/bank close. NOT STARTED.
+P5-028 RPO/RTO/backup retention. NOT STARTED.
+P5-029 Render deployed SHA verified. NOT VERIFIED.
+P5-030 No pre-reset records/IDs imported. PASS for inspected snapshot;
+         must recheck on fresh live baseline.
+
+10. PROJECT RELEASE BASELINE
+Repository: kawadswad-udhyog/kawad-swad-sales-management
+Current main at plan creation:
+5493bd5c509cdbfac2a83dcf3064a71e4bca16fe
+
+PR #5: Phase 4 milling, recipes, production and batch costing hardening.
+Merged: 18-Nov-2026 14:25:07 UTC.
+Final PR head used for CI:
+e1c5b0d1dbf5f782bb59edfd2cf7b0f20f31dbe6
+CI run #26 / 44323035343: SUCCESS.
+Backend jobs: security regression, clean-data/production contracts and
+manufacturing regression suites passed (12 + 17 + 73 tests).
+Frontend TypeScript and production build passed.
+Merge does not prove Render deployment. Keep service single-instance while
+process-local approval/ID claim mechanisms remain and until distributed
+coordination is designed and tested.
+
+11. PHASE 5 COMPLETION ASSESSMENT
+Design package: COMPLETED for the currently inspected workbook snapshot.
+Execution readiness: NOT READY.
+Pending gates: fresh live baseline, cloud backup verification, schema
+approvals, relationship audit, route/Apps Script mapping, sandbox dry-run,
+rollback proof, integrated acceptance and explicit release authorization.
+
+No live workbook/header/tab/ID changes, data imports, Apps Script execution
+or Render deployment were performed by this Phase 5 design.
+
+END OF PHASE 5 SAFE MIGRATION DESIGN
