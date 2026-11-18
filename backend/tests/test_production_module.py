@@ -94,7 +94,8 @@ class TestProductionWorkflow(unittest.TestCase):
         ))
         self.assertEqual(approved["status"], "APPROVED")
         self.assertEqual(len(db.memory_store["RawMaterialLedger"]), 1)
-        self.assertAlmostEqual(db.memory_store["RawMaterialLedger"][0]["quantity"], 7.2)
+        # quantity_per_kg is defined per kg of saleable output: 0.96 x 9.0 kg = 8.64 kg.
+        self.assertAlmostEqual(db.memory_store["RawMaterialLedger"][0]["quantity"], 8.64)
         self.assertTrue(any(
             r["movement_type"] == "BULK_PRODUCED" and abs(r["quantity_kg"] - 9.0) < 0.01
             for r in db.memory_store["ProductionStockLedger"]
