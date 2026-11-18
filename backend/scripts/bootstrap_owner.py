@@ -97,16 +97,12 @@ def bootstrap_owner():
         "sessions_revoked_at": "",
     }
 
-    user_written = False
-    auth_written = False
     try:
         if not db.append_record("Users", user_record, raise_on_error=True):
             raise RuntimeError("Users row append was not confirmed.")
-        user_written = True
 
         if not db.append_record("AuthUsers", auth_record, raise_on_error=True):
             raise RuntimeError("AuthUsers row append was not confirmed.")
-        auth_written = True
 
         # Read-back verification is required before declaring success.
         users_after = _read_rows("Users")
@@ -123,16 +119,17 @@ def bootstrap_owner():
 
     except Exception:
         rollback_errors = []
-        if auth_written:
+        # Re-read both tables to detect writes that may have reached Sheets even
+        # when the client timed out before receiving an acknowledgement.
+        for tab_name in ("AuthUsers", "Users"):
             try:
-                db.delete_record("AuthUsers", "user_id", user_id, raise_on_error=True)
+                current_rows = _read_rows(tab_name)
+                if any(str(row.get("user_id") or "") == user_id for row in current_rows):
+                    removed = db.delete_record(tab_name, "user_id", user_id, raise_on_error=True)
+                    if not removed:
+                        rollback_errors.append(f"{tab_name} row could not be removed during rollback")
             except Exception as rollback_error:
-                rollback_errors.append(f"AuthUsers rollback failed: {rollback_error}")
-        if user_written:
-            try:
-                db.delete_record("Users", "user_id", user_id, raise_on_error=True)
-            except Exception as rollback_error:
-                rollback_errors.append(f"Users rollback failed: {rollback_error}")
+                rollback_errors.append(f"{tab_name} rollback verification failed: {rollback_error}")
         if rollback_errors:
             raise RuntimeError(
                 f"Bootstrap is partially written. User ID {user_id}; Auth ID {auth_id}. "
