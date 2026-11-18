@@ -35,6 +35,13 @@ def get_latest_purchase_rate(
     if purchase_ledger:
         candidates = []
         for entry in purchase_ledger:
+            # Only accepted supplier receipts establish a purchase rate. Milling
+            # transfers, production consumption, opening verification and stock
+            # adjustments must never become new purchase-rate observations.
+            movement_type = str(entry.get("movement_type", "")).strip().upper()
+            if movement_type != "PURCHASE_RECEIPT":
+                continue
+
             # Match material
             m_name = str(entry.get("material_name", "")).strip().lower()
             m_id = str(entry.get("raw_material_id", "")).strip().lower()
