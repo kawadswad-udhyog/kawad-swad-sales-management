@@ -28,7 +28,7 @@ import app.routers.production as prod_router
 import app.routers.stock as stock_router
 import app.routers.sales as sales_router
 import app.routers.users as users_router
-from backend.tests.phase4_fixtures import seed_basic_moong_recipe
+from tests.phase4_fixtures import seed_basic_moong_recipe
 from app.user_service import audit_user_reconciliation
 from app.calculations.inventory import (
     calculate_bulk_stock_balance,
