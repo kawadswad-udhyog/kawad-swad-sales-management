@@ -1,0 +1,99 @@
+KAWAD SWAD ERP
+PHASE 4.2-B - MASTER DATA SCHEMA FINALIZATION
+Version: 0.2 | 18 November 2026
+Status: PROPOSED DESIGN - NOT APPROVED FOR LIVE EXECUTION
+
+BINDING RULES
+- New clean empty database only. Do not recover, restore, import, or auto-seed pre-reset records.
+- Google Sheets remains the authoritative business database.
+- FastAPI is the business logic/API layer. MongoDB is optional cache/processing support.
+- No live header changes, data writes, production IDs, migration, or deployment under this document.
+
+A. PROPOSED PRODUCT GRAIN
+Recommended: one Products row represents one sellable SKU/pack, to align with current Products API and SaleItems product_id references.
+Products proposed fields:
+product_id TEXT required unique; sku TEXT required unique; product_name TEXT required; category TEXT controlled; variant TEXT controlled/optional as appropriate; pack_weight_g DECIMAL >0; selling_unit TEXT approved UOM code; retail_pack_only BOOLEAN; active BOOLEAN; notes TEXT; created_at DATETIME; created_by TEXT; updated_at DATETIME; updated_by TEXT.
+Existing physical Products has only the first 10 columns. Metadata fields are not physical yet. recipe_id is not a physical or Phase 1 Products field; recommendation is to link Recipes using product_id + version, not store recipe_id on Products.
+ProductVariants and Products_SKU are DEFERRED under this one-row-per-sellable-SKU model to avoid duplicate SKU authority.
+
+B. CUSTOMERS
+Record grain: one customer/business account. Contact person is a contact on that account.
+Proposed fields:
+customer_id TEXT unique; customer_type TEXT controlled; shop_name TEXT required; shopkeeper_name TEXT; mobile TEXT; alternate_mobile TEXT; address TEXT; locality_area TEXT; city TEXT; gstin TEXT; map_location TEXT; active BOOLEAN; created_at DATETIME; notes TEXT; created_by TEXT; updated_at DATETIME; updated_by TEXT.
+Preserve physical notes and GSTIN. Add actor/update metadata only through an approved coordinated schema migration. Do not make mobile globally unique. Remove hard-coded Bhilwara default. Customer credit limit and balance must be sourced from approved ledger/credit tables, not model defaults.
+
+C. SUPPLIERS
+Record grain: one supplier business/legal account.
+Proposed fields:
+supplier_id TEXT unique; supplier_name TEXT; contact_person TEXT; mobile TEXT; email TEXT; address TEXT; city TEXT; gstin TEXT; payment_terms_days INTEGER >=0; active BOOLEAN; notes TEXT; created_at DATETIME; created_by TEXT; updated_at DATETIME; updated_by TEXT.
+Keep physical opening_balance header unchanged for compatibility but classify LEGACY / DO NOT WRITE / DO NOT USE FOR AP BALANCE. Supplier opening payable/advance, if ever needed, belongs in approved accounting opening transactions. Retain payment_terms_days as a canonical field. Current sheets.py REQUIRED_TABS lacks a Suppliers entry and must be fixed before supplier contract enforcement.
+
+D. RAW MATERIALS
+Proposed fields:
+raw_material_id TEXT unique; material_name TEXT; unit TEXT approved UOM code; category TEXT; rate_per_unit DECIMAL reference only; rate_status TEXT controlled enum; minimum_stock DECIMAL >=0; active BOOLEAN; notes TEXT; created_at DATETIME; created_by TEXT; updated_at DATETIME; updated_by TEXT.
+RawMaterialLedger is the authoritative movement history. Available stock is derived from opening verification + receipts + issues + returns + adjustments. Do not manually edit current_stock as the authoritative balance. opening_stock must not form a second independent balance. New clean database starts at zero.
+Keep existing physical columns unchanged until approved migration. rate_status type in Phase 1 dictionary must be corrected from DECIMAL to TEXT.
+Critical current code behavior: GET raw-materials falls back to RAW_MATERIALS_SEED; receive may auto-create a missing RawMaterials row from seed; opening verification also uses seed fallback. All implicit seed paths must be removed before activation. GET returns only real sheet rows. Receive and verification reject unknown material IDs. Master creation must be a separate explicit Owner-authorized operation; no seed records are inserted.
+
+E. PRODUCT PRICES
+Required future table; not yet integrated into Sales routes.
+One effective-dated price per product SKU + sales channel + customer type + start date.
+Fields: price_id TEXT unique; product_id TEXT FK; channel_id TEXT FK; customer_type TEXT; selling_price DECIMAL(12,2) INR; mrp DECIMAL(12,2) INR; valid_from DATE; valid_to DATE; approved_by TEXT; status TEXT; created_at/by; updated_at/by.
+Do not duplicate sku if product_id references the SKU row. Prevent overlapping ACTIVE periods for the same product/channel/customer type. Snapshot price_id, applied price, SKU and product details on every sale line.
+
+F. PRODUCT TAX RULES
+Required before tax automation. Fields: tax_rule_id TEXT unique; product_id TEXT FK or approved HSN shared-rule key; hsn_code TEXT; tax_rate DECIMAL; tax_type TEXT controlled; effective_from DATE; effective_to DATE; approved_by TEXT; created_at/by; updated_at/by.
+Tax rate unit must be explicitly defined (recommend percentage points, e.g. 5.00 not 0.05). Do not seed or assume rates. Accounts/Owner approves rules. Snapshot tax rule/rate on sale lines.
+
+G. REFERENCE TABLES
+SalesChannels: channel_id TEXT unique; channel_name TEXT unique; channel_type TEXT; external_platform TEXT; settlement_cycle_days INTEGER >=0; active BOOLEAN; created_at/by; updated_at/by.
+UnitsOfMeasurement: uom_id TEXT unique; unit_code TEXT unique; unit_name TEXT; unit_type TEXT; base_unit TEXT; conversion_factor DECIMAL >0; active BOOLEAN; created_at/by; updated_at/by.
+Use conversion only within same physical dimension. Do not define global packet-to-kg conversion; use product pack_weight_g.
+Candidate channel names (not approved or seeded): WEBSITE, AMAZON, FLIPKART, MEESHO, ONDC, DIRECT, RETAIL, WHOLESALE, DISTRIBUTOR, EXHIBITION.
+
+H. TABLE DISPOSITIONS
+Products KEEP as sellable SKU candidate.
+Customers KEEP with metadata alignment pending.
+Suppliers KEEP; retain payment_terms_days, deprecate opening_balance operationally.
+RawMaterials KEEP; ledger is stock authority; remove implicit seeds.
+ProductVariants DEFER.
+Products_SKU DEFER.
+ProductPrices REQUIRED FUTURE TABLE, API integration pending.
+ProductTaxRules REQUIRED FUTURE TABLE, Accounts/Owner approval and API integration pending.
+SalesChannels REQUIRED reference table before ProductPrices.
+UnitsOfMeasurement REQUIRED reference table before inventory UOM standardization.
+
+I. VALIDATION AND WRITE CONTRACTS
+- Validate required fields, uniqueness, ranges and references before ID allocation.
+- Phone, GSTIN, SKU, IDs and HSN are TEXT.
+- Use Decimal for money/quantities in backend accounting calculations.
+- Soft-disable referenced master data; no physical delete.
+- Reject unmapped write fields and missing required physical headers; never silently omit fields.
+- Read back every successful write by primary key and compare canonical values.
+- No automatic header expansion.
+
+J. OWNER / TECHNICAL SIGN-OFF REQUIRED
+MD-01 Products row grain and SKU uniqueness.
+MD-02 Defer ProductVariants/Products_SKU.
+MD-03 Customer types and data access rules.
+MD-04 Supplier payment_terms_days and opening_balance deprecation.
+MD-05 RawMaterialLedger balance authority and seed suppression.
+MD-06 rate_per_unit meaning.
+MD-07 ProductPrices matching key and lifecycle.
+MD-08 ProductTaxRules grain and tax policy approval.
+MD-09 SalesChannels list.
+MD-10 UOM codes and conversions.
+MD-11 exact header migration set and rollback plan.
+
+EXIT GATES
+[ ] Owner approves record grain / table dispositions.
+[ ] Exact fields/types/requiredness/uniqueness and relationships approved.
+[ ] Suppliers REQUIRED_TABS contract corrected.
+[ ] Clean-empty and no-seed tests pass.
+[ ] Strict header contract and write read-back tests pass.
+[ ] Price/tax APIs tested before activation.
+[ ] Sandbox tests pass.
+[ ] Owner signs versioned schema before any live migration/deployment.
+
+FINAL
+Design baseline prepared. Owner approval pending. Technical approval pending. No workbook changes, business records, IDs, recovery, or deployment performed.
