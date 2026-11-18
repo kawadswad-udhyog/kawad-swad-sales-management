@@ -4810,36 +4810,59 @@ async def dispatches(user: dict = Depends(get_current_user)):
 
 @router.get("/costing/batch/{production_id}")
 async def get_batch_costing(production_id: str, user: dict = Depends(get_current_user)):
-    """
-    Get attributable actual batch production cost from issued materials and attendance expenses.
-    """
+    """Read batch-attributed direct cost only; never allocate the whole day's wages."""
     require_production_access(user)
-    batch = next((b for b in db.get_records("ProductionBatches") if str(field(b, "production_id")) == production_id), None)
+    batch = next((b for b in db.get_records("ProductionBatches", fresh=True)
+                  if str(field(b, "production_id", "batch_id")) == production_id), None)
     if not batch:
         raise HTTPException(404, "Production batch not found")
 
-    raw_ledger = db.get_records("RawMaterialLedger")
-    materials_issued = [x for x in raw_ledger if str(field(x, "production_id")) == production_id and str(field(x, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"]
-
+    raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+    materials_issued = [
+        row for row in raw_ledger
+        if str(field(row, "production_id")) == production_id
+        and str(field(row, "movement_type")).upper() == "PRODUCTION_CONSUMPTION"
+    ]
+    labour_rows = [
+        row for row in db.get_records("LabourWorkEntries", fresh=True)
+        if str(field(row, "batch_id", default="")).strip() == production_id
+        and str(field(row, "approved_by", default="")).strip()
+    ]
+    labour_cost = sum(
+        (to_decimal(field(row, "total_amount", default=0) or 0) for row in labour_rows),
+        Decimal("0"),
+    )
     saleable_kg = float(field(batch, "net_quantity_kg", default=field(batch, "saleable_output_kg", default=0)) or 0)
 
-    # Calculate labor cost accrued on batch date if applicable
-    batch_date = str(field(batch, "production_date"))
-    attendance_records = db.get_records("WorkerAttendance")
-    labor_for_date = sum(float(field(a, "wage_accrued", default=0) or 0) for a in attendance_records if str(field(a, "attendance_date")) == batch_date)
-
-    cost_result = calculate_batch_actual_cost(
+    result = calculate_batch_actual_cost(
         materials_issued=materials_issued,
         actual_saleable_output_kg=saleable_kg,
-        labour_cost=labor_for_date,
+        labour_cost=float(labour_cost),
     )
+    if not materials_issued:
+        status = "PENDING_MATERIAL_ISSUE_EVIDENCE"
+    elif result.get("status") == "PENDING_RATES":
+        status = "PENDING_CONFIRMED_MATERIAL_RATES"
+    elif not labour_rows:
+        status = "PENDING_BATCH_LABOUR_ALLOCATION"
+    else:
+        status = "PENDING_APPROVED_OVERHEAD_ALLOCATION"
+
+    direct_cost_per_kg = result.get("cost_per_kg")
+    result["direct_cost_per_kg"] = direct_cost_per_kg
+    result["cost_per_kg"] = None
+    result["status"] = status
+    result["total_production_cost"] = None
+    result["labour_entry_count"] = len(labour_rows)
+    result["labour_cost_source"] = "APPROVED_LabourWorkEntries.batch_id"
+    result["cost_scope"] = "DIRECT MATERIAL AND BATCH-LINKED LABOUR ONLY. FULL ACTUAL COST IS PENDING APPROVED ELECTRICITY AND FACTORY OVERHEAD ALLOCATION."
 
     return {
         "production_id": production_id,
         "product_id": field(batch, "product_id"),
         "product_name": field(batch, "product_name_snapshot"),
-        "production_date": batch_date,
-        **cost_result,
+        "production_date": field(batch, "production_date"),
+        **result,
     }
 
 
