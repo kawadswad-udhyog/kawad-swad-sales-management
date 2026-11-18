@@ -1,16 +1,27 @@
 export type UserRole =
-  | 'OWNER'
   | 'OWNER_ADMIN'
-  | 'ADMIN'
   | 'PA'
+  | 'ACCOUNTS'
+  | 'PROCUREMENT'
+  | 'STORE'
+  | 'PRODUCTION'
+  | 'QUALITY'
+  | 'PACKAGING'
+  | 'SALES'
+  | 'FIELD_SALESMAN'
+  | 'HR'
+  | 'AUDITOR'
+  | 'OWNER'
+  | 'ADMIN'
   | 'PERSONAL_ASSISTANT'
   | 'SALESMAN'
-  | 'FIELD_SALESMAN'
   | 'FREELANCER'
   | 'ACCOUNTANT'
   | 'SOCIAL_MEDIA_ECOMMERCE_MANAGER'
   | 'SOCIAL_MEDIA_MANAGER'
   | 'ECOMMERCE_MANAGER'
+  | 'FACTORY_WORKER'
+  | 'LABOUR_SUPERVISOR'
   | string;
 
 export interface User {
@@ -579,7 +590,7 @@ export interface ProductLot {
   initial_quantity: number;
   current_quantity: number;
   unit: string;
-  quality_status: 'RELEASED' | 'QUARANTINE' | 'REJECTED' | 'RECALLED';
+  quality_status: 'PENDING_QC' | 'RELEASED' | 'ON_HOLD' | 'QUARANTINE' | 'REJECTED' | 'RECALLED';
   hold_reason?: string;
   status: string;
   created_at: string;
@@ -788,5 +799,103 @@ export interface VanLoadingPassCreate {
   notes?: string;
   idempotency_key?: string;
 }
+
+export type StorageStatus =
+  | 'ONLINE'
+  | 'BACKEND_UNAVAILABLE'
+  | 'SHEETS_DISCONNECTED'
+  | 'PARTIAL_SYNC'
+  | 'UNKNOWN';
+
+export type WorkflowState =
+  | 'IDLE'
+  | 'SUBMITTING'
+  | 'CONFIRMED'
+  | 'REJECTED'
+  | 'PENDING_UNKNOWN'
+  | 'BLOCKED_PENDING_OWNER_SETUP';
+
+export interface V2ErrorDetail {
+  status?: string;
+  error_code?: string;
+  detail?: string;
+  message?: string;
+  correlation_id?: string;
+  nonce?: string;
+  retryable?: boolean;
+  allocated_id?: string;
+  workflow_status?: WorkflowState;
+}
+
+export interface ReportTabPayload {
+  status?: string;
+  report_title?: string;
+  source_tab: string;
+  period?: string | null;
+  generated_at?: string | null;
+  balance_status?: 'BALANCED' | 'UNBALANCED' | 'REPORTED' | 'UNAVAILABLE' | string;
+  total_debit?: string | null;
+  total_credit?: string | null;
+  stale?: boolean;
+  unavailable_reason?: string | null;
+  rows: Array<Record<string, any>>;
+  row_count?: number;
+}
+
+export interface PendingCaPolicy {
+  policy_key: string;
+  label?: string;
+  status: 'PENDING_CA_APPROVAL' | 'APPROVED' | string;
+  value?: string | null;
+  allowed_values?: string[];
+  blocks_automated_posting?: boolean;
+  notes?: string;
+  updated_at?: string;
+  approved_by?: string;
+}
+
+export interface DatabaseGroupInfo {
+  group_code: string;
+  group_name: string;
+  module: string;
+  workbook_tabs: string[];
+  header_mapping_status: string;
+}
+
+export interface SchemaRegistryPayload {
+  cleaned_tab_baseline: number;
+  database_groups: DatabaseGroupInfo[];
+  locked_32_id_prefixes: Record<string, string>;
+  forbidden_scratch_prefixes: string[];
+  confidential_no_cache_tabs: string[];
+}
+
+export interface ErpCapabilitiesPayload {
+  role: string;
+  all_roles: string[];
+  module_permissions: Record<string, string[]>;
+  database_groups: DatabaseGroupInfo[];
+  locked_id_prefixes: Record<string, string>;
+  valid_retail_pack_weights_g: number[];
+  discontinued_retail_pack_weights_g?: number[];
+  lot_quality_states: string[];
+  gig_worker_statuses: string[];
+  apps_script_bridge_configured: boolean;
+  google_sheets_connected: boolean;
+  persistent_writes_enabled: boolean;
+  pending_ca_policies: Record<string, PendingCaPolicy>;
+}
+
+export interface PaginatedV2Response<T = Record<string, any>> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  tab_name?: string;
+  workflow_status?: string;
+}
+
+
 
 

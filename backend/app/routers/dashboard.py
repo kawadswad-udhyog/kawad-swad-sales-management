@@ -87,7 +87,7 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
 
     active_salesmen = sum(
         1 for u in users
-        if str(u.get("role", "")).upper() == "SALESMAN" and str(u.get("active", "true")).lower() == "true"
+        if str(u.get("role", "")).upper() in {"SALESMAN", "FIELD_SALESMAN"} and str(u.get("active", "true")).lower() == "true"
     )
 
     # Incomplete transactions count

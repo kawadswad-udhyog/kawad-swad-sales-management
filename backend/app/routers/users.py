@@ -45,11 +45,15 @@ async def list_users(current_user: dict = Depends(get_current_user)):
     users = get_all_users_with_auth()
     if not is_owner(current_user):
         # PA may see the operational directory needed to route requests, but not
-        # personal contact details, login names, or free-text employee notes.
+        # personal contact details, banking info, salary structure IDs, login names, or notes.
         redacted_users = []
         for user in users:
             safe_user = dict(user)
-            for field in ("username", "mobile", "email", "notes"):
+            for field in (
+                "username", "mobile", "email", "notes",
+                "address", "emergency_contact", "bank_details",
+                "salary_structure_id", "document_references",
+            ):
                 safe_user[field] = ""
             redacted_users.append(safe_user)
         users = redacted_users
@@ -67,9 +71,10 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
         raise HTTPException(status_code=403, detail="Only the business owner can create another owner account.")
 
     allowed_roles = {
-        "OWNER", "OWNER_ADMIN", "PA", "SALESMAN", "FIELD_SALESMAN",
-        "FREELANCER", "ACCOUNTANT", "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
-        "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"
+        "OWNER", "OWNER_ADMIN", "PA", "ACCOUNTS", "PROCUREMENT", "STORE",
+        "PRODUCTION", "QUALITY", "PACKAGING", "SALES", "FIELD_SALESMAN", "HR", "AUDITOR",
+        "SALESMAN", "FREELANCER", "ACCOUNTANT", "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
+        "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER",
     }
     if requested_role not in allowed_roles:
         raise HTTPException(status_code=422, detail=f"Role must be one of: {', '.join(sorted(allowed_roles))}.")

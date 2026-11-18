@@ -4,6 +4,7 @@ import { DailyClosing } from '../types';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { EmptyState } from '../components/common/EmptyState';
+import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import {
   Lock,
   Wallet,
@@ -37,13 +38,15 @@ export const ClosingView: React.FC = () => {
     reviewDailyClosing,
   } = useStore();
 
-  const isManager = currentUser?.role === 'OWNER' || currentUser?.role === 'PA';
-  const currentSalesmanId = currentUser?.user_id || 'USR-SALES-001';
+  const userRole = String(currentUser?.role || '').toUpperCase();
+  const isManager = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT', 'ACCOUNTS'].includes(userRole);
+  const currentSalesmanId = currentUser?.user_id || '';
 
   const [openingCash, setOpeningCash] = useState<number>(500);
   const [physicalCashReturned, setPhysicalCashReturned] = useState<number>(500);
   const [notes, setNotes] = useState('');
-  const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+  const [submissionNonce, setSubmissionNonce] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ msg: string; error?: boolean; unknownOutcome?: boolean } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Manager review modal state (no window.prompt!)
@@ -65,21 +68,39 @@ export const ClosingView: React.FC = () => {
     e.preventDefault();
     setNotice(null);
 
+    const activeNonce = submissionNonce || createSubmissionNonce('CLOSING');
+    if (!submissionNonce) {
+      setSubmissionNonce(activeNonce);
+    }
+
     try {
       setIsSubmitting(true);
       const closing = await submitDailyClosing({
         opening_cash: Number(openingCash),
         physical_cash_returned: Number(physicalCashReturned),
         notes: notes.trim(),
+        idempotency_key: activeNonce,
       });
 
+      setSubmissionNonce(null);
       setNotice({
-        msg: `Daily closing #${closing.closing_id} submitted with difference: ₹${closing.cash_difference.toFixed(2)}.`,
+        msg: `Daily closing #${closing.closing_id} confirmed with difference: ₹${closing.cash_difference.toFixed(2)}.`,
       });
       setNotes('');
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to submit daily closing';
-      setNotice({ msg: errorMsg, error: true });
+      if (isUnknownOutcomeError(err)) {
+        setNotice({
+          msg: `Status not confirmed; do not submit a new transaction. Inputs preserved for safe retry with same nonce (${activeNonce}).`,
+          error: true,
+          unknownOutcome: true,
+        });
+      } else {
+        const errorMsg = err instanceof Error ? err.message : 'Failed to submit daily closing';
+        setNotice({
+          msg: `NOT SAVED: ${errorMsg}. Inputs and nonce (${activeNonce}) are preserved for retry.`,
+          error: true,
+        });
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -102,8 +123,8 @@ export const ClosingView: React.FC = () => {
     }
   };
 
-  const visibleClosings = currentUser?.role === 'SALESMAN'
-    ? dailyClosings.filter((c) => c.salesman_user_id === currentUser.user_id)
+  const visibleClosings = ['SALESMAN', 'FIELD_SALESMAN'].includes(userRole)
+    ? dailyClosings.filter((c) => c.salesman_user_id === currentUser?.user_id)
     : dailyClosings;
 
   return (
@@ -195,7 +216,10 @@ export const ClosingView: React.FC = () => {
             >
               <MoneyInput
                 value={openingCash}
-                onChange={(val) => setOpeningCash(val)}
+                onChange={(val) => {
+                  setSubmissionNonce(null);
+                  setOpeningCash(val);
+                }}
                 placeholder="500.00"
                 required
               />
@@ -208,7 +232,10 @@ export const ClosingView: React.FC = () => {
             >
               <MoneyInput
                 value={physicalCashReturned}
-                onChange={(val) => setPhysicalCashReturned(val)}
+                onChange={(val) => {
+                  setSubmissionNonce(null);
+                  setPhysicalCashReturned(val);
+                }}
                 placeholder="0.00"
                 required
               />
@@ -258,13 +285,23 @@ export const ClosingView: React.FC = () => {
               maxLength={500}
               placeholder="e.g. 500x3, 200x5, 100x10. Shortage due to credit approved for shopkeeper..."
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              onChange={(e) => {
+                setSubmissionNonce(null);
+                setNotes(e.target.value);
+              }}
             />
           </FormField>
 
-          <div className="pt-2 flex justify-end">
+          <div className="pt-2 flex items-center justify-between gap-3 flex-wrap">
+            {submissionNonce ? (
+              <span className="text-[11px] font-mono text-amber-800 bg-amber-100 px-2.5 py-1 rounded font-semibold">
+                Preserved Nonce: {submissionNonce}
+              </span>
+            ) : (
+              <span />
+            )}
             <SaveButton
-              label="Submit Daily Cash Closing"
+              label={submissionNonce ? 'Retry Cash Closing (Same Nonce)' : 'Submit Daily Cash Closing'}
               isLoading={isSubmitting}
               icon={<Coins size={14} />}
             />

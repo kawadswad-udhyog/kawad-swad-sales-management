@@ -3,6 +3,8 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from app.models import Product, ProductCreate, ProductUpdate
 from app.sheets import db
 from app.auth import get_current_user
+from app.permissions import require_module_action
+from app.schema_registry import VALID_RETAIL_PACK_WEIGHTS_G, DISCONTINUED_RETAIL_PACK_WEIGHTS_G
 
 router = APIRouter(prefix="/api/products", tags=["Products"])
 
@@ -50,9 +52,16 @@ async def list_products(current_user: dict = Depends(get_current_user)):
 
 @router.post("", response_model=Product)
 async def create_product(req: ProductCreate, current_user: dict = Depends(get_current_user)):
-    caller_role = current_user.get("role", "").upper()
-    if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owner or PA can create products")
+    require_module_action(current_user, "catalogue", "create")
+
+    if int(req.pack_weight_g) in DISCONTINUED_RETAIL_PACK_WEIGHTS_G or (
+        (req.retail_pack_only or str(req.selling_unit or "PACKET").strip().upper() == "PACKET")
+        and int(req.pack_weight_g) not in VALID_RETAIL_PACK_WEIGHTS_G
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Retail SKU pack weight must be 200g, 500g, or 1000g (received {req.pack_weight_g}g).",
+        )
 
     product_id = db.generate_id("Products")
     record = {
@@ -97,14 +106,22 @@ async def create_product(req: ProductCreate, current_user: dict = Depends(get_cu
 @router.patch("/{product_id}", response_model=Product)
 @router.put("/{product_id}", response_model=Product)
 async def update_product(product_id: str, req: ProductUpdate, current_user: dict = Depends(get_current_user)):
-    caller_role = current_user.get("role", "").upper()
-    if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owner or PA can update products")
+    require_module_action(current_user, "catalogue", "update")
 
     records = db.get_records("Products")
     existing = next((r for r in records if str(_get_val(r, "product_id", default="")) == product_id), None)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    if req.pack_weight_g is not None:
+        w = int(req.pack_weight_g)
+        eff_retail = req.retail_pack_only if req.retail_pack_only is not None else _parse_bool(_get_val(existing, "retail_pack_only"), default=False)
+        eff_unit = str(req.selling_unit if req.selling_unit is not None else _get_val(existing, "selling_unit", default="PACKET")).strip().upper()
+        if w in DISCONTINUED_RETAIL_PACK_WEIGHTS_G or ((eff_retail or eff_unit == "PACKET") and w not in VALID_RETAIL_PACK_WEIGHTS_G):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Retail SKU pack weight must be 200g, 500g, or 1000g (received {w}g).",
+            )
 
     updates = {}
     if req.sku is not None:

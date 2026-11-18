@@ -16,8 +16,9 @@ export const UsersView: React.FC = () => {
     cancelApprovalRequest,
   } = useStore();
 
-  const isOwner = currentUser?.role === 'OWNER';
-  const isPA = currentUser?.role === 'PA';
+  const currentRoleUpper = String(currentUser?.role || '').toUpperCase();
+  const isOwner = ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(currentRoleUpper);
+  const isPA = ['PA', 'PERSONAL_ASSISTANT'].includes(currentRoleUpper);
 
   const [activeTab, setActiveTab] = useState<'directory' | 'approvals' | 'history' | 'reconciliation'>('directory');
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
@@ -41,7 +42,7 @@ export const UsersView: React.FC = () => {
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState<UserRole>('SALESMAN');
+  const [role, setRole] = useState<UserRole>('FIELD_SALESMAN');
   const [mobile, setMobile] = useState('');
   const [email, setEmail] = useState('');
   const [notes, setNotes] = useState('');
@@ -411,9 +412,18 @@ export const UsersView: React.FC = () => {
                   onChange={(e) => setRole(e.target.value as UserRole)}
                   disabled={isSubmitting}
                 >
-                  <option value="SALESMAN">SALESMAN (Field Sales)</option>
+                  <option value="FIELD_SALESMAN">FIELD_SALESMAN (Route Sales)</option>
+                  <option value="SALES">SALES (Billing & Counter)</option>
                   <option value="PA">PA (Personal Assistant)</option>
-                  {isOwner && <option value="OWNER">OWNER (Business Admin)</option>}
+                  <option value="ACCOUNTS">ACCOUNTS (Accounting & Approved Advances)</option>
+                  <option value="PROCUREMENT">PROCUREMENT (Purchasing & Mill)</option>
+                  <option value="STORE">STORE (Warehouse & Dispatches)</option>
+                  <option value="PRODUCTION">PRODUCTION (Batch Manufacturing)</option>
+                  <option value="QUALITY">QUALITY (QC & Lot Release)</option>
+                  <option value="PACKAGING">PACKAGING (Retail Pack Conversion)</option>
+                  <option value="HR">HR (Non-Confidential Attendance & Gig Verification)</option>
+                  <option value="AUDITOR">AUDITOR (Read-Only Statutory & Compliance)</option>
+                  {isOwner && <option value="OWNER_ADMIN">OWNER_ADMIN (Executive Admin)</option>}
                 </select>
               </label>
 
@@ -498,7 +508,8 @@ export const UsersView: React.FC = () => {
                 </thead>
                 <tbody>
                   {users.map((u) => {
-                    const isTargetOwner = u.role === 'OWNER';
+                    const targetRoleUpper = String(u.role || '').toUpperCase();
+                    const isTargetOwner = ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(targetRoleUpper);
                     const canManage = isOwner || (isPA && !isTargetOwner);
 
                     return (
@@ -520,18 +531,16 @@ export const UsersView: React.FC = () => {
                               borderRadius: '999px',
                               fontSize: '0.78rem',
                               fontWeight: 700,
-                              background:
-                                u.role === 'OWNER'
-                                  ? '#fef08a'
-                                  : u.role === 'PA'
-                                  ? '#bfdbfe'
-                                  : '#bbf7d0',
-                              color:
-                                u.role === 'OWNER'
-                                  ? '#854d0e'
-                                  : u.role === 'PA'
-                                  ? '#1e40af'
-                                  : '#166534',
+                              background: isTargetOwner
+                                ? '#fef08a'
+                                : ['PA', 'PERSONAL_ASSISTANT'].includes(targetRoleUpper)
+                                ? '#bfdbfe'
+                                : '#bbf7d0',
+                              color: isTargetOwner
+                                ? '#854d0e'
+                                : ['PA', 'PERSONAL_ASSISTANT'].includes(targetRoleUpper)
+                                ? '#1e40af'
+                                : '#166534',
                             }}
                           >
                             {u.role}
@@ -928,9 +937,18 @@ export const UsersView: React.FC = () => {
                   onChange={(e) => setEditRole(e.target.value as UserRole)}
                   disabled={isSubmitting}
                 >
-                  <option value="SALESMAN">SALESMAN (Field Sales)</option>
+                  <option value="FIELD_SALESMAN">FIELD_SALESMAN (Route Sales)</option>
+                  <option value="SALES">SALES (Billing & Counter)</option>
                   <option value="PA">PA (Personal Assistant)</option>
-                  {isOwner && <option value="OWNER">OWNER (Business Admin)</option>}
+                  <option value="ACCOUNTS">ACCOUNTS (Accounting & Approved Advances)</option>
+                  <option value="PROCUREMENT">PROCUREMENT (Purchasing & Mill)</option>
+                  <option value="STORE">STORE (Warehouse & Dispatches)</option>
+                  <option value="PRODUCTION">PRODUCTION (Batch Manufacturing)</option>
+                  <option value="QUALITY">QUALITY (QC & Lot Release)</option>
+                  <option value="PACKAGING">PACKAGING (Retail Pack Conversion)</option>
+                  <option value="HR">HR (Non-Confidential Attendance & Gig Verification)</option>
+                  <option value="AUDITOR">AUDITOR (Read-Only Statutory & Compliance)</option>
+                  {isOwner && <option value="OWNER_ADMIN">OWNER_ADMIN (Executive Admin)</option>}
                 </select>
               </label>
 

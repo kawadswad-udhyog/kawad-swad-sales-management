@@ -78,13 +78,18 @@ export const QualityView: React.FC = () => {
   const [showReturnModal, setShowReturnModal] = useState(false);
   const [showComplaintModal, setShowComplaintModal] = useState(false);
   const [showResolveModal, setShowResolveModal] = useState<ComplaintRecall | null>(null);
+  const [lotActionModal, setLotActionModal] = useState<{
+    lotId: string;
+    targetStatus: 'RELEASED' | 'ON_HOLD' | 'REJECTED';
+    reason: string;
+  } | null>(null);
 
   // Form states
   const [newCheck, setNewCheck] = useState({
     check_type: 'FINISHED_GOODS' as 'RAW_MATERIAL' | 'IN_PROCESS' | 'FINISHED_GOODS',
     entity_type: 'LOT',
     entity_id: 'LOT-202610-001',
-    item_name: 'Kawad Special Mung Papad (400g)',
+    item_name: 'Kawad Special Mung Papad (500g)',
     decision: 'PASS' as 'PASS' | 'FAIL' | 'HOLD',
     defect_details: '',
     corrective_action: '',
@@ -92,8 +97,8 @@ export const QualityView: React.FC = () => {
   });
 
   const [newLot, setNewLot] = useState({
-    product_id: 'PRD-PAPAD-400',
-    product_name: 'Kawad Special Mung Papad (400g)',
+    product_id: 'PRD-PAPAD-500',
+    product_name: 'Kawad Special Mung Papad (500g)',
     initial_quantity: 500,
     unit: 'packet',
     expiry_date: new Date(Date.now() + 180 * 24 * 3600 * 1000).toISOString().split('T')[0],
@@ -108,19 +113,19 @@ export const QualityView: React.FC = () => {
     disposition: 'PENDING_INSPECTION' as 'SCRAP' | 'RESTOCK' | 'PENDING_INSPECTION',
     notes: 'Outer shipper box seal was crushed during transit.',
     items: [
-      { product_id: 'PRD-PAPAD-400', sku: 'KS-PAP-400', product_name: 'Kawad Special Mung Papad (400g)', quantity: 20, unit: 'packet', unit_price: 110, reason: 'Transit crush damage' },
+      { product_id: 'PRD-PAPAD-500', sku: 'KS-PAP-500', product_name: 'Kawad Special Mung Papad (500g)', quantity: 20, unit: 'packet', unit_price: 110, reason: 'Transit crush damage' },
     ],
   });
 
   const [newComplaint, setNewComplaint] = useState({
     report_type: 'COMPLAINT' as 'COMPLAINT' | 'RECALL',
-    product_id: 'PRD-PAPAD-400',
+    product_id: 'PRD-PAPAD-500',
     lot_id: '',
     customer_id: '',
     customer_name: 'Agarwal Traders',
     quantity_affected: 15,
     severity: 'MEDIUM' as 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL',
-    description: 'Uneven roasted color in three packets reported by retailer.',
+    description: 'Uneven roasted color reported by retailer.',
     notes: '',
   });
 
@@ -166,22 +171,25 @@ export const QualityView: React.FC = () => {
     loadData();
   }, [loadData]);
 
-  const handleUpdateLotStatus = async (lotId: string, currentStatus: string) => {
-    let nextStatus: 'RELEASED' | 'QUARANTINE' | 'REJECTED' | 'RECALLED' = 'RELEASED';
-    if (currentStatus === 'RELEASED') {
-      nextStatus = 'QUARANTINE';
-    } else if (currentStatus === 'QUARANTINE') {
-      nextStatus = 'RELEASED';
-    } else {
-      nextStatus = 'QUARANTINE';
+  const handleOpenLotTransition = (lotId: string, targetStatus: 'RELEASED' | 'ON_HOLD' | 'REJECTED') => {
+    setLotActionModal({ lotId, targetStatus, reason: '' });
+  };
+
+  const handleConfirmLotTransition = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!lotActionModal) return;
+    if (lotActionModal.targetStatus !== 'RELEASED' && !lotActionModal.reason.trim()) {
+      setError(`Reason is required before marking a lot as ${lotActionModal.targetStatus}.`);
+      return;
     }
-
-    const holdReason = nextStatus === 'QUARANTINE' ? prompt('Reason for placing lot in quarantine:') : undefined;
-    if (nextStatus === 'QUARANTINE' && !holdReason) return;
-
     try {
-      await updateLotStatus(lotId, nextStatus, holdReason || undefined);
-      setSuccessMsg(`Lot ${lotId} status updated to ${nextStatus}.`);
+      await updateLotStatus(
+        lotActionModal.lotId,
+        lotActionModal.targetStatus as any,
+        lotActionModal.reason.trim() || undefined
+      );
+      setSuccessMsg(`Lot ${lotActionModal.lotId} quality_status updated to ${lotActionModal.targetStatus}.`);
+      setLotActionModal(null);
       loadData();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -436,7 +444,9 @@ export const QualityView: React.FC = () => {
                           className={`inline-block px-2 py-0.5 rounded-full text-2xs font-bold ${
                             l.quality_status === 'RELEASED'
                               ? 'bg-emerald-100 text-emerald-800'
-                              : l.quality_status === 'QUARANTINE'
+                              : l.quality_status === 'PENDING_QC'
+                              ? 'bg-blue-100 text-blue-800'
+                              : l.quality_status === 'ON_HOLD' || l.quality_status === 'QUARANTINE'
                               ? 'bg-amber-100 text-amber-800'
                               : 'bg-red-100 text-red-800'
                           }`}
@@ -447,20 +457,38 @@ export const QualityView: React.FC = () => {
                           <div className="text-2xs text-amber-700 mt-0.5 italic">{l.hold_reason}</div>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-center space-x-2">
+                      <td className="px-4 py-3 text-center space-x-1.5 whitespace-nowrap">
+                        {l.quality_status !== 'RELEASED' && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenLotTransition(l.lot_id, 'RELEASED')}
+                            className="text-2xs font-semibold px-2 py-1 rounded-sm text-emerald-700 hover:bg-emerald-50 border border-emerald-300"
+                          >
+                            Release
+                          </button>
+                        )}
+                        {l.quality_status !== 'ON_HOLD' && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenLotTransition(l.lot_id, 'ON_HOLD')}
+                            className="text-2xs font-semibold px-2 py-1 rounded-sm text-amber-700 hover:bg-amber-50 border border-amber-300"
+                          >
+                            Hold
+                          </button>
+                        )}
+                        {l.quality_status !== 'REJECTED' && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenLotTransition(l.lot_id, 'REJECTED')}
+                            className="text-2xs font-semibold px-2 py-1 rounded-sm text-red-700 hover:bg-red-50 border border-red-300"
+                          >
+                            Reject
+                          </button>
+                        )}
                         <button
-                          onClick={() => handleUpdateLotStatus(l.lot_id, l.quality_status)}
-                          className={`text-2xs font-semibold px-2 py-1 rounded-sm ${
-                            l.quality_status === 'RELEASED'
-                              ? 'text-amber-700 hover:bg-amber-50 border border-amber-300'
-                              : 'text-emerald-700 hover:bg-emerald-50 border border-emerald-300'
-                          }`}
-                        >
-                          {l.quality_status === 'RELEASED' ? 'Hold Quarantine' : 'Release Lot'}
-                        </button>
-                        <button
+                          type="button"
                           onClick={() => handleViewMovements(l.lot_id)}
-                          className="text-2xs font-semibold text-blue-600 hover:underline"
+                          className="text-2xs font-semibold text-blue-600 hover:underline ml-1"
                         >
                           Trace
                         </button>
@@ -777,17 +805,22 @@ export const QualityView: React.FC = () => {
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateLot} className="space-y-4">
-            <FormField label="Product Catalogue Item" required helpText="Select finished goods SKU">
+            <FormField label="Product Catalogue Item" required helpText="Retail SKUs restricted to 200g, 500g, 1000g">
               <SelectInput
                 value={newLot.product_id}
                 onChange={(e) => {
                   const id = e.target.value;
-                  const name = id === 'PRD-PAPAD-400' ? 'Kawad Special Mung Papad (400g)' : 'Kawad Masala Papad (200g)';
-                  setNewLot({ ...newLot, product_id: id, product_name: name });
+                  const map: Record<string, string> = {
+                    'PRD-PAPAD-200': 'Kawad Masala Papad (200g)',
+                    'PRD-PAPAD-500': 'Kawad Special Mung Papad (500g)',
+                    'PRD-PAPAD-1000': 'Kawad Family Pack Papad (1000g)',
+                  };
+                  setNewLot({ ...newLot, product_id: id, product_name: map[id] || 'Kawad Papad SKU' });
                 }}
                 options={[
-                  { value: 'PRD-PAPAD-400', label: 'Kawad Special Mung Papad (400g)' },
                   { value: 'PRD-PAPAD-200', label: 'Kawad Masala Papad (200g)' },
+                  { value: 'PRD-PAPAD-500', label: 'Kawad Special Mung Papad (500g)' },
+                  { value: 'PRD-PAPAD-1000', label: 'Kawad Family Pack Papad (1000g)' },
                 ]}
               />
             </FormField>
@@ -980,6 +1013,42 @@ export const QualityView: React.FC = () => {
             <FormActions>
               <CancelButton onClick={() => setShowResolveModal(null)} />
               <SaveButton label="Close Ticket with CAPA" variant="primary" />
+            </FormActions>
+          </form>
+        </FormLayout>
+      )}
+
+      {/* Modal: Lot Quality Transition (RELEASED / ON_HOLD / REJECTED) */}
+      {lotActionModal && (
+        <FormLayout
+          asModal
+          title={`Update Lot ${lotActionModal.lotId} → ${lotActionModal.targetStatus}`}
+          subtitle="Lot Quality State Machine: PENDING_QC → RELEASED / ON_HOLD / REJECTED"
+          onClose={() => setLotActionModal(null)}
+          maxWidth="max-w-md"
+        >
+          <form onSubmit={handleConfirmLotTransition} className="space-y-4">
+            <FormField
+              label="QC Decision Reason / Inspection Note"
+              required={lotActionModal.targetStatus !== 'RELEASED'}
+              helpText="Required when placing lot ON_HOLD or marking REJECTED"
+            >
+              <TextArea
+                rows={3}
+                required={lotActionModal.targetStatus !== 'RELEASED'}
+                value={lotActionModal.reason}
+                onChange={(e) =>
+                  setLotActionModal({ ...lotActionModal, reason: e.target.value })
+                }
+                placeholder="Enter QC inspection remarks or hold/rejection reason…"
+              />
+            </FormField>
+            <FormActions>
+              <CancelButton onClick={() => setLotActionModal(null)} />
+              <SaveButton
+                label={`Confirm ${lotActionModal.targetStatus}`}
+                variant={lotActionModal.targetStatus === 'REJECTED' ? 'danger' : 'primary'}
+              />
             </FormActions>
           </form>
         </FormLayout>

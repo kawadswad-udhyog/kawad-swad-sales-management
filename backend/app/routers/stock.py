@@ -81,7 +81,7 @@ async def list_stock_transactions(limit: int = 250, current_user: dict = Depends
     result = []
     for r in txns[-limit:]:
         s_user = str(r.get("salesman_user_id", ""))
-        if role not in ["OWNER", "OWNER_ADMIN", "PA"] and s_user != user_id:
+        if role not in ["OWNER", "OWNER_ADMIN", "PA", "STORE", "AUDITOR"] and s_user != user_id:
             continue
         result.append(StockTransaction(
             stock_txn_id=str(r.get("stock_txn_id", "")),
@@ -129,11 +129,11 @@ async def record_stock_movement(req: StockIssueCreate, current_user: dict = Depe
     txn_type = aliases.get(requested_type)
     if not txn_type:
         raise HTTPException(status_code=422, detail=f"Unsupported stock movement type: {requested_type}")
-    if txn_type in {"COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT"} and role not in {"OWNER", "OWNER_ADMIN", "PA"}:
-        raise HTTPException(status_code=403, detail="Only Owner or PA can change company stock.")
+    if txn_type in {"COMPANY_RECEIPT", "POSITIVE_ADJUSTMENT"} and role not in {"OWNER", "OWNER_ADMIN", "PA", "STORE"}:
+        raise HTTPException(status_code=403, detail="Only Owner, PA, or Store can change company stock.")
     if txn_type in {"ISSUE_TO_SALESMAN", "RETURN_FROM_SALESMAN", "SALESMAN_POSITIVE_ADJUSTMENT"} and not req.salesman_user_id:
         raise HTTPException(status_code=422, detail="Select a salesman for this stock movement.")
-    if role == "SALESMAN" and (txn_type != "RETURN_FROM_SALESMAN" or req.salesman_user_id != user_id):
+    if role in {"SALESMAN", "FIELD_SALESMAN"} and (txn_type != "RETURN_FROM_SALESMAN" or req.salesman_user_id != user_id):
         raise HTTPException(status_code=403, detail="Salesmen can only record returns for their own assigned stock.")
 
     now_iso = datetime.now(timezone.utc).isoformat()

@@ -25,6 +25,10 @@ import {
   ShieldCheck,
   Briefcase,
   Search,
+  SlidersHorizontal,
+  Store,
+  Wrench,
+  Send,
 } from 'lucide-react';
 import {
   getWorkspaceForRole,
@@ -54,7 +58,11 @@ export type ViewType =
   | 'reports'
   | 'accounting'
   | 'users'
-  | 'audit';
+  | 'audit'
+  | 'logistics'
+  | 'channels'
+  | 'compliance_assets'
+  | 'control_policies';
 
 interface NavigationProps {
   currentView: ViewType;
@@ -85,6 +93,10 @@ const VIEW_ICONS: Record<ViewType, React.ReactNode> = {
   closing: <Lock size={18} />,
   salary: <Coins size={18} />,
   products: <Tag size={18} />,
+  logistics: <Send size={18} />,
+  channels: <Store size={18} />,
+  compliance_assets: <Wrench size={18} />,
+  control_policies: <SlidersHorizontal size={18} />,
 };
 
 export const Navigation: React.FC<NavigationProps> = ({

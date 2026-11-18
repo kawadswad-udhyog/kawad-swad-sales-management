@@ -21,6 +21,40 @@ export interface DesignationConfig {
   canViewAccounting: boolean;
 }
 
+export const CANONICAL_12_ROLES = [
+  'OWNER_ADMIN',
+  'PA',
+  'ACCOUNTS',
+  'PROCUREMENT',
+  'STORE',
+  'PRODUCTION',
+  'QUALITY',
+  'PACKAGING',
+  'SALES',
+  'FIELD_SALESMAN',
+  'HR',
+  'AUDITOR',
+] as const;
+
+export type Canonical12Role = (typeof CANONICAL_12_ROLES)[number];
+
+export function resolveCanonical12Role(role?: string | null): Canonical12Role {
+  const norm = String(role || '').trim().toUpperCase();
+  if (['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(norm)) return 'OWNER_ADMIN';
+  if (['PA', 'PERSONAL_ASSISTANT'].includes(norm)) return 'PA';
+  if (['ACCOUNTS', 'ACCOUNTANT', 'FINANCE'].includes(norm)) return 'ACCOUNTS';
+  if (['PROCUREMENT', 'PURCHASE'].includes(norm)) return 'PROCUREMENT';
+  if (['STORE', 'STOREKEEPER', 'WAREHOUSE', 'DISPATCH'].includes(norm)) return 'STORE';
+  if (['PRODUCTION', 'PRODUCTION_WORKER', 'FACTORY_WORKER', 'OPERATOR', 'WORKER', 'LABOUR_SUPERVISOR', 'SUPERVISOR', 'MANAGER', 'OPERATIONS_MANAGER'].includes(norm)) return 'PRODUCTION';
+  if (['QUALITY', 'QC'].includes(norm)) return 'QUALITY';
+  if (['PACKAGING', 'PACKING'].includes(norm)) return 'PACKAGING';
+  if (['SALES', 'ECOMMERCE_MANAGER', 'SOCIAL_MEDIA_ECOMMERCE_MANAGER', 'SOCIAL_MEDIA_MANAGER'].includes(norm)) return 'SALES';
+  if (['FIELD_SALESMAN', 'SALESMAN'].includes(norm)) return 'FIELD_SALESMAN';
+  if (['HR', 'EMPLOYEE', 'FREELANCER'].includes(norm)) return 'HR';
+  if (['AUDITOR'].includes(norm)) return 'AUDITOR';
+  return 'FIELD_SALESMAN';
+}
+
 export const DESIGNATIONS: Record<string, DesignationConfig> = {
   // 1. Factory Workers
   production_worker: {
@@ -336,6 +370,9 @@ export function resolveEmployeeCategory(role?: string | null, explicitCategory?:
     normRole === 'WORKER' ||
     normRole === 'OPERATOR' ||
     normRole === 'PRODUCTION' ||
+    normRole === 'QUALITY' ||
+    normRole === 'PACKAGING' ||
+    normRole === 'STORE' ||
     normRole === 'DISPATCH' ||
     normRole === 'LABOUR_SUPERVISOR' ||
     normRole === 'SUPERVISOR'

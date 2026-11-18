@@ -8,8 +8,9 @@ from pydantic import BaseModel
 from app.sheets import db
 from app.auth import get_current_user
 from app.permissions import (
-    is_owner, is_manager, require_manager, require_owner,
-    role_of, is_employee, EMPLOYEE_ROLES
+    is_owner, is_manager, require_manager, require_owner, require_roles,
+    role_of, role_v2_of, is_employee, EMPLOYEE_ROLES,
+    filter_confidential_record, filter_confidential_records,
 )
 from app.models import (
     EmployeeAttendanceRecord,
@@ -99,7 +100,7 @@ async def get_my_workspace(current_user: dict = Depends(get_current_user)):
 
     # 5. Role-specific context
     role_context: Dict[str, Any] = {}
-    if c_role == "SALESMAN":
+    if role_v2_of(current_user) == "FIELD_SALESMAN" or c_role == "SALESMAN":
         # Check sales today or customer visit count
         sales = db.get_records("Sales", fresh=True) or []
         today_sales = [s for s in sales if str(s.get("salesman_user_id") or "").strip() == uid and str(s.get("date") or "").startswith(today)]
@@ -409,11 +410,11 @@ async def get_workforce_dashboard_metrics(current_user: dict = Depends(get_curre
 
 @router.get("/employees")
 async def list_employees(current_user: dict = Depends(get_current_user)):
-    """List all employees with full workforce details (Users + AuthUsers)."""
-    require_manager(current_user)
+    """List employees with directory details. Confidential bank/personal/salary fields stripped unless OWNER_ADMIN."""
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
     users = db.get_records("Users", fresh=True) or []
     auth_users = db.get_records("AuthUsers", fresh=True) or []
-    structures = db.get_records("SalaryStructures", fresh=True) or []
+    structures = (db.get_records("SalaryStructures", fresh=True) or []) if is_owner(current_user) else []
 
     auth_map = {str(a.get("user_id") or "").strip(): a for a in auth_users}
     struct_map = {str(s.get("user_id") or "").strip(): s for s in structures}
@@ -423,43 +424,51 @@ async def list_employees(current_user: dict = Depends(get_current_user)):
         uid = str(u.get("user_id") or "").strip()
         auth = auth_map.get(uid, {})
         struct = struct_map.get(uid, {})
-        result.append({
+        row = {
             "user_id": uid,
             "username": auth.get("username") or u.get("username") or uid,
             "full_name": u.get("full_name") or "",
-            "role": auth.get("role") or u.get("role") or "SALESMAN",
-            "employment_type": u.get("employment_type") or "SALARIED",
+            "role": auth.get("role") or u.get("role") or "FIELD_SALESMAN",
+            "employment_type": u.get("employment_type") or "FIXED_EMPLOYEE",
             "designation": u.get("designation") or u.get("role") or "",
             "department": u.get("department") or "",
             "reporting_manager_id": u.get("reporting_manager_id") or "",
             "joining_date": u.get("joining_date") or "",
             "employment_status": u.get("employment_status") or "ACTIVE",
             "salary_frequency": u.get("salary_frequency") or "MONTHLY",
-            "salary_structure_id": (u.get("salary_structure_id") or struct.get("structure_id") or "") if is_owner(current_user) else "",
-            "basic_salary": float(struct.get("basic_salary") or 0.0) if is_owner(current_user) else 0.0,
-            "mobile": u.get("mobile") or "",
-            "email": u.get("email") or "",
-            "address": u.get("address") or "",
-            "emergency_contact": u.get("emergency_contact") or "",
-            "bank_details": u.get("bank_details") or "",
             "active": str(u.get("active", "true")).lower() in {"true", "1", "yes"},
             "created_at": u.get("created_at") or "",
-            "notes": u.get("notes") or "",
-        })
-    return result
+            "notes": u.get("notes") or "" if is_owner(current_user) else "",
+        }
+        if is_owner(current_user):
+            row.update({
+                "salary_structure_id": u.get("salary_structure_id") or struct.get("structure_id") or "",
+                "basic_salary": float(struct.get("basic_salary") or 0.0),
+                "mobile": u.get("mobile") or "",
+                "email": u.get("email") or "",
+                "address": u.get("address") or "",
+                "emergency_contact": u.get("emergency_contact") or "",
+                "bank_details": u.get("bank_details") or "",
+            })
+        else:
+            row["basic_salary"] = 0.0
+        result.append(row)
+    return filter_confidential_records(result, current_user, tab_name="Employees")
 
 
 @router.get("/employees/{user_id}")
 async def get_employee_details(user_id: str, current_user: dict = Depends(get_current_user)):
-    """Full detail of an employee including attendance, tasks, and salary structure (Owner only for structure)."""
-    require_manager(current_user)
+    """Full detail of an employee including attendance and tasks. Bank/IDs/salary strictly OWNER_ADMIN only."""
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
     users = db.get_records("Users", fresh=True) or []
     target = next((u for u in users if str(u.get("user_id") or "").strip() == user_id.strip()), None)
     if not target:
         raise HTTPException(status_code=404, detail="Employee not found.")
 
-    structures = db.get_records("SalaryStructures", fresh=True) or []
-    structure = next((s for s in structures if str(s.get("user_id") or "").strip() == user_id.strip()), None)
+    structure = None
+    if is_owner(current_user):
+        structures = db.get_records("SalaryStructures", fresh=True) or []
+        structure = next((s for s in structures if str(s.get("user_id") or "").strip() == user_id.strip()), None)
 
     attendances = db.get_records("EmployeeAttendance", fresh=True) or []
     emp_att = [a for a in attendances if str(a.get("employee_id") or "").strip() == user_id.strip()]
@@ -469,8 +478,9 @@ async def get_employee_details(user_id: str, current_user: dict = Depends(get_cu
     emp_tasks = [t for t in tasks if str(t.get("assigned_to_user_id") or "").strip() == user_id.strip()]
     emp_tasks.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
 
+    safe_profile = filter_confidential_record(target, current_user, tab_name="Employees")
     return {
-        "profile": target,
+        "profile": safe_profile,
         "salary_structure": structure if is_owner(current_user) else None,
         "recent_attendance": emp_att[:15],
         "tasks": emp_tasks,
@@ -481,8 +491,8 @@ async def get_employee_details(user_id: str, current_user: dict = Depends(get_cu
 
 @router.get("/labour")
 async def list_labour(current_user: dict = Depends(get_current_user)):
-    """List all factory and contract labour workers from LabourMaster and legacy Workers."""
-    require_manager(current_user)
+    """List gig/contract labour workers. Confidential bank/address fields stripped unless OWNER_ADMIN."""
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "PRODUCTION"})
     records = db.get_records("LabourMaster", fresh=True) or []
     existing_ids = {str(l.get("labour_id") or "").strip() for l in records}
     existing_names = {str(l.get("full_name") or l.get("worker_name") or l.get("name") or "").strip().lower() for l in records}
@@ -511,13 +521,13 @@ async def list_labour(current_user: dict = Depends(get_current_user)):
                 "created_at": w.get("created_at") or "",
             })
     records.sort(key=lambda x: str(x.get("full_name") or x.get("worker_name") or ""))
-    return records
+    return filter_confidential_records(records, current_user, tab_name="LabourMaster")
 
 
 @router.post("/labour")
 async def create_labour(req: LabourCreate, current_user: dict = Depends(get_current_user)):
-    """Create a new labour master profile (generates LBR ID)."""
-    require_manager(current_user)
+    """Create a new labour master profile (generates LBR ID). Strips confidential bank fields for non-owners."""
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
     if not req.full_name or len(req.full_name.strip()) < 2:
         raise HTTPException(status_code=422, detail="Labour worker full name is required.")
 
@@ -532,17 +542,18 @@ async def create_labour(req: LabourCreate, current_user: dict = Depends(get_curr
         "base_rate": float(req.base_rate or 0.0),
         "daily_expected_hours": float(req.daily_expected_hours or 8.0),
         "mobile": req.mobile or "",
-        "emergency_contact": req.emergency_contact or "",
-        "address": req.address or "",
-        "bank_account_no": req.bank_account_no or "",
-        "bank_ifsc": req.bank_ifsc or "",
+        "emergency_contact": req.emergency_contact or "" if is_owner(current_user) else "",
+        "address": req.address or "" if is_owner(current_user) else "",
+        "bank_account_no": req.bank_account_no or "" if is_owner(current_user) else "",
+        "bank_ifsc": req.bank_ifsc or "" if is_owner(current_user) else "",
         "active": "true",
         "notes": req.notes or "",
         "created_at": _now_iso(),
     }
     db.append_record("LabourMaster", new_labour)
     _log_workforce_audit("CREATE_LABOUR", "LabourMaster", labour_id, actor_id, f"Created labour {req.full_name}")
-    return {"ok": True, "message": f"Labour worker {req.full_name} registered successfully.", "labour": new_labour, "labour_id": labour_id}
+    safe_labour = filter_confidential_record(new_labour, current_user, tab_name="LabourMaster")
+    return {"ok": True, "message": f"Labour worker {req.full_name} registered successfully.", "labour": safe_labour, "labour_id": labour_id}
 
 
 @router.put("/labour/{labour_id}")

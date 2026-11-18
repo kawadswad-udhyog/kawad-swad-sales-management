@@ -18,6 +18,10 @@ from app.config import (
     SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
     SALES_GOOGLE_SERVICE_ACCOUNT_JSON,
 )
+from app.schema_registry import (
+    CONFIDENTIAL_TABS_NO_CACHE,
+    is_forbidden_scratch_tab,
+)
 from app.timeutil import now_iso
 
 logger = logging.getLogger("kawad_swad.sheets")
@@ -1139,7 +1143,22 @@ class SheetsDatabase:
         with self._lock:
             self._records_cache.pop(tab_name, None)
 
+    def invalidate_tab_cache(self, tab_name: str) -> None:
+        """Immediately invalidate cached rows and diagnostic cache for a tab."""
+        self._invalidate_records_cache(tab_name)
+        self.invalidate_diagnostic_cache()
+
+    def invalidate_all_read_caches(self) -> None:
+        """Clear all shared non-confidential read caches."""
+        with self._lock:
+            self._records_cache.clear()
+            self._diagnostic_headers_cache = None
+
     def _get_worksheet(self, tab_name: str):
+        if is_forbidden_scratch_tab(tab_name):
+            raise RuntimeError(
+                f"Access denied: legacy scratch tab '{tab_name}' is forbidden and must never be recreated or queried."
+            )
         with self._lock:
             ws = self._worksheets.get(tab_name)
         if ws is not None:
@@ -1147,7 +1166,7 @@ class SheetsDatabase:
         try:
             ws = self.spreadsheet.worksheet(tab_name)
         except Exception as exc:
-            # If worksheet is not found, automatically create it with required headers if it's in REQUIRED_TABS
+            # Auto-create ONLY if explicitly present in verified REQUIRED_TABS (never auto-create unmapped 255-tab snapshot sheets)
             if tab_name in REQUIRED_TABS:
                 headers = REQUIRED_TABS[tab_name]
                 logger.info("Worksheet '%s' not found. Creating worksheet with default headers.", tab_name)
@@ -1263,6 +1282,13 @@ class SheetsDatabase:
             return parsed
 
     def get_records(self, tab_name: str, fresh: bool = False) -> List[Dict[str, Any]]:
+        if is_forbidden_scratch_tab(tab_name):
+            raise RuntimeError(
+                f"Access denied: legacy scratch tab '{tab_name}' is forbidden and must never be recreated or queried."
+            )
+        is_confidential_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE
+        effective_fresh = bool(fresh or is_confidential_tab)
+
         # If disconnected but configured, attempt single-flight self-healing reconnect with bounded backoff
         if not (self.is_connected and self.spreadsheet) and SALES_GOOGLE_SPREADSHEET_ID:
             if not self.allow_in_memory_fallback:
@@ -1286,8 +1312,8 @@ class SheetsDatabase:
         import time
         now = time.monotonic()
         with self._lock:
-            cached = self._records_cache.get(tab_name)
-        if not fresh:
+            cached = None if is_confidential_tab else self._records_cache.get(tab_name)
+        if not effective_fresh:
             if cached and now - cached[0] < self._records_cache_ttl_seconds:
                 return [dict(row) for row in cached[1]]
             with self._lock:
@@ -1301,7 +1327,7 @@ class SheetsDatabase:
             if not leader:
                 event.wait(timeout=30)
                 with self._lock:
-                    cached = self._records_cache.get(tab_name)
+                    cached = None if is_confidential_tab else self._records_cache.get(tab_name)
                     if cached:
                         return [dict(row) for row in cached[1]]
 
@@ -1313,7 +1339,11 @@ class SheetsDatabase:
                 worksheet = self._get_worksheet(tab_name)
                 safe_records = self._safe_read_worksheet_records(worksheet, tab_name)
                 with self._lock:
-                    self._records_cache[tab_name] = (time.monotonic(), safe_records)
+                    if is_confidential_tab:
+                        # Guarantee confidential payroll/bank/personal tables are NEVER held in shared cache
+                        self._records_cache.pop(tab_name, None)
+                    else:
+                        self._records_cache[tab_name] = (time.monotonic(), safe_records)
                 return [dict(row) for row in safe_records]
             except Exception as exc:
                 last_exc = exc
@@ -1323,8 +1353,8 @@ class SheetsDatabase:
                         "Google Sheets rate limit/429 for %s (attempt %d/%d): %s",
                         tab_name, attempt + 1, max_retries + 1, exc
                     )
-                    # ONLY serve cached data when fresh=False was requested!
-                    if not fresh and cached and cached[1]:
+                    # ONLY serve cached data when fresh=False was requested and tab is non-confidential
+                    if not effective_fresh and cached and cached[1]:
                         logger.info("Serving stale cached records for %s due to Google Sheets rate limit", tab_name)
                         return [dict(row) for row in cached[1]]
                     if attempt < max_retries:
@@ -1336,7 +1366,7 @@ class SheetsDatabase:
                         self._worksheets.pop(tab_name, None)
                     break
             finally:
-                if not fresh:
+                if not effective_fresh:
                     with self._lock:
                         event = self._inflight.pop(tab_name, None)
                         if event:
@@ -1354,6 +1384,66 @@ class SheetsDatabase:
 
     get_all_records = get_records
 
+    def query_records(
+        self,
+        tab_name: str,
+        *,
+        fresh: bool = False,
+        search: str = "",
+        filters: Optional[Dict[str, Any]] = None,
+        date_field: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 25,
+        sort_desc: bool = True,
+    ) -> Dict[str, Any]:
+        """Server-side filtered, searched, date-ranged, and paginated sheet read."""
+        rows = self.get_records(tab_name, fresh=fresh)
+
+        if filters:
+            for fk, fv in filters.items():
+                if fv is None or str(fv).strip() == "":
+                    continue
+                target_val = str(fv).strip().lower()
+                rows = [r for r in rows if str(r.get(fk, "")).strip().lower() == target_val]
+
+        if date_field and (date_from or date_to):
+            filtered_date_rows = []
+            d_from = str(date_from or "").strip()[:10]
+            d_to = str(date_to or "").strip()[:10]
+            for r in rows:
+                d_val = str(r.get(date_field, "")).strip()[:10]
+                if not d_val:
+                    continue
+                if d_from and d_val < d_from:
+                    continue
+                if d_to and d_val > d_to:
+                    continue
+                filtered_date_rows.append(r)
+            rows = filtered_date_rows
+
+        q = str(search or "").strip().lower()
+        if q:
+            rows = [r for r in rows if any(q in str(v).lower() for v in r.values())]
+
+        if sort_desc:
+            rows = list(reversed(rows))
+
+        safe_page = max(1, int(page or 1))
+        safe_size = max(1, min(int(page_size or 25), 200))
+        total = len(rows)
+        total_pages = max(1, (total + safe_size - 1) // safe_size)
+        start = (safe_page - 1) * safe_size
+        return {
+            "source_tab": tab_name,
+            "items": rows[start : start + safe_size],
+            "total": total,
+            "page": safe_page,
+            "page_size": safe_size,
+            "total_pages": total_pages,
+        }
+
     def inject_failure_once(self, tab_name: str, count: int = 1) -> None:
         with self._lock:
             self._fail_once[tab_name] = count
@@ -1365,6 +1455,11 @@ class SheetsDatabase:
         raise_on_error: bool = False,
         authorize_header_update: bool = False,
     ) -> bool:
+        if is_forbidden_scratch_tab(tab_name):
+            err_msg = f"Write blocked: legacy scratch tab '{tab_name}' is forbidden."
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return False
         self._invalidate_records_cache(tab_name)
         failures = self._fail_once.get(tab_name, 0)
         if failures > 0:
@@ -1499,6 +1594,11 @@ class SheetsDatabase:
            Financial authorization remains fail-closed to prevent unverified updates.
         """
         with self._lock:
+            if is_forbidden_scratch_tab(tab_name):
+                err_msg = f"Update blocked: legacy scratch tab '{tab_name}' is forbidden."
+                if raise_on_error:
+                    raise RuntimeError(err_msg)
+                return False
             self._invalidate_records_cache(tab_name)
             failures = self._fail_once.get(tab_name, 0)
             if failures > 0:
@@ -1603,6 +1703,11 @@ class SheetsDatabase:
                 return False
 
     def delete_record(self, tab_name: str, id_field: str, id_value: str, raise_on_error: bool = False) -> bool:
+        if is_forbidden_scratch_tab(tab_name):
+            err_msg = f"Delete blocked: legacy scratch tab '{tab_name}' is forbidden."
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return False
         self._invalidate_records_cache(tab_name)
         if not (self.is_connected and self.spreadsheet):
             shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")

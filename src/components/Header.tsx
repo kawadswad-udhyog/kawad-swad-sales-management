@@ -70,15 +70,15 @@ export const Header: React.FC<HeaderProps> = ({
 
   if (!isBackendConnected) {
     statusBadge = {
-      label: 'API Standby',
-      dot: 'bg-amber-500',
-      text: 'text-amber-800',
-      bg: 'bg-amber-50 border-amber-200',
-      icon: <Server size={13} className="text-amber-600" />,
+      label: 'API Unavailable',
+      dot: 'bg-red-500',
+      text: 'text-red-900',
+      bg: 'bg-red-50 border-red-200',
+      icon: <Server size={13} className="text-red-600" />,
     };
   } else if (!isGoogleSheetsConnected || !persistentWritesEnabled) {
     statusBadge = {
-      label: 'Sheets Standby',
+      label: 'Writes Locked',
       dot: 'bg-amber-500 animate-pulse',
       text: 'text-amber-900',
       bg: 'bg-amber-50 border-amber-300',
@@ -271,19 +271,19 @@ export const Header: React.FC<HeaderProps> = ({
                 <div className="flex justify-between items-center">
                   <span className="text-slate-600 font-medium">Backend API:</span>
                   <span className="font-bold text-slate-900">
-                    {isBackendConnected ? 'Connected (200 OK)' : 'Standby / Unreachable'}
+                    {isBackendConnected ? 'Connected (200 OK)' : 'Offline / Unreachable'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-slate-600 font-medium">Google Sheets:</span>
                   <span className="font-bold text-slate-900">
-                    {isGoogleSheetsConnected ? 'Connected (66 Tabs)' : 'Standby Mode'}
+                    {isGoogleSheetsConnected ? 'Connected (255-Tab Baseline)' : 'Disconnected (Fail Closed)'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-slate-600 font-medium">Persistent Writes:</span>
                   <span className="font-bold text-slate-900">
-                    {persistentWritesEnabled ? 'Enabled' : 'Locked / Inactive'}
+                    {persistentWritesEnabled ? 'Enabled (Governed Gateway)' : 'Locked / Blocked'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">

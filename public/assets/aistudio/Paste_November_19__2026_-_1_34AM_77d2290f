@@ -1,0 +1,597 @@
+KAWAD SWAD ERP
+GEMINI STUDIO MASTER IMPLEMENTATION INSTRUCTION
+Backend & Frontend Upgrade | Blueprint v2.1
+Prepared: 19 November 2026
+Status: IMPLEMENTATION INSTRUCTION FOR OWNER-APPROVED DEVELOPMENT
+Target code baseline: kawad-swad-sales-management-main (33).zip
+Database baseline: verified 255-tab post-cleanup workbook
+
+======================================================================
+0. INSTRUCTION TO GEMINI STUDIO
+======================================================================
+
+You are upgrading the existing Kawad Swad ERP application. This is an
+upgrade of an existing product, not a greenfield rebuild.
+
+Treat the supplied documents as the governing source material, in this order:
+
+1. kawad_swad_erp_master_manual_source_of_truth.md
+   Master Operations Manual, Policy Handler & Technical Source of Truth v2.0.
+2. Kawad_Swad_Google_Sheets_Master_Database_and_Policy_Blueprint_v2.0.txt
+   Adopted database and business-policy blueprint.
+3. kawad_swad_erp_backend_frontend_upgrade_blueprint_v2_1.txt
+   Backend/frontend target architecture and locked contracts.
+4. Kawad_Swad_Sales_Management_Google_Sheets (23).xlsx
+   Workbook snapshot for schema and header reference. The approved post-cleanup
+   baseline is 255 tabs. The 301-tab copy is the pre-cleanup snapshot and
+   includes 46 temporary scratch tabs that must not be recreated.
+5. kawad-swad-sales-management-main (33).zip
+   Existing application source code to upgrade.
+
+If a source is missing or contradictory, do not invent a business rule. Record
+the exact conflict and implement only the parts that are unambiguous. The
+Master Operations Manual and adopted Blueprint v2.0 govern business/database
+rules; Blueprint v2.1 governs the approved backend/frontend architecture.
+
+OWNER-APPROVED DIRECTION
+- Google Sheets is the only authoritative business database.
+- Apps Script is the sole owner of governed writes, ID allocation, locks,
+  idempotency enforcement, and ledger postings.
+- FastAPI is the authentication, role/field filtering, read/query, and API
+  gateway layer. It forwards governed writes to Apps Script.
+- React 18 + TypeScript + Vite remains the frontend.
+- Support all 15 database groups.
+- Preserve existing visual design and useful workflows wherever practical.
+- Remove fake business-data persistence and silent fallback behaviour.
+- Do not run tests during this development task.
+- Do not edit the live Google Sheet, Apps Script project, production GitHub
+  repository, Render service, credentials, or production records.
+- Do not deploy.
+- Do not restore/import historical business records.
+- Do not create a second business database.
+
+IMPORTANT SCOPE:
+This instruction authorises code development only in the supplied, isolated
+copy of the repository. It does not authorise tests, live access, migrations,
+Apps Script deployment, Google Sheets edits, GitHub pushes, Render deployment,
+or production release.
+
+======================================================================
+1. REQUIRED DEVELOPMENT APPROACH
+======================================================================
+
+1. Inspect the complete supplied repository before editing. Read its README,
+   release manifests, current API routes, auth/permission utilities, Sheets
+   adapter, frontend StoreContext, API client, route/navigation structure,
+   and relevant existing module documentation.
+2. Preserve existing working code and user workflows. Modify the smallest
+   practical set of files. Do not replace the project wholesale.
+3. Build a source-to-target mapping from existing files and the supplied
+   Blueprint. Do not assume a proposed module is absent until the repository
+   has been searched.
+4. Implement the target architecture consistently across frontend, FastAPI,
+   and Apps Script bridge contracts.
+5. Do not add or execute test suites, test commands, integration tests, live
+   diagnostics, spreadsheet write probes, or deployment commands in this task.
+6. Do not claim that the implementation is tested, validated, production-ready,
+   or safe for live deployment. Mark all such items NOT RUN / NOT VERIFIED.
+7. At completion, provide a change summary, file-by-file change list, known
+   gaps, assumptions, unresolved CA/Owner decisions, and exact manual steps
+   required for a later separately authorised validation/release phase.
+
+======================================================================
+2. LOCKED SYSTEM ARCHITECTURE
+======================================================================
+
+A. Google Sheets
+- Sole authoritative business database.
+- Use the verified 255-tab post-cleanup baseline.
+- 254 official Blueprint tables plus DBV5_FIELD_DICTIONARY_3074.
+- Do not recreate the 46 deleted scratch tabs.
+- Do not treat the 301-tab pre-cleanup snapshot as the current schema.
+- Preserve unknown columns, extra columns, formulas, existing headers and
+  existing data layout. Do not rename, delete, reorder, or rewrite headers.
+- Match fields by exact live header name. Any alias mapping must be explicit,
+  documented, and approved by the governing schema contract. Never silently
+  guess a field match.
+- The 94 core/workforce tables already hydrated by DictionaryHydrator.gs and
+  WorkforceEngine.gs must be treated as existing hydrated tables, not
+  re-created from stale KS_P3_FIELD_MAPPING snapshots.
+
+B. Apps Script: SINGLE WRITE / POSTING OWNER
+Apps Script is the only component allowed to perform governed business writes.
+It owns:
+- LockService-serialized ID allocation via IdAllocator.gs.
+- nonce/idempotency handling via SafeWriter.gs.
+- controlled writes and read-back verification.
+- stock overdraft validation and inventory movements via InventoryEngine.gs.
+- production and packaging governed workflows via
+  ProductionAndPackagingEngine.gs.
+- sales posting via SalesEngine.gs.
+- paise-exact double-entry journal posting via AccountingEngine.gs.
+- workforce payout separation via WorkforceEngine.gs.
+- audit and exception records, including the required AuditLog format.
+
+FastAPI must not independently allocate business IDs, append raw stock/ledger
+rows, post accounting entries, or bypass Apps Script controls.
+
+C. FastAPI: READ / QUERY / AUTH / GATEWAY
+FastAPI owns:
+- login/session authentication and token verification.
+- exact role-based and field-level read permissions.
+- filtered, paginated, searchable and date-range read APIs.
+- response shaping and typed request/response schemas.
+- request validation before forwarding.
+- authenticated/signed forwarding of governed mutations to the approved
+  Apps Script Web App / Execution API endpoints.
+- forwarding the client nonce unchanged.
+- interpreting Apps Script result/read-back confirmation and returning an
+  accurate status to React.
+- safe errors, exception logging, and short-lived read caches.
+- immediate cache invalidation after confirmed successful writes.
+
+FastAPI must never pretend a write succeeded merely because a request was
+accepted or forwarded. A success response requires the Apps Script result and
+required read-back verification. If the Apps Script response is ambiguous,
+return a pending/unknown-safe state and do not invite blind duplicate posting.
+
+D. React 18 + TypeScript + Vite: UI ONLY
+- Read business records from FastAPI.
+- Submit state changes to FastAPI with a unique client-generated nonce.
+- Display the immutable business ID returned after Apps Script read-back.
+- Do not write business records to localStorage, sessionStorage, IndexedDB,
+  browser databases, or in-memory stores as a substitute for Sheets.
+- Browser storage may hold only non-authoritative UI preferences and session
+  authentication tokens, subject to the existing security design.
+- Preserve unsaved form input in component memory when an API request fails;
+  show that it was not saved and provide a safe retry using the same nonce for
+  the same logical submission.
+- Never generate a new nonce for an automatic retry of the same logical
+  submission. A genuinely new transaction must receive a new nonce.
+
+======================================================================
+3. DATABASE BASELINE AND THE 15 GROUPS
+======================================================================
+
+Use the verified 255-tab baseline described in Blueprint v2.1. The earlier
+301-tab workbook snapshot contained 46 legacy build-phase scratch tabs
+(KS_P1_*, KS_P2_*, KS_P3_*, DBV5_*, DB_*). Do not recreate or map those
+scratch tabs as active business tables.
+
+Support all 15 database groups in ERP navigation, backend capability mapping,
+permissions and reporting:
+
+00. Control & Setup (DB-15 Governance & Control)
+01. Business & Master Data (DB-01)
+02. Procurement & Supplier (DB-02)
+03. Inventory & Warehousing (DB-03 and DB-07)
+04. Milling & Production (DB-04)
+05. Quality & Food Safety (DB-05)
+06. Packaging & Finished Goods (DB-06)
+07. Sales & Customer (DB-08)
+08. Channel, Marketplace & Marketing (DB-08 / channel extensions)
+09. Distribution & Logistics (DB-09)
+10. Finance & Accounting (DB-11 and DB-12)
+11. Workforce & Payroll (DB-10)
+12. Governance, Compliance & Audit (DB-13 and DB-15)
+13. Assets, Environment & Risk (DB-04 equipment and DB-13 risk)
+14. Reports & Planning (DB-14)
+
+Do not create a one-screen-per-worksheet interface. Organise screens around
+actual employee tasks and workflows. Every registered table must be accounted
+for in the schema/capability mapping, even if some tables are configuration,
+report views, control tables, or not directly exposed as CRUD screens.
+
+Create/maintain a machine-readable schema registry that records, at minimum:
+- canonical table name;
+- physical worksheet name;
+- department/group;
+- exact header names and order as observed in the supplied workbook;
+- field type and required/optional status where defined by the dictionary;
+- read capability;
+- governed write capability / Apps Script owner function;
+- role/field restrictions;
+- lifecycle status;
+- source and mapping notes;
+- unresolved/owner/CA status.
+
+Do not invent fields or change physical sheet headers. Where the supplied
+workbook snapshot does not expose a header or the Blueprint does not define
+the meaning, mark the field/table as PENDING_OWNER_MAPPING rather than guess.
+
+======================================================================
+4. FASTAPI BACKEND IMPLEMENTATION
+======================================================================
+
+4.1 Repository preservation
+- Keep the existing FastAPI application structure and existing useful routers.
+- Inspect existing routers before adding new ones. Extend existing modules
+  instead of creating duplicates.
+- Preserve existing route behaviour where it is compatible with the target
+  architecture. Where a route must change, document old route, new route,
+  compatibility handling, and affected frontend callers.
+- Do not remove existing accounting, production, sales, inventory, workforce,
+  attendance, visits, expenses, approvals, audit, closing, user, or reporting
+  functionality without an explicit reason and replacement.
+
+4.2 Google Sheets read adapter
+- Centralise all Google Sheets reads through a single adapter/service layer.
+- Use gspread/google-auth already present in the repository unless a
+  documented technical reason requires otherwise.
+- Read headers from Row 1 and resolve fields by exact header name.
+- Never depend on fragile hard-coded column numbers when a header lookup is
+  available.
+- Support pagination, search, filtering, date ranges and controlled caching.
+- Log missing sheet/header/configuration exceptions without silently returning
+  fabricated empty business records.
+- Distinguish an actually empty sheet from an unavailable sheet, permission
+  error, timeout, malformed response, or missing header.
+- Do not expose service-account credentials, tokens, or private configuration.
+
+4.3 Apps Script write bridge
+Create/extend one central Apps Script gateway client/service. All write routers
+must use it. The bridge must:
+- authenticate/sign requests using server-side secrets supplied through
+  environment configuration;
+- forward the client nonce unchanged;
+- include actor identity, role, action, payload, request timestamp and
+  correlation ID as required by the approved Apps Script contract;
+- use timeouts and safe retry rules;
+- avoid retrying non-idempotent requests with a different nonce;
+- parse Apps Script result states and read-back confirmation;
+- return the confirmed record ID and state;
+- log correlation IDs, failure categories and safe diagnostic details;
+- never log secrets or confidential employee/bank information.
+
+Do not invent Apps Script function names or deployment URLs. Inspect the
+supplied Apps Script source/manual for exact function names and contract. If
+an endpoint or function is not present in the supplied materials, create a
+clearly marked integration placeholder/configuration contract and report it
+as a blocking dependency. Do not deploy or modify the live Apps Script project.
+
+4.4 Required domain router coverage
+Map and extend the existing routers to cover all required capabilities:
+- Control/setup and business masters.
+- Procurement and suppliers.
+- Inventory and warehousing.
+- Milling and production.
+- Quality and food safety.
+- Packaging and finished goods.
+- Sales and customers.
+- Marketplace/channel operations and settlements.
+- Distribution and logistics.
+- Finance and accounting.
+- Workforce and payroll.
+- Governance, compliance and audit.
+- Assets, maintenance, environment and risk.
+- Reports and planning.
+
+The Blueprint specifically identifies missing capability areas to address:
+Packaging, Distribution/Logistics, Marketplace Settlements,
+Compliance/Food Safety, and Assets/Maintenance. First search for equivalent
+existing functionality; do not duplicate it.
+
+4.5 API versioning and contracts
+- Use /api/v2 for new or upgraded contracts.
+- Keep compatible existing routes where practical.
+- Define typed Pydantic request/response models.
+- Use Decimal for money values at API boundaries. Do not use binary floating
+  point as the authoritative representation of money.
+- Define explicit enums for workflow states.
+- Use consistent error response structure with machine-readable error code,
+  safe message, correlation ID, and retryability indicator.
+- Provide server-side pagination metadata.
+- Ensure API success/failure semantics reflect actual Sheets/Apps Script
+  results.
+
+4.6 Read caching
+- Use short-lived cache only for reads.
+- Invalidate affected cache keys immediately after confirmed successful writes.
+- Do not cache confidential payroll/bank data in shared cache.
+- Do not use cache as a write queue or source of truth.
+
+4.7 Accounting and costing safeguards
+- Enforce balanced debit/credit journal lines through Apps Script
+  AccountingEngine.gs.
+- Use integer paise in Apps Script and Decimal in FastAPI schemas.
+- Respect open-period checks before posting.
+- Do not hardcode unresolved GST rates, HSN decisions, inventory valuation
+  method, overhead/labour allocation bases, or depreciation schedules.
+- Keep unresolved policy inputs configurable and visibly marked
+  PENDING_CA_APPROVAL.
+- Do not enable automatic live financial posting for any policy that remains
+  pending CA/Owner confirmation.
+- Never silently change historic posted entries. Corrections must use linked
+  reversals or approved adjustments.
+
+======================================================================
+5. LOCKED ID PREFIXES, WORKFLOW STATES AND VALIDATIONS
+======================================================================
+
+Use the 32 approved ID prefixes exactly as listed in Config.gs / Blueprint
+v2.1:
+
+PRD, SKU, RM, PKG, CUST, SUP, USR, EMP, LOT, MOV, PO, PB, MCON, POUT,
+PLOSS, PWE, IPQC, FGQC, PKB, PKOUT, SO, SOI, INV, INVI, RCPT, RCPTA,
+JV, JVL, SAL, EADV, AUD, EXC.
+
+- FastAPI may validate prefix/shape but must not allocate the final ID.
+- Apps Script IdAllocator.gs is the only ID allocation owner.
+- Display the final immutable ID only after Apps Script confirms it.
+
+Lot quality states:
+PENDING_QC -> RELEASED / ON_HOLD / REJECTED.
+Block packaging consumption and sales dispatch unless quality_status is
+RELEASED. Enforce in both UI for user guidance and Apps Script for authority.
+UI-only validation is not sufficient.
+
+Retail SKU pack weights:
+Enforce 200g, 500g and 1000g for retail SKU creation/packaging, matching the
+approved ProductionAndPackagingEngine.gs rules. Do not reintroduce discontinued
+pack sizes without an explicit approved master-data change.
+
+Workforce separation:
+- FIXED_EMPLOYEE: monthly salary structure -> PayrollRuns -> SalaryPayments.
+- GIG_WORKER: daily piece/shift entry -> SUBMITTED -> VERIFIED -> PAID.
+- Do not merge these payment flows or expose one category's fields in the
+  other's workflow.
+
+Workflow states must remain distinct. At minimum support the applicable
+states: DRAFT, SUBMITTED, PENDING_QC, RELEASED, ON_HOLD, REJECTED, APPROVED,
+POSTED, VERIFIED, PAID, REVERSED, FAILED. Do not collapse request, approval,
+posting, payment, dispatch, settlement and reversal into one generic status.
+
+======================================================================
+6. SECURITY AND THE 12-ROLE CONTRACT
+======================================================================
+
+Use these exact role codes consistently in React, FastAPI and Apps Script:
+
+OWNER_ADMIN
+PA
+ACCOUNTS
+PROCUREMENT
+STORE
+PRODUCTION
+QUALITY
+PACKAGING
+SALES
+FIELD_SALESMAN
+HR
+AUDITOR
+
+- Enforce role permissions on every backend route, not only by hiding UI menu
+  items.
+- Enforce field-level filtering before serialising API responses.
+- Default to deny when role or permission is missing/unknown.
+- Do not let frontend-supplied role claims override authenticated server-side
+  identity.
+- Record privilege checks, denied access, failed writes and authorised
+  overrides in the approved audit/exception path.
+- Never expose secrets or personal financial data in logs.
+
+Confidentiality contract:
+- SalaryPayments, EmployeeAdvances, SalaryStructures, Employees.bank_details_reference
+  and personal ID fields are restricted.
+- OWNER_ADMIN has owner access.
+- ACCOUNTS may access only the minimum fields and actions required for
+  explicitly approved advance-disbursement workflows.
+- All other roles must receive filtered responses with restricted fields
+  absent, not merely hidden in React.
+- Never expose confidential employee/payroll information in dashboard
+  aggregate endpoints if the aggregate could identify a restricted person.
+
+======================================================================
+7. REACT FRONTEND IMPLEMENTATION
+======================================================================
+
+7.1 Preserve existing design
+- Keep current Kawad Swad branding, visual style, layout patterns, reusable
+  components, modals and useful screen flows.
+- Keep responsive layouts and mobile-first field-sales/factory workflows.
+- Do not perform a wholesale redesign.
+- Update navigation and forms only where required by the 15-group model,
+  security, database contract or workflow.
+
+7.2 Remove fake persistence
+- Remove initialData.ts as a source of production business records.
+- Remove localStorage/in-memory business-record persistence in StoreContext.
+- Do not seed demo/example data into production UI.
+- If demo mode is retained for design development, it must be explicitly
+  isolated, visibly labelled DEMO, disabled by default, and impossible to
+  confuse with live records.
+- Browser storage may retain only UI preferences and auth/session tokens
+  according to existing security design.
+
+7.3 Fail-closed user experience
+- If FastAPI or Sheets is unavailable, show a clear unavailable/read-only
+  banner.
+- Do not show stale fallback data as current saved records.
+- Disable actions that cannot safely be completed.
+- Preserve unsaved form values in memory and clearly label them NOT SAVED.
+- Provide a safe retry for the same logical submission using the same nonce.
+- Never show “Saved”, “Posted”, “Paid”, “Dispatched” or a success toast until
+  the backend confirms Apps Script success and read-back.
+- If the outcome is unknown, show “Status not confirmed; do not submit a new
+  transaction” and provide a safe status/retry path using the same nonce.
+
+7.4 Nonce and confirmation
+- Generate a unique nonce for every new logical write submission.
+- Reuse the same nonce for retries of that same submission.
+- Display the immutable business ID returned by the backend only after
+  Apps Script read-back verification.
+- Show meaningful progress and final states without claiming persistence
+  prematurely.
+
+7.5 Navigation and roles
+- Organise navigation around the 15 database groups and employee tasks.
+- Filter menus by exact authenticated role.
+- Do not treat hidden navigation as a substitute for backend permission checks.
+- Preserve mobile-first FIELD_SALESMAN workflows for Visits, Sales Orders,
+  Collections and Van Stock, and practical factory-floor supervisor workflows.
+
+7.6 Reports and closing
+Bind report/closing screens to the report tabs generated by
+ReportsAndClosingEngine.gs:
+- RPT_TrialBalance
+- RPT_StockStatus
+- RPT_SalesAndReceivables
+
+Display:
+- report period;
+- Generated At timestamp;
+- source tab;
+- BALANCED / UNBALANCED status where applicable;
+- stale/unavailable status where data is not current or could not be fetched.
+
+Do not calculate or present an unverified UI total as an official accounting
+report. Clearly label estimates and operational previews.
+
+======================================================================
+8. REQUIRED FRONTEND AND BACKEND CAPABILITY MAPPING
+======================================================================
+
+For each of the 15 groups, create a capability mapping that identifies:
+- relevant canonical tables and physical worksheet names;
+- existing React workspace/components;
+- existing FastAPI router/service;
+- required API endpoints;
+- Apps Script engine/function that owns writes;
+- allowed roles;
+- read/write distinction;
+- workflow states;
+- whether capability is implemented, extended, missing, or blocked by
+  unavailable Apps Script contract / pending owner decision.
+
+Do not create one endpoint per worksheet automatically. Design endpoints around
+business operations and workflows. Do not expose raw unrestricted worksheet
+CRUD endpoints to normal users.
+
+Existing router names found in the Blueprint include:
+Products, Customers, Sales, Stock, Expenses, Visits, Closing, Salary, Reports,
+Audit, Users, Production, Attendance, Approvals, Accounting, Purchasing,
+Quality and Workforce. Inspect the actual repository and preserve/extend
+their real implementation. Add missing capability routes only where the
+repository truly lacks them.
+
+======================================================================
+9. CONFIGURATION AND SECRETS
+======================================================================
+
+- Preserve the existing environment-variable pattern where practical.
+- Update .env.example with variable names and safe descriptions only.
+- Never place actual service-account JSON, private keys, passwords, API tokens,
+  webhook secrets, spreadsheet IDs if treated as private, or production URLs
+  in source code or generated documentation.
+- Do not print secrets in terminal output or logs.
+- Do not change production credentials.
+- Do not create or rotate credentials.
+- If a required secret or Apps Script endpoint is absent, add a clear
+  configuration requirement and mark it BLOCKED_PENDING_OWNER_SETUP.
+- Do not use a guessed deployment URL or guessed Apps Script function name.
+
+======================================================================
+10. STRICTLY PROHIBITED ACTIONS
+======================================================================
+
+DO NOT:
+1. Run tests, test suites, pytest, npm test, integration tests, browser tests,
+   live diagnostics or spreadsheet write probes during this task.
+2. Run deployment, release, publish, migration or production commands.
+3. Connect to or modify the live Google Sheet.
+4. Modify/deploy the live Apps Script project.
+5. Push to GitHub or modify the production repository.
+6. Deploy to Render or change Render environment variables.
+7. Import, restore, merge or recreate pre-reset/historical business records.
+8. Create MongoDB, SQLite, PostgreSQL or another competing business database.
+9. Recreate the 46 deleted scratch tabs.
+10. Rename, delete, reorder or rewrite existing workbook headers.
+11. Bypass Apps Script for any governed write or ledger posting.
+12. Hardcode pending CA/Owner accounting policies.
+13. weaken role permissions or reveal confidential employee/payroll data.
+14. claim tests passed or that the system is production-ready.
+15. silently remove an existing working feature to simplify implementation.
+
+If an action appears necessary but is prohibited or requires live access, do not
+perform it. Document it as a dependency for a separately authorised phase.
+
+======================================================================
+11. COMPLETION DELIVERABLES
+======================================================================
+
+When code development is complete, return the following:
+
+A. Updated source repository in the isolated development workspace.
+B. Change summary grouped by Backend, Frontend, Security, Database Contract,
+   and Configuration.
+C. File-by-file list of created, modified and removed files, with reason.
+D. 15-group capability mapping showing existing, upgraded, added, blocked.
+E. Table/header registry coverage summary for the 255-tab baseline, including
+   tables not exposed as direct UI screens.
+F. API contract summary including routes, methods, request/response models,
+   permissions, nonce behaviour and Apps Script owner function.
+G. Role/field permission matrix for all 12 roles.
+H. List of all Apps Script endpoints/functions assumed or required, with
+   source evidence and any missing integration dependency.
+I. List of unresolved CA/Owner policy inputs, which must remain configurable.
+J. List of known gaps, assumptions and any source conflicts.
+K. A clear statement:
+   “TESTS NOT RUN AS INSTRUCTED. LIVE GOOGLE SHEETS NOT ACCESSED. APPS SCRIPT
+   NOT DEPLOYED. GITHUB NOT PUSHED. RENDER NOT DEPLOYED. PRODUCTION DATA NOT
+   MODIFIED.”
+L. Separate later-phase validation/release checklist. Do not execute it.
+
+Do not claim that a complete capability is finished if it is only represented
+by a placeholder. Mark every item accurately as IMPLEMENTED IN CODE,
+CONFIGURATION REQUIRED, APPS SCRIPT DEPENDENCY, PENDING OWNER DECISION, or
+NOT IMPLEMENTED.
+
+======================================================================
+12. PENDING POLICY AND OWNER INPUTS
+======================================================================
+
+The following must remain isolated and must not block unrelated UI/API
+development:
+
+1. CA/Owner accounting inputs:
+   - HSN/GST rates;
+   - inventory valuation method (FIFO or Weighted Average);
+   - overhead and labour allocation basis;
+   - depreciation policy.
+   Keep these configurable and marked PENDING_CA_APPROVAL. Do not enable
+   automated live financial posting that depends on an unresolved value.
+
+2. Apps Script bridge:
+   Use exact function names and request/response formats from the supplied
+   Apps Script source/manual. If the actual deployment endpoint or required
+   function is not available in source materials, mark it as a setup dependency.
+   Do not invent one.
+
+3. Workbook live verification:
+   Use the supplied verified 255-tab workbook snapshot as the development
+   schema baseline. Do not connect to live Sheets to re-verify it during this
+   task.
+
+4. Code baseline:
+   Use the supplied kawad-swad-sales-management-main (33).zip as the isolated
+   source baseline. Do not fetch another branch or overwrite it with an
+   external version.
+
+======================================================================
+13. FINAL RESPONSE REQUIRED FROM GEMINI STUDIO
+======================================================================
+
+At the end, state:
+- whether the code upgrade was completed;
+- which capabilities are complete, partial, blocked or not implemented;
+- which files changed;
+- which source contracts could not be confirmed;
+- which Owner/CA decisions remain pending;
+- what must be supplied before a later validation/release phase;
+- explicitly confirm that no tests were run and no live/production system was
+  accessed or modified.
+
+Do not ask the Owner to approve a live deployment as part of this task.
+Stop after isolated code development and handover.
+
+END OF IMPLEMENTATION INSTRUCTION

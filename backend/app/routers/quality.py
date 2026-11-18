@@ -15,7 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_user
-from app.permissions import is_manager, is_owner, require_manager, require_owner
+from app.permissions import is_manager, is_owner, require_manager, require_owner, require_roles, role_v2_of
+from app.schema_registry import LOT_QUALITY_STATES
 from app.sheets import db
 from app.timeutil import now_iso, business_today
 from app.calculations.units import to_decimal, round_money, round_stock
@@ -23,19 +24,19 @@ from app.accounting.postings import post_customer_return_journal
 
 router = APIRouter(prefix="/api/quality", tags=["Quality & Traceability"])
 
-QUALITY_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN", "PA"}
+QUALITY_ROLES = {"OWNER_ADMIN", "OWNER", "ADMIN", "PA", "QUALITY"}
 
 
 def require_quality_access(user: dict):
-    if not is_manager(user):
-        raise HTTPException(403, "Access denied. Quality & Traceability operations require Manager privileges.")
-    return str(user.get("user_id", "")), str(user.get("role", "")).upper()
+    return require_roles(
+        user,
+        {"OWNER_ADMIN", "PA", "QUALITY"},
+        detail="Access denied. Quality & Traceability operations require Quality, PA, or Owner permissions.",
+    )
 
 
 def require_owner_access(user: dict):
-    if not is_owner(user):
-        raise HTTPException(403, "Access denied. Action requires Owner privileges.")
-    return str(user.get("user_id", "")), str(user.get("role", "")).upper()
+    return require_owner(user)
 
 
 # ============================================================================
@@ -155,12 +156,13 @@ async def create_quality_check(req: QualityCheckCreate, user: dict = Depends(get
     }
     db.append_record("QualityChecks", qc_row, raise_on_error=True)
 
-    # If linked to a product lot and failed/held, update lot status
+    # If linked to a product lot and passed/held/failed, update lot status
     if req.reference_type.upper() in {"PRODUCT_LOT", "LOT"}:
         lots = db.get_records("ProductLots", fresh=True)
         lot = next((l for l in lots if str(l.get("lot_id")) == req.reference_id or str(l.get("lot_number")) == req.reference_id), None)
         if lot:
-            new_status = "RELEASED" if req.decision.upper() == "PASS" else ("QUARANTINE" if req.decision.upper() == "HOLD" else "REJECTED")
+            dec_up = req.decision.upper()
+            new_status = "RELEASED" if dec_up == "PASS" else ("ON_HOLD" if dec_up == "HOLD" else "REJECTED")
             db.update_record("ProductLots", "lot_id", str(lot.get("lot_id")), {
                 "quality_status": new_status,
                 "hold_reason": req.defect_details or req.notes or "",
@@ -202,7 +204,7 @@ async def create_product_lot(req: ProductLotCreate, user: dict = Depends(get_cur
         "initial_quantity": float(req.initial_quantity),
         "current_quantity": float(req.initial_quantity),
         "unit": req.unit,
-        "quality_status": "RELEASED",
+        "quality_status": "PENDING_QC",
         "hold_reason": "",
         "status": "ACTIVE",
         "created_at": now,
@@ -224,7 +226,7 @@ async def create_product_lot(req: ProductLotCreate, user: dict = Depends(get_cur
         "unit": req.unit,
         "actor_user_id": actor,
         "created_at": now,
-        "notes": f"Initial creation of lot {lot_num}",
+        "notes": f"Initial creation of lot {lot_num} (PENDING_QC)",
     })
 
     db.log_audit(actor, "CREATE_PRODUCT_LOT", "ProductLots", lot_id, reason=f"Created Lot {lot_num} for {req.product_name} ({req.initial_quantity} {req.unit})")
@@ -233,14 +235,24 @@ async def create_product_lot(req: ProductLotCreate, user: dict = Depends(get_cur
 
 @router.post("/lots/{lot_id}/status")
 async def update_lot_status(lot_id: str, req: LotStatusUpdate, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner_access(user)
+    actor, _ = require_roles(
+        user,
+        {"OWNER_ADMIN", "QUALITY"},
+        detail="Only Quality Controller or OWNER_ADMIN can release, hold, or reject a product lot.",
+    )
+    new_st = req.quality_status.strip().upper()
+    if new_st == "QUARANTINE":
+        new_st = "ON_HOLD"
+    valid_statuses = set(LOT_QUALITY_STATES) | {"RECALLED"}
+    if new_st not in valid_statuses:
+        raise HTTPException(422, f"Invalid lot quality_status '{req.quality_status}'. Allowed: {sorted(valid_statuses)}.")
+
     lots = db.get_records("ProductLots", fresh=True)
     lot = next((l for l in lots if str(l.get("lot_id")) == lot_id or str(l.get("lot_number")) == lot_id), None)
     if not lot:
         raise HTTPException(404, f"Product lot {lot_id} not found.")
 
     clean_lot_id = str(lot.get("lot_id"))
-    new_st = req.quality_status.upper()
     updates = {
         "quality_status": new_st,
         "hold_reason": (req.hold_reason or "").strip(),

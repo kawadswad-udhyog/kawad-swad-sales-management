@@ -1,6 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../context/StoreContext';
-import { Payment } from '../types';
+import { Payment, ReportTabPayload } from '../types';
+import { fetchV2OfficialReport } from '../services/api';
+
+type OfficialReportSlug = 'trial-balance' | 'stock-status' | 'sales-receivables';
 
 export const ReportsView: React.FC = () => {
   const {
@@ -18,6 +21,29 @@ export const ReportsView: React.FC = () => {
   const currentYearMonth = new Date().toISOString().slice(0, 7);
   const [selectedMonth, setSelectedMonth] = useState(currentYearMonth);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+
+  const [officialSlug, setOfficialSlug] = useState<OfficialReportSlug>('trial-balance');
+  const [officialReport, setOfficialReport] = useState<ReportTabPayload | null>(null);
+  const [officialLoading, setOfficialLoading] = useState(false);
+  const [officialError, setOfficialError] = useState<string | null>(null);
+
+  const loadOfficialReport = useCallback(async (slug: OfficialReportSlug) => {
+    setOfficialLoading(true);
+    setOfficialError(null);
+    try {
+      const payload = await fetchV2OfficialReport(slug);
+      setOfficialReport(payload);
+    } catch (err: unknown) {
+      setOfficialReport(null);
+      setOfficialError(err instanceof Error ? err.message : 'Unable to fetch official report.');
+    } finally {
+      setOfficialLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadOfficialReport(officialSlug);
+  }, [officialSlug, loadOfficialReport]);
 
   // Filter sales for the selected month
   const monthSales = sales.filter(
@@ -169,6 +195,122 @@ export const ReportsView: React.FC = () => {
 
       {exportNotice && <div className="notice-success">{exportNotice}</div>}
 
+      {/* OFFICIAL SHEET-BACKED REPORTS (RPT_TrialBalance, RPT_StockStatus, RPT_SalesAndReceivables) */}
+      <div className="card" style={{ borderLeft: '4px solid #0f2c23' }}>
+        <div className="toolbar">
+          <div>
+            <h2 style={{ margin: 0 }}>Official Sheet-Backed Reports (Authoritative)</h2>
+            <p className="muted" style={{ margin: '4px 0 0' }}>
+              Bound directly to <code>RPT_TrialBalance</code>, <code>RPT_StockStatus</code>, and <code>RPT_SalesAndReceivables</code> in Google Sheets.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+            {[
+              { slug: 'trial-balance', label: 'RPT_TrialBalance' },
+              { slug: 'stock-status', label: 'RPT_StockStatus' },
+              { slug: 'sales-receivables', label: 'RPT_SalesAndReceivables' },
+            ].map((item) => (
+              <button
+                key={item.slug}
+                type="button"
+                className={officialSlug === item.slug ? 'primary' : 'secondary'}
+                onClick={() => setOfficialSlug(item.slug as OfficialReportSlug)}
+                style={{ fontWeight: 600 }}
+              >
+                {item.label}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="secondary"
+              disabled={officialLoading}
+              onClick={() => loadOfficialReport(officialSlug)}
+            >
+              {officialLoading ? 'Loading…' : '↻ Reload Official Tab'}
+            </button>
+          </div>
+        </div>
+
+        {officialError && (
+          <div className="notice-error" style={{ marginTop: '12px' }}>
+            <strong>Official Report Unavailable:</strong> {officialError}
+          </div>
+        )}
+
+        {officialReport && (
+          <div style={{ marginTop: '14px' }}>
+            <div className="grid">
+              <div className="metric">
+                <span>Source Tab</span>
+                <strong style={{ fontSize: '1rem' }}><code>{officialReport.source_tab}</code></strong>
+              </div>
+              <div className="metric">
+                <span>Period / Generated At</span>
+                <strong style={{ fontSize: '0.95rem' }}>
+                  {officialReport.period || 'CURRENT'} {officialReport.generated_at ? `· ${officialReport.generated_at}` : ''}
+                </strong>
+              </div>
+              <div className="metric">
+                <span>Balance / Status</span>
+                <strong
+                  style={{
+                    color:
+                      officialReport.balance_status === 'BALANCED'
+                        ? '#15803d'
+                        : officialReport.balance_status === 'UNBALANCED' || officialReport.status === 'UNAVAILABLE'
+                        ? '#b91c1c'
+                        : '#0f172a',
+                  }}
+                >
+                  {officialReport.balance_status || officialReport.status || 'UNKNOWN'}
+                </strong>
+              </div>
+              <div className="metric">
+                <span>Rows ({officialReport.row_count ?? officialReport.rows.length})</span>
+                <strong style={{ fontSize: '0.95rem' }}>
+                  {officialReport.total_debit != null || officialReport.total_credit != null
+                    ? `Dr ${officialReport.total_debit || '0.00'} / Cr ${officialReport.total_credit || '0.00'}`
+                    : officialReport.stale
+                    ? 'STALE / EMPTY'
+                    : 'LIVE SHEET ROWS'}
+                </strong>
+              </div>
+            </div>
+
+            {officialReport.unavailable_reason && (
+              <div className="notice-error" style={{ marginTop: '12px' }}>
+                <strong>Sheet State ({officialReport.status}):</strong> {officialReport.unavailable_reason}
+              </div>
+            )}
+
+            {officialReport.rows.length > 0 && (
+              <div className="table-wrap" style={{ marginTop: '14px' }}>
+                <table>
+                  <thead>
+                    <tr>
+                      {Object.keys(officialReport.rows[0]).slice(0, 8).map((col) => (
+                        <th key={col}>{col}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {officialReport.rows.map((r, idx) => (
+                      <tr key={idx}>
+                        {Object.keys(officialReport.rows[0])
+                          .slice(0, 8)
+                          .map((col) => (
+                            <td key={col}>{String(r[col] ?? '')}</td>
+                          ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="card">
         <h2>Export Worksheets to Excel (.xlsx)</h2>
         <p className="muted" style={{ marginTop: 0 }}>
@@ -190,7 +332,12 @@ export const ReportsView: React.FC = () => {
 
       <div className="card">
         <div className="toolbar">
-          <h2>Monthly Performance Analysis</h2>
+          <div>
+            <h2 style={{ margin: 0 }}>Monthly Performance Analysis — OPERATIONAL PREVIEW ONLY</h2>
+            <p className="muted" style={{ margin: '4px 0 0', fontSize: '0.82rem' }}>
+              Live Transaction Aggregation from operational collections. For official financial sign-off, use the Authoritative RPT_* tabs above.
+            </p>
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <label style={{ margin: 0, fontSize: '0.88rem' }}>Select month:</label>
             <input

@@ -3692,7 +3692,31 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         elif p_weight == 1000:
             req.packets_1000g = req.packets_produced
         else:
-            req.packets_200g = req.packets_produced
+            raise HTTPException(
+                422,
+                f"Retail SKU pack weight must be 200g, 500g, or 1000g (cannot package {p_weight}g SKU).",
+            )
+
+    # Blueprint v2.1 Quality Lot Release Gate: block packaging consumption of un-released lots
+    if req.bulk_batch_id and req.bulk_batch_id.strip():
+        lots = db.get_records("ProductLots", fresh=True) or []
+        matching_lots = [
+            l for l in lots
+            if str(l.get("production_id", "")).strip() == req.bulk_batch_id.strip()
+            or str(l.get("lot_id", "")).strip() == req.bulk_batch_id.strip()
+        ]
+        blocked_lot = next(
+            (l for l in matching_lots if str(l.get("quality_status", "")).strip().upper() != "RELEASED"),
+            None,
+        )
+        if blocked_lot:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Packaging blocked: Lot '{blocked_lot.get('lot_id')}' is in "
+                    f"'{blocked_lot.get('quality_status')}' state. Only RELEASED lots can be packaged."
+                ),
+            )
 
     # Calculate packed weight from SKU configurations
     packet_entries = [
@@ -4661,6 +4685,23 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
         raise HTTPException(404, "Product not found")
     if req.channel.upper() not in {"ECOMMERCE", "RETAIL", "SALESMAN", "WHOLESALE", "DISTRIBUTOR", "WAREHOUSE"}:
         raise HTTPException(400, "Unsupported distribution channel")
+
+    # Block dispatch if a non-released ProductLot is referenced via reference or active hold for product
+    lots = db.get_records("ProductLots", fresh=True) or []
+    ref_clean_check = str(req.reference or "").strip()
+    if ref_clean_check:
+        linked_lot = next(
+            (l for l in lots if str(l.get("lot_id", "")).strip() == ref_clean_check or str(l.get("lot_number", "")).strip() == ref_clean_check),
+            None,
+        )
+        if linked_lot and str(linked_lot.get("quality_status", "")).strip().upper() != "RELEASED":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Dispatch blocked: Lot '{linked_lot.get('lot_id')}' has quality_status="
+                    f"'{linked_lot.get('quality_status')}'. Only RELEASED lots may be dispatched."
+                ),
+            )
 
     ledger = db.get_records("ProductionStockLedger")
     packages = db.get_records("PackagingBatches", fresh=True)

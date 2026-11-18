@@ -22,10 +22,13 @@ from app.accounting.journal_engine import (
 router = APIRouter(prefix="/api/accounting", tags=["Accounting"])
 
 
-def require_accounting_access(user: dict):
+def require_accounting_access(user: dict, write: bool = False):
     role = str(user.get("role", "")).upper()
-    if role not in {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "PA"}:
-        raise HTTPException(403, "Access restricted to Owner, Admin, or Accountant.")
+    allowed_read = {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "ACCOUNTS", "PA", "AUDITOR"}
+    allowed_write = {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "ACCOUNTS", "PA"}
+    allowed = allowed_write if write else allowed_read
+    if role not in allowed:
+        raise HTTPException(403, "Access restricted to authorized Accounting, Owner, PA, or Auditor roles.")
     return str(user.get("user_id", "")), role
 
 
@@ -113,7 +116,7 @@ async def create_manual_journal_voucher(
     req: ManualJournalVoucherCreate,
     user: dict = Depends(get_current_user),
 ):
-    actor, _ = require_accounting_access(user)
+    actor, _ = require_accounting_access(user, write=True)
     try:
         voucher = post_journal_voucher(
             voucher_type=req.voucher_type,
@@ -137,7 +140,7 @@ async def reverse_voucher(
     req: ReversalRequest,
     user: dict = Depends(get_current_user),
 ):
-    actor, _ = require_accounting_access(user)
+    actor, _ = require_accounting_access(user, write=True)
     try:
         rev = reverse_journal_voucher(journal_id=journal_id, reason=req.reason, actor=actor)
         return rev
@@ -162,7 +165,7 @@ async def audit_reconcile_post(
     confirm_live_backfill: bool = Query(False),
     user: dict = Depends(get_current_user),
 ):
-    actor, role = require_accounting_access(user)
+    actor, role = require_accounting_access(user, write=not dry_run)
     if not dry_run:
         if role not in {"OWNER", "OWNER_ADMIN", "ADMIN"}:
             raise HTTPException(403, "Live accounting backfill writes are restricted to Owner or Admin.")

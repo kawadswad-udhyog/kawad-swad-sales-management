@@ -15,6 +15,8 @@ import {
   StockTxnType,
   CustomerType,
   ApprovalRequest,
+  StorageStatus,
+  ErpCapabilitiesPayload,
 } from '../types';
 import {
   apiRequest,
@@ -23,6 +25,7 @@ import {
   getApiBaseUrl,
   setApiBaseUrl,
   fetchBackendHealth,
+  fetchV2Capabilities,
 } from '../services/api';
 import {
   INITIAL_USERS,
@@ -198,6 +201,7 @@ export interface StoreContextType {
     opening_cash: number;
     physical_cash_returned: number;
     notes?: string;
+    idempotency_key?: string;
   }) => Promise<DailyClosing>;
   reviewDailyClosing: (
     closing_id: string,
@@ -221,6 +225,9 @@ export interface StoreContextType {
   dashboardMetrics: DashboardMetrics | null;
   auditLogs: AuditLog[];
   syncError: string | null;
+  storageStatus: StorageStatus;
+  capabilities: ErpCapabilitiesPayload | null;
+  refreshCapabilities: () => Promise<void>;
   clearSyncError: () => void;
   refreshData: () => Promise<void>;
   isRefreshing: boolean;
@@ -236,20 +243,11 @@ export interface StoreContextType {
 const StoreContext = createContext<StoreContextType | null>(null);
 
 export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem('ks_user');
-        if (saved) return JSON.parse(saved);
-      } catch {
-        // ignore
-      }
-    }
-    return null;
-  });
+  // Never persist business profile data in localStorage['ks_user']; hydrate solely from authenticated /api/auth/me.
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      return !localStorage.getItem('ks_user') && !!localStorage.getItem('ks_token');
+      return !!localStorage.getItem('ks_token');
     }
     return false;
   });
@@ -261,18 +259,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [customers, setCustomers] = useState<Customer[]>(INITIAL_CUSTOMERS);
   const [activeCustomerIdForBilling, setActiveCustomerIdForBilling] = useState<string | null>(null);
   const [sales, setSales] = useState<Sale[]>(INITIAL_SALES);
-  const [saleItems, setSaleItems] = useState<SaleItem[]>(INITIAL_SALES.flatMap((s) => s.lines || []));
+  const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
   const [payments, setPayments] = useState<Payment[]>(INITIAL_PAYMENTS);
   const [stockTransactions, setStockTransactions] = useState<StockTransaction[]>(INITIAL_STOCK_TRANSACTIONS);
-  const [companyStockSummary, setCompanyStockSummary] = useState<CompanyStockItem[]>([
-    { product_id: 'PRD-MOONG-200', sku: 'MOONG-200G', product_name: 'Moong Special Papad (200g)', pack_weight_g: 200, company_quantity: 400 },
-    { product_id: 'PRD-CHANA-250', sku: 'CHANA-250G', product_name: 'Chana Masala Papad (250g)', pack_weight_g: 250, company_quantity: 350 },
-    { product_id: 'PRD-URAD-200', sku: 'URAD-200G', product_name: 'Urad Punjabi Tadka Papad (200g)', pack_weight_g: 200, company_quantity: 250 },
-  ]);
-  const [salesmanStockSummary, setSalesmanStockSummary] = useState<SalesmanStockItem[]>([
-    { salesman_user_id: 'USR-SALES-01', salesman_name: 'Ramesh Patidar', product_id: 'PRD-MOONG-200', sku: 'MOONG-200G', product_name: 'Moong Special Papad (200g)', quantity: 80 },
-    { salesman_user_id: 'USR-SALES-01', salesman_name: 'Ramesh Patidar', product_id: 'PRD-CHANA-250', sku: 'CHANA-250G', product_name: 'Chana Masala Papad (250g)', quantity: 60 },
-  ]);
+  const [companyStockSummary, setCompanyStockSummary] = useState<CompanyStockItem[]>([]);
+  const [salesmanStockSummary, setSalesmanStockSummary] = useState<SalesmanStockItem[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>(INITIAL_EXPENSES);
   const [shopVisits, setShopVisits] = useState<ShopVisit[]>(INITIAL_SHOP_VISITS);
   const [dailyClosings, setDailyClosings] = useState<DailyClosing[]>(INITIAL_DAILY_CLOSINGS);
@@ -283,11 +274,44 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(INITIAL_DASHBOARD_METRICS);
   const [stockDiscrepancies, setStockDiscrepancies] = useState<any[]>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [storageStatus, setStorageStatus] = useState<StorageStatus>('UNKNOWN');
+  const [capabilities, setCapabilities] = useState<ErpCapabilitiesPayload | null>(null);
   const [isGoogleSheetsConnected, setIsGoogleSheetsConnected] = useState<boolean>(false);
   const [persistentWritesEnabled, setPersistentWritesEnabled] = useState<boolean>(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const clearSyncError = () => setSyncError(null);
+
+  const clearBusinessState = useCallback(() => {
+    setProducts([]);
+    setCustomers([]);
+    setSales([]);
+    setSaleItems([]);
+    setPayments([]);
+    setStockTransactions([]);
+    setCompanyStockSummary([]);
+    setSalesmanStockSummary([]);
+    setExpenses([]);
+    setShopVisits([]);
+    setDailyClosings([]);
+    setSalaryIncentives([]);
+    setAuditLogs([]);
+    setUsers([]);
+    setApprovalRequests([]);
+    setDashboardMetrics(null);
+    setStockDiscrepancies([]);
+  }, []);
+
+  const refreshCapabilities = useCallback(async () => {
+    const token = getAuthToken();
+    if (!token || token.startsWith('ks-local-jwt-')) return;
+    try {
+      const caps = await fetchV2Capabilities();
+      setCapabilities(caps);
+    } catch {
+      // Non-fatal if user role or backend unavailable
+    }
+  }, []);
 
   const checkHealth = useCallback(async (): Promise<{
     backendConnected: boolean;
@@ -297,14 +321,23 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }> => {
     const res = await fetchBackendHealth();
     const isOnline = res.status === 'ok' || res.backend?.status === 'CONNECTED';
+    const sheetsOk = res.google_sheets_connected ?? false;
+    const writesOk = res.persistent_writes_enabled ?? false;
     setIsBackendConnected(isOnline);
-    setIsGoogleSheetsConnected(res.google_sheets_connected ?? false);
-    setPersistentWritesEnabled(res.persistent_writes_enabled ?? false);
+    setIsGoogleSheetsConnected(sheetsOk);
+    setPersistentWritesEnabled(writesOk);
     setConnectionError(res.last_connection_error || null);
+    if (!isOnline) {
+      setStorageStatus('BACKEND_UNAVAILABLE');
+    } else if (!sheetsOk || !writesOk) {
+      setStorageStatus('SHEETS_DISCONNECTED');
+    } else {
+      setStorageStatus('ONLINE');
+    }
     return {
       backendConnected: isOnline,
-      sheetsConnected: res.google_sheets_connected ?? false,
-      persistentWrites: res.persistent_writes_enabled ?? false,
+      sheetsConnected: sheetsOk,
+      persistentWrites: writesOk,
       error: res.last_connection_error || undefined,
     };
   }, []);
@@ -371,7 +404,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       localStorage.removeItem('ks_token');
     }
     setCurrentUser(null);
-  }, []);
+    setCapabilities(null);
+    clearBusinessState();
+  }, [clearBusinessState]);
 
   // Multi-tab logout synchronization
   useEffect(() => {
@@ -491,7 +526,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       user_id: userPayload.user_id || cleanUsername,
       full_name: userPayload.full_name || cleanUsername,
       username: cleanUsername,
-      role: (userPayload.role || 'SALESMAN') as User['role'],
+      role: (userPayload.role || 'FIELD_SALESMAN') as User['role'],
       mobile: '',
       email: '',
       active: true,
@@ -501,12 +536,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     setCurrentUser(newUser);
     if (typeof window !== 'undefined') {
-      localStorage.setItem('ks_user', JSON.stringify(newUser));
+      localStorage.removeItem('ks_user');
     }
     setIsBackendConnected(true);
     setSyncError('Signed in. Loading your latest workspace data…');
     setIsRefreshing(true);
-    void loadInitialData(userPayload.role).finally(() => setIsRefreshing(false));
+    void Promise.all([loadInitialData(userPayload.role), refreshCapabilities()]).finally(() =>
+      setIsRefreshing(false)
+    );
   };
 
   // Load all live records from FastAPI backend
@@ -515,7 +552,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!token || token.startsWith('ks-local-jwt-')) return;
 
     try {
-      const activeRole = role || currentUser?.role;
+      const _activeRole = role || currentUser?.role;
       // Parallel fetch for all core tables
       const workspace = await apiRequest<{
         products: Product[] | null;
@@ -546,6 +583,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const details = syncErrors
           .map((item) => `${item.resource}: ${item.message}`)
           .join('; ');
+        setStorageStatus('PARTIAL_SYNC');
         setSyncError(`Partial data sync. Some records could not be retrieved from storage. ${details}`);
       } else {
         setSyncError(null);
@@ -657,16 +695,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       try {
-        let cachedUser: User | null = null;
-        if (typeof window !== 'undefined') {
-          try {
-            const raw = localStorage.getItem('ks_user');
-            if (raw) cachedUser = JSON.parse(raw);
-          } catch {
-            // ignore
-          }
-        }
-
         let me: { user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean };
         try {
           me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/api/auth/me', { silent: true });
@@ -678,28 +706,28 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
         }
 
-        const realUsername = me.username || cachedUser?.username || me.user_id;
+        const realUsername = me.username || me.user_id;
         const verifiedUser: User = {
           user_id: me.user_id,
-          full_name: me.full_name || cachedUser?.full_name || realUsername,
+          full_name: me.full_name || realUsername,
           username: realUsername,
-          role: (me.role || cachedUser?.role || 'SALESMAN') as User['role'],
-          mobile: cachedUser?.mobile || '',
-          email: cachedUser?.email || '',
+          role: (me.role || 'FIELD_SALESMAN') as User['role'],
+          mobile: '',
+          email: '',
           active: true,
-          created_at: cachedUser?.created_at || new Date().toISOString(),
-          notes: cachedUser?.notes || '',
+          created_at: new Date().toISOString(),
+          notes: '',
         };
         setCurrentUser(verifiedUser);
         if (typeof window !== 'undefined') {
-          localStorage.setItem('ks_user', JSON.stringify(verifiedUser));
+          localStorage.removeItem('ks_user');
         }
         setIsBackendConnected(true);
-        // Restore the cached session immediately. Fetch live records after
-        // rendering so browser refresh does not wait on all Sheets requests.
-        setSyncError('Session restored. Loading your latest workspace data…');
+        setSyncError('Session verified. Loading live workspace data…');
         setIsRefreshing(true);
-        void loadInitialData(me.role).finally(() => setIsRefreshing(false));
+        void Promise.all([loadInitialData(me.role), refreshCapabilities()]).finally(() =>
+          setIsRefreshing(false)
+        );
       } catch (e: unknown) {
         console.warn('Session verification warning:', e);
         const msg = e instanceof Error ? e.message.toLowerCase() : '';
@@ -709,11 +737,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             localStorage.removeItem('ks_user');
           }
           setCurrentUser(null);
+          clearBusinessState();
         } else {
-          // If network / Render waking up, preserve user session so page refresh doesn't log them out!
           setIsBackendConnected(false);
-          setSyncError('Connecting to backend API... (Backend may be spinning up).');
-          loadInitialData().catch(() => {});
+          setStorageStatus('BACKEND_UNAVAILABLE');
+          setSyncError('Backend API is unavailable. Governed operations and unverified reads are locked.');
         }
       } finally {
         setIsLoading(false);
@@ -722,7 +750,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     checkSession();
     checkHealth();
-  }, [loadInitialData, checkHealth]);
+  }, [loadInitialData, checkHealth, clearBusinessState, refreshCapabilities]);
 
   const refreshData = async () => {
     setIsRefreshing(true);
@@ -1111,6 +1139,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     opening_cash: number;
     physical_cash_returned: number;
     notes?: string;
+    idempotency_key?: string;
   }): Promise<DailyClosing> => {
     const saved = await apiRequest<DailyClosing>('/api/closing', {
       method: 'POST',
@@ -1478,6 +1507,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         refreshDashboardMetrics,
         auditLogs,
         syncError,
+        storageStatus,
+        capabilities,
+        refreshCapabilities,
         clearSyncError,
         refreshData,
         isRefreshing,

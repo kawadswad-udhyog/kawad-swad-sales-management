@@ -30,7 +30,8 @@ export const ProductsView: React.FC = () => {
     isRefreshing,
   } = useStore();
 
-  const isManager = currentUser?.role === 'OWNER' || currentUser?.role === 'PA';
+  const userRole = String(currentUser?.role || '').toUpperCase();
+  const isManager = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT'].includes(userRole);
 
   const [filter, setFilter] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -86,6 +87,15 @@ export const ProductsView: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
+
+    const parsedWeight = Number(packWeightG);
+    if ((retailPackOnly || sellingUnit === 'packet') && ![200, 500, 1000].includes(parsedWeight)) {
+      setNotice({
+        msg: `Retail packet SKUs strictly allow 200g, 500g, or 1000g only (250g and 400g packs are discontinued). Received: ${parsedWeight}g.`,
+        error: true,
+      });
+      return;
+    }
 
     try {
       if (editingId) {
@@ -149,9 +159,9 @@ export const ProductsView: React.FC = () => {
   };
 
   const getProductStock = (productId: string) => {
-    if (currentUser?.role === 'SALESMAN') {
+    if (['SALESMAN', 'FIELD_SALESMAN'].includes(userRole)) {
       const sm = salesmanStockSummary.find(
-        (s) => s.product_id === productId && s.salesman_user_id === currentUser.user_id
+        (s) => s.product_id === productId && s.salesman_user_id === currentUser?.user_id
       );
       return { quantity: sm ? sm.quantity : 0, label: 'My Stock' };
     }
@@ -304,15 +314,27 @@ export const ProductsView: React.FC = () => {
                 />
               </FormField>
 
-              <FormField label="Pack Net Weight (grams)" required helpText="Select preset or enter exact grams">
+              <FormField label="Pack Net Weight (grams)" required helpText="Retail SKUs strictly allow 200g, 500g, or 1000g (250g/400g discontinued)">
                 <div className="space-y-1.5">
-                  <QuantityInput
-                    unit="g"
-                    min={1}
-                    step={1}
-                    value={packWeightG}
-                    onChange={(val) => setPackWeightG(val)}
-                  />
+                  {retailPackOnly ? (
+                    <SelectInput
+                      value={String([200, 500, 1000].includes(Number(packWeightG)) ? packWeightG : 200)}
+                      onChange={(e) => setPackWeightG(Number(e.target.value))}
+                      options={[
+                        { value: '200', label: '200 g (Standard Retail)' },
+                        { value: '500', label: '500 g (Medium Retail)' },
+                        { value: '1000', label: '1000 g / 1 kg (Family Pack)' },
+                      ]}
+                    />
+                  ) : (
+                    <QuantityInput
+                      unit="g"
+                      min={1}
+                      step={1}
+                      value={packWeightG}
+                      onChange={(val) => setPackWeightG(val)}
+                    />
+                  )}
                   <div className="flex gap-1.5">
                     {[200, 500, 1000].map((preset) => (
                       <button

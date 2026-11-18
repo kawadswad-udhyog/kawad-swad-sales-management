@@ -4,6 +4,7 @@ import { CustomerType, Sale, SaleItem, Product } from '../types';
 import { generateInvoicePdf } from '../utils/generateInvoicePdf';
 import { InvoiceModal } from '../components/InvoiceModal';
 import { PageHeader } from '../components/common/PageHeader';
+import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import {
   CalculationPreview,
   MoneyInput,
@@ -40,7 +41,6 @@ const getDefaultPriceForProduct = (p?: Product, saleType?: CustomerType): number
   const weight = p.pack_weight_g || 200;
   let basePrice = 50;
   if (weight <= 200) basePrice = 50;
-  else if (weight <= 250) basePrice = 60;
   else if (weight <= 500) basePrice = 110;
   else if (weight <= 1000) basePrice = 210;
   else basePrice = Math.round(weight * 0.22);
@@ -138,10 +138,12 @@ export const SalesView: React.FC = () => {
   const [viewingSaleData, setViewingSaleData] = useState<{ sale: Sale; items: SaleItem[] } | null>(null);
   const [customShareMobile, setCustomShareMobile] = useState('');
 
+  const userRoleUpper = String(currentUser?.role || '').toUpperCase();
+
   const getAvailableStock = (productId: string) => {
-    if (currentUser?.role === 'SALESMAN') {
+    if (['SALESMAN', 'FIELD_SALESMAN'].includes(userRoleUpper)) {
       const sm = salesmanStockSummary.find(
-        (s) => s.product_id === productId && s.salesman_user_id === currentUser.user_id
+        (s) => s.product_id === productId && s.salesman_user_id === currentUser?.user_id
       );
       return sm ? sm.quantity : 0;
     } else {
@@ -354,10 +356,8 @@ export const SalesView: React.FC = () => {
       customerMode === 'registered' ? selectedCustomer?.mobile || '' : walkInMobile.trim();
 
     setIsSubmitting(true);
-    // Reuse the active idempotency key for retries of this exact bill, preventing duplicate sales
-    const idempotencyKey =
-      submissionIdempotencyKey ||
-      `IDEMP-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}-${(resolvedCustId || 'WALKIN').slice(-4)}`;
+    // Reuse the active nonce for retries of this exact bill, preventing duplicate sales
+    const idempotencyKey = submissionIdempotencyKey || createSubmissionNonce('SALE');
     if (!submissionIdempotencyKey) {
       setSubmissionIdempotencyKey(idempotencyKey);
     }
@@ -408,19 +408,18 @@ export const SalesView: React.FC = () => {
       setWalkInMobile('');
       setProductSearch('');
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to issue bill';
-      const isTimeoutOrNetwork =
-        errorMsg.toLowerCase().includes('time') ||
-        errorMsg.toLowerCase().includes('network') ||
-        errorMsg.toLowerCase().includes('fetch') ||
-        errorMsg.toLowerCase().includes('spin') ||
-        errorMsg.toLowerCase().includes('connect');
-      setNotice({
-        msg: isTimeoutOrNetwork
-          ? `${errorMsg}. Your cart and payment details are safely preserved. Click "Retry Bill Submission" to safely resubmit with duplicate protection.`
-          : errorMsg,
-        error: true,
-      });
+      if (isUnknownOutcomeError(err)) {
+        setNotice({
+          msg: `Status not confirmed; do not submit a new transaction. Your cart and bill details are preserved — retry with the same nonce (${idempotencyKey}) once connectivity stabilizes.`,
+          error: true,
+        });
+      } else {
+        const errorMsg = err instanceof Error ? err.message : 'Failed to issue bill';
+        setNotice({
+          msg: `NOT SAVED: ${errorMsg}. Your cart and payment details remain preserved (nonce: ${idempotencyKey}).`,
+          error: true,
+        });
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -449,11 +448,11 @@ export const SalesView: React.FC = () => {
 
   // Filter bills for salesman vs manager
   const userVisibleSales =
-    currentUser?.role === 'SALESMAN'
+    ['SALESMAN', 'FIELD_SALESMAN'].includes(userRoleUpper)
       ? sales.filter(
           (s) =>
-            s.salesman_user_id === currentUser.user_id ||
-            s.entered_by_user_id === currentUser.user_id
+            s.salesman_user_id === currentUser?.user_id ||
+            s.entered_by_user_id === currentUser?.user_id
         )
       : sales;
 
@@ -1391,7 +1390,7 @@ export const SalesView: React.FC = () => {
                         >
                           👁️ Inspect
                         </button>
-                        {(currentUser?.role === 'OWNER' || currentUser?.role === 'PA' || s.salesman_user_id === currentUser?.user_id) && (
+                        {(['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT'].includes(userRoleUpper) || s.salesman_user_id === currentUser?.user_id) && (
                           <button
                             type="button"
                             className="secondary"

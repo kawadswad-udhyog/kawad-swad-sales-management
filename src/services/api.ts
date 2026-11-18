@@ -24,6 +24,12 @@ import type {
   AccountingPeriod,
   VanLoadingPass,
   VanLoadingPassCreate,
+  ErpCapabilitiesPayload,
+  PendingCaPolicy,
+  ReportTabPayload,
+  PaginatedV2Response,
+  V2ErrorDetail,
+  WorkflowState,
 } from '../types';
 
 export const DEFAULT_API_BASE_URL =
@@ -216,13 +222,23 @@ export class ApiHttpError extends Error {
   category: ApiFailureCategory;
   targetUrl: string;
   isRenderNoServer: boolean;
+  errorCode?: string;
+  correlationId?: string;
+  retryable?: boolean;
+  workflowStatus?: WorkflowState;
 
   constructor(
     status: number,
     message: string,
     category: ApiFailureCategory,
     targetUrl: string,
-    isRenderNoServer = false
+    isRenderNoServer = false,
+    extra?: {
+      errorCode?: string;
+      correlationId?: string;
+      retryable?: boolean;
+      workflowStatus?: WorkflowState;
+    }
   ) {
     super(message);
     this.name = 'ApiHttpError';
@@ -230,7 +246,42 @@ export class ApiHttpError extends Error {
     this.category = category;
     this.targetUrl = targetUrl;
     this.isRenderNoServer = isRenderNoServer;
+    this.errorCode = extra?.errorCode;
+    this.correlationId = extra?.correlationId;
+    this.retryable = extra?.retryable;
+    this.workflowStatus = extra?.workflowStatus;
   }
+}
+
+export class ApiOutcomeUnknownError extends Error {
+  nonce?: string;
+  correlationId?: string;
+
+  constructor(message: string, nonce?: string, correlationId?: string) {
+    super(message);
+    this.name = 'ApiOutcomeUnknownError';
+    this.nonce = nonce;
+    this.correlationId = correlationId;
+  }
+}
+
+export function createSubmissionNonce(prefix = 'NONCE'): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+}
+
+export function isUnknownOutcomeError(err: unknown): boolean {
+  if (err instanceof ApiOutcomeUnknownError) return true;
+  if (err instanceof ApiHttpError && (err.status === 504 || err.workflowStatus === 'PENDING_UNKNOWN')) {
+    return true;
+  }
+  if (err instanceof Error) {
+    const m = err.message.toLowerCase();
+    return m.includes('status not confirmed') || m.includes('timed out') || m.includes('timeout');
+  }
+  return false;
 }
 
 export interface ApiRequestOptions extends RequestInit {
@@ -450,17 +501,33 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           (trimmed.toLowerCase() === 'not found' && isProxied));
 
       let errorMsg = '';
+      let errorCode: string | undefined;
+      let correlationId: string | undefined;
+      let retryable: boolean | undefined;
+      let workflowStatus: WorkflowState | undefined;
       if (parsedJson && typeof parsedJson === 'object') {
-        errorMsg = parsedJson.detail || parsedJson.message || parsedJson.error || '';
+        const detailObj = parsedJson.detail && typeof parsedJson.detail === 'object' ? (parsedJson.detail as V2ErrorDetail) : null;
+        errorCode = detailObj?.error_code || parsedJson.error_code;
+        correlationId = detailObj?.correlation_id || parsedJson.correlation_id;
+        retryable = detailObj?.retryable ?? parsedJson.retryable;
+        workflowStatus = detailObj?.workflow_status || (errorCode === 'BLOCKED_PENDING_OWNER_SETUP' ? 'BLOCKED_PENDING_OWNER_SETUP' : undefined);
+        const rawDetail =
+          detailObj?.detail ||
+          detailObj?.message ||
+          (typeof parsedJson.detail === 'string' ? parsedJson.detail : '') ||
+          parsedJson.message ||
+          parsedJson.error ||
+          '';
+        errorMsg = String(rawDetail);
       }
 
       if (!errorMsg && trimmed.length > 0) {
         if (isRenderNoServer) {
-          errorMsg = 'FastAPI backend service is sleeping or offline on Render (x-render-routing: no-server). Operating in Local Standby Mode.';
+          errorMsg = 'Backend service is currently unreachable on Render (x-render-routing: no-server). All governed writes are locked.';
         } else if (trimmed.startsWith('<')) {
           if (res.status === 502) errorMsg = 'Backend service is starting up or temporarily unreachable (HTTP 502 Bad Gateway).';
           else if (res.status === 503) errorMsg = 'Backend service or Google Sheets storage is temporarily unavailable (HTTP 503 Service Unavailable).';
-          else if (res.status === 504) errorMsg = 'Gateway timed out waiting for backend (HTTP 504 Gateway Timeout).';
+          else if (res.status === 504) errorMsg = 'Status not confirmed; do not submit a new transaction. Gateway timed out waiting for backend (HTTP 504).';
           else errorMsg = `Server returned an HTML error response (HTTP ${res.status}).`;
         } else {
           errorMsg = trimmed.slice(0, 160);
@@ -476,12 +543,14 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           errorMsg = 'Access forbidden. You do not have permission for this action.';
         } else if (res.status === 404) {
           errorMsg = isRenderNoServer
-            ? 'FastAPI backend service is sleeping or offline on Render. Operating in Local Standby Mode.'
+            ? 'Backend service is currently unreachable on Render. All governed writes are locked.'
             : `Requested endpoint was not found on the backend (${path}).`;
         } else if (res.status === 429) {
           errorMsg = 'Too many requests or temporary Google Sheets quota reached. Please wait 15 seconds and try again.';
+        } else if (res.status === 504) {
+          errorMsg = 'Status not confirmed; do not submit a new transaction.';
         } else if (res.status >= 500) {
-          errorMsg = `Backend server encountered an error (HTTP ${res.status}). Service may be spinning up.`;
+          errorMsg = `Backend server encountered an error (HTTP ${res.status}).`;
         } else {
           errorMsg = `Server returned status ${res.status} (${res.statusText || 'Error'}).`;
         }
@@ -515,7 +584,19 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         console.error(`%c[ERP API Error: HTTP ${res.status}]%c ${errorMsg}`, 'color: #ef4444; font-weight: bold;', 'color: inherit;');
       }
       console.groupEnd();
-      throw new ApiHttpError(res.status, errorMsg, category, targetUrl, isRenderNoServer);
+      if (res.status === 504 && method !== 'GET') {
+        throw new ApiOutcomeUnknownError(
+          'Status not confirmed; do not submit a new transaction.',
+          undefined,
+          correlationId
+        );
+      }
+      throw new ApiHttpError(res.status, errorMsg, category, targetUrl, isRenderNoServer, {
+        errorCode,
+        correlationId,
+        retryable,
+        workflowStatus,
+      });
     }
 
     // Success recording
@@ -617,18 +698,23 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
 
     if (err instanceof Error) {
       if (err.name === 'AbortError') {
+        if (method !== 'GET') {
+          throw new ApiOutcomeUnknownError(
+            'Status not confirmed; do not submit a new transaction.'
+          );
+        }
         throw new Error(
-          `Request timed out after ${timeoutMs / 1000}s connecting to backend. Render free tier services may take 40-50s to wake up from cold standby.`
+          `Request timed out after ${timeoutMs / 1000}s connecting to backend.`
         );
       }
       if (category === 'CORS_RESTRICTION') {
         throw new Error(
-          `CORS Error: Backend server did not allow connection from ${typeof window !== 'undefined' ? window.location.origin : 'this origin'}. Using the Vite proxy will bypass this issue.`
+          `CORS Error: Backend server did not allow connection from ${typeof window !== 'undefined' ? window.location.origin : 'this origin'}.`
         );
       }
       if (category === 'BACKEND_UNREACHABLE_OR_TIMEOUT') {
         throw new Error(
-          'Unable to reach backend API server. Please check your network connection or verify that the Render backend service is running.'
+          'Unable to reach backend API server. Service is offline or unreachable.'
         );
       }
       throw err;
@@ -662,33 +748,33 @@ export async function fetchBackendHealth(): Promise<BackendHealthResponse> {
 
     const isNoServer = err instanceof ApiHttpError && err.isRenderNoServer;
     const msg = isNoServer
-      ? 'Render backend is in standby / offline (x-render-routing: no-server). Local Standby Mode active.'
+      ? 'Render backend is offline or unreachable (x-render-routing: no-server). Fail-closed lock active.'
       : err instanceof Error
       ? err.message
-      : 'Backend unreachable. Operating in Local Standby Mode.';
+      : 'Backend unreachable. Fail-closed lock active.';
 
     return {
-      status: 'standby',
+      status: 'unreachable',
       google_sheets_connected: false,
       persistent_writes_enabled: false,
       spreadsheet_id_configured: false,
       service_account_configured: false,
       last_connection_error: msg,
-      allow_in_memory_fallback: true,
+      allow_in_memory_fallback: false,
       backend: {
-        status: 'STANDBY',
+        status: 'UNREACHABLE',
         service: 'kawad-swad-erp-api',
-        version: '1.0.0',
+        version: '2.1.0',
       },
       google_sheets: {
-        status: 'STANDBY',
+        status: 'DISCONNECTED',
         connected: false,
         persistent_writes_enabled: false,
-        message: 'Standby Mode active. Connect Google Sheets in settings or Render dashboard to enable live persistence.',
+        message: 'Backend or Google Sheets unavailable. All governed writes are blocked (fail closed).',
       },
       required_sheets: {
-        status: 'STANDBY',
-        total_managed_tabs: 28,
+        status: 'UNAVAILABLE',
+        total_managed_tabs: 255,
       },
     };
   }
@@ -1789,6 +1875,81 @@ export async function cancelVanLoadingPass(passIdOrNumber: string, notes?: strin
     body: JSON.stringify({ notes }),
   });
 }
+
+// -------------------------------------------------------------
+// Blueprint v2.1 /api/v2 Governed Operations, Policies & Official Reports
+// -------------------------------------------------------------
+
+export async function fetchV2Capabilities(): Promise<ErpCapabilitiesPayload> {
+  return apiRequest<ErpCapabilitiesPayload>('/api/v2/meta/capabilities');
+}
+
+export async function fetchV2Policies(): Promise<{ policies: Record<string, PendingCaPolicy> }> {
+  return apiRequest<{ policies: Record<string, PendingCaPolicy> }>('/api/v2/meta/policies');
+}
+
+export async function updateV2Policy(
+  policyKey: string,
+  payload: { status: 'APPROVED' | 'PENDING_CA_APPROVAL'; value: unknown; notes?: string }
+): Promise<{ status: string; policy: PendingCaPolicy }> {
+  return apiRequest<{ status: string; policy: PendingCaPolicy }>(
+    `/api/v2/meta/policies/${encodeURIComponent(policyKey)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+export async function fetchV2OfficialReport(
+  reportSlug: 'trial-balance' | 'stock-status' | 'sales-receivables',
+  params?: { period?: string; page?: number; page_size?: number }
+): Promise<ReportTabPayload> {
+  const q = new URLSearchParams();
+  if (params?.period) q.set('period', params.period);
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  const qs = q.toString();
+  return apiRequest<ReportTabPayload>(`/api/v2/reports/${reportSlug}${qs ? `?${qs}` : ''}`);
+}
+
+export async function fetchV2Collection(
+  endpointPath: string,
+  params?: { page?: number; page_size?: number; search?: string; status?: string }
+): Promise<PaginatedV2Response> {
+  const q = new URLSearchParams();
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  if (params?.search) q.set('search', params.search);
+  if (params?.status) q.set('status', params.status);
+  const qs = q.toString();
+  const clean = endpointPath.startsWith('/api/v2/') ? endpointPath : `/api/v2/${endpointPath.replace(/^\/+/, '')}`;
+  return apiRequest<PaginatedV2Response>(`${clean}${qs ? `?${qs}` : ''}`);
+}
+
+export async function postV2GovernedAction<T = Record<string, any>>(
+  endpointPath: string,
+  payload: Record<string, any> & { nonce: string }
+): Promise<T> {
+  const clean = endpointPath.startsWith('/api/v2/') ? endpointPath : `/api/v2/${endpointPath.replace(/^\/+/, '')}`;
+  try {
+    return await apiRequest<T>(clean, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: 30000,
+    });
+  } catch (err: unknown) {
+    if (err instanceof ApiOutcomeUnknownError) {
+      throw new ApiOutcomeUnknownError(
+        'Status not confirmed; do not submit a new transaction. Your inputs are preserved for safe retry with the same nonce.',
+        payload.nonce,
+        err.correlationId
+      );
+    }
+    throw err;
+  }
+}
+
 
 
 

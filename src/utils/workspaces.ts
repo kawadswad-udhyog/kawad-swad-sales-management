@@ -6,6 +6,16 @@ import { resolveEmployeeCategory, EmployeeCategory } from './permissions';
 export type WorkspaceId =
   | 'owner'
   | 'pa'
+  | 'accounts'
+  | 'procurement'
+  | 'store'
+  | 'production'
+  | 'quality'
+  | 'packaging'
+  | 'sales'
+  | 'field_salesman'
+  | 'hr'
+  | 'auditor'
   | 'manager'
   | 'salesman'
   | 'factory'
@@ -180,6 +190,34 @@ export const ALL_NAV_ITEMS: Record<ViewType, NavItemConfig> = {
     description: 'Salary calculations & payouts',
     group: 'management',
   },
+  logistics: {
+    view: 'logistics',
+    label: 'Logistics & Van Dispatch',
+    hindiLabel: 'Gaadi & Dispatch',
+    description: 'Van routes, dispatch & delivery',
+    group: 'operations',
+  },
+  channels: {
+    view: 'channels',
+    label: 'E-Commerce & Channels',
+    hindiLabel: 'Online Bazaar',
+    description: 'Amazon, Flipkart & distributor settlements',
+    group: 'operations',
+  },
+  compliance_assets: {
+    view: 'compliance_assets',
+    label: 'Compliance & Assets',
+    hindiLabel: 'FSSAI & Machine',
+    description: 'Statutory licenses & factory maintenance',
+    group: 'management',
+  },
+  control_policies: {
+    view: 'control_policies',
+    label: 'Control & CA Policies',
+    hindiLabel: 'Niyam & Registry',
+    description: '255-tab schema, 32 prefixes & CA policies',
+    group: 'system',
+  },
 };
 
 /**
@@ -189,8 +227,8 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
   owner: {
     id: 'owner',
     title: 'Business Overview',
-    subtitle: 'Executive overview of sales, production, inventory & finances',
-    roleBadge: 'Business Owner / MD',
+    subtitle: 'Executive overview of all 15 ERP groups, policies & governed writes',
+    roleBadge: 'OWNER_ADMIN',
     category: 'ADMINISTRATIVE',
     allowedViews: [
       'dashboard',
@@ -213,14 +251,18 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
       'salary',
       'workforce',
       'products',
+      'logistics',
+      'channels',
+      'compliance_assets',
+      'control_policies',
     ],
     defaultView: 'dashboard',
   },
   pa: {
     id: 'pa',
     title: 'Daily Operations',
-    subtitle: 'Daily priorities, billing, coordination, purchases & team workflow',
-    roleBadge: 'Personal Assistant (PA)',
+    subtitle: 'Operational orchestration without confidential salary/bank access',
+    roleBadge: 'PA',
     category: 'OFFICE_STAFF',
     allowedViews: [
       'dashboard',
@@ -233,12 +275,116 @@ export const WORKSPACES: Record<WorkspaceId, WorkspaceConfig> = {
       'reports',
       'purchasing',
       'packaging',
+      'quality',
       'expenses',
       'visits',
       'closing',
       'workforce',
+      'logistics',
+      'channels',
+      'compliance_assets',
     ],
     defaultView: 'dashboard',
+  },
+  accounts: {
+    id: 'accounts',
+    title: 'Accounts & Finance',
+    subtitle: 'General ledger, payments, GST, trial balance & approved advances',
+    roleBadge: 'ACCOUNTS',
+    category: 'OFFICE_STAFF',
+    allowedViews: [
+      'dashboard',
+      'accounting',
+      'expenses',
+      'sales',
+      'purchasing',
+      'channels',
+      'reports',
+      'closing',
+      'control_policies',
+    ],
+    defaultView: 'dashboard',
+  },
+  procurement: {
+    id: 'procurement',
+    title: 'Procurement & Vendors',
+    subtitle: 'Raw materials, suppliers, POs, GRNs & supplier bills',
+    roleBadge: 'PROCUREMENT',
+    category: 'OFFICE_STAFF',
+    allowedViews: ['dashboard', 'purchasing', 'stock', 'quality', 'products'],
+    defaultView: 'purchasing',
+  },
+  store: {
+    id: 'store',
+    title: 'Store & Warehouse',
+    subtitle: 'Warehouse stock, RM/FG balances, van loading & dispatches',
+    roleBadge: 'STORE',
+    category: 'FACTORY_WORKERS',
+    allowedViews: ['dashboard', 'stock', 'purchasing', 'packaging', 'logistics', 'products'],
+    defaultView: 'stock',
+  },
+  production: {
+    id: 'production',
+    title: 'Production Floor',
+    subtitle: 'Milling, dough batches, cooking, output & factory muster roll',
+    roleBadge: 'PRODUCTION',
+    category: 'FACTORY_WORKERS',
+    allowedViews: ['dashboard', 'production', 'attendance', 'stock', 'quality', 'compliance_assets'],
+    defaultView: 'production',
+  },
+  quality: {
+    id: 'quality',
+    title: 'Quality Assurance (QC)',
+    subtitle: 'Lot quarantine/release gates, IPQC/FGQC inspections & recalls',
+    roleBadge: 'QUALITY',
+    category: 'FACTORY_WORKERS',
+    allowedViews: ['dashboard', 'quality', 'production', 'packaging', 'compliance_assets', 'reports'],
+    defaultView: 'quality',
+  },
+  packaging: {
+    id: 'packaging',
+    title: 'Packaging Desk',
+    subtitle: '200g / 500g / 1000g retail packing on RELEASED lots only',
+    roleBadge: 'PACKAGING',
+    category: 'FACTORY_WORKERS',
+    allowedViews: ['dashboard', 'packaging', 'production', 'stock', 'quality', 'products'],
+    defaultView: 'packaging',
+  },
+  sales: {
+    id: 'sales',
+    title: 'Sales & Channels',
+    subtitle: 'B2B orders, retail billing, logistics & marketplace settlements',
+    roleBadge: 'SALES',
+    category: 'OFFICE_STAFF',
+    allowedViews: ['dashboard', 'sales', 'customers', 'products', 'stock', 'logistics', 'channels', 'reports'],
+    defaultView: 'sales',
+  },
+  field_salesman: {
+    id: 'field_salesman',
+    title: 'Field Sales Mobile',
+    subtitle: 'Mobile billing, van stock, shop visits & daily cash handover',
+    roleBadge: 'FIELD_SALESMAN',
+    category: 'FIELD_STAFF',
+    allowedViews: ['dashboard', 'sales', 'customers', 'visits', 'stock', 'expenses', 'closing'],
+    defaultView: 'sales',
+  },
+  hr: {
+    id: 'hr',
+    title: 'HR & Workforce',
+    subtitle: 'Attendance, gig worker verification & non-confidential staff ops',
+    roleBadge: 'HR',
+    category: 'OFFICE_STAFF',
+    allowedViews: ['dashboard', 'workforce', 'attendance', 'reports'],
+    defaultView: 'workforce',
+  },
+  auditor: {
+    id: 'auditor',
+    title: 'Internal Audit (Read-Only)',
+    subtitle: 'Read-only access to audit trails, exceptions, reports & ledger',
+    roleBadge: 'AUDITOR',
+    category: 'OFFICE_STAFF',
+    allowedViews: ['dashboard', 'reports', 'accounting', 'stock', 'quality', 'control_policies', 'audit'],
+    defaultView: 'reports',
   },
   manager: {
     id: 'manager',
@@ -375,31 +521,56 @@ export function getWorkspaceForRole(role?: string | null): WorkspaceConfig {
     case 'PERSONAL_ASSISTANT':
       return WORKSPACES.pa;
 
-    case 'MANAGER':
-    case 'OPERATIONS_MANAGER':
-      return WORKSPACES.manager;
+    case 'ACCOUNTS':
+    case 'ACCOUNTANT':
+    case 'FINANCE':
+      return WORKSPACES.accounts;
 
-    case 'SALESMAN':
-    case 'FIELD_SALESMAN':
-      return WORKSPACES.salesman;
+    case 'PROCUREMENT':
+    case 'PURCHASE':
+      return WORKSPACES.procurement;
 
+    case 'STORE':
+    case 'STOREKEEPER':
+    case 'WAREHOUSE':
+    case 'DISPATCH':
+      return WORKSPACES.store;
+
+    case 'PRODUCTION':
     case 'FACTORY_WORKER':
     case 'PRODUCTION_WORKER':
     case 'WORKER':
     case 'OPERATOR':
-    case 'PRODUCTION':
-      return WORKSPACES.factory;
+      return WORKSPACES.production;
 
-    case 'DISPATCH':
-      return WORKSPACES.factory;
+    case 'QUALITY':
+    case 'QC':
+      return WORKSPACES.quality;
+
+    case 'PACKAGING':
+    case 'PACKING':
+      return WORKSPACES.packaging;
+
+    case 'SALES':
+      return WORKSPACES.sales;
+
+    case 'SALESMAN':
+    case 'FIELD_SALESMAN':
+      return WORKSPACES.field_salesman;
+
+    case 'HR':
+      return WORKSPACES.hr;
+
+    case 'AUDITOR':
+      return WORKSPACES.auditor;
+
+    case 'MANAGER':
+    case 'OPERATIONS_MANAGER':
+      return WORKSPACES.manager;
 
     case 'LABOUR_SUPERVISOR':
     case 'SUPERVISOR':
       return WORKSPACES.labour_supervisor;
-
-    case 'ACCOUNTANT':
-    case 'FINANCE':
-      return WORKSPACES.accountant;
 
     case 'FREELANCER':
       return WORKSPACES.freelancer;

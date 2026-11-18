@@ -38,6 +38,7 @@ from app.routers import (
     purchasing,
     quality,
     workforce,
+    v2_erp,
 )
 
 
@@ -87,10 +88,20 @@ app = FastAPI(
 if hasattr(app, "exception_handler"):
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
-        logger.exception(f"Unhandled server error on {request.method} {request.url.path}: {exc}")
+        import uuid
+        corr_id = (
+            getattr(getattr(request, "headers", None), "get", lambda *_: None)("X-Correlation-Id")
+            or f"CORR-{uuid.uuid4().hex[:12].upper()}"
+        )
+        logger.exception("Unhandled server error [%s] on %s %s: %s", corr_id, request.method, request.url.path, exc)
         return JSONResponse(
             status_code=500,
-            content={"detail": "An internal server error occurred. Please contact the system administrator."},
+            content={
+                "detail": "An internal server error occurred. Please contact the system administrator.",
+                "error_code": "INTERNAL_SERVER_ERROR",
+                "correlation_id": corr_id,
+                "retryable": False,
+            },
         )
 
 # Configure CORS
@@ -143,6 +154,7 @@ app.include_router(accounting.router)
 app.include_router(purchasing.router)
 app.include_router(quality.router)
 app.include_router(workforce.router)
+app.include_router(v2_erp.router)
 
 
 def _sanitize_diagnostic_error(err: Optional[str]) -> Optional[str]:

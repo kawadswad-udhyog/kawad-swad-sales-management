@@ -27,6 +27,7 @@ const PurchasingView = lazy(() => import('./views/PurchasingView').then((m) => (
 const QualityView = lazy(() => import('./views/QualityView').then((m) => ({ default: m.QualityView })));
 const WorkforceView = lazy(() => import('./views/WorkforceView').then((m) => ({ default: m.WorkforceView })));
 const EmployeePortal = lazy(() => import('./employee/EmployeePortal').then((m) => ({ default: m.EmployeePortal })));
+const ErpOperationsHubView = lazy(() => import('./views/ErpOperationsHubView').then((m) => ({ default: m.ErpOperationsHubView })));
 
 const ViewLoadingFallback: React.FC = () => (
   <div className="py-16 flex flex-col items-center justify-center text-slate-500 text-xs">
@@ -203,6 +204,14 @@ const MainAppContent: React.FC = () => {
         return <ReportsView />;
       case 'accounting':
         return <AccountingView />;
+      case 'logistics':
+        return <ErpOperationsHubView initialModule="logistics" />;
+      case 'channels':
+        return <ErpOperationsHubView initialModule="channels" />;
+      case 'compliance_assets':
+        return <ErpOperationsHubView initialModule="compliance_assets" />;
+      case 'control_policies':
+        return <ErpOperationsHubView initialModule="control_policies" />;
       case 'audit':
         return <AuditView />;
       case 'users':
@@ -235,9 +244,9 @@ const MainAppContent: React.FC = () => {
           <div className="flex items-center gap-2">
             <AlertTriangle size={16} className="text-amber-300 shrink-0" />
             <div>
-              <span className="font-bold">Backend API Standby:</span> Cannot reach backend service right now.
+              <span className="font-bold">Backend API Unavailable (Fail-Closed Mode):</span> Cannot reach authoritative backend service right now.
               <span className="text-amber-200 ml-1.5 hidden sm:inline">
-                The Render server may be spinning up from cold sleep (~40s).
+                Operations are locked with zero local mock persistence.
                 {connectionError ? ` (${connectionError})` : ''}
               </span>
             </div>

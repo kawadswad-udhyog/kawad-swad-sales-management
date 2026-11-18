@@ -37,7 +37,7 @@ def _token_for(row: dict) -> TokenResponse:
     raw_username = str(row.get("username") or "").strip()
     user_id = raw_user_id or raw_username or "user"
     username = raw_username or raw_user_id or user_id
-    role = ui_role(str(row.get("role") or "SALESMAN"))
+    role = ui_role(str(row.get("role") or "FIELD_SALESMAN"))
     full_name = str(row.get("full_name") or raw_username or user_id)
     must_change = str(row.get("must_change_password", "false")).lower() == "true"
     token = create_access_token({

@@ -71,8 +71,8 @@ export const RAW_MATERIAL_CATALOG = [
   { id: 'RM-ADD-SALT', name: 'Iodized Salt', unit: 'kg', defaultRate: 18, gstRate: 0, category: 'Additive' },
   { id: 'RM-ADD-EDIBLE-OIL', name: 'Edible Cooking Oil', unit: 'kg', defaultRate: 135, gstRate: 0.05, category: 'Additive' },
   { id: 'RM-PKG-POUCH-200G', name: 'Printed Pouch Film (200g Moong)', unit: 'kg', defaultRate: 260, gstRate: 0.18, category: 'Packaging' },
-  { id: 'RM-PKG-POUCH-400G', name: 'Printed Pouch Film (400g Moong)', unit: 'kg', defaultRate: 260, gstRate: 0.18, category: 'Packaging' },
   { id: 'RM-PKG-POUCH-500G', name: 'Printed Pouch Film (500g Chana)', unit: 'kg', defaultRate: 260, gstRate: 0.18, category: 'Packaging' },
+  { id: 'RM-PKG-POUCH-1000G', name: 'Printed Pouch Film (1000g Family Pack)', unit: 'kg', defaultRate: 260, gstRate: 0.18, category: 'Packaging' },
   { id: 'RM-PKG-MASTER-CARTON', name: '5-Ply Master Corrugated Boxes', unit: 'packet', defaultRate: 42, gstRate: 0.18, category: 'Packaging' },
 ];
 

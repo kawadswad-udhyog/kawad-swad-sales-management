@@ -16,6 +16,18 @@ SALES_CORS_ORIGINS = os.getenv(
 SALES_TOKEN_HOURS = int(os.getenv("SALES_TOKEN_HOURS", "8"))
 SALES_ENV = os.getenv("SALES_ENV", "development").strip().lower()
 
+# Blueprint v2.1 Apps Script Single-Write-Owner Bridge Configuration
+SALES_APPS_SCRIPT_ENABLED = os.getenv("SALES_APPS_SCRIPT_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+SALES_APPS_SCRIPT_WEBAPP_URL = os.getenv("SALES_APPS_SCRIPT_WEBAPP_URL", "").strip()
+SALES_APPS_SCRIPT_SHARED_SECRET = os.getenv("SALES_APPS_SCRIPT_SHARED_SECRET", "").strip()
+try:
+    _raw_as_timeout = float(os.getenv("SALES_APPS_SCRIPT_TIMEOUT_SECONDS", "15"))
+    SALES_APPS_SCRIPT_TIMEOUT_SECONDS = max(3.0, min(_raw_as_timeout, 30.0))
+except (TypeError, ValueError):
+    SALES_APPS_SCRIPT_TIMEOUT_SECONDS = 15.0
+
+SALES_CA_POLICY_CONFIG_JSON = os.getenv("SALES_CA_POLICY_CONFIG_JSON", "").strip()
+
 _EPHEMERAL_SECRET = secrets.token_hex(32)
 
 _INSECURE_SECRETS = {
