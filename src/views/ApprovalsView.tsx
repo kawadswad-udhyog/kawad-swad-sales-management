@@ -39,7 +39,7 @@ const isPending = (status: unknown) => {
 
 const isApproved = (status: unknown) => {
   const norm = String(status || '').trim().toUpperCase();
-  return ['APPROVED', 'COMPLETED', 'CONFIRMED'].includes(norm);
+  return ['APPROVED', 'COMPLETED', 'CONFIRMED', 'EXECUTED'].includes(norm);
 };
 
 const isRejected = (status: unknown) => {
