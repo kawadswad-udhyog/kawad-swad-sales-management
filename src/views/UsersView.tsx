@@ -13,7 +13,6 @@ export const UsersView: React.FC = () => {
     resetUserPassword,
     approvalRequests,
     decideApprovalRequest,
-    retryApprovalRequest,
     cancelApprovalRequest,
   } = useStore();
 
@@ -72,7 +71,7 @@ export const UsersView: React.FC = () => {
 
   // Pending approval requests count
   const pendingRequests = approvalRequests.filter((r) => r.status === 'PENDING');
-  const failedExecutions = approvalRequests.filter((r) => r.status === 'EXECUTION_FAILED');
+  const failedExecutions = approvalRequests.filter((r) => ['EXECUTING', 'EXECUTION_FAILED', 'EXECUTION_REVIEW_REQUIRED'].includes(r.status));
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -246,17 +245,6 @@ export const UsersView: React.FC = () => {
     }
   };
 
-  const handleRetryExecution = async (reqId: string) => {
-    setNotice(null);
-    try {
-      await retryApprovalRequest(reqId);
-      setNotice({ msg: `Successfully retried and executed request ${reqId}!` });
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Retry execution failed.';
-      setNotice({ msg: errorMsg, error: true });
-    }
-  };
-
   const handleCancelRequest = async (reqId: string) => {
     if (!window.confirm(`Cancel your pending request ${reqId}?`)) return;
     setNotice(null);
@@ -276,8 +264,10 @@ export const UsersView: React.FC = () => {
         return <span style={{ background: '#dcfce7', color: '#15803d', padding: '3px 8px', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>EXECUTED</span>;
       case 'PENDING':
         return <span style={{ background: '#fef08a', color: '#854d0e', padding: '3px 8px', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>PENDING APPROVAL</span>;
+      case 'EXECUTING':
       case 'EXECUTION_FAILED':
-        return <span style={{ background: '#fee2e2', color: '#b91c1c', padding: '3px 8px', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>EXECUTION FAILED</span>;
+      case 'EXECUTION_REVIEW_REQUIRED':
+        return <span style={{ background: '#ffedd5', color: '#9a3412', padding: '3px 8px', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>MANUAL REVIEW REQUIRED</span>;
       case 'REJECTED':
         return <span style={{ background: '#f1f5f9', color: '#475569', padding: '3px 8px', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>REJECTED</span>;
       case 'CANCELLED':
@@ -362,9 +352,9 @@ export const UsersView: React.FC = () => {
       {/* Failed Execution Alert for Owner */}
       {isOwner && failedExecutions.length > 0 && (
         <div className="notice-error" style={{ marginBottom: '16px' }}>
-          <strong>⚠️ Action Required: Execution Failure ({failedExecutions.length})</strong>
+          <strong>⚠️ Action Required: Approval Reconciliation ({failedExecutions.length})</strong>
           <p style={{ margin: '4px 0 8px', fontSize: '0.85rem' }}>
-            One or more approved requests could not complete Google Sheets persistence. You can safely retry without duplicating records:
+            An approval may have partially completed. Automatic retry is disabled. Verify the target business record and resolve each request manually before taking further action:
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {failedExecutions.map((req) => (
@@ -372,9 +362,7 @@ export const UsersView: React.FC = () => {
                 <div>
                   <strong>{req.request_id}</strong>: {req.request_type} on target {req.target_user_id || 'NEW'} — <span style={{ color: '#dc2626' }}>{req.execution_error || 'Write error'}</span>
                 </div>
-                <button type="button" onClick={() => handleRetryExecution(req.request_id)} style={{ padding: '4px 10px', fontSize: '0.8rem' }}>
-                  ⚡ Retry Execution
-                </button>
+                <span style={{ color: '#9a3412', fontSize: '0.8rem', fontWeight: 700 }}>Manual review only</span>
               </div>
             ))}
           </div>
@@ -766,15 +754,6 @@ export const UsersView: React.FC = () => {
                       {req.execution_error && (
                         <div style={{ color: '#dc2626', fontWeight: 600 }}>
                           Error: {req.execution_error}
-                          {isOwner && req.status === 'EXECUTION_FAILED' && (
-                            <button
-                              type="button"
-                              onClick={() => handleRetryExecution(req.request_id)}
-                              style={{ marginLeft: '6px', padding: '2px 6px', fontSize: '0.72rem' }}
-                            >
-                              Retry
-                            </button>
-                          )}
                         </div>
                       )}
                     </td>
