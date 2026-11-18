@@ -119,10 +119,13 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
         self.assertEqual(len(db.memory_store["RawMaterials"]), 1)
 
     def test_confirmed_rate_requires_positive_value(self):
-        with self.assertRaises(Exception):
-            prod.RawMaterialMasterCreate(
-                material_name="Chilli Paste", unit="kg", rate_status="CONFIRMED"
-            )
+        request = prod.RawMaterialMasterCreate(
+            material_name="Chilli Paste", unit="kg", rate_status="CONFIRMED"
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(prod.create_raw_material_master(request, self.owner))
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertEqual(db.memory_store["RawMaterials"], [])
 
     def test_unknown_product_blocks_batch_before_allocation(self):
         allocation_count = len(db.memory_store["IdAllocations"])
