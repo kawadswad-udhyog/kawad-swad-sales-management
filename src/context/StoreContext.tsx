@@ -347,23 +347,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, []);
 
-  const bootstrapOwnerAccount = useCallback(async (username: string, password: string, fullName?: string) => {
-    try {
-      const res = await apiRequest<{
-        success: boolean;
-        message: string;
-        user_id?: string;
-        username?: string;
-      }>('/api/auth/bootstrap-owner', {
-        method: 'POST',
-        body: JSON.stringify({ username, password, full_name: fullName }),
-        timeoutMs: 25000,
-      });
-      return { success: res.success ?? true, message: res.message || 'Owner account created successfully in Google Sheets!' };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to bootstrap owner account.';
-      return { success: false, message: msg };
-    }
+  const bootstrapOwnerAccount = useCallback(async (_username: string, _password: string, _fullName?: string) => {
+    return {
+      success: false,
+      message: 'Public Owner setup is disabled for security. Run backend/scripts/bootstrap_owner.py from a trusted owner-controlled environment.',
+    };
   }, []);
 
   const updateBackendUrl = (url: string) => {
@@ -429,22 +417,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
     setAuditLogs((prev) => [log, ...prev]);
 
-    // Asynchronously persist to backend audit router and Google Sheets
-    apiRequest<AuditLog>('/api/audit-logs', {
-      method: 'POST',
-      body: JSON.stringify({
-        action,
-        entity_type: entityType,
-        entity_id: entityId,
-        field_changed: fieldChanged,
-        old_value: oldValue,
-        new_value: newValue,
-        reason,
-        related_record_id: entityId,
-      }),
-    }).catch((err) => {
-      console.warn('Backend audit log sync warning:', err);
-    });
+    // This is a local UI activity hint only. Authoritative audit events are
+    // written by trusted backend workflows after validating each business action.
   };
 
   // Secure Login: Authenticates exclusively with backend FastAPI server.

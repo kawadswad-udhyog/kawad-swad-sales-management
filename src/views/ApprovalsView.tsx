@@ -39,7 +39,7 @@ const isPending = (status: unknown) => {
 
 const isApproved = (status: unknown) => {
   const norm = String(status || '').trim().toUpperCase();
-  return ['APPROVED', 'COMPLETED', 'CONFIRMED'].includes(norm);
+  return ['APPROVED', 'COMPLETED', 'CONFIRMED', 'EXECUTED'].includes(norm);
 };
 
 const isRejected = (status: unknown) => {
@@ -49,7 +49,7 @@ const isRejected = (status: unknown) => {
 
 const isFailed = (status: unknown) => {
   const norm = String(status || '').trim().toUpperCase();
-  return ['EXECUTION_FAILED', 'FAILED'].includes(norm);
+  return ['EXECUTING', 'EXECUTION_FAILED', 'EXECUTION_REVIEW_REQUIRED', 'FAILED'].includes(norm);
 };
 
 export const ApprovalsView: React.FC = () => {
@@ -1399,7 +1399,7 @@ export const ApprovalsView: React.FC = () => {
                 {filteredBatches.map((b) => {
                   const bId = String(b.production_id || b.batch_id || '').trim();
                   const isBusy = busyActionId === bId;
-                  const pendingDecision = isPending(b.status) || isFailed(b.status);
+                  const pendingDecision = isPending(b.status);
                   const isExecutionFailed = isFailed(b.status);
                   const fromRequest = b._from_request;
 
@@ -1420,7 +1420,11 @@ export const ApprovalsView: React.FC = () => {
                         <StatusBadge status={b.status || 'PENDING'} />
                       </td>
                       <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                        {pendingDecision ? (
+                        {isExecutionFailed ? (
+                          <span style={{ fontSize: '0.76rem', color: '#b45309', fontWeight: 600 }}>
+                            Manual review required
+                          </span>
+                        ) : pendingDecision ? (
                           canDecide ? (
                             <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
                               <button
@@ -1430,7 +1434,7 @@ export const ApprovalsView: React.FC = () => {
                                   padding: '5px 11px',
                                   fontSize: '0.78rem',
                                   fontWeight: 700,
-                                  background: isExecutionFailed ? '#d97706' : '#166534',
+                                  background: '#166534',
                                   color: '#ffffff',
                                   border: 'none',
                                   borderRadius: '6px',
@@ -1438,7 +1442,7 @@ export const ApprovalsView: React.FC = () => {
                                 }}
                                 title="Approve batch, consume recipe raw materials, and credit bulk stock"
                               >
-                                {isBusy ? 'Saving…' : isExecutionFailed ? 'Retry Approval' : 'Approve'}
+                                {isBusy ? 'Saving…' : 'Approve'}
                               </button>
                               <button
                                 disabled={isBusy || (!isGoogleSheetsConnected && persistentWritesEnabled) || !bId}
@@ -1551,7 +1555,7 @@ export const ApprovalsView: React.FC = () => {
               <tbody>
                 {filteredUserRequests.map((r) => {
                   const isBusy = busyActionId === r.request_id;
-                  const pendingDecision = isPending(r.status) || isFailed(r.status);
+                  const pendingDecision = isPending(r.status);
                   const isExecutionFailed = isFailed(r.status);
                   const isExpanded = expandedPayloadIds.has(r.request_id);
 
@@ -1622,7 +1626,11 @@ export const ApprovalsView: React.FC = () => {
                           <StatusBadge status={r.status} />
                         </td>
                         <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                          {pendingDecision ? (
+                          {isExecutionFailed ? (
+                            <span style={{ fontSize: '0.76rem', color: '#b45309', fontWeight: 600 }}>
+                              Manual review required
+                            </span>
+                          ) : pendingDecision ? (
                             canDecide ? (
                               <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
                                 <button
@@ -1638,9 +1646,9 @@ export const ApprovalsView: React.FC = () => {
                                     borderRadius: '6px',
                                     cursor: isBusy ? 'not-allowed' : 'pointer',
                                   }}
-                                  title={isExecutionFailed ? 'Retry failed execution' : 'Approve user request'}
+                                  title="Approve user request"
                                 >
-                                  {isBusy ? 'Saving…' : isExecutionFailed ? 'Retry' : 'Approve'}
+                                  {isBusy ? 'Saving…' : 'Approve'}
                                 </button>
                                 <button
                                   disabled={isBusy || (!isGoogleSheetsConnected && persistentWritesEnabled)}
