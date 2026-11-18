@@ -158,7 +158,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [worker, setWorker] = useState({ worker_name: '', mobile: '', daily_wage: '', notes: '' });
   const [recipe, setRecipe] = useState({ product_id: '', ingredients: '', expected_yield_kg: '', notes: '' });
   const [rawMasterForm, setRawMasterForm] = useState({ material_name: '', unit: 'kg', category: 'RAW_MATERIAL', rate_per_unit: '', rate_status: 'PENDING' });
-  const [production, setProduction] = useState({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });
+  const [production, setProduction] = useState({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', process_loss_kg: '0', loss_reason: '', flour_base_used_kg: '', recipe_id: '', notes: '' });
   const [pack, setPack] = useState({ product_id: '', packaging_date: today, bulk_kg_used: '', packets_200g: '0', packets_500g: '0', packets_1000g: '0', notes: '' });
   const [dispatch, setDispatch] = useState({ product_id: '', channel: 'ECOMMERCE', destination: '', quantity_packets: '', reference: '', notes: '' });
   const [availableBulkBatches, setAvailableBulkBatches] = useState<any[]>([]);
@@ -2717,6 +2717,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         ...production,
                         quantity_kg: Number(production.quantity_kg),
                         wastage_kg: Number(production.wastage_kg),
+                        process_loss_kg: Number(production.process_loss_kg),
+                        loss_reason: production.loss_reason,
                         flour_base_used_kg: production.flour_base_used_kg ? Number(production.flour_base_used_kg) : undefined,
                       }),
                     }),
@@ -2724,7 +2726,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   refreshBatches
                 );
                 if (ok) {
-                  setProduction({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', flour_base_used_kg: '', recipe_id: '', notes: '' });
+                  setProduction({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', process_loss_kg: '0', loss_reason: '', flour_base_used_kg: '', recipe_id: '', notes: '' });
                 }
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10 }}
@@ -2767,29 +2769,28 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               />
               <input
                 style={input}
+                type="number"
+                min="0"
+                step="0.001"
+                placeholder="Measured process loss (kg)"
+                value={production.process_loss_kg}
+                onChange={e => setProduction({ ...production, process_loss_kg: e.target.value })}
+              />
+              <input
+                style={input}
+                placeholder="Reason for process loss (required if loss > 0)"
+                value={production.loss_reason}
+                onChange={e => setProduction({ ...production, loss_reason: e.target.value })}
+                required={Number(production.process_loss_kg) > 0}
+              />
+              <input
+                style={input}
                 placeholder="Notes / Batch shift (Optional)"
                 value={production.notes}
                 onChange={e => setProduction({ ...production, notes: e.target.value })}
               />
 
-              <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-                {liveBenchmarkYield && (
-                  <div style={{ fontSize: 13, color: '#334155' }}>
-                    Benchmark Expected Yield: <b>{liveBenchmarkYield} kg</b> (1.2 ratio) | Actual Net Yield:{' '}
-                    <b>{liveNetYield || 0} kg</b>{' '}
-                    {liveVariance && (
-                      <span
-                        style={{
-                          color: parseFloat(liveVariance) >= 0 ? '#166534' : '#b91c1c',
-                          fontWeight: 600,
-                        }}
-                      >
-                        (Variance: {parseFloat(liveVariance) >= 0 ? '+' : ''}
-                        {liveVariance} kg)
-                      </span>
-                    )}
-                  </div>
-                )}
+              <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
                 <button
                   style={{
                     ...btn,
@@ -2814,10 +2815,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               ['product_name_snapshot', 'Product'],
               ['flour_base_used_kg', 'Flour kg'],
               ['quantity_kg', 'Gross kg'],
-              ['wastage_kg', 'Wastage kg'],
-              ['net_quantity_kg', 'Net kg'],
-              ['benchmark_yield_kg', 'Benchmark kg'],
-              ['yield_variance_kg', 'Variance kg'],
+              ['wastage_kg', 'Rejected kg'],
+              ['process_loss_kg', 'Process loss kg'],
+              ['net_quantity_kg', 'Saleable kg'],
+              ['yield_variance_kg', 'Recipe yield variance kg'],
               ['status', 'Status'],
               ['created_by', 'Entered by'],
             ])}
