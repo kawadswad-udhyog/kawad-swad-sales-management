@@ -710,6 +710,23 @@ async def create_labour_work_entry(req: LabourWorkEntryCreate, current_user: dic
     if not target:
         raise HTTPException(status_code=404, detail="Labour worker not found.")
 
+    batch_id = str(req.batch_id or "").strip()
+    if batch_id:
+        production_batches = db.get_records("ProductionBatches", fresh=True) or []
+        linked_batch = next(
+            (row for row in production_batches
+             if str(row.get("production_id") or row.get("batch_id") or "").strip() == batch_id),
+            None,
+        )
+        if not linked_batch:
+            raise HTTPException(status_code=404, detail=f"Production batch '{batch_id}' not found. Labour cannot be allocated to an unknown batch.")
+        if str(linked_batch.get("status") or "").strip().upper() == "REJECTED":
+            raise HTTPException(status_code=409, detail="Labour cannot be allocated to a rejected production batch.")
+
+    if float(req.units_completed or 0.0) < 0 or float(req.piece_rate or 0.0) < 0 or float(req.hours_logged or 0.0) < 0:
+        raise HTTPException(status_code=422, detail="Completed units, piece rate and logged hours cannot be negative.")
+
+    # Relationship and range validation happens before reserving the entry ID.
     entry_id = db.get_next_id("LabourWorkEntries")
     total_amount = round(float(req.units_completed or 0.0) * float(req.piece_rate or 0.0), 2)
 
@@ -720,7 +737,7 @@ async def create_labour_work_entry(req: LabourWorkEntryCreate, current_user: dic
         "entry_date": req.entry_date or _today_str(),
         "category": req.category or str(target.get("category") or "GENERAL"),
         "activity_name": req.activity_name,
-        "batch_id": req.batch_id or "",
+        "batch_id": batch_id,
         "units_completed": float(req.units_completed or 0.0),
         "unit_of_measure": req.unit_of_measure or "KG",
         "piece_rate": float(req.piece_rate or 0.0),
