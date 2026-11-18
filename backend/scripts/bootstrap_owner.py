@@ -117,26 +117,15 @@ def bootstrap_owner():
         if not (user_ok and auth_ok):
             raise RuntimeError("Owner rows could not be verified by read-back. Stop and reconcile manually.")
 
-    except Exception:
-        rollback_errors = []
-        # Re-read both tables to detect writes that may have reached Sheets even
-        # when the client timed out before receiving an acknowledgement.
-        for tab_name in ("AuthUsers", "Users"):
-            try:
-                current_rows = _read_rows(tab_name)
-                if any(str(row.get("user_id") or "") == user_id for row in current_rows):
-                    removed = db.delete_record(tab_name, "user_id", user_id, raise_on_error=True)
-                    if not removed:
-                        rollback_errors.append(f"{tab_name} row could not be removed during rollback")
-            except Exception as rollback_error:
-                rollback_errors.append(f"{tab_name} rollback verification failed: {rollback_error}")
-        if rollback_errors:
-            raise RuntimeError(
-                f"Bootstrap is partially written. User ID {user_id}; Auth ID {auth_id}. "
-                + " | ".join(rollback_errors)
-                + " Do not retry before manual reconciliation."
-            )
-        raise
+    except Exception as exc:
+        # Google Sheets operations can time out after the server committed a row.
+        # Never delete an owner/profile row automatically on an ambiguous outcome.
+        # Keep the sheet untouched and require a read-only manual reconciliation.
+        raise RuntimeError(
+            f"Bootstrap did not complete with a verified result (candidate User ID {user_id}, "
+            f"Auth ID {auth_id}). No automatic rollback or deletion was attempted. "
+            f"Inspect Users and AuthUsers for these identifiers before retrying. Cause: {exc}"
+        ) from exc
     finally:
         password = ""
         confirmation = ""
