@@ -32,7 +32,7 @@ _SENSITIVE_APPROVAL_KEYS = {
     "document_reference", "identity_document", "account_number", "account_no",
     "bank_account", "ifsc", "ifsc_code", "aadhaar", "aadhaar_number",
     "pan", "pan_number", "passport_number", "date_of_birth", "dob",
-    "password", "password_hash", "mobile", "alternate_mobile",
+    "password", "password_hash", "username", "mobile", "alternate_mobile",
     "personal_mobile", "phone", "phone_number", "email", "personal_email",
 }
 
