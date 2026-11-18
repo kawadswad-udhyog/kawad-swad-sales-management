@@ -207,6 +207,8 @@ class TestApprovalExecutionClaim(unittest.TestCase):
             "request_type": "UPDATE_USER",
             "target_user_id": "USR-000001",
             "requested_by": "pa-1",
+            "requested_by_name": "PA",
+            "requested_at": "2026-11-18T00:00:00Z",
             "payload_json": "{}",
             "status": "PENDING",
         }]
