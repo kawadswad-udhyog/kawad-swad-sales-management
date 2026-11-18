@@ -38,6 +38,12 @@ jobs:
           SALES_JWT_SECRET: "test-only-secret-do-not-use-for-deployment-32"
         run: python -m unittest tests.test_phase4_2a_security_guards -v
 
+      - name: Run Phase 4 clean-data and production contracts
+        env:
+          SALES_TESTING: "1"
+          SALES_JWT_SECRET: "test-only-secret-do-not-use-for-deployment-32"
+        run: python -m unittest tests.test_phase4_clean_data_contracts -v
+
   frontend-build:
     name: Frontend TypeScript and production build
     runs-on: ubuntu-latest
