@@ -1,0 +1,161 @@
+KAWAD SWAD ERP
+PHASE 4.2-B - MASTER DATA ROUTE / FIELD CONTRACT AUDIT
+Version: 0.1
+Date: 18 November 2026
+Review basis: owner-confirmed workbook snapshot and current GitHub main source after PR #3 merge.
+Main source commit at review: 46165cfc5b6b36af4385159fd337edd91be4d77e
+Status: STATIC SOURCE REVIEW. NO LIVE CHANGES OR API CALLS.
+
+PERMANENT POLICY
+- Keep the empty database empty. No pre-reset data recovery, import, or automatic seeds.
+- Google Sheets remains authoritative.
+- No live headers, business records, ID allocation, or production deployment are changed by this review.
+
+1. VERIFIED SOURCE FINDINGS
+
+PRODUCTS
+- Routes: GET/POST /api/products; PUT/PATCH /api/products/{product_id}.
+- GET returns product_id, sku, product_name, category, variant, pack_weight_g, selling_unit, retail_pack_only, recipe_id, active, notes.
+- POST permitted to OWNER, OWNER_ADMIN, PA. It allocates a product ID before any SKU duplicate check (no duplicate SKU check currently exists).
+- POST writes the 10 physical fields and optionally recipe_id.
+- Physical Products headers are 10 fields; recipe_id and created_at/created_by/updated_at/updated_by are absent.
+- sheets.py REQUIRED_TABS for Products declares exactly the existing 10 headers.
+- append_record silently omits fields not present in physical headers unless header update is explicitly authorized. Consequently recipe_id is omitted from persistent rows.
+- POST does not persist created_at/created_by. PUT/PATCH does not persist updated_at/updated_by.
+- Recommendation: one Products row per sellable SKU/pack, pending Owner approval.
+
+CUSTOMERS
+- Routes: GET/POST /api/customers; PUT /api/customers/{customer_id}.
+- Any authenticated user can currently list/create/update; no route-specific sales/accounts/Owner scope is present in these handlers.
+- GET exposes shopkeeper name, mobile, alternate mobile, address, city, GSTIN, map location and notes to any authenticated user.
+- POST writes customer_id, customer_type, shop_name, shopkeeper_name, mobile, alternate_mobile, address, locality_area, city, gstin, map_location, active, created_at, notes.
+- Physical Customers headers are 14 fields and include notes and GSTIN.
+- sheets.py REQUIRED_TABS declares 13 fields and omits notes; it does not declare created_by, updated_at or updated_by.
+- Current route writes notes; the physical sheet accepts it. The required-header contract therefore does not fully reflect actual use.
+- Current API defaults city to Bhilwara.
+- Pydantic Customer response model includes credit_limit, max_overdue_days and current_balance defaults, but these are not part of physical Customers headers nor Phase 1 Customers dictionary. Routes do not persist them. Do not treat defaults as authoritative balances/credit limits; source those from approved customer-ledger/credit-control tables.
+- Create has no duplicate/possible-duplicate detection. Update is full-model replacement, not partial update; no updated_at/updated_by.
+
+SUPPLIERS
+- Routes: GET/POST /api/purchasing/suppliers; PUT /api/purchasing/suppliers/{supplier_id}.
+- Endpoints require purchasing access.
+- SupplierCreate fields: supplier_name, contact_person, mobile, email, address, city, gstin, notes.
+- POST allocates supplier_id before duplicate-name validation.
+- City defaults to Barwani.
+- POST/PUT does not use payment_terms_days or opening_balance.
+- Physical Suppliers has 14 headers and includes payment_terms_days/opening_balance.
+- Phase 1 Suppliers dictionary proposes updated_at/updated_by and omits payment_terms_days/opening_balance.
+- Important correction: current main backend sheets.py REQUIRED_TABS does NOT declare a Suppliers entry, even though the Phase 1 table registry marks Suppliers as having a backend contract. This must be resolved before any installer/preflight relies on REQUIRED_TABS.
+- PUT does not persist updated_at/updated_by.
+- Supplier-name duplicate check is lowercase/trimmed but no GSTIN validation or duplicate handling is visible.
+
+RAWMATERIALS
+- Routes: GET /api/production/raw-materials; POST /api/production/raw-materials/receive; POST /api/production/raw-materials/verify-opening-stock.
+- GET requires production access; it reads RawMaterials and RawMaterialLedger, calculates balances, but falls back to RAW_MATERIALS_SEED if master is empty and appends missing seed items to the returned API list.
+- Receive requires production access but, if no real master record is found, searches RAW_MATERIALS_SEED and may append a new RawMaterials master row automatically.
+- Opening-stock verification is Owner-only but also uses RAW_MATERIALS_SEED fallback.
+- No ordinary explicit RawMaterials master create/update route was identified. Master creation is currently coupled to the receive fallback.
+- sheets.py REQUIRED_TABS for RawMaterials declares nine headers: raw_material_id, material_name, current_stock, unit, rate_per_unit, rate_status, category, created_at, created_by.
+- Physical RawMaterials has 13 headers, including opening_stock, minimum_stock, active and notes.
+- RawMaterialLedger is already used to calculate movements/balances; opening verification is represented through a ledger transaction and audit event.
+- Required before activation: GET returns only real sheet master records; receive and verification reject unknown material IDs; only a separate Owner-authorized master-create action may add a master record; no seed fallback.
+
+PRODUCTPRICES / PRODUCTTAXRULES / SALESCHANNELS / UNITSOFMEASUREMENT
+- No corresponding route/model references found in inspected current main backend source.
+- Physical sheets are generic 7-column placeholders.
+- Keep deferred until schemas and API ownership are approved.
+
+SALES INTEGRATION
+- Sales routes accept actual_unit_price from the request; no ProductPrices lookup was found.
+- Sale item stores actual_unit_price and snapshots SKU/product name/pack size.
+- Sales routes contain hard-coded retail pack-size checks; a legacy order path also applies a fixed 5% tax calculation.
+- Do not activate ProductPrices or ProductTaxRules until server-side price/tax lookup and immutable sale-line snapshots are implemented.
+
+SHEETS ADAPTER
+- append_record warns and silently omits record keys absent from physical headers unless authorize_header_update=True.
+- API can therefore return success while some requested fields are not persisted.
+- Before master-data activation, add strict header/field preflight: reject unknown record keys and missing required headers; never silently drop fields; no automatic header expansion by default.
+- Verify every successful write by fresh read-back using the primary key.
+- Do not allocate IDs before required-field, duplicate and reference validation.
+
+2. ROUTE-TO-SCHEMA DECISION MATRIX
+
+Products
+- Current access: authenticated GET; OWNER/OWNER_ADMIN/PA create/update.
+- Primary key: product_id. Business unique key: sku (must be enforced).
+- Unmapped fields: recipe_id, created_at, created_by, updated_at, updated_by.
+- Actions: remove recipe_id from Products persistence/model or formally add it; preferred: Recipes links by product_id/version. Add SKU duplicate check before ID allocation. Add strict read-back and approved actor/timestamp metadata.
+
+Customers
+- Current access: any authenticated user for all three handlers.
+- Primary key: customer_id.
+- Possible duplicate keys: GSTIN when supplied; otherwise warning using business name + city/contact, not hard unique on mobile.
+- Contract issue: created_by/updated_at/updated_by absent; physical notes field missing from REQUIRED_TABS.
+- Response phantom fields: credit_limit/max_overdue_days/current_balance are defaults, not persisted here.
+- Actions: role/field-scope customer PII; reconcile notes/header contract; remove hard-coded city default; define credit/balance authority; duplicate warnings; persist actor/update metadata.
+
+Suppliers
+- Current access: purchasing roles.
+- Primary key: supplier_id.
+- Physical payment_terms_days/opening_balance unused in API; updated_at/by proposed but not physical.
+- Suppliers absent from sheets.py REQUIRED_TABS.
+- Actions: add approved Suppliers header contract; retain payment_terms_days; deprecate opening_balance for AP balance; remove Barwani default; duplicate checks before ID allocation; update metadata/read-back.
+
+RawMaterials
+- Current access: production; Owner for opening-stock verification.
+- Primary key: raw_material_id.
+- Current implicit seed insertion via receive endpoint.
+- Actions: explicit Owner-only master creation; remove all implicit seed fallback; current_stock derived/read-only; opening stock via approved ledger verification; strict UOM; rate_status TEXT enum; read-back.
+
+ProductPrices
+- No current route.
+- Business effective key proposal: product_id + channel_id + customer_type + valid_from.
+- Actions: define channels first; prevent overlapping ACTIVE periods; use Decimal(12,2); snapshot applied price in SaleItems.
+
+ProductTaxRules
+- No current route.
+- Actions: tax_rule_id TEXT, tax_type TEXT, HSN TEXT, tax_rate numeric percentage points; accounts/Owner approval; snapshot tax per sale line.
+
+3. CRITICAL PRIORITIES
+
+P0 - Empty database integrity
+1. Remove RAW_MATERIALS_SEED from GET fallback.
+2. Prevent seed material insertion during receive.
+3. Disable seed master fallback during opening verification.
+4. Ensure recipe setup cannot auto-create seed master items.
+5. Test every master GET returns zero records for clean empty tabs.
+6. Test receive cannot create unknown master data.
+
+P0 - Write integrity
+7. Implement strict header/field preflight.
+8. No silent field omission.
+9. Read-back verify each successful write.
+10. Run duplicate and parent-reference checks before ID allocation.
+11. Resolve missing Suppliers entry in REQUIRED_TABS.
+
+P1 - Data governance and privacy
+12. Scope customer PII by role; authenticated access should not automatically expose all customer contact/address/GSTIN details.
+13. Remove hard-coded city defaults.
+14. Resolve Customer credit_limit/current_balance fields against actual ledger/credit tables.
+15. Add actor/update metadata consistently.
+
+P1 - Pricing and tax
+16. Server-side ProductPrices lookup.
+17. Server-side ProductTaxRules lookup.
+18. Snapshot price/tax rule on each sale item.
+19. Remove hard-coded pack/tax assumptions only after replacement logic is approved and tested.
+
+4. SAFE IMPLEMENTATION ORDER
+A. Approve master-data record grains and field lists.
+B. Approve exact header migration set, including Suppliers REQUIRED_TABS.
+C. Remove implicit seed creation and verify clean-empty behavior.
+D. Implement strict Sheets header/field preflight, validation-before-ID, and read-back.
+E. Implement Products, Customers, Suppliers and RawMaterials maintenance APIs in sandbox.
+F. Implement ProductPrices, ProductTaxRules, SalesChannels and UOM routes after records/relationships are approved.
+G. Run role, duplicate, missing-header, read-back, clean-empty and failure tests.
+H. Owner signs a versioned schema before production migration/deployment.
+
+5. LIMITATIONS
+Static source review only. No live API call or runtime test. Does not prove Render runs main commit 46165cfc... or that any change is deployed. No spreadsheet modified, no IDs allocated, no records created, no historical data restored.
+
+END
