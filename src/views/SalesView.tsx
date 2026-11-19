@@ -137,6 +137,10 @@ export const SalesView: React.FC = () => {
   const [issuedSale, setIssuedSale] = useState<{ sale: Sale; paymentId: string } | null>(null);
   const [viewingSaleData, setViewingSaleData] = useState<{ sale: Sale; items: SaleItem[] } | null>(null);
   const [customShareMobile, setCustomShareMobile] = useState('');
+  const [cancelSaleTarget, setCancelSaleTarget] = useState<Sale | null>(null);
+  const [cancelSaleReason, setCancelSaleReason] = useState('');
+  const [cancelSaleNonces, setCancelSaleNonces] = useState<Record<string, string>>({});
+  const [isCancellingSale, setIsCancellingSale] = useState(false);
 
   const userRoleUpper = String(currentUser?.role || '').toUpperCase();
 
@@ -1394,18 +1398,12 @@ export const SalesView: React.FC = () => {
                           <button
                             type="button"
                             className="secondary"
+                            disabled={isCancellingSale}
                             style={{ padding: '4px 8px', fontSize: '0.8rem', color: '#b91c1c', borderColor: '#fca5a5' }}
-                            onClick={async () => {
-                              const reason = window.prompt(`Enter reason for cancelling Bill #${s.bill_number}:`);
-                              if (reason && reason.trim()) {
-                                try {
-                                  await cancelSale(s.sale_id, reason.trim());
-                                  setNotice({ msg: `Bill #${s.bill_number} has been cancelled and stock/payment reversed.` });
-                                } catch (err: unknown) {
-                                  const errStr = err instanceof Error ? err.message : String(err);
-                                  setNotice({ msg: `Cancellation failed: ${errStr}`, error: true });
-                                }
-                              }
+                            onClick={() => {
+                              setCancelSaleTarget(s);
+                              setCancelSaleReason('');
+                              setNotice(null);
                             }}
                             title="Cancel Bill & Reverse Stock"
                           >
@@ -1432,6 +1430,90 @@ export const SalesView: React.FC = () => {
           items={viewingSaleData.items}
           onClose={() => setViewingSaleData(null)}
         />
+      )}
+
+      {cancelSaleTarget && (
+        <div
+          className="modal-overlay"
+          onClick={() => {
+            if (!isCancellingSale) {
+              setCancelSaleTarget(null);
+              setCancelSaleReason('');
+            }
+          }}
+        >
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '460px' }}>
+            <h2 style={{ marginTop: 0 }}>Cancel Bill #{cancelSaleTarget.bill_number}</h2>
+            <p className="muted" style={{ fontSize: '0.85rem', marginBottom: '12px' }}>
+              Cancelling reverses salesman stock and payment entries cleanly. Enter the cancellation reason below.
+            </p>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (isCancellingSale || !cancelSaleReason.trim()) return;
+                const saleId = cancelSaleTarget.sale_id;
+                const activeNonce = cancelSaleNonces[saleId] || createSubmissionNonce('SALECAN');
+                if (!cancelSaleNonces[saleId]) {
+                  setCancelSaleNonces((prev) => ({ ...prev, [saleId]: activeNonce }));
+                }
+                setIsCancellingSale(true);
+                setNotice(null);
+                try {
+                  await cancelSale(saleId, cancelSaleReason.trim(), activeNonce);
+                  setCancelSaleNonces((prev) => {
+                    const next = { ...prev };
+                    delete next[saleId];
+                    return next;
+                  });
+                  setNotice({
+                    msg: `Bill #${cancelSaleTarget.bill_number} has been cancelled and stock/payment reversed.`,
+                  });
+                  setCancelSaleTarget(null);
+                  setCancelSaleReason('');
+                } catch (err: unknown) {
+                  const errMsg = isUnknownOutcomeError(err)
+                    ? 'Status not confirmed; do not cancel again with a new key. Retry safely with preserved reason and key.'
+                    : `Cancellation failed: ${err instanceof Error ? err.message : String(err)}`;
+                  setNotice({ msg: errMsg, error: true });
+                } finally {
+                  setIsCancellingSale(false);
+                }
+              }}
+            >
+              <label>
+                Reason for cancelling Bill #{cancelSaleTarget.bill_number}
+                <textarea
+                  rows={3}
+                  required
+                  value={cancelSaleReason}
+                  onChange={(e) => setCancelSaleReason(e.target.value)}
+                  placeholder="Customer cancellation, billing error, or stock return..."
+                  disabled={isCancellingSale}
+                />
+              </label>
+              <div className="actions" style={{ marginTop: '14px' }}>
+                <button
+                  type="submit"
+                  disabled={isCancellingSale || !cancelSaleReason.trim()}
+                  style={{ background: '#b91c1c' }}
+                >
+                  {isCancellingSale ? 'Cancelling…' : 'Confirm Bill Cancellation'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={isCancellingSale}
+                  onClick={() => {
+                    setCancelSaleTarget(null);
+                    setCancelSaleReason('');
+                  }}
+                >
+                  Keep Bill
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

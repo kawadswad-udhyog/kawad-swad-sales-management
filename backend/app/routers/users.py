@@ -278,6 +278,15 @@ async def get_user_references(user_id: str, current_user: dict = Depends(get_cur
     return inspect_user_references(user_id)
 
 
+def _is_active_custom_role(row: dict) -> bool:
+    if str(row.get("deleted", "")).strip().lower() in {"true", "1", "yes"}:
+        return False
+    active_raw = str(row.get("active", "true")).strip().lower()
+    if active_raw in {"false", "0", "no"}:
+        return False
+    return True
+
+
 @router.get("/roles")
 async def list_roles(current_user: dict = Depends(get_current_user)):
     """List all available roles (built-in and custom) with module permissions."""
@@ -294,8 +303,8 @@ async def list_roles(current_user: dict = Depends(get_current_user)):
             "permissions": perms,
         })
 
-    # Custom roles
-    custom_records = db.get_records("CustomRoles") or []
+    # Custom roles (exclude soft-deleted/inactive rows)
+    custom_records = [cr for cr in (db.get_records("CustomRoles", fresh=True) or []) if _is_active_custom_role(cr)]
     for cr in custom_records:
         raw_p = cr.get("permissions_json") or "{}"
         try:
@@ -333,7 +342,13 @@ async def create_or_update_custom_role(req: CustomRoleCreate, request: Request, 
     validate_custom_role_permissions(req.permissions)
 
     actor_id = str(current_user.get("user_id") or "")
-    existing = next((r for r in db.get_records("CustomRoles") if str(r.get("role_name", "")).upper() == clean_name), None)
+    existing = next(
+        (
+            r for r in (db.get_records("CustomRoles", fresh=True) or [])
+            if _is_active_custom_role(r) and str(r.get("role_name", "")).upper() == clean_name
+        ),
+        None,
+    )
     now_iso_str = datetime.now(timezone.utc).isoformat()
 
     if existing:
@@ -385,7 +400,13 @@ async def delete_custom_role(role_name: str, request: Request, current_user: dic
     require_owner(current_user)
     clean_name = str(role_name or "").strip().upper()
 
-    existing = next((r for r in db.get_records("CustomRoles") if str(r.get("role_name", "")).upper() == clean_name), None)
+    existing = next(
+        (
+            r for r in (db.get_records("CustomRoles", fresh=True) or [])
+            if _is_active_custom_role(r) and str(r.get("role_name", "")).upper() == clean_name
+        ),
+        None,
+    )
     if not existing:
         raise HTTPException(404, f"Custom role '{clean_name}' not found.")
 

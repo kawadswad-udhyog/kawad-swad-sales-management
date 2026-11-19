@@ -747,6 +747,7 @@ async def list_incomplete_sales(current_user: dict = Depends(get_current_user)):
 @router.post("/{sale_id}/cancel", dependencies=[Depends(require_sheets_connection)])
 async def cancel_sale(sale_id: str, req: SaleCancelRequest, request: Request, current_user: dict = Depends(get_current_user)):
     _reject_auditor(current_user)
+    require_roles(current_user, SALES_WRITE_ROLES)
     actor_role = role_v2_of(current_user)
     user_id = str(current_user.get("user_id", ""))
     async with _sales_lock:
@@ -754,6 +755,9 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, request: Request, cu
         match = next((s for s in sales if str(s.get("sale_id")) == sale_id), None)
         if not match:
             raise HTTPException(status_code=404, detail="Sale record not found.")
+        salesman_id = str(match.get("salesman_user_id", ""))
+        if not is_manager(current_user) and salesman_id != user_id:
+            raise HTTPException(status_code=403, detail="Only an Owner/PA or the issuing salesman can cancel a bill.")
         if str(match.get("bill_status", "")).upper() == "CANCELLED":
             # Idempotency / reconciliation: Ensure any active journal voucher is reversed
             # and any interrupted cancellation is recovered safely.
@@ -829,10 +833,6 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, request: Request, cu
                 "accounting_error": accounting_error,
                 "message": f"Bill {match.get('bill_number')} has already been cancelled. (Accounting status: {accounting_status})",
             }
-
-        salesman_id = str(match.get("salesman_user_id", ""))
-        if not is_manager(current_user) and salesman_id != user_id:
-            raise HTTPException(status_code=403, detail="Only an Owner/PA or the issuing salesman can cancel a bill.")
 
         now = now_iso()
         bill_number = str(match.get("bill_number", ""))

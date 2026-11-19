@@ -76,13 +76,13 @@ async def get_stock_summary(current_user: dict = Depends(get_current_user)):
 @router.get("/transactions", response_model=List[StockTransaction])
 async def list_stock_transactions(limit: int = 250, current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
-    role = current_user.get("role", "").upper()
+    v2_role = role_v2_of(current_user)
 
     txns = db.get_records("SalesmanStockLedger")
     result = []
     for r in txns[-limit:]:
         s_user = str(r.get("salesman_user_id", ""))
-        if role not in ["OWNER", "OWNER_ADMIN", "PA", "STORE", "AUDITOR"] and s_user != user_id:
+        if v2_role not in {"OWNER_ADMIN", "PA", "STORE", "AUDITOR"} and s_user != user_id:
             continue
         result.append(StockTransaction(
             stock_txn_id=str(r.get("stock_txn_id", "")),
@@ -947,8 +947,9 @@ async def list_van_loading_passes(
     current_user: dict = Depends(get_current_user)
 ):
     user_id = str(current_user.get("user_id", ""))
-    role = role_of(current_user)
-    is_sales_role = role in {"SALESMAN", "FIELD_SALESMAN"}
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "STORE", "SALES", "FIELD_SALESMAN", "PACKAGING", "AUDITOR"})
+    v2_role = role_v2_of(current_user)
+    is_sales_role = v2_role == "FIELD_SALESMAN"
 
     records = db.get_records("VanLoadingPasses", fresh=True)
     results = []
@@ -974,8 +975,9 @@ async def list_van_loading_passes(
 @router.get("/loading-passes/{pass_id_or_number}", response_model=VanLoadingPass)
 async def get_van_loading_pass(pass_id_or_number: str, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id", ""))
-    role = role_of(current_user)
-    is_sales_role = role in {"SALESMAN", "FIELD_SALESMAN"}
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "STORE", "SALES", "FIELD_SALESMAN", "PACKAGING", "AUDITOR"})
+    v2_role = role_v2_of(current_user)
+    is_sales_role = v2_role == "FIELD_SALESMAN"
 
     target = pass_id_or_number.strip()
     records = db.get_records("VanLoadingPasses", fresh=True)

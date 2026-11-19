@@ -143,6 +143,10 @@ SCHEMA_HEADER_VARIANCES: Dict[str, Dict[str, Any]] = {
         "status": "VERIFIED_CORE",
         "source": "docs/SALES_MANAGEMENT_SCHEMA.md",
         "headers": ["setting_key", "setting_value", "description"],
+        "id_exception": (
+            "Settings is keyed by logical 'setting_key' and intentionally has no numeric sequence prefix "
+            "in sheets.ID_PREFIXES (all 66 other REQUIRED_TABS entries have sequential prefixes)."
+        ),
     },
     "Suppliers": {
         "status": "CONFLICT_RECONCILIATION_REQUIRED",
@@ -154,6 +158,73 @@ SCHEMA_HEADER_VARIANCES: Dict[str, Dict[str, Any]] = {
             "opening_balance whereas REQUIRED_TABS['Suppliers'] has 12 columns. Reconcile physical Row-1 "
             "headers against workbook before strict header pruning."
         ),
+    },
+    "CustomRoles": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": ["deleted", "active"],
+        "notes": "users.py DELETE_CUSTOM_ROLE transmits soft-delete flags deleted/active which are omitted from REQUIRED_TABS['CustomRoles'].",
+    },
+    "SalaryIncentives": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": [
+            "record_id", "period_start", "period_end", "record_type", "eligible_kg",
+            "completed_100kg_blocks", "rate", "calculated_amount", "approved_amount",
+            "approval_status", "paid_datetime", "payment_reference",
+        ],
+        "notes": "salary.py reads/writes record_id, period_start/period_end, calculated_amount/approved_amount whereas REQUIRED_TABS['SalaryIncentives'] lists legacy columns (incentive_id, period_month, incentive_amount).",
+    },
+    "RawMaterials": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": [
+            "active", "notes", "opening_stock", "opening_stock_verified",
+            "verification_status", "verified_physical_stock", "verified_by", "verified_at",
+        ],
+        "notes": "production.py writes active/notes and opening-stock verification metadata beyond the 9 columns in REQUIRED_TABS['RawMaterials'].",
+    },
+    "Products": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": ["recipe_id"],
+        "notes": "products.py accepts/writes optional recipe_id linkage omitted from REQUIRED_TABS['Products'].",
+    },
+    "Workers": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": ["created_by"],
+        "notes": "production.py CREATE_WORKER records created_by which is omitted from REQUIRED_TABS['Workers'].",
+    },
+    "Customers": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": ["notes"],
+        "notes": "customers.py reads/writes notes which is omitted from REQUIRED_TABS['Customers'].",
+    },
+    "Sales": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": ["cash_collected", "credit_amount", "owner_credit_approval_id"],
+        "notes": "sales.py writes cash_collected, credit_amount, and owner_credit_approval_id beyond REQUIRED_TABS['Sales'].",
+    },
+    "ProductionBatches": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": [
+            "gross_output_kg", "process_loss_kg", "loss_reason",
+            "saleable_output_kg", "unexplained_variance_kg", "ingredients",
+        ],
+        "notes": "production.py CREATE_PRODUCTION_BATCH includes extended reconciliation & ingredient columns omitted from REQUIRED_TABS['ProductionBatches'].",
+    },
+    "PackagingBatches": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": [
+            "recipe_id", "bulk_batch_id", "bulk_product_key", "bulk_quantity_consumed_kg",
+        ],
+        "notes": "production.py RECORD_PACKAGING_BATCH writes recipe/bulk linkage fields omitted from REQUIRED_TABS['PackagingBatches'].",
+    },
+    "Expenses": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": ["post_accounting_journal"],
+        "notes": "expenses.py passes governance flag post_accounting_journal inside REVIEW_EXPENSE update payload.",
+    },
+    "ShopVisits": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "missing_from_required_tabs": ["shop_name_snapshot", "visit_outcome", "order_taken", "follow_up_date", "next_action"],
+        "notes": "visits.py uses shop_name_snapshot/visit_outcome/order_taken/follow_up_date/next_action whereas REQUIRED_TABS['ShopVisits'] lists customer_name_snapshot/purpose/outcome.",
     },
 }
 

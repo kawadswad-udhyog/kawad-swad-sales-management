@@ -18,7 +18,7 @@ Architectural rules enforced here:
 6. Never log raw secrets, bank details, or personal identity numbers.
 """
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
 import json
@@ -86,16 +86,54 @@ class BridgeResult:
 def _normalize_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            dec = value if isinstance(value, Decimal) else Decimal(str(value))
+            if dec.is_finite():
+                if dec == 0:
+                    return "0"
+                return format(dec.normalize(), "f").rstrip("0").rstrip(".")
+        except (InvalidOperation, ValueError):
+            pass
     s = str(value if value is not None else "").strip()
     if s.lower() in {"true", "false"}:
         return s.lower()
+    try:
+        dec = Decimal(s)
+        if dec.is_finite():
+            if dec == 0:
+                return "0"
+            return format(dec.normalize(), "f").rstrip("0").rstrip(".")
+    except (InvalidOperation, ValueError):
+        pass
     return s
+
+
+_PRIMARY_RECORD_NESTED_KEYS: Tuple[str, ...] = (
+    "record",
+    "updates",
+    "packaging_updates",
+    "sale",
+    "order",
+    "po",
+    "grn",
+    "supplier_return",
+    "payment",
+    "payment_update",
+    "salary_structure",
+    "payroll_run",
+    "user_updates",
+    "auth_updates",
+    "item_update",
+    "milling_batch",
+    "leg2_row",
+)
 
 
 def _lookup_expected_value(payload: Dict[str, Any], key: str) -> Any:
     if key in payload:
         return payload.get(key)
-    for nested_key in ("sale", "order", "payroll_run", "payment", "user_updates", "auth_updates", "item_update"):
+    for nested_key in _PRIMARY_RECORD_NESTED_KEYS:
         sub = payload.get(nested_key)
         if isinstance(sub, dict) and key in sub:
             return sub.get(key)
@@ -253,7 +291,41 @@ class AppsScriptBridge:
             if raw_payload_id:
                 lookup_id = str(raw_payload_id).strip()
 
-        if spec.id_field and lookup_id:
+        if spec.readback.expect_absent or spec.readback.expect_absent_or_soft_deleted:
+            target_criteria: List[Tuple[str, str]] = []
+            if spec.id_field and lookup_id:
+                target_criteria = [(spec.id_field, lookup_id)]
+            elif spec.readback.primary_match_fields:
+                for f_name in spec.readback.primary_match_fields:
+                    expected_v = _lookup_expected_value(payload, f_name)
+                    if expected_v is not None and str(expected_v).strip() != "":
+                        target_criteria.append((f_name, str(expected_v).strip()))
+            if not target_criteria:
+                raise _ReadBackFailure(
+                    f"Cannot verify deletion read-back on '{spec.target_tab}': missing target identifier."
+                )
+            existing_row = next(
+                (
+                    r for r in fresh_rows
+                    if all(str(r.get(k, "")).strip() == v for k, v in target_criteria)
+                ),
+                None,
+            )
+            if spec.readback.expect_absent:
+                if existing_row is not None:
+                    raise _ReadBackFailure(
+                        f"Deleted row matching {target_criteria} still present on read-back in '{spec.target_tab}'."
+                    )
+            else:
+                if existing_row is not None:
+                    is_deleted_flag = _normalize_scalar(existing_row.get("deleted", "")) == "true"
+                    is_inactive_flag = _normalize_scalar(existing_row.get("active", "")) == "false"
+                    if not (is_deleted_flag or is_inactive_flag):
+                        raise _ReadBackFailure(
+                            f"Soft-deleted row matching {target_criteria} in '{spec.target_tab}' is still active on read-back."
+                        )
+            matched = None
+        elif spec.id_field and lookup_id:
             matched = next(
                 (r for r in fresh_rows if str(r.get(spec.id_field, "")).strip() == lookup_id),
                 None,
@@ -324,7 +396,7 @@ class AppsScriptBridge:
 
             expected_min = 1
             if child_check.min_rows_payload_key:
-                items_val = payload.get(child_check.min_rows_payload_key)
+                items_val = _lookup_expected_value(payload, child_check.min_rows_payload_key)
                 if isinstance(items_val, list) and len(items_val) > 0:
                     expected_min = len(items_val)
 
@@ -638,6 +710,52 @@ class AppsScriptBridge:
                 nonce=clean_nonce,
                 error_code=str(data.get("error_code") or "APPS_SCRIPT_UNCONFIRMED_STATUS"),
                 message="Status not confirmed; do not submit a new transaction. Retry safely with the same nonce.",
+                retryable=True,
+                http_status=504,
+                payload_hash=payload_hash,
+            )
+
+        # Mandatory fail-closed echo presence check for all CONFIRMED responses
+        if not echo_corr:
+            return BridgeResult(
+                status="PENDING_UNKNOWN",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                error_code="MISSING_RESPONSE_CORRELATION",
+                message="Status not confirmed; Apps Script CONFIRMED response omitted correlation_id.",
+                retryable=True,
+                http_status=504,
+                payload_hash=payload_hash,
+            )
+        if not echo_nonce:
+            return BridgeResult(
+                status="PENDING_UNKNOWN",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                error_code="MISSING_RESPONSE_NONCE",
+                message="Status not confirmed; Apps Script CONFIRMED response omitted nonce.",
+                retryable=True,
+                http_status=504,
+                payload_hash=payload_hash,
+            )
+        if not echo_action:
+            return BridgeResult(
+                status="PENDING_UNKNOWN",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                error_code="MISSING_RESPONSE_ACTION",
+                message="Status not confirmed; Apps Script CONFIRMED response omitted action.",
+                retryable=True,
+                http_status=504,
+                payload_hash=payload_hash,
+            )
+        if not echo_tab:
+            return BridgeResult(
+                status="PENDING_UNKNOWN",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                error_code="MISSING_RESPONSE_TABLE",
+                message="Status not confirmed; Apps Script CONFIRMED response omitted target_tab.",
                 retryable=True,
                 http_status=504,
                 payload_hash=payload_hash,

@@ -27,14 +27,16 @@ router = APIRouter(prefix="/api/accounting", tags=["Accounting"])
 
 
 def require_accounting_access(user: dict, write: bool = False):
-    role = str(user.get("role", "")).upper()
-    allowed_read = {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "ACCOUNTS", "PA", "AUDITOR"}
-    # Blueprint v2.1: PA has read-only access to accounting ("view" only); only OWNER_ADMIN or ACCOUNTS may write.
-    allowed_write = {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "ACCOUNTS"}
+    v2_role = role_v2_of(user)
+    allowed_read = {"OWNER_ADMIN", "ACCOUNTS", "PA", "AUDITOR"}
+    # Blueprint v2.1: PA and AUDITOR are read-only for accounting; only OWNER_ADMIN or ACCOUNTS may write.
+    allowed_write = {"OWNER_ADMIN", "ACCOUNTS"}
+    if write and v2_role == "AUDITOR":
+        raise HTTPException(403, "AUDITOR role is strictly read-only.")
     allowed = allowed_write if write else allowed_read
-    if role not in allowed:
+    if v2_role not in allowed:
         raise HTTPException(403, "Access restricted to authorized Accounting, Owner, or read-only PA/Auditor roles.")
-    return str(user.get("user_id", "")), role
+    return str(user.get("user_id", "")), v2_role
 
 
 class JournalLineInput(BaseModel):
@@ -190,10 +192,10 @@ async def audit_reconcile_post(
     confirm_live_backfill: bool = Query(False),
     user: dict = Depends(get_current_user),
 ):
-    actor, role = require_accounting_access(user, write=not dry_run)
+    actor, _ = require_accounting_access(user, write=not dry_run)
     if not dry_run:
-        if role not in {"OWNER", "OWNER_ADMIN", "ADMIN"}:
-            raise HTTPException(403, "Live accounting backfill writes are restricted to Owner or Admin.")
+        if not is_owner(user):
+            raise HTTPException(403, "Live accounting backfill writes are restricted to Owner.")
         if not confirm_live_backfill:
             raise HTTPException(400, "To execute live journal backfill writes, confirm_live_backfill=true must be explicitly passed.")
 

@@ -64,6 +64,8 @@ export const UsersView: React.FC = () => {
   const [createUserNonce, setCreateUserNonce] = useState<string | null>(null);
   const [editUserNonce, setEditUserNonce] = useState<string | null>(null);
   const [pwResetNonce, setPwResetNonce] = useState<string | null>(null);
+  const [statusConfirmUser, setStatusConfirmUser] = useState<User | null>(null);
+  const [cancelConfirmReqId, setCancelConfirmReqId] = useState<string | null>(null);
   const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
 
   const clearActionNonce = (key: string) => {
@@ -196,21 +198,19 @@ export const UsersView: React.FC = () => {
   };
 
   const handleToggleStatus = async (u: User) => {
+    if (isSubmitting) return;
     const nextState = !u.active;
     const actionWord = nextState ? 'reactivate' : 'deactivate';
-    const confirmMsg = isOwner
-      ? `Are you sure you want to ${actionWord} '${u.full_name}'? ${!nextState ? 'This will immediately revoke all active sessions across devices.' : ''}`
-      : `Submit a request to Owner to ${actionWord} '${u.full_name}'?`;
-
-    if (!window.confirm(confirmMsg)) return;
 
     setNotice(null);
     const key = `status:${u.user_id}:${nextState}`;
     const activeNonce = actionNonces[key] || createSubmissionNonce('USRSTAT');
     if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
+    setIsSubmitting(true);
     try {
       const res = await setUserStatus(u.user_id, nextState, `Requested by ${currentUser?.full_name}`, activeNonce);
       clearActionNonce(key);
+      setStatusConfirmUser(null);
       if (res.pending_approval) {
         setNotice({ msg: `Status change request for '${u.full_name}' submitted for Owner approval.` });
       } else {
@@ -223,6 +223,8 @@ export const UsersView: React.FC = () => {
         ? err.message
         : `Failed to ${actionWord} employee.`;
       setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -309,14 +311,16 @@ export const UsersView: React.FC = () => {
   };
 
   const handleCancelRequest = async (reqId: string) => {
-    if (!window.confirm(`Cancel your pending request ${reqId}?`)) return;
+    if (isSubmitting) return;
     setNotice(null);
     const key = `cancel:${reqId}`;
     const activeNonce = actionNonces[key] || createSubmissionNonce('USRCAN');
     if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
+    setIsSubmitting(true);
     try {
       await cancelApprovalRequest(reqId, activeNonce);
       clearActionNonce(key);
+      setCancelConfirmReqId(null);
       setNotice({ msg: `Request ${reqId} cancelled.` });
     } catch (err: unknown) {
       const errorMsg = isUnknownOutcomeError(err)
@@ -325,6 +329,8 @@ export const UsersView: React.FC = () => {
         ? err.message
         : 'Failed to cancel request.';
       setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -653,7 +659,7 @@ export const UsersView: React.FC = () => {
                                   fontSize: '0.75rem',
                                   color: u.active ? '#b91c1c' : '#15803d',
                                 }}
-                                onClick={() => handleToggleStatus(u)}
+                                onClick={() => setStatusConfirmUser(u)}
                                 title={isOwner ? (u.active ? 'Deactivate account & revoke sessions' : 'Reactivate account') : 'Request status change'}
                               >
                                 {u.active ? (isOwner ? '🚫 Deactivate' : 'Req Deactivate') : (isOwner ? '✅ Reactivate' : 'Req Reactivate')}
@@ -782,7 +788,7 @@ export const UsersView: React.FC = () => {
                               type="button"
                               className="secondary"
                               style={{ padding: '4px 10px', fontSize: '0.75rem', color: '#b91c1c' }}
-                              onClick={() => handleCancelRequest(req.request_id)}
+                              onClick={() => setCancelConfirmReqId(req.request_id)}
                             >
                               Cancel Request
                             </button>
@@ -1142,6 +1148,58 @@ export const UsersView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CONFIRM STATUS TOGGLE */}
+      {statusConfirmUser && (
+        <div className="modal-overlay" onClick={() => !isSubmitting && setStatusConfirmUser(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '440px' }}>
+            <h2>{statusConfirmUser.active ? 'Deactivate Employee' : 'Reactivate Employee'}</h2>
+            <p style={{ fontSize: '0.9rem', color: '#334155', margin: '8px 0 16px' }}>
+              {isOwner
+                ? `Are you sure you want to ${statusConfirmUser.active ? 'deactivate' : 'reactivate'} '${statusConfirmUser.full_name}'?${statusConfirmUser.active ? ' This will immediately revoke all active sessions across devices.' : ''}`
+                : `Submit a request to Owner to ${statusConfirmUser.active ? 'deactivate' : 'reactivate'} '${statusConfirmUser.full_name}'?`}
+            </p>
+            <div className="actions">
+              <button
+                type="button"
+                disabled={isSubmitting}
+                style={{ background: statusConfirmUser.active ? '#b91c1c' : '#15803d' }}
+                onClick={() => handleToggleStatus(statusConfirmUser)}
+              >
+                {isSubmitting ? 'Processing…' : statusConfirmUser.active ? 'Confirm Deactivate' : 'Confirm Reactivate'}
+              </button>
+              <button type="button" className="secondary" disabled={isSubmitting} onClick={() => setStatusConfirmUser(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CONFIRM CANCEL REQUEST */}
+      {cancelConfirmReqId && (
+        <div className="modal-overlay" onClick={() => !isSubmitting && setCancelConfirmReqId(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '420px' }}>
+            <h2>Cancel Approval Request</h2>
+            <p style={{ fontSize: '0.9rem', color: '#334155', margin: '8px 0 16px' }}>
+              Cancel your pending request <code>{cancelConfirmReqId}</code>?
+            </p>
+            <div className="actions">
+              <button
+                type="button"
+                disabled={isSubmitting}
+                style={{ background: '#b91c1c' }}
+                onClick={() => handleCancelRequest(cancelConfirmReqId)}
+              >
+                {isSubmitting ? 'Cancelling…' : 'Confirm Cancel Request'}
+              </button>
+              <button type="button" className="secondary" disabled={isSubmitting} onClick={() => setCancelConfirmReqId(null)}>
+                Keep Request
+              </button>
+            </div>
           </div>
         </div>
       )}

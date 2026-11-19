@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../context/StoreContext';
-import { getAuthToken, apiFetch, createSubmissionNonce } from '../services/api';
+import { getAuthToken, apiFetch, createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 import {
   Users,
@@ -120,6 +120,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [calcPayrollNonce, setCalcPayrollNonce] = useState('');
   const [approvePayrollNonces, setApprovePayrollNonces] = useState<Record<string, string>>({});
   const [approvingRunId, setApprovingRunId] = useState<string | null>(null);
+  const [approveRunTargetId, setApproveRunTargetId] = useState<string | null>(null);
   const [disburseNonce, setDisburseNonce] = useState('');
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
@@ -253,7 +254,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       setActionError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error while saving attendance.'
       );
@@ -310,7 +311,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       setActionError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error logging work entry.'
       );
@@ -354,7 +355,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       setActionError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error calculating payroll.'
       );
@@ -365,7 +366,6 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
 
   const handleApprovePayroll = async (runId: string) => {
     if (isLoading || approvingRunId) return;
-    if (!window.confirm(`Approve payroll run ${runId}? This freezes calculations for payment.`)) return;
     const activeNonce = approvePayrollNonces[runId] || createSubmissionNonce('WF-PAYAPP');
     if (!approvePayrollNonces[runId]) {
       setApprovePayrollNonces((prev) => ({ ...prev, [runId]: activeNonce }));
@@ -390,6 +390,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           delete next[runId];
           return next;
         });
+        setApproveRunTargetId(null);
         setActionSuccess(data.message || 'Payroll approved successfully!');
         loadPayroll();
       } else {
@@ -397,7 +398,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       setActionError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error approving payroll.'
       );
@@ -462,7 +463,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       setActionError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error recording payment.'
       );
@@ -1143,7 +1144,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                       </button>
                       {run.status !== 'APPROVED' && isOwner && (
                         <button
-                          onClick={() => handleApprovePayroll(run.payroll_run_id)}
+                          onClick={() => setApproveRunTargetId(run.payroll_run_id)}
                           disabled={isLoading || Boolean(approvingRunId)}
                           className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs cursor-pointer"
                         >
@@ -1532,6 +1533,36 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           }}
         />
       )}
+
+      {/* MODAL: Confirm Payroll Approval */}
+      {approveRunTargetId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-md w-full p-5 space-y-4">
+            <h3 className="text-base font-bold text-slate-900 m-0">Approve Payroll Run</h3>
+            <p className="text-xs text-slate-600 m-0">
+              Approve payroll run <strong className="font-mono text-slate-900">{approveRunTargetId}</strong>? This freezes calculations for payment.
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={Boolean(approvingRunId)}
+                onClick={() => setApproveRunTargetId(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isLoading || Boolean(approvingRunId)}
+                onClick={() => handleApprovePayroll(approveRunTargetId)}
+                className="px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl cursor-pointer disabled:opacity-50"
+              >
+                {approvingRunId === approveRunTargetId ? 'Approving...' : 'Confirm Approval'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1585,7 +1616,7 @@ const AddLabourModal: React.FC<{ onClose: () => void; onSuccess: (msg: string) =
       }
     } catch (err) {
       setError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error registering labour worker.'
       );
@@ -1732,7 +1763,7 @@ const AssignTaskModal: React.FC<{
       }
     } catch (err) {
       setError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error assigning task.'
       );
@@ -1858,7 +1889,7 @@ const ReviewTaskModal: React.FC<{
       }
     } catch (err) {
       setError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error submitting review decision.'
       );
@@ -1972,7 +2003,7 @@ const CreateProjectModal: React.FC<{
       }
     } catch (err) {
       setError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error creating project.'
       );
@@ -2090,7 +2121,7 @@ const AddMilestoneModal: React.FC<{
       }
     } catch (err) {
       setError(
-        err instanceof Error && err.name === 'AbortError'
+        isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
           : 'Network error adding milestone.'
       );

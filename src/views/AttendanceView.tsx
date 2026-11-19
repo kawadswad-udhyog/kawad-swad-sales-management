@@ -62,6 +62,7 @@ export const AttendanceView: React.FC = () => {
   const [bulkNonce, setBulkNonce] = useState<string | null>(null);
   const [correctionNonce, setCorrectionNonce] = useState<string | null>(null);
   const [deleteNonces, setDeleteNonces] = useState<Record<string, string>>({});
+  const [deleteDupTarget, setDeleteDupTarget] = useState<{ attendanceId: string; workerName: string } | null>(null);
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwner = canonicalRole === 'OWNER_ADMIN';
@@ -280,10 +281,8 @@ export const AttendanceView: React.FC = () => {
   };
 
   // Handle Remove Duplicate
-  const handleRemoveDuplicate = async (attendanceId: string, workerName: string) => {
-    if (!window.confirm(`Are you sure you want to remove duplicate attendance row ${attendanceId} for ${workerName}?`)) {
-      return;
-    }
+  const handleRemoveDuplicate = async (attendanceId: string) => {
+    if (isSubmitting) return;
     const activeNonce = deleteNonces[attendanceId] || createSubmissionNonce('ATTDEL');
     if (!deleteNonces[attendanceId]) setDeleteNonces((prev) => ({ ...prev, [attendanceId]: activeNonce }));
     setIsSubmitting(true);
@@ -297,6 +296,7 @@ export const AttendanceView: React.FC = () => {
         delete next[attendanceId];
         return next;
       });
+      setDeleteDupTarget(null);
       setFeedback({ type: 'success', message: `Duplicate attendance entry removed.` });
       await refreshAttendanceOnly();
     } catch (err: unknown) {
@@ -1096,7 +1096,13 @@ export const AttendanceView: React.FC = () => {
                           {a.is_duplicate && (
                             <button
                               type="button"
-                              onClick={() => handleRemoveDuplicate(a.attendance_id, a.worker_name_snapshot || a.worker_id)}
+                              disabled={isSubmitting}
+                              onClick={() =>
+                                setDeleteDupTarget({
+                                  attendanceId: a.attendance_id,
+                                  workerName: a.worker_name_snapshot || a.worker_id,
+                                })
+                              }
                               style={{
                                 padding: '4px 8px',
                                 borderRadius: '6px',
@@ -1125,6 +1131,36 @@ export const AttendanceView: React.FC = () => {
           </div>
         )}
       </div>
+
+      {deleteDupTarget && (
+        <div className="modal-overlay" onClick={() => !isSubmitting && setDeleteDupTarget(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '420px' }}>
+            <h2 style={{ marginTop: 0 }}>Remove Duplicate Attendance</h2>
+            <p style={{ fontSize: '0.9rem', color: '#334155', margin: '8px 0 16px' }}>
+              Are you sure you want to remove duplicate attendance row <code>{deleteDupTarget.attendanceId}</code> for{' '}
+              <strong>{deleteDupTarget.workerName}</strong>?
+            </p>
+            <div className="actions">
+              <button
+                type="button"
+                disabled={isSubmitting}
+                style={{ background: '#b91c1c' }}
+                onClick={() => handleRemoveDuplicate(deleteDupTarget.attendanceId)}
+              >
+                {isSubmitting ? 'Removing…' : 'Confirm Removal'}
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                disabled={isSubmitting}
+                onClick={() => setDeleteDupTarget(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

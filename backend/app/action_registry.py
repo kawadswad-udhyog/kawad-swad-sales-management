@@ -8,7 +8,7 @@ Enforces Blueprint v2.1 & ZIP (35) Static Acceptance Audit rules:
 """
 
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,8 @@ class ReadBackSpec:
     primary_match_fields: Tuple[str, ...] = ()
     state_assertions: Tuple[Tuple[str, str], ...] = ()
     child_checks: Tuple[ChildTabCheck, ...] = ()
+    expect_absent: bool = False
+    expect_absent_or_soft_deleted: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,8 @@ def _spec(
     primary_match_fields: Tuple[str, ...] = (),
     state_assertions: Tuple[Tuple[str, str], ...] = (),
     child_checks: Tuple[ChildTabCheck, ...] = (),
+    expect_absent: bool = False,
+    expect_absent_or_soft_deleted: bool = False,
 ) -> GovernedActionSpec:
     inv = frozenset({target_tab, *invalidate_tabs})
     return GovernedActionSpec(
@@ -63,6 +67,8 @@ def _spec(
             primary_match_fields=primary_match_fields,
             state_assertions=state_assertions,
             child_checks=child_checks,
+            expect_absent=expect_absent,
+            expect_absent_or_soft_deleted=expect_absent_or_soft_deleted,
         ),
     )
 
@@ -187,6 +193,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("CustomRoles",),
         requires_allocated_id=False,
         primary_match_fields=("role_id",),
+        expect_absent_or_soft_deleted=True,
     ),
     _spec(
         "UPDATE_CA_POLICY",
@@ -319,6 +326,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "recipe_id",
         ("Recipes",),
         requires_allocated_id=True,
+        state_assertions=(("product_id", "product_id"),),
     ),
     _spec(
         "APPROVE_RECIPE_VERSION",
@@ -454,6 +462,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "milling_batch_id",
         ("MillingBatches", "RawMaterialLedger", "RawMaterials", "JournalHeaders", "JournalLines"),
         requires_allocated_id=True,
+        state_assertions=(("source_material_id", "source_material_id"),),
     ),
     _spec(
         "RECOVER_MILLING_BATCH",
@@ -468,6 +477,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "production_id",
         ("ProductionBatches", "RawMaterialLedger", "RawMaterials", "ApprovalRequests", "ProductLots", "ProductionStockLedger"),
         requires_allocated_id=True,
+        state_assertions=(("product_id", "product_id"),),
     ),
     _spec(
         "RECOVER_RAW_MATERIALS_STATUS",
@@ -539,6 +549,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "packaging_id",
         ("PackagingBatches", "ProductionStockLedger", "Products", "ProductLots", "JournalHeaders", "JournalLines"),
         requires_allocated_id=True,
+        state_assertions=(("product_id", "product_id"), ("status", "status")),
         child_checks=(ChildTabCheck("ProductionStockLedger", "reference_id", "allocated_id"),),
     ),
     _spec(
@@ -548,6 +559,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("PackagingBatches", "ProductionStockLedger", "IncompleteTransactions"),
         requires_allocated_id=False,
         primary_match_fields=("packaging_id",),
+        state_assertions=(("status", "status"),),
         child_checks=(ChildTabCheck("ProductionStockLedger", "reference_id", "packaging_id"),),
     ),
     _spec(
@@ -558,6 +570,15 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         requires_allocated_id=False,
         primary_match_fields=("packaging_id",),
         state_assertions=(("discrepancy_approved", "discrepancy_approved"),),
+        child_checks=(
+            ChildTabCheck(
+                "ProductionStockLedger",
+                "reference_id",
+                "packaging_id",
+                min_rows_payload_key="stock_movements",
+                condition_payload_key="stock_movements",
+            ),
+        ),
     ),
     _spec(
         "CREATE_QUALITY_CHECK",
@@ -664,7 +685,15 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         requires_allocated_id=False,
         primary_match_fields=("sale_id",),
         state_assertions=(("bill_status", "bill_status"), ("delivery_status", "delivery_status")),
-        child_checks=(ChildTabCheck("SalesmanStockLedger", "related_sale_id", "sale_id"),),
+        child_checks=(
+            ChildTabCheck(
+                "SalesmanStockLedger",
+                "related_sale_id",
+                "sale_id",
+                min_rows_payload_key="stock_ledger_rows",
+                condition_payload_key="stock_ledger_rows",
+            ),
+        ),
     ),
     _spec(
         "MARK_SALE_COMPLETE",
@@ -816,7 +845,15 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         requires_allocated_id=False,
         primary_match_fields=("pass_id",),
         state_assertions=(("status", "status"),),
-        child_checks=(ChildTabCheck("SalesmanStockLedger", "reference_id", "pass_id"),),
+        child_checks=(
+            ChildTabCheck(
+                "SalesmanStockLedger",
+                "reference_id",
+                "pass_number",
+                min_rows_payload_key="ledger_movements",
+                condition_payload_key="ledger_movements",
+            ),
+        ),
     ),
     _spec(
         "REPORT_VAN_LOADING_DISCREPANCY",
@@ -944,6 +981,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "worker_id",
         ("Workers",),
         requires_allocated_id=True,
+        state_assertions=(("worker_name", "worker_name"),),
     ),
     _spec(
         "RECORD_WORKER_ATTENDANCE",
@@ -951,6 +989,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "attendance_id",
         ("WorkerAttendance",),
         requires_allocated_id=True,
+        state_assertions=(("worker_id", "worker_id"), ("attendance_date", "attendance_date"), ("status", "status")),
     ),
     _spec(
         "RECORD_BULK_WORKER_ATTENDANCE",
@@ -972,10 +1011,11 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
     _spec(
         "REMOVE_DUPLICATE_ATTENDANCE",
         "WorkerAttendance",
-        None,
+        "attendance_id",
         ("WorkerAttendance",),
         requires_allocated_id=False,
-        primary_match_fields=(),
+        primary_match_fields=("attendance_id",),
+        expect_absent=True,
     ),
     _spec(
         "CHECK_IN_ATTENDANCE",
@@ -1121,6 +1161,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "structure_id",
         ("SalaryStructures", "Users"),
         requires_allocated_id=True,
+        state_assertions=(("user_id", "user_id"),),
     ),
     _spec(
         "CALCULATE_PAYROLL",
@@ -1137,6 +1178,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("PayrollItems", "PayrollRuns"),
         requires_allocated_id=False,
         primary_match_fields=("item_id",),
+        state_assertions=(("net_amount", "net_amount"),),
     ),
     _spec(
         "APPROVE_PAYROLL",
@@ -1153,6 +1195,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "payment_id",
         ("WorkforcePayments", "PayrollItems", "FreelancerMilestones", "LabourWageRecords", "SalaryReceipts"),
         requires_allocated_id=True,
+        state_assertions=(("payment_type", "payment_type"), ("recipient_id", "recipient_id"), ("reference_id", "reference_id")),
         child_checks=(ChildTabCheck("SalaryReceipts", "payment_id", "allocated_id"),),
     ),
     _spec(

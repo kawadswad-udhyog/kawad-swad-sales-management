@@ -2195,6 +2195,7 @@ async def delete_duplicate_attendance(attendance_id: str, request: Request, user
         actor_user_id=actor,
         actor_role=role,
         request=request,
+        id_field="attendance_id",
         invalidate_tabs=["WorkerAttendance"],
     )
     db.log_audit(actor, "REMOVE_DUPLICATE_ATTENDANCE", "WorkerAttendance", attendance_id, reason=f"Removed duplicate attendance row for {field(existing, 'worker_name_snapshot')} on {a_dt}")

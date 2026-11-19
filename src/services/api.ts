@@ -254,13 +254,14 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
   const token = getAuthToken();
   const { targetUrl } = constructApiUrl(baseUrl, path);
   const method = (options.method || 'GET').toUpperCase();
+  const timeoutMs = options.timeoutMs ?? 35000;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...((options.headers as Record<string, string>) || {}),
   };
 
-  if (token && !headers['Authorization']) {
+  if (token && !token.startsWith('ks-local-jwt-') && !headers['Authorization']) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
@@ -269,10 +270,47 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
-  return fetch(targetUrl, {
-    ...options,
-    headers,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(targetUrl, {
+      ...options,
+      headers,
+      signal: options.signal ?? controller.signal,
+    });
+  } catch (err: unknown) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new ApiOutcomeUnknownError(
+        'Status not confirmed; request timed out. Do not submit a new transaction—your inputs and retry key are preserved.',
+        resolvedIdempotencyKey || undefined
+      );
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
+
+  if (res.status === 504) {
+    let msg = 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+    let corrId: string | undefined;
+    try {
+      const payload = await res.clone().json();
+      const detail = payload?.detail;
+      if (detail && typeof detail === 'object') {
+        if (typeof detail.message === 'string' && detail.message.trim()) msg = detail.message;
+        if (typeof detail.correlation_id === 'string') corrId = detail.correlation_id;
+      } else if (typeof payload?.message === 'string' && payload.message.trim()) {
+        msg = payload.message;
+      }
+    } catch {
+      // Ignore parse failure on 504
+    }
+    throw new ApiOutcomeUnknownError(msg, resolvedIdempotencyKey || undefined, corrId);
+  }
+
+  return res;
 }
 
 export class ApiHttpError extends Error {
