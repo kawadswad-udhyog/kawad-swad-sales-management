@@ -36,7 +36,25 @@ def mask_id(val: str) -> str:
         return val[:2] + "****" + val[-2:]
     return val[:4] + "****" + val[-4:]
 
+SCRIPT_MUTATION_MODE = "LEGACY_DIRECT_WRITE_DISABLED"
+
+
+def _assert_offline_script_allowed() -> None:
+    if os.getenv("SALES_ENV", "").strip().lower() == "production":
+        raise RuntimeError(
+            "BLOCKED_SINGLE_WRITE_OWNER: backend/scripts/update_sheets_recipe_master.py cannot run when SALES_ENV=production."
+        )
+    if os.getenv("SALES_TESTING", "").strip() == "1":
+        return
+    raise RuntimeError(
+        "BLOCKED_SINGLE_WRITE_OWNER: backend/scripts/update_sheets_recipe_master.py is a legacy "
+        "direct-write utility disabled under Blueprint v2.1 Single-Write-Owner (Sheets OAuth is read-only). "
+        "Perform recipe synchronization via the governed Apps Script bridge."
+    )
+
+
 def run_update():
+    _assert_offline_script_allowed()
     print("=" * 70)
     print("KAWAD SWAD UDHYOG - GOOGLE SHEETS RECIPE MASTER UPDATE")
     print("Formula Master Version 2.0 Synchronization Utility")

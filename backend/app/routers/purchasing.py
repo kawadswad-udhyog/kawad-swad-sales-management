@@ -530,7 +530,7 @@ async def create_goods_receipt(req: GoodsReceiptCreate, request: Request, user: 
         actor_role=actor_role,
         request=request,
         id_field="receipt_id",
-        invalidate_tabs=["GoodsReceipts", "GoodsReceiptItems", "RawMaterialLedger", "PurchaseOrderItems"],
+        invalidate_tabs=["GoodsReceipts", "GoodsReceiptItems", "RawMaterialLedger", "RawMaterials", "PurchaseOrderItems", "PurchaseOrders"],
     )
     receipt_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("receipt_id") or "")
     saved_grn = bridge_res.get("record") or {**grn_record, "receipt_id": receipt_id}

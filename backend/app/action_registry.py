@@ -1238,7 +1238,11 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "record_id",
         ("SalaryIncentives",),
         requires_allocated_id=True,
-        locked_prefix="SAL",
+        # SAL is owned by SalaryPayments (LOCKED_32_ID_PREFIXES) and blocked on new
+        # SalaryIncentives allocations via COLLIDING_LEGACY_PREFIX_TABS. Do not lock
+        # CREATE_SALARY_INCENTIVE to 'SAL' (deadlock); non-colliding canonical prefixes
+        # (e.g. SINC/INC) are validated via validate_table_id_prefix().
+        locked_prefix=None,
         state_assertions=(("approval_status", "approval_status"),),
     ),
     _spec(

@@ -353,6 +353,135 @@ export class ApiHttpError extends Error {
   }
 }
 
+export const BLOCKED_OWNER_SETUP_ERROR_CODES = new Set<string>([
+  'BLOCKED_PENDING_OWNER_SETUP',
+  'CORE_SCHEMA_CONFLICT_UNRECONCILED',
+  'PENDING_OWNER_MAPPING',
+  'CONFLICT_RECONCILIATION_REQUIRED',
+  'APPS_SCRIPT_BRIDGE_UNCONFIGURED',
+]);
+
+export interface NormalizedApiErrorPayload {
+  errorMsg: string;
+  errorCode?: string;
+  correlationId?: string;
+  retryable?: boolean;
+  workflowStatus?: WorkflowState;
+}
+
+export function normalizeApiErrorPayload(
+  parsedJson: Record<string, any> | null | undefined,
+  httpStatus: number
+): NormalizedApiErrorPayload {
+  if (!parsedJson || typeof parsedJson !== 'object') {
+    return {
+      errorMsg: '',
+      retryable: httpStatus === 503 ? false : undefined,
+    };
+  }
+  const detailObj =
+    parsedJson.detail && typeof parsedJson.detail === 'object'
+      ? (parsedJson.detail as V2ErrorDetail)
+      : null;
+  const errorCode = detailObj?.error_code || parsedJson.error_code;
+  const correlationId = detailObj?.correlation_id || parsedJson.correlation_id;
+  const rawRetryable = detailObj?.retryable ?? parsedJson.retryable;
+  const backendStatus = String(detailObj?.status || parsedJson.status || '')
+    .trim()
+    .toUpperCase();
+
+  let workflowStatus: WorkflowState | undefined = detailObj?.workflow_status;
+  if (
+    !workflowStatus &&
+    (backendStatus === 'BLOCKED_PENDING_OWNER_SETUP' ||
+      (errorCode && BLOCKED_OWNER_SETUP_ERROR_CODES.has(String(errorCode).trim().toUpperCase())))
+  ) {
+    workflowStatus = 'BLOCKED_PENDING_OWNER_SETUP';
+  } else if (!workflowStatus && backendStatus === 'PENDING_UNKNOWN') {
+    workflowStatus = 'PENDING_UNKNOWN';
+  }
+
+  const retryable =
+    workflowStatus === 'BLOCKED_PENDING_OWNER_SETUP'
+      ? false
+      : typeof rawRetryable === 'boolean'
+      ? rawRetryable
+      : undefined;
+
+  const rawDetail =
+    detailObj?.detail ||
+    detailObj?.message ||
+    (typeof parsedJson.detail === 'string' ? parsedJson.detail : '') ||
+    parsedJson.message ||
+    parsedJson.error ||
+    '';
+
+  return {
+    errorMsg: String(rawDetail),
+    errorCode: errorCode ? String(errorCode) : undefined,
+    correlationId: correlationId ? String(correlationId) : undefined,
+    retryable,
+    workflowStatus,
+  };
+}
+
+export function isBlockedOwnerSetupError(err: unknown): boolean {
+  if (err instanceof ApiHttpError) {
+    if (err.workflowStatus === 'BLOCKED_PENDING_OWNER_SETUP') return true;
+    if (err.errorCode && BLOCKED_OWNER_SETUP_ERROR_CODES.has(err.errorCode.toUpperCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export type SchemaBadgeTone = 'verified' | 'blocked' | 'pending' | 'unknown';
+
+export interface SchemaStatusBadgeInfo {
+  tone: SchemaBadgeTone;
+  label: string;
+  writableImplied: false;
+  className: string;
+}
+
+export function classifySchemaStatusBadge(rawStatus?: string | null): SchemaStatusBadgeInfo {
+  const status = String(rawStatus || '').trim().toUpperCase();
+  if (status === 'VERIFIED_CORE' || status === 'RECONCILED_OWNER_APPROVED' || status === 'COMPLETE_VERIFIED') {
+    return {
+      tone: 'verified',
+      label: status,
+      writableImplied: false,
+      className: 'bg-emerald-100 text-emerald-800',
+    };
+  }
+  if (
+    status.includes('CONFLICT') ||
+    status.includes('BLOCKED') ||
+    status === 'CORE_SCHEMA_CONFLICT_UNRECONCILED'
+  ) {
+    return {
+      tone: 'blocked',
+      label: status,
+      writableImplied: false,
+      className: 'bg-red-100 text-red-800',
+    };
+  }
+  if (status.includes('PENDING') || status.includes('INCOMPLETE')) {
+    return {
+      tone: 'pending',
+      label: status,
+      writableImplied: false,
+      className: 'bg-amber-100 text-amber-800',
+    };
+  }
+  return {
+    tone: 'unknown',
+    label: status || 'UNKNOWN_STATUS',
+    writableImplied: false,
+    className: 'bg-slate-200 text-slate-800',
+  };
+}
+
 export const UNKNOWN_OUTCOME_STANDARD_MSG =
   'Outcome unknown / checking transaction status — do not submit a new transaction. Form inputs are NOT SAVED and your retry nonce is preserved.';
 
@@ -670,19 +799,12 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       let retryable: boolean | undefined;
       let workflowStatus: WorkflowState | undefined;
       if (parsedJson && typeof parsedJson === 'object') {
-        const detailObj = parsedJson.detail && typeof parsedJson.detail === 'object' ? (parsedJson.detail as V2ErrorDetail) : null;
-        errorCode = detailObj?.error_code || parsedJson.error_code;
-        correlationId = detailObj?.correlation_id || parsedJson.correlation_id;
-        retryable = detailObj?.retryable ?? parsedJson.retryable;
-        workflowStatus = detailObj?.workflow_status || (errorCode === 'BLOCKED_PENDING_OWNER_SETUP' ? 'BLOCKED_PENDING_OWNER_SETUP' : undefined);
-        const rawDetail =
-          detailObj?.detail ||
-          detailObj?.message ||
-          (typeof parsedJson.detail === 'string' ? parsedJson.detail : '') ||
-          parsedJson.message ||
-          parsedJson.error ||
-          '';
-        errorMsg = String(rawDetail);
+        const normalized = normalizeApiErrorPayload(parsedJson, res.status);
+        errorCode = normalized.errorCode;
+        correlationId = normalized.correlationId;
+        retryable = normalized.retryable;
+        workflowStatus = normalized.workflowStatus;
+        errorMsg = normalized.errorMsg;
       }
 
       if (!errorMsg && trimmed.length > 0) {
@@ -711,6 +833,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
             : `Requested endpoint was not found on the backend (${path}).`;
         } else if (res.status === 429) {
           errorMsg = 'Too many requests or temporary Google Sheets quota reached. Please wait 15 seconds and try again.';
+        } else if (res.status === 503) {
+          errorMsg = 'Service unavailable or write blocked pending owner setup (HTTP 503). Record NOT SAVED.';
         } else if (res.status === 504) {
           errorMsg = 'Status not confirmed; do not submit a new transaction.';
         } else if (res.status >= 500) {

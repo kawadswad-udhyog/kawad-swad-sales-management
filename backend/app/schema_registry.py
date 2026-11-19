@@ -12,6 +12,8 @@ Authoritative code-level catalog for:
 """
 
 import json
+import logging
+import os
 import re
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -20,6 +22,8 @@ from app.config import (
     SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON,
     SALES_CA_POLICY_CONFIG_JSON,
 )
+
+logger = logging.getLogger("kawad_swad.schema_registry")
 
 WORKBOOK_TARGET_TAB_COUNT: int = 255
 
@@ -560,7 +564,7 @@ DATABASE_GROUPS_15: List[Dict[str, Any]] = [
             "GoodsReceipts", "GoodsReceiptItems", "SupplierBills",
             "SupplierPayments", "SupplierReturns", "SupplierReturnItems",
         ],
-        "header_mapping_status": "VERIFIED_CORE",
+        "header_mapping_status": "CONFLICT_RECONCILIATION_REQUIRED",
     },
     {
         "group_code": "03",
@@ -635,7 +639,7 @@ DATABASE_GROUPS_15: List[Dict[str, Any]] = [
             "ChartOfAccounts", "JournalHeaders", "JournalLines",
             "AccountingPeriods", "Expenses", "CashLedger",
         ],
-        "header_mapping_status": "VERIFIED_CORE",
+        "header_mapping_status": "CONFLICT_RECONCILIATION_REQUIRED",
     },
     {
         "group_code": "11",
@@ -730,38 +734,186 @@ WRITE_BLOCKED_SCHEMA_TABS: Set[str] = PENDING_OWNER_MAPPING_TABS | CONFLICTING_C
 _RUNTIME_CORE_SCHEMA_RECONCILIATIONS: Dict[str, Dict[str, Any]] = {}
 
 
+def get_expected_canonical_reconciliation_headers(tab_name: str) -> List[str]:
+    """
+    Derive the authoritative expected canonical header sequence for a conflicting core tab
+    strictly from trusted repository specifications (`REQUIRED_TABS[tab]` followed by
+    declared `SCHEMA_HEADER_VARIANCES[tab]['missing_from_required_tabs']`).
+    Returns an empty list if the tab has no trusted baseline specification.
+    """
+    from app.sheets import REQUIRED_TABS
+
+    clean_tab = str(tab_name or "").strip()
+    if clean_tab not in CONFLICTING_CORE_SCHEMA_TABS:
+        return []
+    base_headers = REQUIRED_TABS.get(clean_tab)
+    if not base_headers:
+        return []
+    variance = SCHEMA_HEADER_VARIANCES.get(clean_tab) or {}
+    missing_fields = list(variance.get("missing_from_required_tabs") or [])
+    expected: List[str] = list(base_headers)
+    for field in missing_fields:
+        clean_field = str(field or "").strip()
+        if clean_field and clean_field not in expected:
+            expected.append(clean_field)
+    return expected
+
+
+def validate_reconciliation_headers(
+    tab_name: str,
+    headers: Any,
+    *,
+    physical_headers: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Fail-closed validator ensuring reconciliation unlock headers match the trusted
+    canonical specification (`REQUIRED_TABS` + declared `SCHEMA_HEADER_VARIANCES`):
+    - Rejects tabs without a trusted specification or not in `CONFLICTING_CORE_SCHEMA_TABS`.
+    - Rejects empty, non-list, blank, or duplicate headers (case-insensitive).
+    - Rejects missing required columns, missing variance columns, arbitrary/unexpected
+      extra columns, and out-of-order canonical leading columns.
+    - When `physical_headers` is supplied, verifies exact match against verified physical Row-1 headers.
+    """
+    from app.sheets import REQUIRED_TABS
+
+    clean_tab = str(tab_name or "").strip()
+    if clean_tab not in CONFLICTING_CORE_SCHEMA_TABS:
+        raise ValueError(f"Tab '{clean_tab}' is not in CONFLICTING_CORE_SCHEMA_TABS.")
+
+    base_headers = REQUIRED_TABS.get(clean_tab)
+    if not base_headers:
+        raise ValueError(
+            f"Tab '{clean_tab}' has no trusted canonical baseline in REQUIRED_TABS; cannot unlock."
+        )
+
+    if not isinstance(headers, list) or not headers:
+        raise ValueError("Verified non-empty physical Row-1 headers list is required.")
+
+    clean_headers: List[str] = []
+    seen_lower: Set[str] = set()
+    for raw_h in headers:
+        if not isinstance(raw_h, str):
+            raise ValueError("All schema reconciliation headers must be non-empty strings.")
+        h = raw_h.strip()
+        if not h:
+            raise ValueError("Blank header names are not permitted in schema reconciliation.")
+        h_low = h.lower()
+        if h_low in seen_lower:
+            raise ValueError(f"Duplicate header '{h}' in schema reconciliation for '{clean_tab}'.")
+        seen_lower.add(h_low)
+        clean_headers.append(h)
+
+    expected_canonical = get_expected_canonical_reconciliation_headers(clean_tab)
+    expected_set = set(expected_canonical)
+    actual_set = set(clean_headers)
+
+    missing_required = [col for col in base_headers if col not in actual_set]
+    if missing_required:
+        raise ValueError(
+            f"Reconciliation headers for '{clean_tab}' are missing required baseline columns: {missing_required}."
+        )
+
+    missing_variance = [col for col in expected_canonical if col not in actual_set]
+    if missing_variance:
+        raise ValueError(
+            f"Reconciliation headers for '{clean_tab}' are missing unreconciled variance columns: {missing_variance}."
+        )
+
+    unexpected_extra = [col for col in clean_headers if col not in expected_set]
+    if unexpected_extra:
+        raise ValueError(
+            f"Reconciliation headers for '{clean_tab}' contain unexpected/unverified columns: {unexpected_extra}."
+        )
+
+    # Column ordering is significant for Google Sheets Row-1 alignment:
+    # baseline REQUIRED_TABS columns must preserve exact canonical leading order.
+    leading_slice = clean_headers[: len(base_headers)]
+    if leading_slice != list(base_headers):
+        raise ValueError(
+            f"Reconciliation headers for '{clean_tab}' have invalid column ordering for baseline REQUIRED_TABS columns."
+        )
+
+    if physical_headers is not None:
+        if not isinstance(physical_headers, list) or not physical_headers:
+            raise ValueError("physical_headers must be a non-empty list when provided.")
+        clean_physical = [str(h or "").strip() for h in physical_headers if str(h or "").strip()]
+        if clean_physical != clean_headers:
+            raise ValueError(
+                f"Physical Row-1 headers for '{clean_tab}' do not match approved canonical headers."
+            )
+
+    return clean_headers
+
+
+def _validate_approved_entry(tab: str, entry: Any) -> Optional[Dict[str, Any]]:
+    if tab not in CONFLICTING_CORE_SCHEMA_TABS or not isinstance(entry, dict):
+        logger.warning(
+            "Schema reconciliation rejected for tab='%s': tab is not an eligible conflicting core table or entry is not a dict.",
+            tab,
+        )
+        return None
+    if str(entry.get("status", "")).strip().upper() != "RECONCILED_OWNER_APPROVED":
+        logger.warning(
+            "Schema reconciliation rejected for tab='%s': status must be 'RECONCILED_OWNER_APPROVED'.",
+            tab,
+        )
+        return None
+    approver = str(entry.get("approved_by", "")).strip()
+    if not approver:
+        logger.warning(
+            "Schema reconciliation rejected for tab='%s': missing approved_by identifier.",
+            tab,
+        )
+        return None
+    physical = entry.get("physical_headers")
+    try:
+        validated_headers = validate_reconciliation_headers(
+            tab,
+            entry.get("headers"),
+            physical_headers=physical if physical is not None else None,
+        )
+    except ValueError as exc:
+        logger.warning("Schema reconciliation rejected for tab='%s': %s", tab, exc)
+        return None
+    normalized = dict(entry)
+    normalized["tab_name"] = tab
+    normalized["approved_by"] = approver
+    normalized["headers"] = validated_headers
+    return normalized
+
+
 def get_approved_core_schema_reconciliations() -> Dict[str, Dict[str, Any]]:
     """
     Return Owner-approved core schema reconciliations (default EMPTY — fail-closed).
-    Only entries with status == 'RECONCILED_OWNER_APPROVED', non-empty approved_by, and non-empty
-    verified physical headers list are accepted.
+    Only entries passing `validate_reconciliation_headers()` with status == 'RECONCILED_OWNER_APPROVED'
+    and non-empty `approved_by` are accepted.
     """
     approved: Dict[str, Dict[str, Any]] = {}
-    if SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON:
+    env_json = os.getenv("SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON", "").strip()
+    if not env_json:
+        env_json = SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+    if env_json:
         try:
-            raw = json.loads(SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON)
+            raw = json.loads(env_json)
             if isinstance(raw, dict):
                 for tab, entry in raw.items():
-                    if (
-                        tab in CONFLICTING_CORE_SCHEMA_TABS
-                        and isinstance(entry, dict)
-                        and str(entry.get("status", "")).strip().upper() == "RECONCILED_OWNER_APPROVED"
-                        and str(entry.get("approved_by", "")).strip()
-                        and isinstance(entry.get("headers"), list)
-                        and len(entry["headers"]) > 0
-                    ):
-                        approved[tab] = dict(entry)
-        except Exception:
-            pass
+                    valid_entry = _validate_approved_entry(tab, entry)
+                    if valid_entry is not None:
+                        approved[tab] = valid_entry
+            else:
+                logger.warning(
+                    "Schema reconciliation env JSON rejected: expected top-level JSON object, got %s.",
+                    type(raw).__name__,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Schema reconciliation env JSON rejected due to parse error (%s); keeping tables blocked.",
+                type(exc).__name__,
+            )
     for tab, entry in _RUNTIME_CORE_SCHEMA_RECONCILIATIONS.items():
-        if (
-            tab in CONFLICTING_CORE_SCHEMA_TABS
-            and str(entry.get("status", "")).strip().upper() == "RECONCILED_OWNER_APPROVED"
-            and str(entry.get("approved_by", "")).strip()
-            and isinstance(entry.get("headers"), list)
-            and len(entry["headers"]) > 0
-        ):
-            approved[tab] = dict(entry)
+        valid_entry = _validate_approved_entry(tab, entry)
+        if valid_entry is not None:
+            approved[tab] = valid_entry
     return approved
 
 
@@ -771,17 +923,23 @@ def approve_core_schema_reconciliation(
     headers: List[str],
     approved_by: str,
     notes: str = "",
+    physical_headers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Register an explicit Owner-approved reconciliation for a conflicting core tab."""
+    """Register an explicit Owner-approved reconciliation for a conflicting core tab after strict schema validation."""
     clean_tab = str(tab_name or "").strip()
-    if clean_tab not in CONFLICTING_CORE_SCHEMA_TABS:
-        raise ValueError(f"Tab '{clean_tab}' is not in CONFLICTING_CORE_SCHEMA_TABS.")
     clean_approver = str(approved_by or "").strip()
     if not clean_approver:
+        logger.warning("Schema reconciliation approval rejected for tab='%s': approved_by is empty.", clean_tab)
         raise ValueError("approved_by is required to approve core schema reconciliation.")
-    clean_headers = [str(h or "").strip() for h in (headers or []) if str(h or "").strip()]
-    if not clean_headers or len(clean_headers) != len(set(clean_headers)):
-        raise ValueError("Verified non-empty unique physical Row-1 headers are required.")
+    try:
+        clean_headers = validate_reconciliation_headers(
+            clean_tab,
+            headers,
+            physical_headers=physical_headers,
+        )
+    except ValueError as exc:
+        logger.warning("Schema reconciliation approval rejected for tab='%s': %s", clean_tab, exc)
+        raise
     entry = {
         "tab_name": clean_tab,
         "status": "RECONCILED_OWNER_APPROVED",
@@ -789,6 +947,8 @@ def approve_core_schema_reconciliation(
         "approved_by": clean_approver,
         "notes": notes or f"Owner-approved physical Row-1 header reconciliation for {clean_tab}.",
     }
+    if physical_headers is not None:
+        entry["physical_headers"] = list(clean_headers)
     _RUNTIME_CORE_SCHEMA_RECONCILIATIONS[clean_tab] = entry
     return dict(entry)
 

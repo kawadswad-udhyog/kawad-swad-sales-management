@@ -5,6 +5,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from app.apps_script_bridge import apps_script_bridge
+from app.config import SALES_LOGIN_MAX_ATTEMPTS, SALES_LOGIN_LOCKOUT_SECONDS
 from app.models import LoginRequest, TokenResponse
 from app.sheets import db
 from app.auth import (
@@ -12,6 +13,7 @@ from app.auth import (
     create_access_token,
     get_current_user,
     hash_password,
+    is_account_deactivated,
     password_needs_reset,
     revoke_token,
     require_sheets_connection,
@@ -25,8 +27,16 @@ router = APIRouter(tags=["Authentication"])
 
 # In-memory brute force protection tracking failed logins per username
 _LOGIN_ATTEMPTS: Dict[str, List[float]] = {}
-_MAX_FAILED_ATTEMPTS = 5
-_LOCKOUT_WINDOW_SECONDS = 120.0  # 2 minutes
+_MAX_FAILED_ATTEMPTS = SALES_LOGIN_MAX_ATTEMPTS
+_LOCKOUT_WINDOW_SECONDS = SALES_LOGIN_LOCKOUT_SECONDS
+
+
+def _format_lockout_duration(seconds: float) -> str:
+    secs = max(1, int(round(seconds)))
+    if secs % 60 == 0:
+        mins = secs // 60
+        return f"{mins} minute" if mins == 1 else f"{mins} minutes"
+    return f"{secs} seconds"
 
 
 class ChangePasswordRequest(BaseModel):
@@ -72,9 +82,10 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
     past_attempts = [t for t in _LOGIN_ATTEMPTS.get(username, []) if now_ts - t < _LOCKOUT_WINDOW_SECONDS]
     _LOGIN_ATTEMPTS[username] = past_attempts
     if len(past_attempts) >= _MAX_FAILED_ATTEMPTS:
+        duration_label = _format_lockout_duration(_LOCKOUT_WINDOW_SECONDS)
         raise HTTPException(
             status_code=getattr(status, "HTTP_429_TOO_MANY_REQUESTS", 429),
-            detail="Account temporarily locked due to repeated failed login attempts. Please wait 5 minutes before trying again.",
+            detail=f"Account temporarily locked due to repeated failed login attempts. Please wait {duration_label} before trying again.",
         )
 
     try:
@@ -88,7 +99,7 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
             )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Could not verify login credentials with Google Sheets: {exc}",
+            detail="Could not verify login credentials with Google Sheets.",
         )
     if not auth_records:
         raise HTTPException(
@@ -99,7 +110,7 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
     for auth in auth_records:
         if str(auth.get("username", "")).strip().lower() != username:
             continue
-        if str(auth.get("active", "true")).lower() == "false":
+        if is_account_deactivated(auth.get("active", "true")):
             raise HTTPException(status_code=403, detail="Account is deactivated")
         stored = str(auth.get("password_hash", ""))
         if password_needs_reset(stored):
@@ -144,7 +155,14 @@ async def logout(
     if credentials and credentials.credentials:
         persisted = revoke_token(credentials.credentials, user_id, reason="User logged out")
     db.log_audit(user_id, "LOGOUT", "AuthUsers", user_id, reason="User logged out and session revoked")
-    return {"ok": True, "message": "Signed out and session revoked successfully", "persisted": persisted}
+    if not persisted:
+        return {
+            "ok": True,
+            "persisted": False,
+            "warning": "Token revoked in local process memory only; persistent RevokedTokens bridge write did not confirm.",
+            "message": "Signed out locally; persistent cross-worker revocation could not be confirmed.",
+        }
+    return {"ok": True, "message": "Signed out and session revoked successfully", "persisted": True}
 
 
 @router.get("/api/auth/me")

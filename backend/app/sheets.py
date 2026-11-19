@@ -26,6 +26,12 @@ from app.timeutil import now_iso
 
 logger = logging.getLogger("kawad_swad.sheets")
 
+# Single-Write-Owner (POL-021 / P1.5-008): FastAPI backend is strictly read-only against Google Sheets.
+# All authoritative business writes flow exclusively through the signed Apps Script Web App bridge.
+SHEETS_OAUTH_SCOPES: List[str] = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+]
+
 
 class StorageCorruptionError(RuntimeError):
     """Raised when shared persistent storage data is corrupted or invalid."""
@@ -672,10 +678,7 @@ class SheetsDatabase:
             import gspread
             from google.oauth2.service_account import Credentials
 
-            scopes = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive.file",
-            ]
+            scopes = list(SHEETS_OAUTH_SCOPES)
             creds = None
             if SALES_GOOGLE_SERVICE_ACCOUNT_JSON:
                 try:

@@ -31,6 +31,22 @@ SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON = os.getenv(
     "SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON", ""
 ).strip()
 
+# Authentication lockout configuration (consistent across code, messages, and tests)
+try:
+    SALES_LOGIN_MAX_ATTEMPTS = max(1, int(os.getenv("SALES_LOGIN_MAX_ATTEMPTS", "5")))
+except (TypeError, ValueError):
+    SALES_LOGIN_MAX_ATTEMPTS = 5
+
+try:
+    SALES_LOGIN_LOCKOUT_SECONDS = max(1.0, float(os.getenv("SALES_LOGIN_LOCKOUT_SECONDS", "300")))
+except (TypeError, ValueError):
+    SALES_LOGIN_LOCKOUT_SECONDS = 300.0
+
+# Explicit opt-in gate for offline CLI schema migration tools (disabled by default)
+SALES_ALLOW_OFFLINE_SHEETS_MIGRATION = (
+    os.getenv("SALES_ALLOW_OFFLINE_SHEETS_MIGRATION", "false").strip().lower() in {"1", "true", "yes"}
+)
+
 _EPHEMERAL_SECRET = secrets.token_hex(32)
 
 _INSECURE_SECRETS = {

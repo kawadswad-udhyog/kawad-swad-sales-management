@@ -651,7 +651,7 @@ async def create_v2_packaging_batch(req: GovernedPackagingCreateRequest, current
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="packaging_id",
-        invalidate_tabs=["PackagingBatches", "ProductionStockLedger", "ProductLots"],
+        invalidate_tabs=["PackagingBatches", "ProductionStockLedger", "ProductLots", "Products"],
     )
     return _handle_bridge_result(res)
 
@@ -1160,7 +1160,7 @@ async def create_v2_milling_batch(req: GovernedMillingBatchRequest, current_user
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="milling_batch_id",
-        invalidate_tabs=["MillingBatches", "RawMaterialLedger", "JournalHeaders", "JournalLines"],
+        invalidate_tabs=["MillingBatches", "RawMaterialLedger", "RawMaterials", "JournalHeaders", "JournalLines"],
     )
     return _handle_bridge_result(res)
 
@@ -1185,7 +1185,7 @@ async def create_v2_production_batch(req: GovernedProductionBatchRequest, curren
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="production_id",
-        invalidate_tabs=["ProductionBatches", "ProductLots", "ProductionStockLedger"],
+        invalidate_tabs=["ProductionBatches", "ProductLots", "ProductionStockLedger", "RawMaterialLedger", "RawMaterials"],
     )
     return _handle_bridge_result(res)
 

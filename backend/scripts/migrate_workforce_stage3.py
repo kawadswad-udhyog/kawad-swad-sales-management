@@ -46,11 +46,14 @@ from app.workforce_migration import (
     execute_safe_workforce_migration,
     execute_safe_workforce_rollback,
     verify_backup_integrity,
+    _assert_offline_migration_allowed,
     MigrationError,
     AuthorizationError,
     BackupVerificationError,
     RollbackRefusalError,
 )
+
+SCRIPT_MUTATION_MODE = "OFFLINE_MAINTENANCE_OPT_IN_REQUIRED"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("kawad_swad.migration_cli")
@@ -141,6 +144,7 @@ def run_execute_migration(
     print_banner("AUTHORIZED LIVE EXECUTION (STAGE 3 WORKFORCE)")
 
     try:
+        _assert_offline_migration_allowed("migrate_workforce_stage3 --execute")
         result = execute_safe_workforce_migration(
             spreadsheet=spreadsheet,
             required_tabs=REQUIRED_TABS,
@@ -182,6 +186,7 @@ def run_rollback(
     print(f"Target Manifest: {manifest_path}")
 
     try:
+        _assert_offline_migration_allowed("migrate_workforce_stage3 --rollback")
         result = execute_safe_workforce_rollback(
             spreadsheet=spreadsheet,
             manifest_path=manifest_path,

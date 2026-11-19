@@ -28,6 +28,8 @@ import {
   postV2GovernedAction,
   updateV2Policy,
   isUnknownOutcomeError,
+  isBlockedOwnerSetupError,
+  classifySchemaStatusBadge,
   ApiHttpError,
   ApiOutcomeUnknownError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
@@ -291,12 +293,12 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
       return;
     }
     if (err instanceof ApiHttpError) {
-      if (err.errorCode === 'BLOCKED_PENDING_OWNER_SETUP') {
+      if (isBlockedOwnerSetupError(err)) {
         setBanner({
           state: 'BLOCKED_PENDING_OWNER_SETUP',
           nonce,
           correlationId: err.correlationId,
-          message: `${err.message} (Inputs preserved — not saved.)`,
+          message: `${err.message} (Write blocked by backend — inputs preserved, NOT SAVED.)`,
         });
         return;
       }
@@ -1493,46 +1495,72 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                 {schemaRegistry.table_registry_summary && (
                   <div className="flex flex-wrap gap-2 text-[11px]">
                     <span className="px-2 py-1 rounded bg-slate-100 text-slate-800 font-semibold">
-                      Catalogued Tabs: {schemaRegistry.table_registry_summary.total_catalogued_tabs}
+                      Catalogued Tabs: {schemaRegistry.table_registry_summary.total_catalogued_tabs} / {schemaRegistry.cleaned_tab_baseline}
                     </span>
-                    {Object.entries(schemaRegistry.table_registry_summary.status_counts || {}).map(([st, cnt]) => (
+                    {typeof schemaRegistry.table_registry_summary.unmapped_workbook_tabs_remaining === 'number' && (
+                      <span className="px-2 py-1 rounded bg-amber-100 text-amber-900 font-semibold">
+                        Unmapped Tabs Remaining: {schemaRegistry.table_registry_summary.unmapped_workbook_tabs_remaining}
+                      </span>
+                    )}
+                    {typeof schemaRegistry.table_registry_summary.write_blocked_schema_tabs_count === 'number' && (
+                      <span className="px-2 py-1 rounded bg-red-100 text-red-900 font-semibold">
+                        Write-Blocked Tabs: {schemaRegistry.table_registry_summary.write_blocked_schema_tabs_count}
+                      </span>
+                    )}
+                    {schemaRegistry.table_registry_summary.coverage_status && (
                       <span
-                        key={st}
                         className={`px-2 py-1 rounded font-semibold ${
-                          st === 'VERIFIED_CORE'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : st === 'CONFLICT_RECONCILIATION_REQUIRED'
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-amber-100 text-amber-800'
+                          classifySchemaStatusBadge(schemaRegistry.table_registry_summary.coverage_status).className
                         }`}
                       >
-                        {st}: {cnt}
+                        Coverage: {schemaRegistry.table_registry_summary.coverage_status}
                       </span>
-                    ))}
+                    )}
+                    {Object.entries(schemaRegistry.table_registry_summary.status_counts || {}).map(([st, cnt]) => {
+                      const badge = classifySchemaStatusBadge(st);
+                      return (
+                        <span
+                          key={st}
+                          className={`px-2 py-1 rounded font-semibold ${badge.className}`}
+                        >
+                          {badge.label}: {cnt}
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {schemaRegistry.database_groups.map((grp) => (
-                    <div key={grp.group_code} className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="font-bold text-slate-900">
-                          {grp.group_code}. {grp.group_name}
-                        </span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                            grp.header_mapping_status === 'VERIFIED_CORE'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-amber-100 text-amber-800'
-                          }`}
-                        >
-                          {grp.header_mapping_status}
-                        </span>
+                  {schemaRegistry.database_groups.map((grp) => {
+                    const hasConflictingTab = (schemaRegistry.conflicting_core_schema_tabs || []).some((t) =>
+                      grp.workbook_tabs.includes(t)
+                    );
+                    const hasPendingTab = (schemaRegistry.pending_owner_mapping_tabs || []).some((t) =>
+                      grp.workbook_tabs.includes(t)
+                    );
+                    const effectiveGroupStatus = hasConflictingTab
+                      ? 'CONFLICT_RECONCILIATION_REQUIRED'
+                      : hasPendingTab && grp.header_mapping_status === 'VERIFIED_CORE'
+                      ? 'PENDING_OWNER_MAPPING'
+                      : grp.header_mapping_status;
+                    const badge = classifySchemaStatusBadge(effectiveGroupStatus);
+                    return (
+                      <div key={grp.group_code} className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+                        <div className="flex items-center justify-between mb-1 gap-1">
+                          <span className="font-bold text-slate-900">
+                            {grp.group_code}. {grp.group_name}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${badge.className}`}
+                          >
+                            {badge.label}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-600 font-mono break-words">
+                          {grp.workbook_tabs.join(', ')}
+                        </div>
                       </div>
-                      <div className="text-[11px] text-slate-600 font-mono break-words">
-                        {grp.workbook_tabs.join(', ')}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 

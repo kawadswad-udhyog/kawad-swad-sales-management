@@ -17,7 +17,25 @@ from app.auth import hash_password
 from app.sheets import db
 
 
+SCRIPT_MUTATION_MODE = "LEGACY_DIRECT_WRITE_DISABLED"
+
+
+def _assert_offline_script_allowed() -> None:
+    if os.getenv("SALES_ENV", "").strip().lower() == "production":
+        raise RuntimeError(
+            "BLOCKED_SINGLE_WRITE_OWNER: backend/scripts/reset_password.py cannot run when SALES_ENV=production."
+        )
+    if os.getenv("SALES_TESTING", "").strip() == "1":
+        return
+    raise RuntimeError(
+        "BLOCKED_SINGLE_WRITE_OWNER: backend/scripts/reset_password.py is a legacy direct-write "
+        "utility disabled under Blueprint v2.1 Single-Write-Owner (Sheets OAuth is read-only). "
+        "Perform password resets via the governed Apps Script bridge."
+    )
+
+
 def main():
+    _assert_offline_script_allowed()
     username = input("Username to reset: ").strip()
     if not username:
         print("Username is required.")

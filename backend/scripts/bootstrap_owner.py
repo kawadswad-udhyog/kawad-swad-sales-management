@@ -26,7 +26,25 @@ def _read_rows(tab_name):
     return [row for row in rows if any(str(value or "").strip() for value in row.values())]
 
 
+SCRIPT_MUTATION_MODE = "LEGACY_DIRECT_WRITE_DISABLED"
+
+
+def _assert_offline_script_allowed() -> None:
+    if os.getenv("SALES_ENV", "").strip().lower() == "production":
+        raise RuntimeError(
+            "BLOCKED_SINGLE_WRITE_OWNER: backend/scripts/bootstrap_owner.py cannot run when SALES_ENV=production."
+        )
+    if os.getenv("SALES_TESTING", "").strip() == "1":
+        return
+    raise RuntimeError(
+        "BLOCKED_SINGLE_WRITE_OWNER: backend/scripts/bootstrap_owner.py is a legacy direct-write "
+        "utility disabled under Blueprint v2.1 Single-Write-Owner (Sheets OAuth is read-only). "
+        "Perform owner bootstrapping via the governed Apps Script bridge."
+    )
+
+
 def bootstrap_owner():
+    _assert_offline_script_allowed()
     print("=== Kawad Swad ERP: Local First-Owner Bootstrap ===")
     print("This command creates the first Owner account in the configured Google Sheet.")
     print("It does not restore or import any pre-reset business data.\n")

@@ -26,6 +26,7 @@ from app.schema_registry import (
     approve_core_schema_reconciliation,
     clear_runtime_core_schema_reconciliations,
     get_allowed_id_prefixes_for_tab,
+    get_expected_canonical_reconciliation_headers,
     get_schema_coverage_summary,
     get_schema_write_block_reason,
     get_table_schema_registry,
@@ -125,7 +126,8 @@ class TestPhase1SchemaRegistryAndContracts(unittest.TestCase):
             self.assertIsNotNone(block, f"Expected fail-closed block for conflicting core tab {tab_name}")
             self.assertEqual(block["error_code"], "CORE_SCHEMA_CONFLICT_UNRECONCILED")
 
-        # Unlock abuse checks: empty approver, empty headers, duplicate headers, non-conflicting tab must raise
+        # Unlock abuse checks: empty approver, empty headers, duplicate headers, non-conflicting tab,
+        # arbitrary fake headers, and incomplete subset headers must ALL raise ValueError (P1.5-005).
         with self.assertRaises(ValueError):
             approve_core_schema_reconciliation("Customers", headers=["customer_id"], approved_by="")
         with self.assertRaises(ValueError):
@@ -134,11 +136,20 @@ class TestPhase1SchemaRegistryAndContracts(unittest.TestCase):
             approve_core_schema_reconciliation("Customers", headers=["a", "a"], approved_by="USR-OWNER-001")
         with self.assertRaises(ValueError):
             approve_core_schema_reconciliation("Users", headers=["user_id"], approved_by="USR-OWNER-001")
+        with self.assertRaises(ValueError):
+            approve_core_schema_reconciliation("Customers", headers=["totally_fake_column"], approved_by="USR-OWNER-001")
+        with self.assertRaises(ValueError):
+            approve_core_schema_reconciliation(
+                "Customers",
+                headers=["customer_id", "shop_name", "notes"],
+                approved_by="USR-OWNER-001",
+            )
 
-        # Valid owner reconciliation unlocks ONLY the explicitly reconciled tab
+        # Valid owner reconciliation with full canonical headers unlocks ONLY the explicitly reconciled tab
+        canonical_customer_headers = get_expected_canonical_reconciliation_headers("Customers")
         approve_core_schema_reconciliation(
             "Customers",
-            headers=["customer_id", "shop_name", "notes"],
+            headers=canonical_customer_headers,
             approved_by="USR-OWNER-001",
         )
         self.assertIsNone(get_schema_write_block_reason("Customers"))
@@ -283,12 +294,12 @@ class TestPhase1BridgeAndAppStartup(unittest.TestCase):
             action_conflicting_tabs = {
                 t for t in spec.allowed_invalidate_tabs if t in EXPECTED_12_CONFLICTING_CORE_TABS
             } | {conflicting_sec_tab}
-            for inv in ([primary_tab, conflicting_sec_tab], None):
+            for inv in ([primary_tab, conflicting_sec_tab], [primary_tab], [], None):
                 res = bridge.execute_governed_write(
                     action=spec.action,
                     target_tab=spec.target_tab,
                     payload={"probe": True},
-                    nonce=f"NONCE-SEC-{action_name}-{bool(inv)}",
+                    nonce=f"NONCE-SEC-{action_name}-{repr(inv)}",
                     actor_user_id="USR-OWNER-001",
                     actor_role="OWNER_ADMIN",
                     id_field=spec.id_field,

@@ -44,6 +44,7 @@ from app.config import (
     SALES_ENV,
 )
 from app.schema_registry import (
+    COLLIDING_LEGACY_PREFIX_TABS,
     CONFIDENTIAL_TABS_NO_CACHE,
     get_allowed_id_prefixes_for_tab,
     get_locked_prefix_for_tab,
@@ -252,19 +253,288 @@ class AppsScriptBridge:
         return None
 
     @classmethod
-    def _validate_id_format(cls, spec: GovernedActionSpec, allocated_id: str) -> bool:
+    def _validate_id_format(
+        cls,
+        spec: GovernedActionSpec,
+        allocated_id: str,
+        *,
+        for_new_allocation: bool = True,
+    ) -> bool:
         clean = str(allocated_id or "").strip().upper()
         if not clean:
             return False
         effective_prefix = cls._effective_locked_prefix(spec)
-        if not effective_prefix:
-            return True
+        # Always delegate to centralized validate_table_id_prefix(), even when
+        # effective_prefix is None, so COLLIDING_LEGACY_PREFIX_TABS (SalaryIncentives,
+        # SalaryReceipts) and cross-table LOCKED_32_ID_PREFIXES collisions are always enforced.
         return validate_table_id_prefix(
             spec.target_tab,
             clean,
-            for_new_allocation=True,
+            for_new_allocation=for_new_allocation,
             explicit_locked_prefix=effective_prefix,
         )
+
+    @staticmethod
+    def _extract_payload_field(payload: Dict[str, Any], field_name: str) -> Tuple[bool, str]:
+        """Search top-level payload and known nested entity containers for an identifier field."""
+        if not field_name or not isinstance(payload, dict):
+            return False, ""
+        if field_name in payload:
+            raw = payload.get(field_name)
+            return True, str(raw).strip() if raw is not None else ""
+        for container_key in ("record", "payment", "grn", "order", "invoice", "receipt", "batch"):
+            sub = payload.get(container_key)
+            if isinstance(sub, dict) and field_name in sub:
+                raw = sub.get(field_name)
+                return True, str(raw).strip() if raw is not None else ""
+        return False, ""
+
+    @staticmethod
+    def _id_exists_in_tab(tab_name: str, id_fields: Tuple[str, ...], candidate_id: str) -> bool:
+        target_upper = candidate_id.strip().upper()
+        if not target_upper:
+            return False
+        try:
+            rows = db.get_records(tab_name, fresh=False)
+        except Exception:
+            return False
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for field in id_fields:
+                existing_val = str(row.get(field) or "").strip().upper()
+                if existing_val and existing_val == target_upper:
+                    return True
+        return False
+
+    def _preflight_validate_payload_ids(
+        self,
+        *,
+        spec: GovernedActionSpec,
+        payload: Dict[str, Any],
+        corr_id: str,
+        clean_nonce: str,
+        payload_hash: str,
+    ) -> Optional[BridgeResult]:
+        """
+        Pre-write identifier, prefix, parent-reference, child-row, and cross-table
+        collision validation. Runs BEFORE any bridge HTTP POST or mutation so invalid
+        or colliding IDs never create partial records.
+        """
+        effective_prefix = self._effective_locked_prefix(spec)
+        primary_fields = spec.readback.primary_match_fields or ()
+
+        # 1. Primary target identifier validation (if supplied in payload or explicitly blank on update/delete)
+        if spec.id_field:
+            present, supplied_id = self._extract_payload_field(payload, spec.id_field)
+            if not spec.requires_allocated_id and len(primary_fields) == 1 and primary_fields[0] == spec.id_field:
+                if present and not supplied_id:
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code="MISSING_TARGET_IDENTIFIER",
+                        message=f"Action '{spec.action}' requires a non-empty '{spec.id_field}' before mutation.",
+                        retryable=False,
+                        http_status=422,
+                        payload_hash=payload_hash,
+                    )
+            if supplied_id:
+                enforces_prefix = bool(
+                    effective_prefix
+                    or get_locked_prefix_for_tab(spec.target_tab)
+                    or spec.target_tab in COLLIDING_LEGACY_PREFIX_TABS
+                    or spec.requires_allocated_id
+                )
+                if enforces_prefix and not validate_table_id_prefix(
+                    spec.target_tab,
+                    supplied_id,
+                    for_new_allocation=spec.requires_allocated_id,
+                    explicit_locked_prefix=effective_prefix,
+                ):
+                    allowed_prefixes = get_allowed_id_prefixes_for_tab(
+                        spec.target_tab,
+                        for_new_allocation=spec.requires_allocated_id,
+                        explicit_locked_prefix=effective_prefix,
+                    )
+                    allowed_desc = ", ".join(allowed_prefixes) if allowed_prefixes else "non-colliding canonical format"
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        allocated_id=supplied_id,
+                        error_code="INVALID_PAYLOAD_ID_FORMAT",
+                        message=(
+                            f"Pre-write validation failed: '{spec.id_field}'='{supplied_id}' is invalid for "
+                            f"'{spec.target_tab}' (allowed: {allowed_desc}). Data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=422,
+                        payload_hash=payload_hash,
+                    )
+                if spec.requires_allocated_id:
+                    check_fields = (spec.id_field,)
+                    if spec.target_tab == "SalaryIncentives":
+                        check_fields = ("record_id", "incentive_id")
+                    if self._id_exists_in_tab(spec.target_tab, check_fields, supplied_id):
+                        return BridgeResult(
+                            status="REJECTED",
+                            correlation_id=corr_id,
+                            nonce=clean_nonce,
+                            allocated_id=supplied_id,
+                            error_code="DUPLICATE_RECORD_ID",
+                            message=(
+                                f"Pre-write validation failed: '{supplied_id}' already exists in "
+                                f"'{spec.target_tab}'. Data was NOT SAVED."
+                            ),
+                            retryable=False,
+                            http_status=409,
+                            payload_hash=payload_hash,
+                        )
+                    # Cross-table uniqueness for RCPT (Payments <-> SalaryReceipts) and SAL (SalaryPayments <-> SalaryIncentives)
+                    if spec.target_tab == "Payments":
+                        if self._id_exists_in_tab("SalaryReceipts", ("receipt_id", "receipt_number"), supplied_id):
+                            return BridgeResult(
+                                status="REJECTED",
+                                correlation_id=corr_id,
+                                nonce=clean_nonce,
+                                allocated_id=supplied_id,
+                                error_code="CROSS_TABLE_ID_COLLISION",
+                                message=(
+                                    f"Pre-write validation failed: '{supplied_id}' collides with an existing "
+                                    "SalaryReceipts identifier. Data was NOT SAVED."
+                                ),
+                                retryable=False,
+                                http_status=409,
+                                payload_hash=payload_hash,
+                            )
+                    elif spec.target_tab == "SalaryIncentives":
+                        if self._id_exists_in_tab("SalaryPayments", ("salary_payment_id", "payment_id", "record_id"), supplied_id):
+                            return BridgeResult(
+                                status="REJECTED",
+                                correlation_id=corr_id,
+                                nonce=clean_nonce,
+                                allocated_id=supplied_id,
+                                error_code="CROSS_TABLE_ID_COLLISION",
+                                message=(
+                                    f"Pre-write validation failed: '{supplied_id}' collides with an existing "
+                                    "SalaryPayments identifier. Data was NOT SAVED."
+                                ),
+                                retryable=False,
+                                http_status=409,
+                                payload_hash=payload_hash,
+                            )
+
+        # 2. Child-row ID & RCPT cross-table collision validation (e.g. RECORD_WORKFORCE_PAYMENT -> SalaryReceipts)
+        touches_salary_receipts = (
+            spec.target_tab == "SalaryReceipts"
+            or "SalaryReceipts" in spec.allowed_invalidate_tabs
+            or any(c.tab == "SalaryReceipts" for c in spec.readback.child_checks)
+        )
+        if touches_salary_receipts:
+            receipt_obj = payload.get("receipt") if isinstance(payload.get("receipt"), dict) else {}
+            child_receipt_candidates = [
+                str(payload.get("receipt_id") or "").strip(),
+                str(receipt_obj.get("receipt_id") or "").strip(),
+                str(receipt_obj.get("receipt_number") or "").strip(),
+            ]
+            for child_rid in [c for c in child_receipt_candidates if c]:
+                if not validate_table_id_prefix("SalaryReceipts", child_rid, for_new_allocation=True):
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code="INVALID_CHILD_ID_FORMAT",
+                        message=(
+                            f"Pre-write validation failed: SalaryReceipts child identifier '{child_rid}' "
+                            "violates table prefix/collision rules (RCPT is locked to Payments). Data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=422,
+                        payload_hash=payload_hash,
+                    )
+                if self._id_exists_in_tab("SalaryReceipts", ("receipt_id", "receipt_number"), child_rid):
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code="DUPLICATE_CHILD_RECORD_ID",
+                        message=(
+                            f"Pre-write validation failed: SalaryReceipts identifier '{child_rid}' "
+                            "already exists. Data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=409,
+                        payload_hash=payload_hash,
+                    )
+                if self._id_exists_in_tab("Payments", ("payment_id", "receipt_id", "receipt_number"), child_rid):
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code="CROSS_TABLE_ID_COLLISION",
+                        message=(
+                            f"Pre-write validation failed: SalaryReceipts identifier '{child_rid}' "
+                            "collides with an existing Payments identifier. Data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=409,
+                        payload_hash=payload_hash,
+                    )
+
+        # 3. Validate any explicit child-item IDs supplied inside nested child row arrays
+        child_array_contracts = (
+            ("items", "SaleItems", "sale_item_id"),
+            ("lines", "JournalLines", "line_id"),
+            ("order_items", "SalesOrderItems", "order_item_id"),
+        )
+        for arr_key, child_tab, child_id_field in child_array_contracts:
+            if child_tab not in spec.allowed_invalidate_tabs and not any(c.tab == child_tab for c in spec.readback.child_checks):
+                continue
+            rows_list = payload.get(arr_key)
+            if not isinstance(rows_list, list):
+                continue
+            seen_child_ids: set = set()
+            for item in rows_list:
+                if not isinstance(item, dict):
+                    continue
+                cid = str(item.get(child_id_field) or "").strip()
+                if not cid:
+                    continue
+                if not validate_table_id_prefix(child_tab, cid, for_new_allocation=True):
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code="INVALID_CHILD_ID_FORMAT",
+                        message=(
+                            f"Pre-write validation failed: child '{child_id_field}'='{cid}' is invalid "
+                            f"for '{child_tab}'. Data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=422,
+                        payload_hash=payload_hash,
+                    )
+                cid_upper = cid.upper()
+                if cid_upper in seen_child_ids or self._id_exists_in_tab(child_tab, (child_id_field,), cid):
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code="DUPLICATE_CHILD_RECORD_ID",
+                        message=(
+                            f"Pre-write validation failed: duplicate child '{child_id_field}'='{cid}' "
+                            f"for '{child_tab}'. Data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=409,
+                        payload_hash=payload_hash,
+                    )
+                seen_child_ids.add(cid_upper)
+
+        return None
 
     def _verify_readback(
         self,
@@ -551,13 +821,19 @@ class AppsScriptBridge:
                 http_status=422,
             )
 
-        # Fail-closed schema write gate across primary tab AND any secondary/child tabs touched by the action.
-        # Prevents bypassing DB-002 core schema conflict or extended pending-mapping blocks via alternate actions.
+        # Fail-closed schema write gate across the FULL authoritative union of:
+        # 1. Primary target tab (`clean_tab`)
+        # 2. ALL required secondary tabs declared on the trusted action spec (`spec.allowed_invalidate_tabs`)
+        # 3. Any caller-requested invalidation tabs (`requested_inv`, already allowlist-checked)
+        # 4. ALL read-back child tabs (`spec.readback.child_checks`)
+        # Caller-supplied `invalidate_tabs` can NEVER replace or shrink the required validation set (P1.5-001).
         candidate_write_tabs: List[str] = [clean_tab]
-        secondary_tabs_to_check = requested_inv if requested_inv else sorted(spec.allowed_invalidate_tabs)
-        for sec_tab in secondary_tabs_to_check:
+        for sec_tab in sorted(spec.allowed_invalidate_tabs):
             if sec_tab not in candidate_write_tabs:
                 candidate_write_tabs.append(sec_tab)
+        for req_tab in requested_inv:
+            if req_tab not in candidate_write_tabs:
+                candidate_write_tabs.append(req_tab)
         for child_check in spec.readback.child_checks:
             if child_check.tab not in candidate_write_tabs:
                 candidate_write_tabs.append(child_check.tab)
@@ -594,6 +870,17 @@ class AppsScriptBridge:
             actor_role=actor_role,
             payload=payload,
         )
+
+        # Pre-write identifier, prefix, child-row, and cross-table collision validation (P1.5-002 / P1.5-007)
+        preflight_id_err = self._preflight_validate_payload_ids(
+            spec=spec,
+            payload=payload,
+            corr_id=corr_id,
+            clean_nonce=clean_nonce,
+            payload_hash=payload_hash,
+        )
+        if preflight_id_err is not None:
+            return preflight_id_err
 
         if not self.is_configured():
             return BridgeResult(
@@ -841,12 +1128,21 @@ class AppsScriptBridge:
             )
 
         effective_locked_prefix = self._effective_locked_prefix(spec)
-        if allocated_id and effective_locked_prefix and not self._validate_id_format(spec, allocated_id):
+        should_validate_allocated = bool(
+            allocated_id
+            and (
+                effective_locked_prefix
+                or spec.requires_allocated_id
+                or spec.target_tab in COLLIDING_LEGACY_PREFIX_TABS
+            )
+        )
+        if should_validate_allocated and not self._validate_id_format(spec, allocated_id):
             allowed_prefixes = get_allowed_id_prefixes_for_tab(
                 spec.target_tab,
                 for_new_allocation=True,
                 explicit_locked_prefix=effective_locked_prefix,
             )
+            allowed_desc = ", ".join(allowed_prefixes) if allowed_prefixes else "non-colliding canonical format"
             return BridgeResult(
                 status="PENDING_UNKNOWN",
                 correlation_id=corr_id,
@@ -855,12 +1151,35 @@ class AppsScriptBridge:
                 error_code="INVALID_ALLOCATED_ID_FORMAT",
                 message=(
                     f"Status not confirmed; allocated_id '{allocated_id}' failed prefix validation for "
-                    f"'{spec.target_tab}' (allowed: {', '.join(allowed_prefixes)})."
+                    f"'{spec.target_tab}' (allowed: {allowed_desc})."
                 ),
                 retryable=True,
                 http_status=504,
                 payload_hash=payload_hash,
             )
+
+        # Defense-in-depth post-write validation for SalaryReceipts child-row IDs (P1.5-002)
+        if any(c.tab == "SalaryReceipts" for c in spec.readback.child_checks) or "SalaryReceipts" in spec.allowed_invalidate_tabs:
+            child_receipt_id = str(
+                data.get("receipt_id")
+                or (record.get("receipt_id") if isinstance(record, dict) else "")
+                or ""
+            ).strip()
+            if child_receipt_id and not validate_table_id_prefix("SalaryReceipts", child_receipt_id, for_new_allocation=True):
+                return BridgeResult(
+                    status="PENDING_UNKNOWN",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    allocated_id=allocated_id,
+                    error_code="INVALID_CHILD_ALLOCATED_ID_FORMAT",
+                    message=(
+                        f"Status not confirmed; child SalaryReceipts identifier '{child_receipt_id}' "
+                        "violates table prefix/collision rules (RCPT is locked to Payments)."
+                    ),
+                    retryable=True,
+                    http_status=504,
+                    payload_hash=payload_hash,
+                )
 
         # Explicit transaction-specific read-back verification before confirming
         try:
@@ -903,9 +1222,8 @@ class AppsScriptBridge:
                 payload_hash=payload_hash,
             )
 
-        # Immediate allowlisted cache invalidation on confirmed write
-        tabs_to_clear = set(requested_inv)
-        tabs_to_clear.add(spec.target_tab)
+        # Immediate full-union allowlisted cache invalidation on confirmed write
+        tabs_to_clear = set(requested_inv) | set(spec.allowed_invalidate_tabs) | {spec.target_tab}
         for tab in tabs_to_clear:
             db.invalidate_tab_cache(tab)
 

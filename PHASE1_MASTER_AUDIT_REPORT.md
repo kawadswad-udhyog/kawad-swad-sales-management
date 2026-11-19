@@ -49,12 +49,12 @@ Each Phase 1 repair was independently re-audited line by line:
    - Malformed JSON or incomplete approval entries fail closed without crashing startup.
 2. **`backend/app/schema_registry.py`**:
    - `WORKBOOK_TARGET_TAB_COUNT = 255` and `get_schema_coverage_summary()` dynamically compute all counts directly from `DATABASE_GROUPS_15`, `REQUIRED_TABS`, `EXTENDED_V2_TAB_CONTRACTS`, `CONFLICTING_CORE_SCHEMA_TABS`, and `PENDING_OWNER_MAPPING_TABS`.
-   - `approve_core_schema_reconciliation()` enforces strict validation: non-empty `approved_by`, target must be in `CONFLICTING_CORE_SCHEMA_TABS`, non-empty unique `confirmed_headers` covering all required + missing fields.
+   - `approve_core_schema_reconciliation()` (hardened in Phase 1.6 for `P1.5-005`) validates non-empty `approved_by`, target membership in `CONFLICTING_CORE_SCHEMA_TABS`, unique non-blank strings matching trusted `REQUIRED_TABS[tab]` (in exact leading canonical order) plus all declared `missing_from_required_tabs` variance fields with zero unexpected columns, and exact physical Row-1 match when `physical_headers` is supplied.
    - `LEGACY_TO_LOCKED_ID_PREFIX_ALIASES` hardened so **10/10** entries set `allow_on_new_allocation: False` and `allow_on_read: True`.
    - `COLLIDING_LEGACY_PREFIX_TABS` explicitly flags `SalaryReceipts` (`RCPT` collides with canonical `Payments`) and `SalaryIncentives` (`SAL` collides with canonical `SalaryPayments`), preventing ambiguous prefix reuse.
-   - `validate_table_id_prefix()` enforces `^{PREFIX}-\d{4,}$` (or canonical format) on new allocations, permits historical legacy aliases only when `for_new_allocation=False`, and rejects cross-table colliding prefixes.
+   - `validate_table_id_prefix()` enforces `^([A-Z]{2,6})-[A-Z0-9_-]{3,}$` on new allocations, permits historical legacy aliases only when `for_new_allocation=False`, and rejects cross-table colliding prefixes.
 3. **`backend/app/apps_script_bridge.py`**:
-   - **Closed `P1-NEW-01` (Critical Secondary-Tab Bypass):** `execute_governed_write()` now inspects `clean_tab` (primary), every tab in `requested_inv` (falling back to `spec.allowed_invalidate_tabs` when `requested_inv` is omitted), and every `child.tab` in `spec.readback.child_checks`. Any tab returning a block reason from `get_schema_write_block_reason()` fails closed with `HTTP 503` (`CORE_SCHEMA_CONFLICT_UNRECONCILED` or `PENDING_OWNER_MAPPING`).
+   - **Closed `P1-NEW-01` & `P1.5-001` (Secondary-Tab Bypass):** `execute_governed_write()` inspects the full union of `clean_tab` (primary), ALL `spec.allowed_invalidate_tabs`, any allowlisted `requested_inv`, and every `child.tab` in `spec.readback.child_checks`. Any tab returning a block reason from `get_schema_write_block_reason()` fails closed with `HTTP 503` (`CORE_SCHEMA_CONFLICT_UNRECONCILED` or `PENDING_OWNER_MAPPING`).
    - Replaced the legacy 6-table `if/elif` prefix check in `_validate_id_format()` with `validate_table_id_prefix(..., for_new_allocation=True, explicit_locked_prefix=effective_prefix)` and `_effective_locked_prefix(spec)`.
 4. **`backend/app/action_registry.py`**:
    - All 11 affected creation actions declare explicit `locked_prefix`:
@@ -96,29 +96,35 @@ Recalculated directly from `backend/app/schema_registry.py` and `backend/app/she
 | Unmapped Workbook Tabs Remaining (`DB-003`) | **164** | `64.31%` of 255 — absent from repo, **NOT fabricated**, fail-closed |
 | Locked Canonical ID Prefixes | **32** | Enforced via `LOCKED_32_ID_PREFIXES` |
 
-### The 12 Conflicting Core Tables (Write-Blocked Fail-Closed)
-1. `ApprovalRequests` — 3 missing fields
-2. `Attendance` — 7 missing fields
-3. `DailyClosings` — 3 missing fields
-4. `Expenses` — 4 missing fields
-5. `GoodsReceipts` — 2 missing fields
-6. `MillingBatches` — 2 missing fields
-7. `PackagingBatches` — 1 missing field
-8. `ProductionBatches` — 6 missing fields
-9. `RawMaterials` — 7 missing fields
-10. `Sales` — 4 missing fields
-11. `StockMovements` — 5 missing fields
-12. `SupplierBills` — 2 missing fields
-*(Total declared missing fields across the 12 conflicting core tables: 46.)*
+### The 12 Conflicting Core Tables (Reconstructed Directly From `backend/app/schema_registry.py:273-351` — Corrected in Phase 1.6 for `P1.5-004`)
+
+*(Note: All 12 conflicts remain UNRESOLVED pending physical Google Sheets Row-1 header export `DB-007` and remain write-blocked fail-closed by `DB-002`.)*
+
+| # | Table / Tab Name | Source Definition | Declared Missing Fields (`missing_from_required_tabs`) | Count | Resolved? |
+|---|---|---|---|---:|---|
+| 1 | `Suppliers` | `schema_registry.py:273-283`, `sheets.py` `REQUIRED_TABS['Suppliers']`, `routers/purchasing.py` | `payment_terms`, `opening_balance` | 2 | No (Write-Blocked) |
+| 2 | `CustomRoles` | `schema_registry.py:284-288`, `sheets.py` `REQUIRED_TABS['CustomRoles']`, `routers/users.py` | `deleted`, `active` | 2 | No (Write-Blocked) |
+| 3 | `SalaryIncentives` | `schema_registry.py:289-297`, `sheets.py` `REQUIRED_TABS['SalaryIncentives']`, `routers/salary.py` | `record_id`, `period_start`, `period_end`, `record_type`, `eligible_kg`, `completed_100kg_blocks`, `rate`, `calculated_amount`, `approved_amount`, `approval_status`, `paid_datetime`, `payment_reference` | 12 | No (Write-Blocked) |
+| 4 | `RawMaterials` | `schema_registry.py:298-305`, `sheets.py` `REQUIRED_TABS['RawMaterials']`, `routers/production.py` | `active`, `notes`, `opening_stock`, `opening_stock_verified`, `verification_status`, `verified_physical_stock`, `verified_by`, `verified_at` | 8 | No (Write-Blocked) |
+| 5 | `Products` | `schema_registry.py:306-310`, `sheets.py` `REQUIRED_TABS['Products']`, `routers/products.py` | `recipe_id` | 1 | No (Write-Blocked) |
+| 6 | `Workers` | `schema_registry.py:311-315`, `sheets.py` `REQUIRED_TABS['Workers']`, `routers/production.py` | `created_by` | 1 | No (Write-Blocked) |
+| 7 | `Customers` | `schema_registry.py:316-320`, `sheets.py` `REQUIRED_TABS['Customers']`, `routers/customers.py` | `notes` | 1 | No (Write-Blocked) |
+| 8 | `Sales` | `schema_registry.py:321-325`, `sheets.py` `REQUIRED_TABS['Sales']`, `routers/sales.py` | `cash_collected`, `credit_amount`, `owner_credit_approval_id` | 3 | No (Write-Blocked) |
+| 9 | `ProductionBatches` | `schema_registry.py:326-333`, `sheets.py` `REQUIRED_TABS['ProductionBatches']`, `routers/production.py` | `gross_output_kg`, `process_loss_kg`, `loss_reason`, `saleable_output_kg`, `unexplained_variance_kg`, `ingredients` | 6 | No (Write-Blocked) |
+| 10 | `PackagingBatches` | `schema_registry.py:334-340`, `sheets.py` `REQUIRED_TABS['PackagingBatches']`, `routers/production.py` | `recipe_id`, `bulk_batch_id`, `bulk_product_key`, `bulk_quantity_consumed_kg` | 4 | No (Write-Blocked) |
+| 11 | `Expenses` | `schema_registry.py:341-345`, `sheets.py` `REQUIRED_TABS['Expenses']`, `routers/expenses.py` | `post_accounting_journal` | 1 | No (Write-Blocked) |
+| 12 | `ShopVisits` | `schema_registry.py:346-350`, `sheets.py` `REQUIRED_TABS['ShopVisits']`, `routers/visits.py` | `shop_name_snapshot`, `visit_outcome`, `order_taken`, `follow_up_date`, `next_action` | 5 | No (Write-Blocked) |
+
+*(Total declared missing fields across the 12 conflicting core tables: **46**. Prior report erroneously listed `ApprovalRequests`, `Attendance`, `DailyClosings`, `GoodsReceipts`, `MillingBatches`, `StockMovements`, and `SupplierBills`, which are NOT in `CONFLICTING_CORE_SCHEMA_TABS`.)*
 
 ---
 
 ## 5. ID Prefix Audit (`DB-004` & `DB-005`)
 
-- **Canonical-Only New Allocations:** All 10 legacy prefix mappings (`Customers`/`CUS`->`CUST`, `JournalHeaders`/`JRN`->`JV`, `JournalLines`/`JLN`->`JVL`, `PackagingBatches`/`PKG`->`PKB`, `Payments`/`PAY`->`RCPT`, `ProductionBatches`/`PRB`->`PB`, `ProductionStockLedger`/`PST`->`PSL`, `RawMaterials`/`RWM`->`RM`, `SaleItems`/`ITEM`->`SI`, `Sales`/`SALE`->`INV`) reject legacy prefixes on new allocations (`allow_on_new_allocation: False`) while preserving historical read compatibility (`allow_on_read: True`).
+- **Canonical-Only New Allocations:** All 10 legacy prefix mappings (`Customers`/`CUS`->`CUST`, `JournalHeaders`/`JRN`->`JV`, `JournalLines`/`JLN`->`JVL`, `PackagingBatches`/`PKG`->`PKB`, `Payments`/`PAY`->`RCPT`, `ProductionBatches`/`PRB`->`PB`, `ProductionStockLedger`/`PST`->`MOV`, `RawMaterials`/`RWM`->`RM`, `SaleItems`/`ITEM`->`INVI`, `Sales`/`SALE`->`INV`) reject legacy prefixes on new allocations (`allow_on_new_allocation: False`) while preserving historical read compatibility (`allow_on_read: True`).
 - **`PKG` / `PKB` Separation:** `PackagingMaterials` exclusively allocates/validates `PKG`; `PackagingBatches` allocates `PKB` on new writes and accepts `PKB` or historical `PKG` on reads.
 - **Cross-Table Collisions Blocked:** `SalaryReceipts` (`RCPT`, colliding with `Payments`) and `SalaryIncentives` (`SAL`, colliding with `SalaryPayments`) are explicitly registered in `COLLIDING_LEGACY_PREFIX_TABS` and `TAB_RECONCILIATION_CONFLICTS` so colliding prefixes cannot be allocated on new writes.
-- **11 Creation Actions Enforced:** Every creation action targeting a locked-prefix table declares explicit `locked_prefix` in `action_registry.py` and passes `AppsScriptBridge._validate_id_format()`.
+- **11 Creation Actions Enforced:** Every creation action targeting a locked-prefix table declares explicit `locked_prefix` in `action_registry.py` and passes `AppsScriptBridge._validate_id_format()` as well as pre-write `_preflight_validate_payload_ids()` (added in Phase 1.6 for `P1.5-007`).
 
 ---
 
@@ -162,7 +168,7 @@ Full command-by-command records are documented in `PHASE1_VERIFICATION_RESULTS.m
 ## 9. Security & Data-Integrity Implications
 
 1. **Zero Silent Data Corruption on Unreconciled Schemas:** All 36 write-blocked tabs (12 conflicting core + 24 extended pending) fail closed on primary, secondary invalidation, and read-back child paths (`HTTP 503`).
-2. **No Bypass via Secondary Multi-Tab Writes (`P1-NEW-01`):** Actions targeting clean primary tables (`RawMaterialLedger`, `StockMovements`, `Payments`, etc.) can no longer implicitly mutate conflicting core tables (`RawMaterials`, `ProductionBatches`, `Sales`, `Attendance`, `DailyClosings`, `ApprovalRequests`, `GoodsReceipts`, `MillingBatches`).
+2. **No Bypass via Secondary Multi-Tab Writes (`P1-NEW-01` & `P1.5-001`):** Actions targeting clean primary tables (`RawMaterialLedger`, `GoodsReceipts`, `MillingBatches`, `ProductionStockLedger`, `Payments`, `DailyClosing`, `ApprovalRequests`) can no longer implicitly mutate conflicting core tables (`RawMaterials`, `Products`, `Sales`, `Expenses`, `ProductionBatches`) even when callers pass a partial `invalidate_tabs` list.
 3. **No Silent Legacy Prefix Contamination (`P1-NEW-02`):** New writes strictly require canonical `LOCKED_32_ID_PREFIXES`; historical legacy rows remain readable without destructive conversion.
 4. **Startup Integrity Restored (`P1-NEW-06`):** `app.main` boots cleanly without crashing on `auth.py`.
 5. **Remaining Operational Risk:** Until `DB-007` and `DB-008` are resolved with physical workbook headers and Apps Script writer source, production writes to the 12 conflicting core business tables remain intentionally halted (safe, fail-closed, but non-operational for those 12 tables).

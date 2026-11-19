@@ -117,11 +117,28 @@ if "jwt" not in sys.modules:
         sig = base64.urlsafe_b64encode(hmac.new(secret.encode(), f"{header}.{body}".encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
         return f"{header}.{body}.{sig}"
     def mock_decode(token, secret, algorithms=None):
+        import time as _time
+        if not isinstance(token, str):
+            raise ValueError("Invalid token")
         parts = token.split(".")
-        if len(parts) != 3: raise ValueError("Invalid token")
+        if len(parts) != 3:
+            raise ValueError("Invalid token")
+        expected_sig = base64.urlsafe_b64encode(
+            hmac.new(secret.encode(), f"{parts[0]}.{parts[1]}".encode(), hashlib.sha256).digest()
+        ).rstrip(b"=").decode()
+        if not hmac.compare_digest(parts[2], expected_sig):
+            raise ValueError("Invalid token signature")
         pad = len(parts[1]) % 4
         body = base64.urlsafe_b64decode(parts[1] + "=" * (4 - pad if pad else 0))
-        return json.loads(body.decode())
+        payload = json.loads(body.decode())
+        exp = payload.get("exp")
+        if exp is not None:
+            try:
+                if _time.time() > float(exp):
+                    raise ValueError("Token has expired")
+            except (TypeError, ValueError) as exc:
+                raise ValueError(str(exc)) from exc
+        return payload
     mock_jwt.encode = mock_encode
     mock_jwt.decode = mock_decode
     sys.modules["jwt"] = mock_jwt

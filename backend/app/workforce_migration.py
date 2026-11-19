@@ -99,6 +99,29 @@ def get_configured_auth_code() -> str:
     return code
 
 
+def _assert_offline_migration_allowed(operation: str) -> None:
+    """
+    Single-Write-Owner offline migration safety gate (P1.5-008).
+    Direct spreadsheet schema mutations are disabled by default and can NEVER activate
+    when SALES_ENV=production. Requires non-production environment plus explicit
+    SALES_ALLOW_OFFLINE_SHEETS_MIGRATION=1 (or isolated mock testing SALES_TESTING=1).
+    """
+    if os.getenv("SALES_ENV", "").strip().lower() == "production":
+        raise AuthorizationError(
+            f"Offline direct spreadsheet mutation '{operation}' cannot be activated when SALES_ENV=production "
+            "(Single-Write-Owner protection)."
+        )
+    if os.getenv("SALES_TESTING", "").strip() == "1":
+        return
+    allowed = os.getenv("SALES_ALLOW_OFFLINE_SHEETS_MIGRATION", "false").strip().lower() in {"1", "true", "yes"}
+    if not allowed:
+        raise AuthorizationError(
+            f"Offline direct spreadsheet mutation '{operation}' is disabled by default under Single-Write-Owner. "
+            "Set SALES_ALLOW_OFFLINE_SHEETS_MIGRATION=1 together with SALES_MIGRATION_AUTH_CODE and "
+            "confirm_spreadsheet_id only during an Owner-authorized non-production offline maintenance window."
+        )
+
+
 def mask_spreadsheet_id(val: str) -> str:
     """Mask spreadsheet ID for safe logging without exposing full identifier."""
     if not val:
@@ -507,7 +530,10 @@ def execute_safe_workforce_migration(
             "message": "Dry-run complete. No changes were made to the spreadsheet.",
         }
 
-    # Step 2: Strict authorization validation
+    # Step 2: Explicit Single-Write-Owner offline migration safety gate (P1.5-008)
+    _assert_offline_migration_allowed("execute_workforce_migration")
+
+    # Step 2b: Strict authorization validation
     expected_code = get_configured_auth_code()
     if not authorization_code or authorization_code.strip() != expected_code:
         raise AuthorizationError(
@@ -774,6 +800,7 @@ def execute_safe_workforce_rollback(
     5. Preserves all canonical identity and legacy worksheets untouched.
     6. Updates manifest status to ROLLED_BACK.
     """
+    _assert_offline_migration_allowed("rollback_workforce_migration")
     expected_code = get_configured_auth_code()
     if not authorization_code or authorization_code.strip() != expected_code:
         raise AuthorizationError(
