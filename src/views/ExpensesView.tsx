@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
+import { resolveCanonical12Role } from '../utils/permissions';
 import { Expense } from '../types';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -46,8 +47,20 @@ const CATEGORIES: Array<{ key: 'TRAVEL' | 'DELIVERY' | 'OTHER' | 'DIGITAL'; labe
 ];
 
 export const ExpensesView: React.FC = () => {
-  const { expenses, submitExpense, approveExpense, rejectExpense, currentUser } = useStore();
-  const isManager = currentUser?.role === 'OWNER' || currentUser?.role === 'PA';
+  const {
+    expenses,
+    submitExpense,
+    approveExpense,
+    rejectExpense,
+    currentUser,
+    isBackendConnected,
+    isGoogleSheetsConnected,
+    persistentWritesEnabled,
+  } = useStore();
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isAuditor = canonicalRole === 'AUDITOR';
+  const isManager = !isAuditor && (canonicalRole === 'OWNER_ADMIN' || canonicalRole === 'PA');
+  const writesLocked = isAuditor || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
 
   const [category, setCategory] = useState<'TRAVEL' | 'DELIVERY' | 'OTHER' | 'DIGITAL'>('TRAVEL');
   const [amount, setAmount] = useState<number>(100);
@@ -120,11 +133,11 @@ export const ExpensesView: React.FC = () => {
   };
 
   // Filter based on user role
-  const userExpenses = currentUser?.role === 'SALESMAN'
+  const userExpenses = canonicalRole === 'FIELD_SALESMAN'
     ? expenses.filter(
         (e) =>
-          e.submitted_by_user_id === currentUser.user_id ||
-          e.salesman_user_id === currentUser.user_id
+          e.submitted_by_user_id === currentUser?.user_id ||
+          e.salesman_user_id === currentUser?.user_id
       )
     : expenses;
 
@@ -160,6 +173,7 @@ export const ExpensesView: React.FC = () => {
       )}
 
       {/* Expense Submission Form using FormComponents */}
+      {!isAuditor && (
       <div className="bg-white border border-[#E7E2D6] rounded-2xl shadow-sm overflow-hidden">
         <div className="p-5 sm:p-6 border-b border-[#F0ECE1] bg-[#FAF8F5]">
           <h2 className="text-base sm:text-lg font-bold text-slate-900 m-0">Record Expense Claim</h2>
@@ -276,13 +290,15 @@ export const ExpensesView: React.FC = () => {
 
           <div className="pt-2 flex justify-end">
             <SaveButton
-              label="Submit Expense Claim"
+              label={writesLocked ? 'Writes Locked' : 'Submit Expense Claim'}
               isLoading={isSubmitting}
+              disabled={writesLocked}
               icon={<Receipt size={14} />}
             />
           </div>
         </form>
       </div>
+      )}
 
       {/* Expenses Register Table */}
       <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">

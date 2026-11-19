@@ -5,13 +5,14 @@ import re
 import threading
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
 from pydantic import BaseModel
 
+from app.apps_script_bridge import apps_script_bridge
 from app.models import Sale, SaleCreate, SaleItem, SalePaymentCreate
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
-from app.permissions import is_manager, is_salesman
+from app.permissions import is_manager, is_salesman, require_roles, role_v2_of
 from app.stock_math import salesman_available
 from app.timeutil import now_iso
 from app.accounting.customer_ledger import (
@@ -20,7 +21,22 @@ from app.accounting.customer_ledger import (
     CrossProcessLock,
 )
 
+logger = logging.getLogger("kawad_swad.sales")
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
+
+SALES_READ_ALL_ROLES = {"OWNER_ADMIN", "PA", "ACCOUNTS", "SALES", "AUDITOR"}
+SALES_READ_ROLES = SALES_READ_ALL_ROLES | {"FIELD_SALESMAN"}
+SALES_WRITE_ROLES = {"OWNER_ADMIN", "PA", "SALES", "FIELD_SALESMAN"}
+SALES_PAYMENT_ROLES = {"OWNER_ADMIN", "PA", "ACCOUNTS", "SALES", "FIELD_SALESMAN"}
+
+
+def _reject_auditor(user: dict) -> None:
+    if role_v2_of(user) == "AUDITOR":
+        raise HTTPException(status_code=403, detail="AUDITOR role is strictly read-only.")
+
+
+def _can_view_all_sales(user: dict) -> bool:
+    return is_manager(user) or role_v2_of(user) in SALES_READ_ALL_ROLES
 class UniversalSalesLock:
     """
     Universal thread and async lock.
@@ -166,11 +182,6 @@ def _to_sale(row: dict, items: List[SaleItem], key: str = "") -> Sale:
     )
 
 
-def _must_write(tab: str, record: dict):
-    if not db.append_record(tab, record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail=f"Could not save {tab}. The sale is incomplete and can be retried with the same idempotency key.")
-
-
 def _sale_is_complete(sale_id: str, line_count: int, payment_method: str, is_unpaid: bool = False, is_cash: bool = True) -> bool:
     if len(_items_for(sale_id)) < line_count:
         return False
@@ -225,7 +236,9 @@ def _compute_authoritative_cogs(validated: list):
 
 @router.get("", response_model=List[Sale])
 async def list_sales(current_user: dict = Depends(get_current_user)):
+    require_roles(current_user, SALES_READ_ROLES)
     user_id = str(current_user.get("user_id", ""))
+    can_view_all = _can_view_all_sales(current_user)
     sales_records = db.get_records("Sales")
     items_records = db.get_records("SaleItems")
     payments = db.get_records("Payments")
@@ -238,7 +251,7 @@ async def list_sales(current_user: dict = Depends(get_current_user)):
     result = []
     for row in sales_records:
         salesman_id = str(row.get("salesman_user_id", ""))
-        if not is_manager(current_user) and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
+        if not can_view_all and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
             continue
         if str(row.get("txn_status", "COMPLETE")).upper() == "INCOMPLETE":
             continue
@@ -255,13 +268,15 @@ async def list_sales(current_user: dict = Depends(get_current_user)):
 
 @router.get("/payments")
 async def list_payments(current_user: dict = Depends(get_current_user)):
+    require_roles(current_user, SALES_READ_ROLES)
     user_id = str(current_user.get("user_id", ""))
+    can_view_all = _can_view_all_sales(current_user)
     sales = {str(row.get("sale_id")): row for row in db.get_records("Sales")}
     payments = []
     for row in db.get_records("Payments"):
         sale = sales.get(str(row.get("sale_id")), {})
         salesman_id = str(sale.get("salesman_user_id", ""))
-        if not is_manager(current_user) and salesman_id not in {user_id, ""} and str(sale.get("entered_by_user_id", "")) != user_id:
+        if not can_view_all and salesman_id not in {user_id, ""} and str(sale.get("entered_by_user_id", "")) != user_id:
             continue
         if str(sale.get("txn_status", "COMPLETE")).upper() == "INCOMPLETE":
             continue
@@ -281,12 +296,14 @@ async def list_payments(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("", response_model=Sale, dependencies=[Depends(require_sheets_connection)])
-async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_user)):
+async def create_sale(req: SaleCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    _reject_auditor(current_user)
+    actor_role = role_v2_of(current_user)
     user_id = str(current_user.get("user_id") or "")
     requested_salesman = _clean(req.salesman_user_id) or user_id
     if is_salesman(current_user) and requested_salesman != user_id:
         raise HTTPException(status_code=403, detail="A salesman can only record a sale against their own user id.")
-    if not is_manager(current_user) and not is_salesman(current_user):
+    if not is_manager(current_user) and not is_salesman(current_user) and actor_role != "SALES":
         raise HTTPException(status_code=403, detail="You do not have permission to record a sale.")
 
     raw_items = req.items or req.lines or []
@@ -457,23 +474,21 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
                                 from app.accounting.customer_ledger import consume_credit_approval
                                 if not consume_credit_approval(app_id_res, sale_id):
                                     raise HTTPException(status_code=503, detail="The sale rows exist but approval consumption could not be saved. Retry the same request.")
-                                try:
-                                    inc_records = db.get_records("IncompleteTransactions", fresh=True)
-                                    for inc in inc_records:
-                                        if str(inc.get("idempotency_key", "")).strip() == f"appr-cons-{sale_id}" and str(inc.get("status", "")).upper() in {"CONSUMPTION_FAILED", "PENDING"}:
-                                            db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
-                                                "status": "RESOLVED",
-                                                "resolved_by": user_id,
-                                                "resolved_at": now_iso(),
-                                            })
-                                except Exception:
-                                    pass
-                            if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE"}):
-                                raise HTTPException(status_code=503, detail="The sale rows exist but the completion flag could not be saved. Retry the same request.")
+                            apps_script_bridge.delegate_governed_write(
+                                action="MARK_SALE_COMPLETE",
+                                target_tab="Sales",
+                                payload={"sale_id": sale_id, "txn_status": "COMPLETE"},
+                                actor_user_id=user_id,
+                                actor_role=actor_role,
+                                nonce=clean_key or None,
+                                request=request,
+                                id_field="sale_id",
+                                invalidate_tabs=["Sales"],
+                            )
                             existing["txn_status"] = "COMPLETE"
                         items = [_to_item(row) for row in _items_for(sale_id)]
                         return _to_sale(existing, items, clean_key)
-                    return await _resume_sale(existing, validated, method, reference, bill_total, user_id, clean_key)
+                    return await _resume_sale(existing, validated, method, reference, bill_total, user_id, actor_role, clean_key, request=request)
 
             if credit_amount > 0 or approval_id:
                 from app.accounting.customer_ledger import check_credit_control
@@ -495,22 +510,13 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
                     )
 
             now = now_iso()
-            sale_id = db.generate_id("Sales")
-            bill_number = db.allocate_bill_number()
             notes = _clean(req.notes)
             if clean_key:
-                notes = f"[idemp:{clean_key}] [txn:INCOMPLETE] {notes}".strip()
-
-            # Atomic reservation of credit approval before writing sale header
-            if approval_id:
-                from app.accounting.customer_ledger import reserve_credit_approval
-                reserve_credit_approval(approval_id, sale_id, customer_id, credit_amount)
+                notes = f"[idemp:{clean_key}] [txn:COMPLETE] {notes}".strip()
 
             sale_record = {
-                "sale_id": sale_id,
-                "bill_number": bill_number,
                 "idempotency_key": clean_key,
-                "txn_status": "INCOMPLETE",
+                "txn_status": "COMPLETE",
                 "sale_datetime": now,
                 "sales_type": _clean(req.sales_type or "Retailer Sale") or "Retailer Sale",
                 "customer_id": customer_id,
@@ -534,162 +540,112 @@ async def create_sale(req: SaleCreate, current_user: dict = Depends(get_current_
                 "notes": notes,
                 "owner_credit_approval_id": approval_id or "",
             }
-            header_written = False
-            try:
-                _must_write("Sales", sale_record)
-                header_written = True
-                _write_children(sale_record, validated, method, reference, user_id, now)
-            except Exception as exc:
-                if not header_written and approval_id:
-                    try:
-                        from app.accounting.customer_ledger import release_credit_approval
-                        release_credit_approval(approval_id, sale_id)
-                    except Exception:
-                        pass
-                if isinstance(exc, HTTPException):
-                    raise exc
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Sale {sale_id} is incomplete and was not issued. Retry the same idempotency key. {exc}",
-                ) from exc
+            children_bundle = _build_children_bundle(sale_record, validated, method, reference, user_id, now)
+            cogs = _compute_authoritative_cogs(validated)
 
-            # Fail-closed approval consumption: must consume approval before marking COMPLETE
-            if approval_id:
-                from app.accounting.customer_ledger import consume_credit_approval
-                consumed = consume_credit_approval(approval_id, sale_id)
-                if not consumed:
-                    try:
-                        db.append_record("IncompleteTransactions", {
-                            "transaction_id": db.generate_id("IncompleteTransactions"),
-                            "transaction_type": "APPROVAL_CONSUMPTION_PENDING",
-                            "idempotency_key": f"appr-cons-{sale_id}",
-                            "status": "CONSUMPTION_FAILED",
-                            "payload_json": f'{{"sale_id": "{sale_id}", "approval_id": "{approval_id}"}}',
-                            "error_details": f"Failed to mark credit approval {approval_id} as consumed for sale {sale_id}",
-                            "created_at": now_iso(),
-                            "updated_at": now_iso(),
-                            "resolved_by": "",
-                            "resolved_at": "",
-                        })
-                    except Exception:
-                        pass
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Sale {sale_id} rows were written but credit approval consumption could not be saved. Retry the same idempotency key.",
-                    )
-
-            if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE", "notes": notes.replace("[txn:INCOMPLETE]", "[txn:COMPLETE]")}):
-                raise HTTPException(status_code=503, detail=f"Sale {sale_id} rows were written but completion could not be marked. Retry the same idempotency key.")
-            sale_record["txn_status"] = "COMPLETE"
+            bridge_res = apps_script_bridge.delegate_governed_write(
+                action="CREATE_SALE",
+                target_tab="Sales",
+                payload={
+                    "sale": sale_record,
+                    **children_bundle,
+                    "owner_credit_approval_id": approval_id or "",
+                    "estimated_cogs": float(cogs),
+                },
+                actor_user_id=user_id,
+                actor_role=actor_role,
+                nonce=clean_key or None,
+                request=request,
+                id_field="sale_id",
+                invalidate_tabs=["Sales", "SaleItems", "SalesmanStockLedger", "Payments", "CashLedger", "ApprovalRequests"],
+            )
+            sale_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("sale_id") or "")
+            saved_sale = bridge_res.get("record") or {**sale_record, "sale_id": sale_id}
+            bill_number = str(saved_sale.get("bill_number") or sale_id)
 
             db.log_audit(user_id, "ISSUE_BILL", "Sales", sale_id, reason=f"Issued bill {bill_number} for ₹{bill_total:.2f} to {customer_name}")
 
-            # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
-            try:
-                from app.accounting.postings import post_sale_journal
-                cogs = _compute_authoritative_cogs(validated)
-                post_sale_journal(sale_record, cogs, user_id)
-            except Exception as acct_err:
-                try:
-                    db.append_record("IncompleteTransactions", {
-                        "transaction_id": db.generate_id("IncompleteTransactions"),
-                        "transaction_type": "ACCOUNTING_POSTING_PENDING",
-                        "idempotency_key": f"acct-sale-{sale_id}",
-                        "status": "POSTING_FAILED",
-                        "payload_json": f'{{"sale_id": "{sale_id}", "type": "SALE"}}',
-                        "error_details": str(acct_err),
-                        "created_at": now_iso(),
-                        "updated_at": now_iso(),
-                        "resolved_by": "",
-                        "resolved_at": "",
-                    })
-                except Exception:
-                    pass
+            from app.accounting.postings import post_sale_journal
+            post_sale_journal(saved_sale, cogs, user_id)
 
-            items = [_to_item(row) for row in _items_for(sale_id)]
-            res_sale = _to_sale(sale_record, items, clean_key)
+            items = [_to_item(row) for row in _items_for(sale_id)] or [_to_item({**itm, "sale_id": sale_id}) for itm in children_bundle["sale_items"]]
+            res_sale = _to_sale(saved_sale, items, clean_key)
             res_sale.total_amount = float(bill_total)
             res_sale.cash_collected = float(cash_collected)
             res_sale.credit_amount = float(credit_amount)
             return res_sale
 
 
-async def _resume_sale(existing: dict, validated: list, method: str, reference: str, bill_total: float, user_id: str, clean_key: str) -> Sale:
+async def _resume_sale(
+    existing: dict,
+    validated: list,
+    method: str,
+    reference: str,
+    bill_total: float,
+    user_id: str,
+    actor_role: str,
+    clean_key: str,
+    request: Optional[Request] = None,
+) -> Sale:
     sale_id = str(existing.get("sale_id"))
     if abs(_money(existing.get("bill_total")) - _money(bill_total)) > _MONEY:
         raise HTTPException(status_code=409, detail="This idempotency key belongs to a different bill total. Start a new bill.")
     now = now_iso()
-    try:
-        _write_children(existing, validated, method or str(existing.get("payment_method") or "CASH"), reference or _clean(existing.get("payment_reference")), user_id, now)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Recovery of sale {sale_id} is still incomplete. Retry the same idempotency key. {exc}") from exc
-
+    children_bundle = _build_children_bundle(
+        existing,
+        validated,
+        method or str(existing.get("payment_method") or "CASH"),
+        reference or _clean(existing.get("payment_reference")),
+        user_id,
+        now,
+    )
     approval_id = _clean(existing.get("owner_credit_approval_id"))
     if approval_id:
         from app.accounting.customer_ledger import consume_credit_approval
-        consumed = consume_credit_approval(approval_id, sale_id)
-        if not consumed:
-            try:
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": db.generate_id("IncompleteTransactions"),
-                    "transaction_type": "APPROVAL_CONSUMPTION_PENDING",
-                    "idempotency_key": f"appr-cons-{sale_id}",
-                    "status": "CONSUMPTION_FAILED",
-                    "payload_json": f'{{"sale_id": "{sale_id}", "approval_id": "{approval_id}"}}',
-                    "error_details": f"Failed to mark credit approval {approval_id} as consumed on resume for sale {sale_id}",
-                    "created_at": now_iso(),
-                    "updated_at": now_iso(),
-                    "resolved_by": "",
-                    "resolved_at": "",
-                })
-            except Exception:
-                pass
-            raise HTTPException(status_code=503, detail=f"Sale {sale_id} was recovered but credit approval consumption could not be saved. Retry.")
-
-        # If previously logged to IncompleteTransactions, resolve it
-        try:
-            inc_records = db.get_records("IncompleteTransactions", fresh=True)
-            for inc in inc_records:
-                if str(inc.get("idempotency_key", "")).strip() == f"appr-cons-{sale_id}" and str(inc.get("status", "")).upper() in {"CONSUMPTION_FAILED", "PENDING"}:
-                    db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
-                        "status": "RESOLVED",
-                        "resolved_by": user_id,
-                        "resolved_at": now_iso(),
-                    })
-        except Exception:
-            pass
+        if not consume_credit_approval(approval_id, sale_id):
+            raise HTTPException(status_code=503, detail=f"Sale {sale_id} recovery blocked because credit approval consumption was not confirmed. Retry.")
 
     notes = str(existing.get("notes", "")).replace("[txn:INCOMPLETE]", "[txn:COMPLETE]")
-    if not db.update_record("Sales", "sale_id", sale_id, {"txn_status": "COMPLETE", "notes": notes}):
-        raise HTTPException(status_code=503, detail=f"Sale {sale_id} was recovered but completion could not be marked. Retry.")
+    apps_script_bridge.delegate_governed_write(
+        action="RESUME_SALE",
+        target_tab="Sales",
+        payload={
+            "sale_id": sale_id,
+            "txn_status": "COMPLETE",
+            "notes": notes,
+            **children_bundle,
+        },
+        actor_user_id=user_id,
+        actor_role=actor_role,
+        nonce=clean_key or None,
+        request=request,
+        id_field="sale_id",
+        invalidate_tabs=["Sales", "SaleItems", "SalesmanStockLedger", "Payments", "CashLedger"],
+    )
     existing["txn_status"] = "COMPLETE"
-    db.log_audit(user_id, "RECOVER_BILL", "Sales", sale_id, reason="Completed missing sale rows on retry")
+    db.log_audit(user_id, "RECOVER_BILL", "Sales", sale_id, reason="Completed missing sale rows on retry via Apps Script bridge")
 
-    # Double-Entry Accounting Journal Posting on Resumed Sale
-    try:
-        from app.accounting.postings import post_sale_journal
-        cogs = _compute_authoritative_cogs(validated)
-        post_sale_journal(existing, cogs, user_id)
-    except Exception:
-        pass
+    from app.accounting.postings import post_sale_journal
+    cogs = _compute_authoritative_cogs(validated)
+    post_sale_journal(existing, cogs, user_id)
 
     return _to_sale(existing, [_to_item(row) for row in _items_for(sale_id)], clean_key)
 
 
+def _build_children_bundle(sale: dict, validated: list, method: str, reference: str, user_id: str, now: str) -> dict:
+    sale_id = str(sale.get("sale_id") or "")
+    bill_number = str(sale.get("bill_number") or "")
+    salesman_id = str(sale.get("salesman_user_id") or "")
+    existing_items = _items_for(sale_id) if sale_id else []
+    existing_stock = _stock_for(sale_id) if sale_id else []
 
-def _write_children(sale: dict, validated: list, method: str, reference: str, user_id: str, now: str):
-    sale_id = str(sale.get("sale_id"))
-    bill_number = str(sale.get("bill_number"))
-    salesman_id = str(sale.get("salesman_user_id"))
-    existing_items = _items_for(sale_id)
-    existing_stock = _stock_for(sale_id)
+    sale_items = []
+    stock_ledger_rows = []
     for line in validated:
         marker = f"[line:{line['line_no']}]"
         if not any(marker in str(row.get("notes", "")) for row in existing_items):
-            item_id = db.generate_id("SaleItems")
-            item_notes = f"{marker} {line['notes']}".strip()
-            _must_write("SaleItems", {
-                "sale_item_id": item_id,
+            sale_items.append({
+                "line_no": line["line_no"],
                 "sale_id": sale_id,
                 "product_id": line["product_id"],
                 "product_name_snapshot": line["product_name_snapshot"],
@@ -702,11 +658,11 @@ def _write_children(sale: dict, validated: list, method: str, reference: str, us
                 "line_total": line["line_total"],
                 "qualifying_kg": line["qualifying_kg"],
                 "created_at": now,
-                "notes": item_notes,
+                "notes": f"{marker} {line['notes']}".strip(),
             })
-        if not any(marker in str(row.get("notes", "")) or str(row.get("reference_id")) == f"{bill_number}#{line['line_no']}" for row in existing_stock):
-            _must_write("SalesmanStockLedger", {
-                "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+        if not any(marker in str(row.get("notes", "")) or (bill_number and str(row.get("reference_id")) == f"{bill_number}#{line['line_no']}") for row in existing_stock):
+            stock_ledger_rows.append({
+                "line_no": line["line_no"],
                 "txn_datetime": now,
                 "salesman_user_id": salesman_id,
                 "product_id": line["product_id"],
@@ -719,14 +675,15 @@ def _write_children(sale: dict, validated: list, method: str, reference: str, us
                 "issued_by_user_id": user_id,
                 "received_by_user_id": str(sale.get("customer_id", "")),
                 "confirmed_by_user_id": salesman_id,
-                "reference_id": f"{bill_number}#{line['line_no']}",
-                "notes": f"{marker} Sale delivery against bill {bill_number}",
+                "reference_id": f"{bill_number}#{line['line_no']}" if bill_number else f"LINE#{line['line_no']}",
+                "notes": f"{marker} Sale delivery against bill",
             })
+
     collected = float(sale.get("cash_collected", 0) if sale.get("cash_collected") is not None else (sale.get("bill_total", 0) if method != "CREDIT" else 0.0))
-    if collected > 0 and not _payments_for(sale_id):
+    payments = []
+    if collected > 0 and (not sale_id or not _payments_for(sale_id)):
         p_status = "PAID" if collected >= float(sale.get("bill_total", 0) or 0) - 0.01 else "PARTIAL"
-        _must_write("Payments", {
-            "payment_id": db.generate_id("Payments"),
+        payments.append({
             "sale_id": sale_id,
             "payment_datetime": now,
             "payment_method": method,
@@ -734,11 +691,12 @@ def _write_children(sale: dict, validated: list, method: str, reference: str, us
             "reference_number": reference or bill_number,
             "received_by_user_id": salesman_id,
             "payment_status": p_status,
-            "notes": f"ref:{reference}" if reference else f"Payment for bill {bill_number}",
+            "notes": f"ref:{reference}" if reference else "Payment for bill",
         })
-    if method == "CASH" and collected > 0 and not _cash_for(sale_id):
-        _must_write("CashLedger", {
-            "cash_txn_id": db.generate_id("CashLedger"),
+
+    cash_ledger_rows = []
+    if method == "CASH" and collected > 0 and (not sale_id or not _cash_for(sale_id)):
+        cash_ledger_rows.append({
             "txn_datetime": now,
             "salesman_user_id": salesman_id,
             "txn_type": "SALE_COLLECTION",
@@ -750,8 +708,15 @@ def _write_children(sale: dict, validated: list, method: str, reference: str, us
             "received_by_user_id": salesman_id,
             "confirmed_by_user_id": salesman_id,
             "reference_id": bill_number,
-            "notes": f"Cash collection for bill {bill_number}",
+            "notes": "Cash collection for bill",
         })
+
+    return {
+        "sale_items": sale_items,
+        "stock_ledger_rows": stock_ledger_rows,
+        "payments": payments,
+        "cash_ledger_rows": cash_ledger_rows,
+    }
 
 
 class SaleCancelRequest(BaseModel):
@@ -760,7 +725,9 @@ class SaleCancelRequest(BaseModel):
 
 @router.get("/incomplete", response_model=List[Sale])
 async def list_incomplete_sales(current_user: dict = Depends(get_current_user)):
+    require_roles(current_user, SALES_READ_ROLES)
     user_id = str(current_user.get("user_id", ""))
+    can_view_all = _can_view_all_sales(current_user)
     sales_records = db.get_records("Sales", fresh=True)
     items_records = db.get_records("SaleItems", fresh=True)
     items_by_sale = {}
@@ -771,14 +738,16 @@ async def list_incomplete_sales(current_user: dict = Depends(get_current_user)):
         if str(row.get("txn_status", "")).upper() != "INCOMPLETE":
             continue
         salesman_id = str(row.get("salesman_user_id", ""))
-        if not is_manager(current_user) and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
+        if not can_view_all and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
             continue
         incomplete.append(_to_sale(row, items_by_sale.get(str(row.get("sale_id")), [])))
     return incomplete
 
 
 @router.post("/{sale_id}/cancel", dependencies=[Depends(require_sheets_connection)])
-async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict = Depends(get_current_user)):
+async def cancel_sale(sale_id: str, req: SaleCancelRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    _reject_auditor(current_user)
+    actor_role = role_v2_of(current_user)
     user_id = str(current_user.get("user_id", ""))
     async with _sales_lock:
         sales = db.get_records("Sales", fresh=True)
@@ -840,37 +809,13 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     accounting_status = "NO_VOUCHER"
 
                 if accounting_status in {"REVERSED", "ALREADY_REVERSED"}:
-                    try:
-                        inc_records = db.get_records("IncompleteTransactions", fresh=True)
-                        for inc in inc_records:
-                            if str(inc.get("idempotency_key", "")).strip() == f"acct-rev-sale-{sale_id}" and str(inc.get("status", "")).upper() in {"REVERSAL_FAILED", "PENDING"}:
-                                db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
-                                    "status": "RESOLVED",
-                                    "resolved_by": user_id,
-                                    "resolved_at": now_iso(),
-                                })
-                    except Exception:
-                        pass
+                    logger.info("Accounting reversal reconciled for cancelled sale %s (%s)", sale_id, accounting_status)
+            except HTTPException:
+                raise
             except Exception as acct_exc:
                 accounting_status = "FAILED"
                 accounting_error = str(acct_exc)
                 logging.warning("Accounting reversal check for already cancelled sale %s: %s", sale_id, acct_exc)
-                try:
-                    import json
-                    db.append_record("IncompleteTransactions", {
-                        "transaction_id": db.generate_id("IncompleteTransactions"),
-                        "transaction_type": "ACCOUNTING_REVERSAL_PENDING",
-                        "idempotency_key": f"acct-rev-sale-{sale_id}",
-                        "status": "REVERSAL_FAILED",
-                        "payload_json": json.dumps({"sale_id": sale_id, "reason": req.reason.strip(), "user_id": user_id}),
-                        "error_details": str(acct_exc),
-                        "error_message": str(acct_exc),
-                        "created_at": now_iso(),
-                        "resolved_by": "",
-                        "resolved_at": "",
-                    })
-                except Exception:
-                    pass
 
             return {
                 "ok": True,
@@ -893,18 +838,18 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
         bill_number = str(match.get("bill_number", ""))
         reason_text = req.reason.strip() or "Customer cancellation / authorized reversal"
 
-        # 1. Reverse stock in SalesmanStockLedger (check if reversal line already appended)
+        # 1. Build SalesmanStockLedger reversal rows
         existing_stock_reversals = [
             r for r in db.get_records("SalesmanStockLedger", fresh=True)
             if str(r.get("related_sale_id")) == sale_id and str(r.get("txn_type", "")).upper() == "RETURN_FROM_SALESMAN"
         ]
         items = _items_for(sale_id)
+        stock_reversals = []
         for itm in items:
             p_id = str(itm.get("product_id"))
             qty = int(float(itm.get("quantity", 0) or 0))
             if qty > 0 and not any(str(r.get("product_id")) == p_id and int(float(r.get("quantity", 0) or 0)) == qty for r in existing_stock_reversals):
-                db.append_record("SalesmanStockLedger", {
-                    "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+                stock_reversals.append({
                     "txn_datetime": now,
                     "salesman_user_id": salesman_id,
                     "product_id": p_id,
@@ -919,9 +864,9 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     "confirmed_by_user_id": user_id,
                     "reference_id": f"CANCEL-{bill_number}",
                     "notes": f"Stock reversal for cancelled bill {bill_number}: {reason_text}",
-                }, raise_on_error=True)
+                })
 
-        # 2. Reverse payments in Payments / CashLedger (refund only actual collected amounts)
+        # 2. Build Payments / CashLedger reversal rows
         bill_total = float(match.get("bill_total", 0) or 0)
         method = str(match.get("payment_method", "CASH")).upper()
 
@@ -940,16 +885,16 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
         ]
         existing_refund_refs = {str(r.get("reference_number", "")).strip() for r in existing_refunds}
 
+        payment_reversals = []
+        cash_reversals = []
         if positive_payments:
-            # Refund every individual collection so method and amount match accurately
             for p in positive_payments:
                 p_id = str(p.get("payment_id", "")).strip()
                 p_amt = round(float(p.get("amount", 0) or 0), 2)
                 p_method = str(p.get("payment_method", "CASH")).upper()
                 ref_refund = f"REFUND-{p_id}"
                 if ref_refund not in existing_refund_refs and not any(p_id in str(r.get("notes", "")) for r in existing_refunds):
-                    db.append_record("Payments", {
-                        "payment_id": db.generate_id("Payments"),
+                    payment_reversals.append({
                         "sale_id": sale_id,
                         "payment_datetime": now,
                         "payment_method": p_method,
@@ -958,7 +903,7 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                         "received_by_user_id": salesman_id,
                         "payment_status": "REFUNDED",
                         "notes": f"Payment reversal for collection {p_id} of cancelled bill {bill_number}: {reason_text}",
-                    }, raise_on_error=True)
+                    })
 
                 if p_method == "CASH":
                     existing_cash_refunds = [
@@ -966,8 +911,7 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                         if str(c.get("related_sale_id")) == sale_id and str(c.get("reference_id", "")).strip() in {f"CANCEL-{bill_number}-{p_id}", f"CANCEL-{bill_number}"}
                     ]
                     if not existing_cash_refunds:
-                        db.append_record("CashLedger", {
-                            "cash_txn_id": db.generate_id("CashLedger"),
+                        cash_reversals.append({
                             "txn_datetime": now,
                             "salesman_user_id": salesman_id,
                             "txn_type": "SALE_REFUND",
@@ -980,17 +924,15 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                             "confirmed_by_user_id": user_id,
                             "reference_id": f"CANCEL-{bill_number}-{p_id}",
                             "notes": f"Cash refund reversal for collection {p_id} of cancelled bill {bill_number}",
-                        }, raise_on_error=True)
+                        })
         else:
-            # Legacy fallback if no individual Payments records exist
             p_status = str(match.get("payment_status", "")).upper()
             if p_status != "UNPAID" and method != "CREDIT":
                 leg_collected = float(match.get("cash_collected") if match.get("cash_collected") is not None else bill_total)
             else:
                 leg_collected = float(match.get("cash_collected", 0) or 0)
             if leg_collected > 0 and not existing_refunds:
-                db.append_record("Payments", {
-                    "payment_id": db.generate_id("Payments"),
+                payment_reversals.append({
                     "sale_id": sale_id,
                     "payment_datetime": now,
                     "payment_method": method,
@@ -999,15 +941,14 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                     "received_by_user_id": salesman_id,
                     "payment_status": "REFUNDED",
                     "notes": f"Payment reversal for cancelled bill {bill_number}: {reason_text}",
-                }, raise_on_error=True)
+                })
                 if method == "CASH":
                     existing_cash_refunds = [
                         c for c in db.get_records("CashLedger", fresh=True)
                         if str(c.get("related_sale_id")) == sale_id and str(c.get("txn_type", "")).upper() == "SALE_REFUND"
                     ]
                     if not existing_cash_refunds:
-                        db.append_record("CashLedger", {
-                            "cash_txn_id": db.generate_id("CashLedger"),
+                        cash_reversals.append({
                             "txn_datetime": now,
                             "salesman_user_id": salesman_id,
                             "txn_type": "SALE_REFUND",
@@ -1020,26 +961,37 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                             "confirmed_by_user_id": user_id,
                             "reference_id": f"CANCEL-{bill_number}",
                             "notes": f"Cash refund reversal for cancelled bill {bill_number}",
-                        }, raise_on_error=True)
+                        })
 
-        # 3. Update Sales record status
-        updated = db.update_record("Sales", "sale_id", sale_id, {
-            "bill_status": "CANCELLED",
-            "notes": f"{match.get('notes', '')} [CANCELLED:{now}:{user_id}:{reason_text}]".strip(),
-        }, raise_on_error=True)
-        if not updated:
-            raise HTTPException(status_code=503, detail="Could not update bill status to CANCELLED.")
+        # 3. Delegate atomic cancellation via Apps Script bridge
+        apps_script_bridge.delegate_governed_write(
+            action="CANCEL_SALE",
+            target_tab="Sales",
+            payload={
+                "sale_id": sale_id,
+                "bill_status": "CANCELLED",
+                "reason": reason_text,
+                "notes": f"{match.get('notes', '')} [CANCELLED:{now}:{user_id}:{reason_text}]".strip(),
+                "stock_reversals": stock_reversals,
+                "payment_reversals": payment_reversals,
+                "cash_reversals": cash_reversals,
+            },
+            actor_user_id=user_id,
+            actor_role=actor_role,
+            request=request,
+            id_field="sale_id",
+            invalidate_tabs=["Sales", "SalesmanStockLedger", "Payments", "CashLedger"],
+        )
 
         db.log_audit(user_id, "CANCEL_BILL", "Sales", sale_id, reason=f"Cancelled bill {bill_number} for ₹{bill_total:.2f}. Reason: {reason_text}")
 
-        # 4. Double-Entry Accounting Compensating Reversal Vouchers (Reverses Invoice and all Collection Vouchers)
+        # 4. Double-Entry Accounting Compensating Reversal Vouchers
         accounting_status = "NO_VOUCHER"
         reversal_journal_ids = []
         accounting_error = None
         try:
             from app.accounting.journal_engine import reverse_journal_voucher
             headers = db.get_records("JournalHeaders", fresh=True)
-            # Find all vouchers for this sale: SALE_INVOICE and PAYMENT_COLLECTION
             all_sale_vouchers = [
                 h for h in headers
                 if ((str(h.get("reference_id", "")).strip() == sale_id and str(h.get("reference_type", "")).strip().upper() in {"SALE_INVOICE", "SALE"})
@@ -1049,7 +1001,6 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                 h for h in all_sale_vouchers
                 if str(h.get("status", "")).strip().upper() in {"POSTED", "PROVISIONAL"}
             ]
-            # Order invoice vouchers first, then payment collection vouchers
             active_vouchers.sort(key=lambda h: 0 if str(h.get("reference_type", "")).strip().upper() in {"SALE_INVOICE", "SALE"} else 1)
 
             already_reversed_vouchers = [
@@ -1081,39 +1032,12 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
                 reversal_journal_ids = [str(r.get("journal_id", "")) for r in reversals if str(r.get("journal_id", ""))]
             else:
                 accounting_status = "NO_VOUCHER"
-
-            if accounting_status in {"REVERSED", "ALREADY_REVERSED"}:
-                try:
-                    inc_records = db.get_records("IncompleteTransactions", fresh=True)
-                    for inc in inc_records:
-                        if str(inc.get("idempotency_key", "")).strip() == f"acct-rev-sale-{sale_id}" and str(inc.get("status", "")).upper() in {"REVERSAL_FAILED", "PENDING"}:
-                            db.update_record("IncompleteTransactions", "transaction_id", inc.get("transaction_id"), {
-                                "status": "RESOLVED",
-                                "resolved_by": user_id,
-                                "resolved_at": now,
-                            })
-                except Exception:
-                    pass
+        except HTTPException:
+            raise
         except Exception as acct_exc:
             accounting_status = "FAILED"
             accounting_error = str(acct_exc)
             logging.error("Accounting reversal for sale %s failed: %s", sale_id, acct_exc)
-            try:
-                import json
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": db.generate_id("IncompleteTransactions"),
-                    "transaction_type": "ACCOUNTING_REVERSAL_PENDING",
-                    "idempotency_key": f"acct-rev-sale-{sale_id}",
-                    "status": "REVERSAL_FAILED",
-                    "payload_json": json.dumps({"sale_id": sale_id, "reason": reason_text, "user_id": user_id}),
-                    "error_details": str(acct_exc),
-                    "error_message": str(acct_exc),
-                    "created_at": now,
-                    "resolved_by": "",
-                    "resolved_at": "",
-                })
-            except Exception as inc_exc:
-                logging.error("Could not record incomplete reversal transaction: %s", inc_exc)
 
         msg = (
             f"Bill {bill_number} cancelled and stock/payment reversed successfully. Accounting voucher reversed ({', '.join(reversal_journal_ids)})."
@@ -1122,7 +1046,7 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
             if accounting_status == "ALREADY_REVERSED"
             else f"Bill {bill_number} cancelled. No accounting voucher found to reverse."
             if accounting_status == "NO_VOUCHER"
-            else f"Bill {bill_number} cancelled, but accounting reversal failed: {accounting_error}. Logged to IncompleteTransactions for recovery."
+            else f"Bill {bill_number} cancelled, but accounting reversal failed: {accounting_error}."
         )
 
         return {
@@ -1142,9 +1066,11 @@ async def cancel_sale(sale_id: str, req: SaleCancelRequest, current_user: dict =
 async def record_sale_payment(
     sale_id: str,
     payload: SalePaymentCreate,
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ):
-    user_id = str(current_user.get("user_id", "")).strip()
+    _reject_auditor(current_user)
+    user_id, actor_role = require_roles(current_user, SALES_PAYMENT_ROLES)
     username = str(current_user.get("username", "OPERATOR")).strip()
 
     async with _sales_lock:
@@ -1164,7 +1090,6 @@ async def record_sale_payment(
         total_paid_so_far = round(sum(float(p.get("amount", 0) or 0) for p in payments), 2)
         remaining_balance = round(bill_total - total_paid_so_far, 2)
 
-        # Idempotency and conflicting replay detection
         clean_key = _clean(getattr(payload, "idempotency_key", None))
         if clean_key:
             for p in payments:
@@ -1198,7 +1123,6 @@ async def record_sale_payment(
             )
 
         now = now_iso()
-        payment_id = db.generate_id("Payments")
         pay_method = str(payload.payment_method or "CASH").upper()
         ref_num = payload.reference_number or str(sale.get("bill_number", ""))
         notes_text = payload.notes or f"Customer collection against bill {sale.get('bill_number')}"
@@ -1206,7 +1130,6 @@ async def record_sale_payment(
             notes_text = f"[idemp:{clean_key}] {notes_text}".strip()
 
         payment_record = {
-            "payment_id": payment_id,
             "sale_id": sale_id,
             "idempotency_key": clean_key,
             "payment_datetime": now,
@@ -1217,39 +1140,46 @@ async def record_sale_payment(
             "payment_status": "COLLECTED",
             "notes": notes_text,
         }
-        db.append_record("Payments", payment_record, raise_on_error=True)
-
-        if pay_method == "CASH":
-            try:
-                db.append_record("CashLedger", {
-                    "cash_txn_id": db.generate_id("CashLedger"),
-                    "txn_datetime": now,
-                    "salesman_user_id": str(sale.get("salesman_user_id", "")) or user_id,
-                    "txn_type": "SALE_COLLECTION",
-                    "amount": round(payload.amount, 2),
-                    "payment_method": "CASH",
-                    "related_sale_id": sale_id,
-                    "related_expense_id": "",
-                    "issued_by_user_id": str(sale.get("customer_id", "")) or "CUSTOMER",
-                    "received_by_user_id": user_id,
-                    "confirmed_by_user_id": user_id,
-                    "reference_id": ref_num,
-                    "notes": f"Cash collection for bill {sale.get('bill_number')}",
-                }, raise_on_error=True)
-            except Exception as cash_err:
-                try:
-                    db.delete_record("Payments", "payment_id", payment_id)
-                except Exception:
-                    pass
-                raise HTTPException(503, f"Failed to persist CashLedger entry: {cash_err}. Payment rolled back.")
+        cash_row = (
+            {
+                "txn_datetime": now,
+                "salesman_user_id": str(sale.get("salesman_user_id", "")) or user_id,
+                "txn_type": "SALE_COLLECTION",
+                "amount": round(payload.amount, 2),
+                "payment_method": "CASH",
+                "related_sale_id": sale_id,
+                "related_expense_id": "",
+                "issued_by_user_id": str(sale.get("customer_id", "")) or "CUSTOMER",
+                "received_by_user_id": user_id,
+                "confirmed_by_user_id": user_id,
+                "reference_id": ref_num,
+                "notes": f"Cash collection for bill {sale.get('bill_number')}",
+            }
+            if pay_method == "CASH"
+            else None
+        )
 
         new_total_paid = round(total_paid_so_far + payload.amount, 2)
         new_balance = max(0.0, round(bill_total - new_total_paid, 2))
         new_status = "PAID" if new_balance <= 0.05 else "PARTIAL"
 
-        db.update_record("Sales", "sale_id", sale_id, {
-            "payment_status": new_status,
-        }, raise_on_error=True)
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="RECORD_SALE_PAYMENT",
+            target_tab="Payments",
+            payload={
+                "payment": payment_record,
+                "cash_ledger_row": cash_row,
+                "sale_payment_status_update": {"sale_id": sale_id, "payment_status": new_status},
+            },
+            actor_user_id=user_id,
+            actor_role=actor_role,
+            nonce=clean_key or None,
+            request=request,
+            id_field="payment_id",
+            invalidate_tabs=["Payments", "CashLedger", "Sales"],
+        )
+        payment_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("payment_id") or "")
+        saved_payment = bridge_res.get("record") or {**payment_record, "payment_id": payment_id}
 
         db.log_audit(
             user_id,
@@ -1259,27 +1189,8 @@ async def record_sale_payment(
             reason=f"Recorded {pay_method} collection of ₹{payload.amount:.2f} for bill {sale.get('bill_number')}",
         )
 
-        journal_res = None
-        try:
-            from app.accounting.postings import post_payment_collection_journal
-            journal_res = post_payment_collection_journal(payment_record, actor=username)
-        except Exception as e:
-            import logging
-            logging.error(f"Non-fatal accounting posting error for payment {payment_id}: {e}")
-            try:
-                import json
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": db.generate_id("IncompleteTransactions"),
-                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
-                    "idempotency_key": f"acct-pay-{payment_id}",
-                    "status": "POSTING_FAILED",
-                    "payload_json": json.dumps({"payment_id": payment_id, "type": "CUSTOMER_PAYMENT"}),
-                    "error_details": str(e),
-                    "created_at": now,
-                    "updated_at": now,
-                })
-            except Exception:
-                pass
+        from app.accounting.postings import post_payment_collection_journal
+        journal_res = post_payment_collection_journal(saved_payment, actor=username)
 
         return {
             "ok": True,
@@ -1295,6 +1206,7 @@ async def record_sale_payment(
 @router.get("/customers/{customer_id}/ledger")
 async def get_customer_ledger(customer_id: str, current_user: dict = Depends(get_current_user)):
     """Authoritative chronological customer ledger transactions (invoices, collections, credit notes)."""
+    require_roles(current_user, SALES_READ_ROLES)
     from app.accounting.customer_ledger import get_customer_transactions
     return get_customer_transactions(customer_id)
 
@@ -1302,6 +1214,7 @@ async def get_customer_ledger(customer_id: str, current_user: dict = Depends(get
 @router.get("/customers/{customer_id}/outstanding")
 async def get_customer_outstanding_summary(customer_id: str, current_user: dict = Depends(get_current_user)):
     """Customer outstanding balance and overdue aging breakdown."""
+    require_roles(current_user, SALES_READ_ROLES)
     from app.accounting.customer_ledger import calculate_customer_outstanding, get_customer_overdue_invoices
     outstanding = calculate_customer_outstanding(customer_id)
     overdue = get_customer_overdue_invoices(customer_id)
@@ -1316,14 +1229,15 @@ async def get_customer_outstanding_summary(customer_id: str, current_user: dict 
 @router.get("/customers/{customer_id}/breakdown")
 async def get_customer_balance_breakdown_endpoint(customer_id: str, current_user: dict = Depends(get_current_user)):
     """Customer debit vs credit balance breakdown (exposing customer credit balances clearly)."""
+    require_roles(current_user, SALES_READ_ROLES)
     from app.accounting.customer_ledger import get_customer_balance_breakdown
     return get_customer_balance_breakdown(customer_id)
-
 
 
 @router.get("/{sale_id}/settlement")
 async def get_sale_settlement(sale_id: str, current_user: dict = Depends(get_current_user)):
     """Invoice settlement status (bill_total, total_collected, remaining_balance, payment_status)."""
+    require_roles(current_user, SALES_READ_ROLES)
     from app.accounting.customer_ledger import get_invoice_settlement_status
     return get_invoice_settlement_status(sale_id)
 
@@ -1331,7 +1245,9 @@ async def get_sale_settlement(sale_id: str, current_user: dict = Depends(get_cur
 @router.get("/orders")
 async def list_sales_orders(current_user: dict = Depends(get_current_user)):
     """List sales orders, distinguishing quotations, drafts, and confirmed orders."""
+    require_roles(current_user, SALES_READ_ROLES)
     user_id = str(current_user.get("user_id", ""))
+    can_view_all = _can_view_all_sales(current_user)
     sales_records = db.get_records("Sales", fresh=True)
     items_records = db.get_records("SaleItems", fresh=True)
     items_by_sale: Dict[str, List[SaleItem]] = {}
@@ -1341,7 +1257,7 @@ async def list_sales_orders(current_user: dict = Depends(get_current_user)):
     orders = []
     for row in sales_records:
         salesman_id = str(row.get("salesman_user_id", ""))
-        if not is_manager(current_user) and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
+        if not can_view_all and salesman_id != user_id and str(row.get("entered_by_user_id", "")) != user_id:
             continue
         status = str(row.get("bill_status", "")).upper()
         if status in {"DRAFT", "ORDER_CONFIRMED", "ORDER_DRAFT"}:
@@ -1350,9 +1266,10 @@ async def list_sales_orders(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/orders", response_model=Sale, dependencies=[Depends(require_sheets_connection)])
-async def create_sales_order(req: SaleCreate, current_user: dict = Depends(get_current_user)):
-    """Create a sales order in DRAFT status with stock availability verification without immediate deduction."""
-    user_id = str(current_user.get("user_id") or "")
+async def create_sales_order(req: SaleCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Create a sales order in DRAFT status atomically via Apps Script bridge."""
+    _reject_auditor(current_user)
+    user_id, actor_role = require_roles(current_user, SALES_WRITE_ROLES)
     salesman_id = _clean(req.salesman_user_id) or user_id
     customer_id = _clean(req.customer_id)
 
@@ -1360,11 +1277,7 @@ async def create_sales_order(req: SaleCreate, current_user: dict = Depends(get_c
     cust = next((c for c in customers if str(c.get("customer_id")) == customer_id), None)
     cust_name = str(cust.get("shop_name") or cust.get("shopkeeper_name") or "Direct Customer") if cust else "Direct Customer"
 
-    sale_id = db.generate_id("Sales")
-    order_num = f"SO-{db.generate_id('Sales').replace('SALE-', '')}"
     now = now_iso()
-
-    # Pre-check product availability
     products = {str(p.get("product_id")): p for p in db.get_records("Products", fresh=True)}
     line_items = []
     subtotal = 0.0
@@ -1376,8 +1289,7 @@ async def create_sales_order(req: SaleCreate, current_user: dict = Depends(get_c
         line_tot = round(unit_price * item.quantity, 2)
         subtotal += line_tot
         line_items.append({
-            "sale_item_id": db.generate_id("SaleItems"),
-            "sale_id": sale_id,
+            "line_no": idx,
             "product_id": item.product_id,
             "product_name_snapshot": str(prod.get("product_name", "")),
             "sku_snapshot": str(prod.get("sku", "")),
@@ -1394,11 +1306,10 @@ async def create_sales_order(req: SaleCreate, current_user: dict = Depends(get_c
 
     tax_amt = round(subtotal * 0.05, 2)
     bill_total = subtotal + tax_amt
+    clean_key = _clean(req.idempotency_key)
 
     order_record = {
-        "sale_id": sale_id,
-        "bill_number": order_num,
-        "idempotency_key": req.idempotency_key or f"SO-{sale_id}",
+        "idempotency_key": clean_key,
         "txn_status": "COMPLETE",
         "sale_datetime": now,
         "sales_type": req.sales_type or "Retailer Sale",
@@ -1421,43 +1332,54 @@ async def create_sales_order(req: SaleCreate, current_user: dict = Depends(get_c
         "notes": f"[SALES_ORDER_DRAFT] {req.notes or ''}".strip(),
     }
 
-    db.append_record("Sales", order_record, raise_on_error=True)
-    for itm in line_items:
-        db.append_record("SaleItems", itm, raise_on_error=True)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_SALES_ORDER",
+        target_tab="Sales",
+        payload={"order": order_record, "items": line_items},
+        actor_user_id=user_id,
+        actor_role=actor_role,
+        nonce=clean_key or None,
+        request=request,
+        id_field="sale_id",
+        invalidate_tabs=["Sales", "SaleItems"],
+    )
+    sale_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("sale_id") or "")
+    saved_order = bridge_res.get("record") or {**order_record, "sale_id": sale_id}
+    order_num = str(saved_order.get("bill_number") or sale_id)
 
     db.log_audit(user_id, "CREATE_SALES_ORDER", "Sales", sale_id, reason=f"Created sales order {order_num} for ₹{bill_total:.2f}")
-    return _to_sale(order_record, [_to_item(i) for i in line_items])
+    return _to_sale(saved_order, [_to_item({**i, "sale_id": sale_id}) for i in line_items])
 
 
 @router.post("/orders/{sale_id}/confirm", dependencies=[Depends(require_sheets_connection)])
-async def confirm_sales_order(sale_id: str, current_user: dict = Depends(get_current_user)):
-    """Confirm a DRAFT sales order, generating an active invoice, deducting stock, and posting accounting voucher."""
-    user_id = str(current_user.get("user_id") or "")
+async def confirm_sales_order(sale_id: str, request: Request, current_user: dict = Depends(get_current_user)):
+    """Confirm a DRAFT sales order atomically via Apps Script bridge and post accounting voucher."""
+    _reject_auditor(current_user)
+    user_id, actor_role = require_roles(current_user, SALES_WRITE_ROLES)
     async with _sales_lock:
         sales = db.get_records("Sales", fresh=True)
         sale = next((s for s in sales if str(s.get("sale_id")) == sale_id), None)
         if not sale:
             raise HTTPException(404, f"Sales order {sale_id} not found.")
-        status = str(sale.get("bill_status", "")).upper()
-        if status != "DRAFT":
-            raise HTTPException(400, f"Cannot confirm order with status '{status}'. Must be in DRAFT state.")
+        order_status = str(sale.get("bill_status", "")).upper()
+        if order_status != "DRAFT":
+            raise HTTPException(400, f"Cannot confirm order with status '{order_status}'. Must be in DRAFT state.")
 
         now = now_iso()
         items = _items_for(sale_id)
         salesman_id = str(sale.get("salesman_user_id") or user_id)
 
-        # 1. Deduct stock from salesman ledger
+        stock_rows = []
         for itm in items:
             p_id = str(itm.get("product_id"))
             qty = int(float(itm.get("quantity", 0) or 0))
-            db.append_record("SalesmanStockLedger", {
-                "stock_txn_id": db.generate_id("SalesmanStockLedger"),
+            stock_rows.append({
                 "txn_datetime": now,
                 "salesman_user_id": salesman_id,
                 "product_id": p_id,
                 "sku_snapshot": str(itm.get("sku_snapshot", "")),
                 "txn_type": "SOLD_DELIVERY",
-                "quantity": qty,
+                "quantity": -qty,
                 "unit": "PACKET",
                 "pack_weight_g": int(float(itm.get("pack_weight_g", 500) or 500)),
                 "related_sale_id": sale_id,
@@ -1466,21 +1388,27 @@ async def confirm_sales_order(sale_id: str, current_user: dict = Depends(get_cur
                 "confirmed_by_user_id": user_id,
                 "reference_id": str(sale.get("bill_number", "")),
                 "notes": f"Stock deduction for confirmed bill {sale.get('bill_number')}",
-            }, raise_on_error=True)
+            })
 
-        # 2. Update status to ISSUED
-        db.update_record("Sales", "sale_id", sale_id, {
-            "bill_status": "ISSUED",
-            "delivery_status": "DELIVERED",
-        }, raise_on_error=True)
+        apps_script_bridge.delegate_governed_write(
+            action="CONFIRM_SALES_ORDER",
+            target_tab="Sales",
+            payload={
+                "sale_id": sale_id,
+                "bill_status": "ISSUED",
+                "delivery_status": "DELIVERED",
+                "stock_ledger_rows": stock_rows,
+            },
+            actor_user_id=user_id,
+            actor_role=actor_role,
+            request=request,
+            id_field="sale_id",
+            invalidate_tabs=["Sales", "SalesmanStockLedger"],
+        )
 
-        # 3. Post double-entry accounting journal
-        try:
-            from app.accounting.postings import post_sale_journal
-            cogs = _compute_authoritative_cogs(items)
-            post_sale_journal(sale, estimated_cogs=cogs, actor=user_id)
-        except Exception as acct_err:
-            logger.error("Non-fatal accounting posting error for confirmed order %s: %s", sale_id, acct_err)
+        from app.accounting.postings import post_sale_journal
+        cogs = _compute_authoritative_cogs(items)
+        post_sale_journal(sale, estimated_cogs=cogs, actor=user_id)
 
         db.log_audit(user_id, "CONFIRM_SALES_ORDER", "Sales", sale_id, reason=f"Confirmed and issued order {sale.get('bill_number')}")
         return {"ok": True, "sale_id": sale_id, "bill_status": "ISSUED", "message": f"Order {sale.get('bill_number')} confirmed and stock deducted."}
@@ -1489,6 +1417,7 @@ async def confirm_sales_order(sale_id: str, current_user: dict = Depends(get_cur
 @router.get("/dispatch-summary")
 async def sales_dispatch_summary(current_user: dict = Depends(get_current_user)):
     """Overview of sales orders, dispatches, and fulfillment status."""
+    require_roles(current_user, SALES_READ_ROLES)
     sales = db.get_records("Sales", fresh=True)
     items = db.get_records("SaleItems", fresh=True)
     items_by_sale = {}

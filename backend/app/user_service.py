@@ -884,57 +884,34 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
     elif len(password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
 
-    user_id = db.generate_id("Users")
-    auth_id = db.generate_id("AuthUsers")
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    # Step 1: Write profile to Users
-    user_record = {
-        "user_id": user_id,
-        "full_name": full_name,
-        "username": username,
-        "role": role,
-        "mobile": mobile,
-        "email": email,
-        "active": "true",
-        "created_at": now_iso,
-        "notes": notes,
-    }
-
-    if not db.append_record("Users", user_record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Failed to save profile record to Google Sheets.")
-
-    # Step 2: Write credentials to AuthUsers
+    now_iso_str = datetime.now(timezone.utc).isoformat()
     hashed_pw = hash_password(password)
-    auth_record = {
-        "auth_id": auth_id,
-        "user_id": user_id,
-        "username": username,
-        "password_hash": hashed_pw,
-        "role": role,
-        "active": "true",
-        "created_at": now_iso,
-        "must_change_password": must_change,
-        "sessions_revoked_at": "",
-    }
 
-    try:
-        if not db.append_record("AuthUsers", auth_record, raise_on_error=True):
-            raise RuntimeError("AuthUsers write returned False")
-    except Exception as exc:
-        # Roll back step 1 so no orphan user profile without auth exists
-        logger.error(f"AuthUsers write failed for {user_id}. Rolling back Users profile: {exc}")
-        try:
-            db.update_record("Users", "user_id", user_id, {
-                "active": "false",
-                "notes": f"INCOMPLETE_CREATION: {exc}",
-            })
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=503,
-            detail=f"The login record could not be saved ({exc}). The employee profile creation was safely rolled back.",
-        )
+    from app.apps_script_bridge import apps_script_bridge
+
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_USER",
+        target_tab="Users",
+        payload={
+            "full_name": full_name,
+            "username": username,
+            "role": role,
+            "mobile": mobile,
+            "email": email,
+            "active": "true",
+            "created_at": now_iso_str,
+            "notes": notes,
+            "password_hash": hashed_pw,
+            "must_change_password": must_change,
+            "sessions_revoked_at": "",
+        },
+        nonce=str(payload.get("nonce") or payload.get("idempotency_key") or ""),
+        actor_user_id=actor_user_id,
+        actor_role="OWNER_ADMIN",
+        id_field="user_id",
+        invalidate_tabs=["Users", "AuthUsers"],
+    )
+    user_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("user_id") or "")
 
     db.log_audit(
         actor=actor_user_id,
@@ -952,8 +929,9 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
         "mobile": mobile,
         "email": email,
         "active": True,
-        "created_at": now_iso,
+        "created_at": now_iso_str,
         "notes": notes,
+        **bridge_res,
     }
     if temporary_password:
         resp["temporary_password"] = temporary_password
@@ -963,8 +941,7 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
 
 def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: str) -> Dict[str, Any]:
     """
-    Update profile and credentials, revoking existing sessions if role changes.
-    Guarantees atomic rollback if AuthUsers synchronization fails so records never disagree.
+    Validate and delegate profile + credential synchronization through Apps Script Single Write Owner.
     """
     user_records = db.get_records("Users", fresh=True) or []
     matching_users = [u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()]
@@ -1000,60 +977,46 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
     if "notes" in payload and payload["notes"] is not None:
         user_updates["notes"] = str(payload["notes"]).strip()
 
-    # Idempotent check: if nothing changed, return target state
     if not user_updates:
         merged = dict(target)
         merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
         return merged
 
-    all_matched = True
-    for k, v in user_updates.items():
-        if str(target.get(k, "")).strip() != str(v).strip():
-            all_matched = False
-            break
+    all_matched = all(str(target.get(k, "")).strip() == str(v).strip() for k, v in user_updates.items())
     if all_matched:
         merged = dict(target)
         merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
         merged["idempotent"] = True
         return merged
 
-    if not db.update_record("Users", "user_id", user_id, user_updates, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Failed to update Users record in Google Sheets.")
-
-    # Synchronize AuthUsers
     auth_updates: Dict[str, Any] = {}
     if "full_name" in user_updates:
         auth_updates["full_name"] = user_updates["full_name"]
-    if "role" in user_updates and user_updates["role"] != old_role:
+    role_changed = "role" in user_updates and user_updates["role"] != old_role
+    if role_changed:
         auth_updates["role"] = user_updates["role"]
-        # Audit requirement: Role change must immediately revoke existing sessions!
-        now_epoch = time.time()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        _USER_REVOKED_AT[str(user_id or "").strip().lower()] = now_epoch
-        auth_updates["sessions_revoked_at"] = now_iso
+        auth_updates["sessions_revoked_at"] = datetime.now(timezone.utc).isoformat()
 
-    if auth_updates:
-        try:
-            if not db.update_record("AuthUsers", "user_id", user_id, auth_updates, raise_on_error=True):
-                raise RuntimeError("AuthUsers update returned False")
-        except Exception as exc:
-            # Audit P0 Rule: Partial write detected! Roll back Users to prevent account divergence.
-            logger.error(f"AuthUsers sync failed for {user_id}. Rolling back Users profile: {exc}")
-            rollback_fields = {
-                "full_name": str(target.get("full_name") or ""),
-                "role": old_role,
-                "mobile": str(target.get("mobile") or ""),
-                "email": str(target.get("email") or ""),
-                "notes": str(target.get("notes") or ""),
-            }
-            try:
-                db.update_record("Users", "user_id", user_id, rollback_fields, raise_on_error=True)
-            except Exception:
-                pass
-            raise HTTPException(
-                status_code=503,
-                detail=f"Failed to synchronize authentication credentials in AuthUsers ({exc}). Profile update was safely rolled back to prevent account mismatch.",
-            )
+    from app.apps_script_bridge import apps_script_bridge
+
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="UPDATE_USER",
+        target_tab="Users",
+        payload={
+            "user_id": user_id,
+            "user_updates": user_updates,
+            "auth_updates": auth_updates,
+            "role_changed": role_changed,
+        },
+        nonce=str(payload.get("nonce") or payload.get("idempotency_key") or ""),
+        actor_user_id=actor_user_id,
+        actor_role="OWNER_ADMIN",
+        id_field="user_id",
+        invalidate_tabs=["Users", "AuthUsers"],
+    )
+
+    if role_changed:
+        _USER_REVOKED_AT[str(user_id or "").strip().lower()] = time.time()
 
     db.log_audit(
         actor=actor_user_id,
@@ -1066,13 +1029,13 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
     merged = dict(target)
     merged.update(user_updates)
     merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
+    merged["bridge_status"] = bridge_res.get("status")
     return merged
 
 
-def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reason: str = "") -> Dict[str, Any]:
+def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reason: str = "", nonce: str = "") -> Dict[str, Any]:
     """
-    Toggle user active/deactive status in both Users and AuthUsers.
-    Guarantees atomic rollback if AuthUsers update fails so status records never disagree.
+    Validate and delegate atomic Users + AuthUsers active status toggle via Apps Script.
     """
     user_records = db.get_records("Users", fresh=True) or []
     matching_u = [u for u in user_records if str(u.get("user_id") or "").strip() == user_id.strip()]
@@ -1092,7 +1055,6 @@ def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reas
         )
     target_a = matching_a[0] if matching_a else None
 
-    # Idempotent check
     if target_u and target_a:
         u_act = str(target_u.get("active", "true")).lower() in {"true", "1", "yes"}
         a_act = str(target_a.get("active", "true")).lower() in {"true", "1", "yes"}
@@ -1100,35 +1062,30 @@ def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reas
             return {"ok": True, "user_id": user_id, "active": active, "idempotent": True}
 
     active_str = "true" if active else "false"
-    old_active_str = "false" if active else "true"
-
-    # Step 1: Update Users
-    if not db.update_record("Users", "user_id", user_id, {"active": active_str}, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Failed to update status in Users sheet.")
-
-    # Step 2: Update AuthUsers
     auth_updates = {"active": active_str}
     if not active:
-        # Invalidate all existing sessions immediately across devices
-        now_epoch = time.time()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        _USER_REVOKED_AT[str(user_id or "").strip().lower()] = now_epoch
-        auth_updates["sessions_revoked_at"] = now_iso
+        auth_updates["sessions_revoked_at"] = datetime.now(timezone.utc).isoformat()
 
-    try:
-        if not db.update_record("AuthUsers", "user_id", user_id, auth_updates, raise_on_error=True):
-            raise RuntimeError("AuthUsers status update returned False")
-    except Exception as exc:
-        # Audit P0 Rule: Partial write detected! Roll back Users status to prevent account divergence.
-        logger.error(f"AuthUsers status update failed for {user_id}. Rolling back Users status: {exc}")
-        try:
-            db.update_record("Users", "user_id", user_id, {"active": old_active_str}, raise_on_error=True)
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to synchronize status in AuthUsers ({exc}). Status change was safely rolled back to prevent account mismatch.",
-        )
+    from app.apps_script_bridge import apps_script_bridge
+
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="REACTIVATE_USER" if active else "DEACTIVATE_USER",
+        target_tab="Users",
+        payload={
+            "user_id": user_id,
+            "active": active_str,
+            "auth_updates": auth_updates,
+            "reason": reason or "Administrative action",
+        },
+        nonce=nonce,
+        actor_user_id=actor_user_id,
+        actor_role="OWNER_ADMIN",
+        id_field="user_id",
+        invalidate_tabs=["Users", "AuthUsers"],
+    )
+
+    if not active:
+        _USER_REVOKED_AT[str(user_id or "").strip().lower()] = time.time()
 
     action_label = "REACTIVATE_USER" if active else "DEACTIVATE_USER"
     db.log_audit(
@@ -1139,11 +1096,11 @@ def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reas
         reason=f"Account {'reactivated' if active else 'deactivated'}. Reason: {reason or 'Administrative action'}",
     )
 
-    return {"ok": True, "user_id": user_id, "active": active}
+    return {"ok": True, "user_id": user_id, "active": active, **bridge_res}
 
 
-def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, reason: str = "Owner password reset") -> Dict[str, Any]:
-    """Reset user password, set must_change_password=True, and revoke all existing sessions across all devices."""
+def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, reason: str = "Owner password reset", nonce: str = "") -> Dict[str, Any]:
+    """Reset user password, set must_change_password=True, and revoke all existing sessions via Apps Script."""
     if len(new_password) < 8:
         raise HTTPException(status_code=422, detail="New password must be at least 8 characters.")
 
@@ -1153,17 +1110,28 @@ def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, 
         raise HTTPException(status_code=404, detail="Login account was not found in AuthUsers.")
 
     current_active_status = str(target_auth.get("active", "true")).lower()
+    revoke_ts = datetime.now(timezone.utc).isoformat()
 
-    # Invalidate all existing sessions across devices immediately
-    revoke_all_user_sessions(user_id, reason=reason)
+    from app.apps_script_bridge import apps_script_bridge
 
-    update_payload = {
-        "password_hash": hash_password(new_password),
-        "must_change_password": "true",
-        "active": current_active_status,  # Preserve existing active status!
-    }
-    if not db.update_record("AuthUsers", "user_id", user_id, update_payload, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="The password update failed to save to Google Sheets.")
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="RESET_PASSWORD",
+        target_tab="AuthUsers",
+        payload={
+            "user_id": user_id,
+            "password_hash": hash_password(new_password),
+            "must_change_password": "true",
+            "active": current_active_status,
+            "sessions_revoked_at": revoke_ts,
+            "reason": reason,
+        },
+        nonce=nonce,
+        actor_user_id=actor_user_id,
+        actor_role="OWNER_ADMIN",
+        id_field="user_id",
+        invalidate_tabs=["AuthUsers"],
+    )
+    _USER_REVOKED_AT[str(user_id or "").strip().lower()] = time.time()
 
     db.log_audit(
         actor=actor_user_id,
@@ -1177,4 +1145,5 @@ def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, 
         "user_id": user_id,
         "must_change_password": True,
         "active": current_active_status == "true",
+        **bridge_res,
     }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { apiRequest } from '../services/api';
+import { resolveCanonical12Role } from '../utils/permissions';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { StatCard } from '../components/common/StatCard';
@@ -58,7 +59,9 @@ export const AttendanceView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterDate, setFilterDate] = useState(today);
 
-  const isOwner = currentUser?.role === 'OWNER';
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isOwner = canonicalRole === 'OWNER_ADMIN';
+  const isAuditor = canonicalRole === 'AUDITOR';
 
   const loadData = async () => {
     setIsLoading(true);
@@ -982,7 +985,7 @@ export const AttendanceView: React.FC = () => {
                   <th style={{ padding: '10px 12px', textAlign: 'right' }}>Accrued Wage</th>
                   <th style={{ padding: '10px 12px' }}>Notes</th>
                   <th style={{ padding: '10px 12px' }}>Entered By</th>
-                  {isOwner && <th style={{ padding: '10px 12px', textAlign: 'center' }}>Actions</th>}
+                  {isOwner && !isAuditor && <th style={{ padding: '10px 12px', textAlign: 'center' }}>Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -1018,7 +1021,7 @@ export const AttendanceView: React.FC = () => {
                     </td>
                     <td style={{ padding: '10px 12px', color: '#64748b', fontSize: '0.80rem' }}>{a.notes || '-'}</td>
                     <td style={{ padding: '10px 12px', color: '#64748b', fontSize: '0.80rem' }}>{a.created_by || '-'}</td>
-                    {isOwner && (
+                    {isOwner && !isAuditor && (
                       <td style={{ padding: '10px 12px', textAlign: 'center' }}>
                         <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
                           <button

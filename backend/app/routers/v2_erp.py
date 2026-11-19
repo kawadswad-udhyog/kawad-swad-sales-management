@@ -16,9 +16,10 @@ from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.accounting.journal_engine import validate_journal_lines
 from app.apps_script_bridge import AppsScriptBridge, BridgeResult, apps_script_bridge
 from app.auth import get_current_user
 from app.permissions import (
@@ -40,9 +41,12 @@ from app.schema_registry import (
     GIG_WORKER_STATUSES,
     LOCKED_32_ID_PREFIXES,
     LOT_QUALITY_STATES,
+    PENDING_OWNER_MAPPING_TABS,
+    TAB_RECONCILIATION_CONFLICTS,
     VALID_RETAIL_PACK_WEIGHTS_G,
     assert_ca_policy_approved,
     get_ca_policies,
+    get_table_schema_registry,
     is_forbidden_scratch_tab,
     quantize_money,
     quantize_weight_kg,
@@ -70,6 +74,7 @@ class PolicyUpdateRequest(BaseModel):
     status: Literal["APPROVED", "PENDING_CA_APPROVAL"]
     value: Optional[str] = None
     notes: Optional[str] = ""
+    nonce: Optional[str] = Field(None, min_length=8, max_length=128)
 
 
 class GovernedPackagingCreateRequest(BaseModel):
@@ -155,6 +160,103 @@ class AdvanceDisburseRequest(BaseModel):
     payment_method: Literal["BANK_TRANSFER", "UPI", "CASH"] = "BANK_TRANSFER"
     payment_reference: str = Field(..., min_length=2)
     notes: Optional[str] = ""
+
+
+class GovernedPurchaseOrderRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    supplier_id: str = Field(..., min_length=2)
+    supplier_name: Optional[str] = ""
+    order_date: Optional[str] = ""
+    expected_delivery_date: Optional[str] = ""
+    items: List[Dict[str, Any]] = Field(..., min_length=1)
+    total_amount: Decimal = Field(..., ge=0)
+    notes: Optional[str] = ""
+
+
+class GovernedGoodsReceiptRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    po_id: Optional[str] = ""
+    supplier_id: str = Field(..., min_length=2)
+    supplier_name: Optional[str] = ""
+    receipt_date: Optional[str] = ""
+    invoice_number: Optional[str] = ""
+    items: List[Dict[str, Any]] = Field(..., min_length=1)
+    freight_amount: Decimal = Field(Decimal("0.00"), ge=0)
+    gst_amount: Decimal = Field(Decimal("0.00"), ge=0)
+    notes: Optional[str] = ""
+
+
+class GovernedStockAdjustmentRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    product_id: str = Field(..., min_length=2)
+    ledger_type: Literal["RAW_MATERIAL", "PRODUCTION_STOCK", "FINISHED_GOODS"] = "FINISHED_GOODS"
+    adjustment_qty: Decimal = Field(...)
+    reason: str = Field(..., min_length=3)
+    notes: Optional[str] = ""
+
+
+class GovernedMillingBatchRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    milling_date: Optional[str] = ""
+    source_material_id: str = Field(..., min_length=2)
+    source_material_name: Optional[str] = ""
+    input_quantity_kg: Decimal = Field(..., gt=0)
+    flour_output_kg: Decimal = Field(..., gt=0)
+    milling_expenses: Decimal = Field(Decimal("0.00"), ge=0)
+    notes: Optional[str] = ""
+
+
+class GovernedProductionBatchRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    production_date: Optional[str] = ""
+    product_id: str = Field(..., min_length=2)
+    recipe_id: Optional[str] = ""
+    planned_quantity_kg: Decimal = Field(..., gt=0)
+    net_quantity_kg: Optional[Decimal] = Field(None, ge=0)
+    shift: Optional[str] = "MORNING"
+    notes: Optional[str] = ""
+
+
+class GovernedSalesOrderRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    customer_id: str = Field(..., min_length=2)
+    customer_name: Optional[str] = ""
+    order_date: Optional[str] = ""
+    delivery_date: Optional[str] = ""
+    items: List[Dict[str, Any]] = Field(..., min_length=1)
+    notes: Optional[str] = ""
+
+
+class GovernedSalesInvoiceRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    customer_id: str = Field(..., min_length=2)
+    customer_name: Optional[str] = ""
+    sale_date: Optional[str] = ""
+    salesman_user_id: Optional[str] = ""
+    so_id: Optional[str] = ""
+    items: List[Dict[str, Any]] = Field(..., min_length=1)
+    payment_method: Literal["CASH", "UPI", "BANK_TRANSFER", "CREDIT"] = "CASH"
+    cash_collected: Decimal = Field(Decimal("0.00"), ge=0)
+    notes: Optional[str] = ""
+
+
+class GovernedJournalLineInput(BaseModel):
+    account_code: str = Field(..., min_length=2)
+    debit_amount: Decimal = Field(Decimal("0.00"), ge=0)
+    credit_amount: Decimal = Field(Decimal("0.00"), ge=0)
+    entity_type: Optional[str] = ""
+    entity_id: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+class GovernedJournalVoucherRequest(BaseModel):
+    nonce: str = Field(..., min_length=8, max_length=128)
+    journal_date: Optional[str] = ""
+    voucher_type: str = Field("JOURNAL", min_length=2)
+    reference_type: str = Field(..., min_length=2)
+    reference_id: str = Field(..., min_length=1)
+    narration: str = Field(..., min_length=3)
+    lines: List[GovernedJournalLineInput] = Field(..., min_length=2)
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +381,37 @@ async def get_erp_capabilities(current_user: dict = Depends(get_current_user)):
 @router.get("/meta/schema-registry")
 async def get_schema_registry_metadata(current_user: dict = Depends(get_current_user)):
     require_module_action(current_user, "control", "view")
+    table_registry = get_table_schema_registry()
+    owner_user = is_owner(current_user)
+    if owner_user:
+        exposed_registry = table_registry
+    else:
+        exposed_registry = {
+            tab: (
+                {**meta, "headers": "REDACTED_NON_OWNER"}
+                if meta.get("confidential") and meta.get("headers") is not None
+                else meta
+            )
+            for tab, meta in table_registry.items()
+        }
+    status_counts: Dict[str, int] = {}
+    for meta in table_registry.values():
+        st = str(meta.get("status", "UNKNOWN"))
+        status_counts[st] = status_counts.get(st, 0) + 1
+
     return {
         "cleaned_tab_baseline": 255,
         "database_groups": DATABASE_GROUPS_15,
         "locked_32_id_prefixes": LOCKED_32_ID_PREFIXES,
         "forbidden_scratch_prefixes": list(FORBIDDEN_SCRATCH_PREFIXES),
-        "confidential_no_cache_tabs": sorted(CONFIDENTIAL_TABS_NO_CACHE) if is_owner(current_user) else ["REDACTED_NON_OWNER"],
+        "confidential_no_cache_tabs": sorted(CONFIDENTIAL_TABS_NO_CACHE) if owner_user else ["REDACTED_NON_OWNER"],
+        "pending_owner_mapping_tabs": sorted(PENDING_OWNER_MAPPING_TABS),
+        "tab_reconciliation_conflicts": TAB_RECONCILIATION_CONFLICTS,
+        "table_registry_summary": {
+            "total_catalogued_tabs": len(table_registry),
+            "status_counts": status_counts,
+        },
+        "table_schema_registry": exposed_registry,
     }
 
 
@@ -298,8 +425,44 @@ async def list_ca_policies(current_user: dict = Depends(get_current_user)):
 
 
 @router.put("/meta/policies/{policy_key}")
-async def update_ca_policy(policy_key: str, req: PolicyUpdateRequest, current_user: dict = Depends(get_current_user)):
-    actor_id, _ = require_owner(current_user)
+async def update_ca_policy(
+    policy_key: str,
+    req: PolicyUpdateRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    actor_id, v2_role = require_owner(current_user)
+    policies = get_ca_policies()
+    if policy_key not in policies:
+        raise HTTPException(status_code=422, detail=f"Unknown policy_key: {policy_key}")
+    allowed = policies[policy_key].get("allowed_values", [])
+    if req.status == "APPROVED" and req.value not in allowed:
+        raise HTTPException(status_code=422, detail=f"Approved value for {policy_key} must be one of {allowed}")
+
+    client_nonce = (
+        req.nonce
+        or request.headers.get("X-KS-Idempotency-Key")
+        or request.headers.get("X-Idempotency-Key")
+        or f"POL-{policy_key}-{req.status}-{req.value or 'NONE'}"
+    )
+    res = apps_script_bridge.execute_governed_write(
+        action="UPDATE_CA_POLICY",
+        target_tab="Settings",
+        payload={
+            "setting_key": f"CA_POLICY_{policy_key.upper()}",
+            "policy_key": policy_key,
+            "status": req.status,
+            "value": req.value,
+            "approved_by": actor_id,
+            "notes": req.notes or "",
+        },
+        nonce=client_nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="setting_key",
+        invalidate_tabs=["Settings"],
+    )
+    handled = _handle_bridge_result(res)
     try:
         updated = set_ca_policy_override(
             policy_key,
@@ -309,7 +472,7 @@ async def update_ca_policy(policy_key: str, req: PolicyUpdateRequest, current_us
             notes=req.notes or "",
         )
         db.log_audit(actor_id, "UPDATE_CA_POLICY", "Settings", policy_key, new_val=f"{req.status}:{req.value}", reason=req.notes or "")
-        return {"ok": True, "policy": updated}
+        return {"ok": True, "policy": updated, **handled}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -837,7 +1000,260 @@ async def pay_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, cur
 
 
 # ---------------------------------------------------------------------------
-# Governance Audit & Exception Logs (Group 00)
+# Procurement, Store, Milling, Production, Sales & Accounting Governed Routes
+# ---------------------------------------------------------------------------
+@router.post("/procurement/purchase-orders")
+async def create_v2_purchase_order(req: GovernedPurchaseOrderRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "procurement", "create")
+    res = apps_script_bridge.execute_governed_write(
+        action="CREATE_PURCHASE_ORDER",
+        target_tab="PurchaseOrders",
+        payload={
+            "supplier_id": req.supplier_id.strip(),
+            "supplier_name": (req.supplier_name or "").strip(),
+            "order_date": req.order_date or now_iso()[:10],
+            "expected_delivery_date": (req.expected_delivery_date or "").strip(),
+            "items": req.items,
+            "total_amount": str(quantize_money(req.total_amount)),
+            "status": "OPEN",
+            "notes": (req.notes or "").strip(),
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="po_id",
+        invalidate_tabs=["PurchaseOrders", "PurchaseOrderItems"],
+    )
+    return _handle_bridge_result(res)
+
+
+@router.post("/procurement/goods-receipts")
+async def create_v2_goods_receipt(req: GovernedGoodsReceiptRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "procurement", "receive")
+    res = apps_script_bridge.execute_governed_write(
+        action="CREATE_GOODS_RECEIPT",
+        target_tab="GoodsReceipts",
+        payload={
+            "po_id": (req.po_id or "").strip(),
+            "supplier_id": req.supplier_id.strip(),
+            "supplier_name": (req.supplier_name or "").strip(),
+            "receipt_date": req.receipt_date or now_iso()[:10],
+            "invoice_number": (req.invoice_number or "").strip(),
+            "items": req.items,
+            "freight_amount": str(quantize_money(req.freight_amount)),
+            "gst_amount": str(quantize_money(req.gst_amount)),
+            "notes": (req.notes or "").strip(),
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="grn_id",
+        invalidate_tabs=["GoodsReceipts", "GoodsReceiptItems", "RawMaterialLedger", "PurchaseOrders", "JournalHeaders", "JournalLines"],
+    )
+    return _handle_bridge_result(res)
+
+
+@router.get("/store/ledger")
+async def list_v2_store_ledger(
+    ledger_type: Literal["RAW_MATERIAL", "PRODUCTION", "LOT_MOVEMENTS"] = Query("PRODUCTION"),
+    search: str = Query(""),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+    current_user: dict = Depends(get_current_user),
+):
+    require_module_action(current_user, "store", "view")
+    tab_map = {
+        "RAW_MATERIAL": "RawMaterialLedger",
+        "PRODUCTION": "ProductionStockLedger",
+        "LOT_MOVEMENTS": "LotMovements",
+    }
+    return _safe_query_tab(tab_map[ledger_type], fresh=True, search=search, page=page, page_size=page_size)
+
+
+@router.post("/store/stock-adjustments")
+async def create_v2_stock_adjustment(req: GovernedStockAdjustmentRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "store", "adjust_request")
+    if req.adjustment_qty == Decimal("0"):
+        raise HTTPException(status_code=422, detail="adjustment_qty must be non-zero.")
+    res = apps_script_bridge.execute_governed_write(
+        action="REQUEST_STOCK_ADJUSTMENT",
+        target_tab="StockDiscrepancies",
+        payload={
+            "product_id": req.product_id.strip(),
+            "ledger_type": req.ledger_type,
+            "adjustment_qty": str(quantize_weight_kg(req.adjustment_qty)),
+            "reason": req.reason.strip(),
+            "status": "PENDING_OWNER_APPROVAL",
+            "notes": (req.notes or "").strip(),
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="discrepancy_id",
+        invalidate_tabs=["StockDiscrepancies", "ApprovalRequests"],
+    )
+    return _handle_bridge_result(res)
+
+
+@router.post("/milling/batches")
+async def create_v2_milling_batch(req: GovernedMillingBatchRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "production", "create")
+    if req.flour_output_kg > req.input_quantity_kg:
+        raise HTTPException(status_code=422, detail="flour_output_kg cannot exceed input_quantity_kg.")
+    res = apps_script_bridge.execute_governed_write(
+        action="RECORD_MILLING_BATCH",
+        target_tab="MillingBatches",
+        payload={
+            "milling_date": req.milling_date or now_iso()[:10],
+            "source_material_id": req.source_material_id.strip(),
+            "source_material_name": (req.source_material_name or "").strip(),
+            "input_quantity_kg": str(quantize_weight_kg(req.input_quantity_kg)),
+            "flour_output_kg": str(quantize_weight_kg(req.flour_output_kg)),
+            "milling_loss_kg": str(quantize_weight_kg(req.input_quantity_kg - req.flour_output_kg)),
+            "milling_expenses": str(quantize_money(req.milling_expenses)),
+            "notes": (req.notes or "").strip(),
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="milling_batch_id",
+        invalidate_tabs=["MillingBatches", "RawMaterialLedger", "JournalHeaders", "JournalLines"],
+    )
+    return _handle_bridge_result(res)
+
+
+@router.post("/production/batches")
+async def create_v2_production_batch(req: GovernedProductionBatchRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "production", "create")
+    res = apps_script_bridge.execute_governed_write(
+        action="CREATE_PRODUCTION_BATCH",
+        target_tab="ProductionBatches",
+        payload={
+            "production_date": req.production_date or now_iso()[:10],
+            "product_id": req.product_id.strip(),
+            "recipe_id": (req.recipe_id or "").strip(),
+            "planned_quantity_kg": str(quantize_weight_kg(req.planned_quantity_kg)),
+            "net_quantity_kg": str(quantize_weight_kg(req.net_quantity_kg)) if req.net_quantity_kg is not None else "",
+            "shift": (req.shift or "MORNING").strip(),
+            "notes": (req.notes or "").strip(),
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="production_id",
+        invalidate_tabs=["ProductionBatches", "ProductLots", "ProductionStockLedger"],
+    )
+    return _handle_bridge_result(res)
+
+
+@router.post("/sales/orders")
+async def create_v2_sales_order(req: GovernedSalesOrderRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "sales", "create")
+    res = apps_script_bridge.execute_governed_write(
+        action="CREATE_SALES_ORDER",
+        target_tab="SalesOrders",
+        payload={
+            "customer_id": req.customer_id.strip(),
+            "customer_name": (req.customer_name or "").strip(),
+            "order_date": req.order_date or now_iso()[:10],
+            "delivery_date": (req.delivery_date or "").strip(),
+            "items": req.items,
+            "notes": (req.notes or "").strip(),
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="so_id",
+        invalidate_tabs=["SalesOrders", "SalesOrderItems"],
+    )
+    return _handle_bridge_result(res)
+
+
+@router.post("/sales/invoices")
+async def create_v2_sales_invoice(req: GovernedSalesInvoiceRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "sales", "create")
+
+    # Enforce strict lot quality gate for any lot-referenced sale line
+    lot_refs = {str(it.get("lot_id", "")).strip() for it in req.items if str(it.get("lot_id", "")).strip()}
+    if lot_refs:
+        try:
+            lots = db.get_records("ProductLots", fresh=True)
+        except Exception as exc:
+            _raise_storage_error(exc, "ProductLots")
+        for ref in lot_refs:
+            lot = next((l for l in lots if str(l.get("lot_id", "")).strip() == ref), None)
+            if lot and str(lot.get("quality_status", "")).strip().upper() != "RELEASED":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Invoice blocked: Lot '{ref}' has quality_status='{lot.get('quality_status')}'. Only RELEASED lots may be billed.",
+                )
+
+    res = apps_script_bridge.execute_governed_write(
+        action="CREATE_SALES_INVOICE",
+        target_tab="Sales",
+        payload={
+            "customer_id": req.customer_id.strip(),
+            "customer_name": (req.customer_name or "").strip(),
+            "sale_date": req.sale_date or now_iso()[:10],
+            "salesman_user_id": (req.salesman_user_id or actor_id).strip(),
+            "so_id": (req.so_id or "").strip(),
+            "items": req.items,
+            "payment_method": req.payment_method,
+            "cash_collected": str(quantize_money(req.cash_collected)),
+            "notes": (req.notes or "").strip(),
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="sale_id",
+        invalidate_tabs=["Sales", "SaleItems", "SalesmanStockLedger", "ProductionStockLedger", "Customers", "JournalHeaders", "JournalLines"],
+    )
+    return _handle_bridge_result(res)
+
+
+@router.post("/accounting/journals")
+async def create_v2_journal_voucher(req: GovernedJournalVoucherRequest, current_user: dict = Depends(get_current_user)):
+    actor_id, v2_role = require_module_action(current_user, "accounting", "create_vouchers")
+    lines_payload = [
+        {
+            "account_code": l.account_code.strip(),
+            "debit_amount": str(quantize_money(l.debit_amount)),
+            "credit_amount": str(quantize_money(l.credit_amount)),
+            "entity_type": (l.entity_type or "").strip(),
+            "entity_id": (l.entity_id or "").strip(),
+            "notes": (l.notes or "").strip(),
+        }
+        for l in req.lines
+    ]
+    try:
+        total_debit, total_credit = validate_journal_lines(lines_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    res = apps_script_bridge.execute_governed_write(
+        action="POST_JOURNAL_VOUCHER",
+        target_tab="JournalHeaders",
+        payload={
+            "journal_date": req.journal_date or now_iso()[:10],
+            "voucher_type": req.voucher_type.strip().upper(),
+            "reference_type": req.reference_type.strip().upper(),
+            "reference_id": req.reference_id.strip(),
+            "narration": req.narration.strip(),
+            "total_debit": str(quantize_money(total_debit)),
+            "total_credit": str(quantize_money(total_credit)),
+            "lines": lines_payload,
+        },
+        nonce=req.nonce,
+        actor_user_id=actor_id,
+        actor_role=v2_role,
+        id_field="journal_id",
+        invalidate_tabs=["JournalHeaders", "JournalLines"],
+    )
+    return _handle_bridge_result(res)
+
+
+# ---------------------------------------------------------------------------
+# Governance Audit & Exception Logs (Group 00 / 12)
 # ---------------------------------------------------------------------------
 @router.get("/control/audit-logs")
 async def list_v2_audit_logs(
@@ -858,4 +1274,26 @@ async def list_v2_exceptions(
     current_user: dict = Depends(get_current_user),
 ):
     require_module_action(current_user, "control", "view")
-    return _safe_query_tab("ExceptionLogs", fresh=True, search=search, page=page, page_size=page_size)
+    conflict = TAB_RECONCILIATION_CONFLICTS["EXC"]
+    # Fail closed cleanly with explicit CONFLICT_RECONCILIATION_REQUIRED metadata while allowing read if snapshot tab exists
+    for candidate_tab in (conflict["snapshot_tab"], conflict["draft_tab"]):
+        try:
+            res = db.query_records(candidate_tab, fresh=True, search=search, page=page, page_size=page_size)
+            return {
+                **res,
+                "source_tab": candidate_tab,
+                "status": conflict["status"],
+                "reconciliation_conflict": conflict,
+            }
+        except Exception:
+            continue
+    return {
+        "status": conflict["status"],
+        "error_code": "CONFLICT_RECONCILIATION_REQUIRED",
+        "reconciliation_conflict": conflict,
+        "items": [],
+        "total": 0,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": 0,
+    }

@@ -28,6 +28,7 @@ import type {
   PendingCaPolicy,
   ReportTabPayload,
   PaginatedV2Response,
+  SchemaRegistryPayload,
   V2ErrorDetail,
   WorkflowState,
 } from '../types';
@@ -293,6 +294,7 @@ export interface BackendHealthResponse {
   status: string;
   google_sheets_connected: boolean;
   persistent_writes_enabled: boolean;
+  apps_script_bridge_configured?: boolean;
   spreadsheet_id_configured?: boolean;
   service_account_configured?: boolean;
   last_connection_error?: string | null;
@@ -1888,17 +1890,33 @@ export async function fetchV2Policies(): Promise<{ policies: Record<string, Pend
   return apiRequest<{ policies: Record<string, PendingCaPolicy> }>('/api/v2/meta/policies');
 }
 
+export async function fetchV2SchemaRegistry(): Promise<SchemaRegistryPayload> {
+  return apiRequest<SchemaRegistryPayload>('/api/v2/meta/schema-registry');
+}
+
 export async function updateV2Policy(
   policyKey: string,
-  payload: { status: 'APPROVED' | 'PENDING_CA_APPROVAL'; value: unknown; notes?: string }
-): Promise<{ status: string; policy: PendingCaPolicy }> {
-  return apiRequest<{ status: string; policy: PendingCaPolicy }>(
-    `/api/v2/meta/policies/${encodeURIComponent(policyKey)}`,
-    {
-      method: 'PUT',
-      body: JSON.stringify(payload),
+  payload: { status: 'APPROVED' | 'PENDING_CA_APPROVAL'; value: unknown; notes?: string; nonce?: string }
+): Promise<{ status?: string; ok?: boolean; policy: PendingCaPolicy; correlation_id?: string; allocated_id?: string }> {
+  try {
+    return await apiRequest<{ status?: string; ok?: boolean; policy: PendingCaPolicy; correlation_id?: string; allocated_id?: string }>(
+      `/api/v2/meta/policies/${encodeURIComponent(policyKey)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+        timeoutMs: 30000,
+      }
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiOutcomeUnknownError) {
+      throw new ApiOutcomeUnknownError(
+        'Status not confirmed; do not submit a new transaction. Your policy selection and nonce are preserved for safe retry.',
+        payload.nonce,
+        err.correlationId
+      );
     }
-  );
+    throw err;
+  }
 }
 
 export async function fetchV2OfficialReport(
@@ -1949,6 +1967,70 @@ export async function postV2GovernedAction<T = Record<string, any>>(
     throw err;
   }
 }
+
+export async function createV2PurchaseOrder(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/procurement/purchase-orders', payload);
+}
+
+export async function createV2GoodsReceipt(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/procurement/goods-receipts', payload);
+}
+
+export async function fetchV2StoreLedger(params?: {
+  ledger_type?: 'RAW_MATERIAL' | 'PRODUCTION_STOCK' | 'LOT_MOVEMENTS';
+  page?: number;
+  page_size?: number;
+  search?: string;
+}): Promise<PaginatedV2Response> {
+  const q = new URLSearchParams();
+  if (params?.ledger_type) q.set('ledger_type', params.ledger_type);
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  if (params?.search) q.set('search', params.search);
+  const qs = q.toString();
+  return apiRequest<PaginatedV2Response>(`/api/v2/store/ledger${qs ? `?${qs}` : ''}`);
+}
+
+export async function createV2StockAdjustment(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/store/stock-adjustments', payload);
+}
+
+export async function createV2MillingBatch(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/milling/batches', payload);
+}
+
+export async function createV2ProductionBatch(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/production/batches', payload);
+}
+
+export async function createV2SalesOrder(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/sales/orders', payload);
+}
+
+export async function createV2SalesInvoice(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/sales/invoices', payload);
+}
+
+export async function createV2JournalVoucher(
+  payload: Record<string, any> & { nonce: string }
+): Promise<Record<string, any>> {
+  return postV2GovernedAction('/api/v2/accounting/journals', payload);
+}
+
 
 
 

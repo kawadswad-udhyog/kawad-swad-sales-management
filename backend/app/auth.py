@@ -92,52 +92,100 @@ def _token_identifier(token: str, payload: Optional[Dict[str, Any]] = None) -> s
 
 
 def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_failure: bool = False) -> bool:
-    """Revoke a single active JWT token (both in-memory and persisted)."""
+    """Revoke a single active JWT token (in-memory + Apps Script governed persistence)."""
     payload = decode_access_token(token)
     token_id = _token_identifier(token, payload)
     _REVOKED_TOKENS.add(token_id)
     if token:
         _REVOKED_TOKENS.add(token)
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso_str = datetime.now(timezone.utc).isoformat()
     exp_iso = ""
     if payload and payload.get("exp"):
         exp_iso = datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()
 
-    from app.sheets import db
+    from app.apps_script_bridge import apps_script_bridge
+
     try:
-        rev_id = db.generate_id("RevokedTokens")
-        persisted = db.append_record("RevokedTokens", {
-            "token_id": rev_id,
-            "jti": token_id,
-            "user_id": user_id,
-            "revoked_at": now_iso,
-            "expires_at": exp_iso,
-            "reason": reason,
-        }, raise_on_error=raise_on_failure)
-        return bool(persisted)
+        res = apps_script_bridge.execute_governed_write(
+            action="REVOKE_TOKEN",
+            target_tab="RevokedTokens",
+            payload={
+                "jti": token_id,
+                "user_id": user_id,
+                "revoked_at": now_iso_str,
+                "expires_at": exp_iso,
+                "reason": reason,
+            },
+            nonce=f"RVK-{token_id[:24]}",
+            actor_user_id=user_id,
+            actor_role="AUTH",
+            invalidate_tabs=["RevokedTokens"],
+        )
+        if res.status != "CONFIRMED" and raise_on_failure:
+            raise HTTPException(
+                status_code=res.http_status,
+                detail={
+                    "status": res.status,
+                    "error_code": res.error_code,
+                    "dependency": res.dependency,
+                    "message": res.message,
+                    "correlation_id": res.correlation_id,
+                    "nonce": res.nonce,
+                    "retryable": res.retryable,
+                },
+            )
+        return res.status == "CONFIRMED"
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.error(f"Failed to persist token revocation for user {user_id}: {exc}")
+        logger.error("Failed to delegate token revocation for user %s: %s", user_id, exc)
         if raise_on_failure:
             raise
         return False
 
 
 def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation", raise_on_failure: bool = False) -> bool:
-    """Invalidate all active sessions across all devices for a user immediately."""
+    """Invalidate all active sessions across all devices via Apps Script governed write."""
     clean_id = str(user_id or "").strip().lower()
     now_epoch = time.time()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso_str = datetime.now(timezone.utc).isoformat()
     _USER_REVOKED_AT[clean_id] = now_epoch
 
-    from app.sheets import db
+    from app.apps_script_bridge import apps_script_bridge
+
     try:
-        updated = db.update_record("AuthUsers", "user_id", user_id, {
-            "sessions_revoked_at": now_iso
-        }, raise_on_error=raise_on_failure)
-        return bool(updated)
+        res = apps_script_bridge.execute_governed_write(
+            action="REVOKE_USER_SESSIONS",
+            target_tab="AuthUsers",
+            payload={
+                "user_id": user_id,
+                "sessions_revoked_at": now_iso_str,
+                "reason": reason,
+            },
+            nonce=f"REVOKE-SESS-{user_id}-{int(now_epoch)}",
+            actor_user_id=user_id,
+            actor_role="AUTH",
+            invalidate_tabs=["AuthUsers"],
+        )
+        if res.status != "CONFIRMED" and raise_on_failure:
+            raise HTTPException(
+                status_code=res.http_status,
+                detail={
+                    "status": res.status,
+                    "error_code": res.error_code,
+                    "dependency": res.dependency,
+                    "message": res.message,
+                    "correlation_id": res.correlation_id,
+                    "nonce": res.nonce,
+                    "retryable": res.retryable,
+                },
+            )
+        return res.status == "CONFIRMED"
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.error(f"Failed to persist user-wide revocation for {user_id}: {exc}")
+        logger.error("Failed to delegate user-wide revocation for %s: %s", user_id, exc)
         if raise_on_failure:
             raise
         return False

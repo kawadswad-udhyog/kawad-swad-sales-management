@@ -868,6 +868,21 @@ export interface SchemaRegistryPayload {
   locked_32_id_prefixes: Record<string, string>;
   forbidden_scratch_prefixes: string[];
   confidential_no_cache_tabs: string[];
+  pending_owner_mapping_tabs?: string[];
+  tab_reconciliation_conflicts?: Array<{
+    prefix?: string;
+    primary_tab?: string;
+    conflicting_tab?: string;
+    status?: string;
+    resolution_required?: string;
+    notes?: string;
+    [key: string]: unknown;
+  }>;
+  table_registry_summary?: {
+    total_catalogued_tabs: number;
+    status_counts: Record<string, number>;
+  };
+  table_schema_registry?: Record<string, Record<string, any>>;
 }
 
 export interface ErpCapabilitiesPayload {

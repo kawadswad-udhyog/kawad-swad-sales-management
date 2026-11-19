@@ -51,6 +51,7 @@ export const MySalaryView: React.FC = () => {
   const receipts = data.receipts;
   const payrollItems = data.payroll_items;
   const role = (currentUser?.role || '').toUpperCase();
+  const isSalesmanRole = role === 'SALESMAN' || role === 'FIELD_SALESMAN';
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
@@ -91,10 +92,10 @@ export const MySalaryView: React.FC = () => {
 
             <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
               <span className="text-[11px] text-slate-500 font-semibold block">
-                {role === 'SALESMAN' ? 'Sales Incentive Slab' : 'Standard Deductions'}
+                {isSalesmanRole ? 'Sales Incentive Slab' : 'Standard Deductions'}
               </span>
               <span className="text-lg font-black text-slate-900 mt-1 block">
-                {role === 'SALESMAN'
+                {isSalesmanRole
                   ? structure.sales_commission_rate > 0
                     ? `${structure.sales_commission_rate}% of Sales`
                     : '₹200 / 100 kg'

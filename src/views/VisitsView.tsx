@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
+import { resolveCanonical12Role } from '../utils/permissions';
 
 const COMMON_OUTCOMES = [
   'Order Placed',
@@ -17,7 +18,18 @@ const COMMON_NEXT_ACTIONS = [
 ];
 
 export const VisitsView: React.FC = () => {
-  const { customers, shopVisits, addShopVisit, currentUser } = useStore();
+  const {
+    customers,
+    shopVisits,
+    addShopVisit,
+    currentUser,
+    isBackendConnected,
+    isGoogleSheetsConnected,
+    persistentWritesEnabled,
+  } = useStore();
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isAuditor = canonicalRole === 'AUDITOR';
+  const writesLocked = isAuditor || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
   const activeCustomers = useMemo(() => customers.filter((c) => c.active), [customers]);
 
   const [customerFilter, setCustomerFilter] = useState('');
@@ -75,8 +87,8 @@ export const VisitsView: React.FC = () => {
     }
   };
 
-  const visibleVisits = currentUser?.role === 'SALESMAN'
-    ? shopVisits.filter((v) => v.salesman_user_id === currentUser.user_id)
+  const visibleVisits = canonicalRole === 'FIELD_SALESMAN'
+    ? shopVisits.filter((v) => v.salesman_user_id === currentUser?.user_id)
     : shopVisits;
 
   return (
@@ -89,6 +101,7 @@ export const VisitsView: React.FC = () => {
         </div>
       )}
 
+      {!isAuditor && (
       <div className="card">
         <h2>Record shop visit</h2>
         <form onSubmit={handleSubmit}>
@@ -226,11 +239,12 @@ export const VisitsView: React.FC = () => {
             </label>
           </div>
 
-          <button type="submit" style={{ padding: '10px 20px', fontSize: '0.95rem' }}>
-            💾 Save Visit Record
+          <button type="submit" disabled={writesLocked} style={{ padding: '10px 20px', fontSize: '0.95rem' }}>
+            {writesLocked ? '🔒 Writes Locked' : '💾 Save Visit Record'}
           </button>
         </form>
       </div>
+      )}
 
       <div className="card">
         <div className="toolbar">

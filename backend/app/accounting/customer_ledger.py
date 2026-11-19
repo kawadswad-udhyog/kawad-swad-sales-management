@@ -957,32 +957,27 @@ def reserve_credit_approval(
                 })
                 return True  # Idempotent retry
 
+            from app.apps_script_bridge import apps_script_bridge
+
             now = now_iso()
-            # Atomic reservation with expected condition in sheet
-            updated = db.update_record(
-                tab_name="ApprovalRequests",
-                id_field="request_id",
-                id_value=clean_id,
-                updates={
+            apps_script_bridge.delegate_governed_write(
+                action="RESERVE_CREDIT_APPROVAL",
+                target_tab="ApprovalRequests",
+                payload={
+                    "request_id": clean_id,
                     "reserved_by_sale_id": clean_sale_id,
                     "reserved_at": now,
+                    "expected_conditions": {
+                        "is_consumed": False,
+                        "reserved_by_sale_id": "",
+                    },
                 },
-                expected_conditions={
-                    "is_consumed": False,
-                    "reserved_by_sale_id": "",
-                },
+                nonce=f"RES-{clean_id}-{clean_sale_id}",
+                actor_user_id="SYSTEM",
+                actor_role="SALES",
+                id_field="request_id",
+                invalidate_tabs=["ApprovalRequests"],
             )
-            if not updated:
-                # Check if another sale raced and reserved it
-                fresh_apprs = db.get_records("ApprovalRequests", fresh=True) or []
-                fresh_appr = next((a for a in fresh_apprs if str(a.get("request_id", "")).strip() == clean_id), None)
-                other_holder = str(fresh_appr.get("reserved_by_sale_id", "") if fresh_appr else "").strip()
-                if other_holder and other_holder != clean_sale_id:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Approval request '{clean_id}' was concurrently reserved by sale '{other_holder}'.",
-                    )
-                raise HTTPException(status_code=503, detail=f"Failed to reserve approval request '{clean_id}' for sale {clean_sale_id}. Retry.")
 
             try:
                 set_cross_process_reservation(clean_id, {
@@ -991,20 +986,27 @@ def reserve_credit_approval(
                     "reserved_at": now,
                 })
             except Exception as exc:
-                # Rollback sheet reservation to prevent leaving an orphaned reservation
-                db.update_record(
-                    tab_name="ApprovalRequests",
-                    id_field="request_id",
-                    id_value=clean_id,
-                    updates={
-                        "reserved_by_sale_id": "",
-                        "reserved_at": "",
-                    },
-                    expected_conditions={
-                        "reserved_by_sale_id": clean_sale_id,
-                        "is_consumed": False,
-                    },
-                )
+                try:
+                    apps_script_bridge.delegate_governed_write(
+                        action="RELEASE_CREDIT_APPROVAL",
+                        target_tab="ApprovalRequests",
+                        payload={
+                            "request_id": clean_id,
+                            "reserved_by_sale_id": "",
+                            "reserved_at": "",
+                            "expected_conditions": {
+                                "reserved_by_sale_id": clean_sale_id,
+                                "is_consumed": False,
+                            },
+                        },
+                        nonce=f"REL-ROLLBACK-{clean_id}-{clean_sale_id}",
+                        actor_user_id="SYSTEM",
+                        actor_role="SALES",
+                        id_field="request_id",
+                        invalidate_tabs=["ApprovalRequests"],
+                    )
+                except Exception:
+                    pass
                 if isinstance(exc, HTTPException):
                     raise exc
                 raise HTTPException(
@@ -1016,13 +1018,7 @@ def reserve_credit_approval(
 
 def consume_credit_approval(approval_request_id: str, sale_id: str) -> bool:
     """
-    Marks an approval request as permanently consumed by a completed sale.
-    Enforces strict ownership, non-revocation, and atomic CAS conditions:
-    - Only the sale that reserved the approval can consume it.
-    - A consumed approval cannot be re-consumed by a different sale.
-    - An approval revoked while reserved cannot be consumed.
-    - Uses atomic conditional updates with expected_conditions.
-    Returns True on success, False on failure.
+    Marks an approval request as permanently consumed by a completed sale via Apps Script Single Write Owner.
     """
     if not approval_request_id or not sale_id:
         return False
@@ -1066,49 +1062,49 @@ def consume_credit_approval(approval_request_id: str, sale_id: str) -> bool:
                 )
                 return False
 
+            from app.apps_script_bridge import apps_script_bridge
+
             now = now_iso()
-            # 4. Atomic conditional update: only update if still reserved by this sale and not consumed
-            updated = db.update_record(
-                tab_name="ApprovalRequests",
-                id_field="request_id",
-                id_value=clean_id,
-                updates={
+            apps_script_bridge.delegate_governed_write(
+                action="CONSUME_CREDIT_APPROVAL",
+                target_tab="ApprovalRequests",
+                payload={
+                    "request_id": clean_id,
                     "is_consumed": True,
                     "consumed_by_sale_id": clean_sale_id,
                     "consumed_at": now,
                     "reserved_by_sale_id": clean_sale_id,
-                },
-                expected_conditions={
-                    "reserved_by_sale_id": clean_sale_id,
-                    "is_consumed": False,
-                },
-            )
-            if updated:
-                try:
-                    set_cross_process_reservation(clean_id, {
+                    "expected_conditions": {
                         "reserved_by_sale_id": clean_sale_id,
-                        "is_consumed": True,
-                        "consumed_at": now,
-                    })
-                except Exception as exc:
-                    logging.error("Failed to persist cross-process state for consumed approval %s: %s", clean_id, exc)
-                    if isinstance(exc, HTTPException):
-                        raise exc
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Failed to persist cross-process consumption state for approval {clean_id}: {exc}"
-                    ) from exc
-            return bool(updated)
+                        "is_consumed": False,
+                    },
+                },
+                nonce=f"CONSUME-{clean_id}-{clean_sale_id}",
+                actor_user_id="SYSTEM",
+                actor_role="SALES",
+                id_field="request_id",
+                invalidate_tabs=["ApprovalRequests"],
+            )
+            try:
+                set_cross_process_reservation(clean_id, {
+                    "reserved_by_sale_id": clean_sale_id,
+                    "is_consumed": True,
+                    "consumed_at": now,
+                })
+            except Exception as exc:
+                logging.error("Failed to persist cross-process state for consumed approval %s: %s", clean_id, exc)
+                if isinstance(exc, HTTPException):
+                    raise exc
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Failed to persist cross-process consumption state for approval {clean_id}: {exc}"
+                ) from exc
+            return True
 
 
 def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
     """
-    Releases an approval reservation if a sale failed prior to completion.
-    Enforces strict ownership and conditional constraints:
-    - Only the sale that reserved the approval can release it.
-    - A consumed approval can NEVER be released.
-    - Uses atomic conditional updates with expected_conditions.
-    Returns True on success, False on failure.
+    Releases an approval reservation via Apps Script if a sale failed prior to completion.
     """
     if not approval_request_id or not sale_id:
         return False
@@ -1116,52 +1112,50 @@ def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
     clean_sale_id = str(sale_id).strip()
     with get_approval_lock(clean_id):
         with CrossProcessLock("approval", clean_id):
-            try:
-                apprs = db.get_records("ApprovalRequests", fresh=True) or []
-                appr = next((a for a in apprs if str(a.get("request_id", "")).strip() == clean_id), None)
-                if not appr:
-                    return False
+            apprs = db.get_records("ApprovalRequests", fresh=True) or []
+            appr = next((a for a in apprs if str(a.get("request_id", "")).strip() == clean_id), None)
+            if not appr:
+                return False
 
-                # 1. A consumed approval can NEVER be released
-                if bool(appr.get("is_consumed")):
-                    logging.warning(
-                        "Cannot release consumed approval %s (consumed by %s)",
-                        clean_id, appr.get("consumed_by_sale_id")
-                    )
-                    return False
+            # 1. A consumed approval can NEVER be released
+            if bool(appr.get("is_consumed")):
+                logging.warning(
+                    "Cannot release consumed approval %s (consumed by %s)",
+                    clean_id, appr.get("consumed_by_sale_id")
+                )
+                return False
 
-                # 2. Ownership check: Only the sale that reserved the approval can release it
-                holder = str(appr.get("reserved_by_sale_id", "")).strip()
-                if holder != clean_sale_id:
-                    logging.warning(
-                        "Cannot release approval %s: reserved by '%s', release requested by '%s'",
-                        clean_id, holder, clean_sale_id
-                    )
-                    return False
+            # 2. Ownership check: Only the sale that reserved the approval can release it
+            holder = str(appr.get("reserved_by_sale_id", "")).strip()
+            if holder != clean_sale_id:
+                logging.warning(
+                    "Cannot release approval %s: reserved by '%s', release requested by '%s'",
+                    clean_id, holder, clean_sale_id
+                )
+                return False
 
-                # 3. Atomic conditional update: only clear if still reserved by this sale and not consumed
-                updated = db.update_record(
-                    tab_name="ApprovalRequests",
-                    id_field="request_id",
-                    id_value=clean_id,
-                    updates={
-                        "reserved_by_sale_id": "",
-                        "reserved_at": "",
-                    },
-                    expected_conditions={
+            from app.apps_script_bridge import apps_script_bridge
+
+            apps_script_bridge.delegate_governed_write(
+                action="RELEASE_CREDIT_APPROVAL",
+                target_tab="ApprovalRequests",
+                payload={
+                    "request_id": clean_id,
+                    "reserved_by_sale_id": "",
+                    "reserved_at": "",
+                    "expected_conditions": {
                         "reserved_by_sale_id": clean_sale_id,
                         "is_consumed": False,
                     },
-                )
-                if updated:
-                    set_cross_process_reservation(clean_id, None)
-                return bool(updated)
-            except Exception as e:
-                logging.warning("Failed to release approval reservation %s: %s", clean_id, e)
-                if isinstance(e, HTTPException):
-                    raise e
-                return False
-    return False
+                },
+                nonce=f"RELEASE-{clean_id}-{clean_sale_id}",
+                actor_user_id="SYSTEM",
+                actor_role="SALES",
+                id_field="request_id",
+                invalidate_tabs=["ApprovalRequests"],
+            )
+            set_cross_process_reservation(clean_id, None)
+            return True
 
 
 

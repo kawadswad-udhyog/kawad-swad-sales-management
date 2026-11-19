@@ -24,6 +24,7 @@ import {
   apiRequest,
   createSubmissionNonce,
   fetchV2Collection,
+  fetchV2SchemaRegistry,
   postV2GovernedAction,
   updateV2Policy,
   isUnknownOutcomeError,
@@ -61,25 +62,25 @@ const MODULE_META: Record<
   logistics: {
     title: 'Logistics & Quality-Gated Dispatch',
     subtitle: 'Route dispatches, van loading verification & strict RELEASED-lot gate',
-    kicker: 'Blueprint v2.1 · Group 09',
+    kicker: 'Blueprint v2.1 · Group 09 (Distribution & Logistics)',
     icon: <Truck size={20} />,
   },
   channels: {
     title: 'E-Commerce & Channel Settlements',
     subtitle: 'Marketplace settlements, fee reconciliation & CA-approved GST posting',
-    kicker: 'Blueprint v2.1 · Group 10',
+    kicker: 'Blueprint v2.1 · Group 08 (Channel, Marketplace & Marketing)',
     icon: <Store size={20} />,
   },
   compliance_assets: {
     title: 'Compliance, Assets, Gig Work & Advances',
     subtitle: 'FSSAI/statutory compliance, machinery maintenance, gig piece-rate workflow & confidential advances',
-    kicker: 'Blueprint v2.1 · Groups 12 & 13',
+    kicker: 'Blueprint v2.1 · Groups 12 & 13 (Compliance, Assets & Risk)',
     icon: <ShieldCheck size={20} />,
   },
   control_policies: {
     title: 'Policies, Schema Registry & Control Logs',
     subtitle: 'Pending CA/Owner approvals, Apps Script Single-Write-Owner gateway, 255-tab architecture & audit logs',
-    kicker: 'Blueprint v2.1 · Group 00',
+    kicker: 'Blueprint v2.1 · Group 00 (System Control & Governance)',
     icon: <Sliders size={20} />,
   },
 };
@@ -95,6 +96,8 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
     refreshCapabilities,
     isBackendConnected,
     isGoogleSheetsConnected,
+    persistentWritesEnabled,
+    appsScriptBridgeConfigured,
   } = useStore();
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
@@ -210,6 +213,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
   const [policyDrafts, setPolicyDrafts] = useState<
     Record<string, { status: 'APPROVED' | 'PENDING_CA_APPROVAL'; value: string; notes: string }>
   >({});
+  const [policyNonces, setPolicyNonces] = useState<Record<string, string>>({});
 
   const resolveCollectionEndpoint = useCallback((): string | null => {
     if (moduleTab === 'logistics') return '/api/v2/logistics/dispatches';
@@ -263,7 +267,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
     }
     if (moduleTab === 'control_policies') {
       refreshCapabilities().catch(() => {});
-      apiRequest<SchemaRegistryPayload>('/api/v2/meta/schema-registry')
+      fetchV2SchemaRegistry()
         .then((res) => setSchemaRegistry(res))
         .catch(() => setSchemaRegistry(null));
     }
@@ -307,7 +311,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleDispatchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const activeNonce = dispatchNonce || createSubmissionNonce('DISP');
+    const activeNonce = dispatchNonce || createSubmissionNonce('MOV');
     if (!dispatchNonce) setDispatchNonce(activeNonce);
     setSubmitting(true);
     setBanner(null);
@@ -341,7 +345,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleSettlementSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const activeNonce = settlementNonce || createSubmissionNonce('CHN');
+    const activeNonce = settlementNonce || createSubmissionNonce('STL');
     if (!settlementNonce) setSettlementNonce(activeNonce);
     setSubmitting(true);
     setBanner(null);
@@ -368,7 +372,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleComplianceSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const activeNonce = complianceNonce || createSubmissionNonce('CMP');
+    const activeNonce = complianceNonce || createSubmissionNonce('STAT');
     if (!complianceNonce) setComplianceNonce(activeNonce);
     setSubmitting(true);
     setBanner(null);
@@ -395,7 +399,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleAssetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const activeNonce = assetNonce || createSubmissionNonce('AST');
+    const activeNonce = assetNonce || createSubmissionNonce('MAINT');
     if (!assetNonce) setAssetNonce(activeNonce);
     setSubmitting(true);
     setBanner(null);
@@ -449,7 +453,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleGigTransition = async (entryId: string, action: 'verify' | 'pay') => {
     const key = `${entryId}:${action}`;
-    const activeNonce = gigActionNonces[key] || createSubmissionNonce(`GIG_${action.toUpperCase()}`);
+    const activeNonce = gigActionNonces[key] || createSubmissionNonce('PWE');
     setGigActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     setSubmitting(true);
     setBanner(null);
@@ -523,31 +527,44 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
       value: policy.value || (policy.allowed_values?.[0] || ''),
       notes: policy.notes || '',
     };
+    const activeNonce = policyNonces[policy.policy_key] || createSubmissionNonce('POL');
+    setPolicyNonces((prev) => ({ ...prev, [policy.policy_key]: activeNonce }));
     setSubmitting(true);
     setBanner(null);
     try {
-      await updateV2Policy(policy.policy_key, {
+      const res = await updateV2Policy(policy.policy_key, {
         status: draft.status,
         value: draft.value,
         notes: draft.notes,
+        nonce: activeNonce,
+      });
+      setPolicyNonces((prev) => {
+        const next = { ...prev };
+        delete next[policy.policy_key];
+        return next;
       });
       await refreshCapabilities();
       setBanner({
         state: 'CONFIRMED',
+        nonce: activeNonce,
+        correlationId: res.correlation_id,
         message: `Policy '${policy.policy_key}' updated to ${draft.status} (${draft.value || 'unset'}).`,
       });
     } catch (err) {
-      setBanner({
-        state: 'NOT_SAVED',
-        message: err instanceof Error ? err.message : 'Policy update failed (NOT SAVED).',
-      });
+      handleGovernedError(err, activeNonce);
     } finally {
       setSubmitting(false);
     }
   };
 
   const meta = MODULE_META[moduleTab];
-  const bridgeReady = Boolean(capabilities?.apps_script_bridge_configured);
+  const bridgeReady = Boolean(appsScriptBridgeConfigured || capabilities?.apps_script_bridge_configured);
+  const writesLocked =
+    isAuditor ||
+    !isBackendConnected ||
+    !isGoogleSheetsConnected ||
+    !persistentWritesEnabled ||
+    !bridgeReady;
   const policiesMap = capabilities?.pending_ca_policies || {};
   const policyList = Object.values(policiesMap);
   const releasedLots = lots.filter((l) => String(l.quality_status || '').toUpperCase() === 'RELEASED');
@@ -832,11 +849,14 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50"
+                  disabled={submitting || writesLocked}
+                  title={writesLocked ? 'Governed writes are locked until Apps Script gateway & Sheets are connected.' : undefined}
+                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {submitting
                     ? 'Submitting Governed Write…'
+                    : writesLocked
+                    ? 'Write Gateway Locked'
                     : dispatchNonce
                     ? 'Retry Dispatch with Same Nonce'
                     : 'Submit Quality-Gated Dispatch'}
@@ -984,11 +1004,14 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
               <div className="flex items-center justify-end gap-3 pt-1">
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50"
+                  disabled={submitting || writesLocked}
+                  title={writesLocked ? 'Governed writes are locked until Apps Script gateway & Sheets are connected.' : undefined}
+                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {submitting
                     ? 'Submitting Settlement…'
+                    : writesLocked
+                    ? 'Write Gateway Locked'
                     : settlementNonce
                     ? 'Retry Settlement with Same Nonce'
                     : 'Submit Marketplace Settlement'}
@@ -1094,10 +1117,11 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
               <div className="flex justify-end">
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50"
+                  disabled={submitting || writesLocked}
+                  title={writesLocked ? 'Governed writes are locked until Apps Script gateway & Sheets are connected.' : undefined}
+                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {complianceNonce ? 'Retry Compliance Record' : 'Submit Compliance Record'}
+                  {writesLocked ? 'Write Gateway Locked' : complianceNonce ? 'Retry Compliance Record' : 'Submit Compliance Record'}
                 </button>
               </div>
             </form>
@@ -1195,10 +1219,11 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
               <div className="flex justify-end">
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50"
+                  disabled={submitting || writesLocked}
+                  title={writesLocked ? 'Governed writes are locked until Apps Script gateway & Sheets are connected.' : undefined}
+                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {assetNonce ? 'Retry Maintenance Log' : 'Submit Maintenance Record'}
+                  {writesLocked ? 'Write Gateway Locked' : assetNonce ? 'Retry Maintenance Log' : 'Submit Maintenance Record'}
                 </button>
               </div>
             </form>
@@ -1306,10 +1331,11 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
               <div className="flex justify-end">
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50"
+                  disabled={submitting || writesLocked}
+                  title={writesLocked ? 'Governed writes are locked until Apps Script gateway & Sheets are connected.' : undefined}
+                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {gigNonce ? 'Retry Gig Work Entry' : 'Submit Gig Work Entry'}
+                  {writesLocked ? 'Write Gateway Locked' : gigNonce ? 'Retry Gig Work Entry' : 'Submit Gig Work Entry'}
                 </button>
               </div>
             </form>
@@ -1418,11 +1444,11 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                         <div className="flex justify-end">
                           <button
                             type="button"
-                            disabled={submitting}
+                            disabled={submitting || writesLocked}
                             onClick={() => handleSavePolicy(policy)}
-                            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded font-semibold cursor-pointer disabled:opacity-50"
+                            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            Save CA Policy Decision
+                            {policyNonces[policy.policy_key] ? 'Retry CA Policy Decision' : 'Save CA Policy Decision'}
                           </button>
                         </div>
                       </div>
@@ -1438,12 +1464,33 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
               <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-3 text-xs">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <h3 className="text-sm font-bold text-slate-900 m-0">
-                    Cleaned Workbook Baseline: {schemaRegistry.cleaned_tab_baseline} Official Tabs
+                    Cleaned Workbook Baseline: {schemaRegistry.cleaned_tab_baseline} Official Tabs (15 Groups)
                   </h3>
                   <span className="font-mono text-red-700 font-semibold">
                     Forbidden Scratch Prefixes: {schemaRegistry.forbidden_scratch_prefixes.join(', ')}
                   </span>
                 </div>
+                {schemaRegistry.table_registry_summary && (
+                  <div className="flex flex-wrap gap-2 text-[11px]">
+                    <span className="px-2 py-1 rounded bg-slate-100 text-slate-800 font-semibold">
+                      Catalogued Tabs: {schemaRegistry.table_registry_summary.total_catalogued_tabs}
+                    </span>
+                    {Object.entries(schemaRegistry.table_registry_summary.status_counts || {}).map(([st, cnt]) => (
+                      <span
+                        key={st}
+                        className={`px-2 py-1 rounded font-semibold ${
+                          st === 'VERIFIED_CORE'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : st === 'CONFLICT_RECONCILIATION_REQUIRED'
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {st}: {cnt}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {schemaRegistry.database_groups.map((grp) => (
                     <div key={grp.group_code} className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
@@ -1469,6 +1516,30 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                 </div>
               </div>
 
+              {(schemaRegistry.tab_reconciliation_conflicts?.length || 0) > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-xs text-red-950 space-y-2">
+                  <div className="font-bold uppercase tracking-wider text-[11px] text-red-800">
+                    CONFLICT_RECONCILIATION_REQUIRED — Dual-Tab Naming Conflicts
+                  </div>
+                  {schemaRegistry.tab_reconciliation_conflicts!.map((c, idx) => (
+                    <div key={idx} className="bg-white/80 border border-red-200 rounded-lg p-2.5 font-mono text-[11px]">
+                      <strong>{String(c.prefix || 'CONFLICT')}:</strong> {String(c.primary_tab || '')} vs {String(c.conflicting_tab || '')} — {String(c.resolution_required || c.notes || 'Owner reconciliation required before write.')}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {(schemaRegistry.pending_owner_mapping_tabs?.length || 0) > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs text-amber-950 space-y-2">
+                  <div className="font-bold uppercase tracking-wider text-[11px] text-amber-800">
+                    PENDING_OWNER_MAPPING ({schemaRegistry.pending_owner_mapping_tabs!.length} Extended Tabs Awaiting Row-1 Header Verification)
+                  </div>
+                  <div className="font-mono text-[11px] text-amber-900 break-words">
+                    {schemaRegistry.pending_owner_mapping_tabs!.join(', ')}
+                  </div>
+                </div>
+              )}
+
               <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs text-xs">
                 <h3 className="text-sm font-bold text-slate-900 mb-3">
                   Locked 32 Business ID Prefixes
@@ -1482,6 +1553,14 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                   ))}
                 </div>
               </div>
+            </div>
+          )}
+
+          {controlSubTab === 'exceptions' && (schemaRegistry?.tab_reconciliation_conflicts?.length || 0) > 0 && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-xs text-red-950">
+              <strong>Reconciliation Gate Active (CONFLICT_RECONCILIATION_REQUIRED):</strong> Both{' '}
+              <code className="font-mono">ExceptionRegister</code> and{' '}
+              <code className="font-mono">ExceptionLogs</code> appear in workbook baselines. Owner reconciliation is required before mutating exception registers.
             </div>
           )}
         </div>
@@ -1537,7 +1616,8 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                       </th>
                     ))}
                     {(complianceSubTab === 'gig' || complianceSubTab === 'advances') &&
-                      moduleTab === 'compliance_assets' && (
+                      moduleTab === 'compliance_assets' &&
+                      !isAuditor && (
                         <th className="px-4 py-2.5 font-semibold text-right">Workflow Action</th>
                       )}
                   </tr>
@@ -1562,15 +1642,15 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                             </td>
                           ))}
 
-                        {moduleTab === 'compliance_assets' && complianceSubTab === 'gig' && (
+                        {moduleTab === 'compliance_assets' && complianceSubTab === 'gig' && !isAuditor && (
                           <td className="px-4 py-2.5 text-right space-x-2 whitespace-nowrap">
                             {String(row.status || '').toUpperCase() === 'SUBMITTED' &&
                               (isOwnerAdmin || canonicalRole === 'HR') && (
                                 <button
                                   type="button"
-                                  disabled={submitting}
+                                  disabled={submitting || writesLocked}
                                   onClick={() => handleGigTransition(String(row.entry_id), 'verify')}
-                                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-[11px] font-bold cursor-pointer"
+                                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-[11px] font-bold cursor-pointer disabled:opacity-50"
                                 >
                                   Verify Work
                                 </button>
@@ -1578,9 +1658,9 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                             {String(row.status || '').toUpperCase() === 'VERIFIED' && isOwnerAdmin && (
                               <button
                                 type="button"
-                                disabled={submitting}
+                                disabled={submitting || writesLocked}
                                 onClick={() => handleGigTransition(String(row.entry_id), 'pay')}
-                                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded text-[11px] font-bold cursor-pointer"
+                                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded text-[11px] font-bold cursor-pointer disabled:opacity-50"
                               >
                                 Pay Gig Wage
                               </button>
@@ -1590,7 +1670,8 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
                         {moduleTab === 'compliance_assets' &&
                           complianceSubTab === 'advances' &&
-                          canViewAdvances && (
+                          canViewAdvances &&
+                          !isAuditor && (
                             <td className="px-4 py-2.5 text-right whitespace-nowrap">
                               <div className="inline-flex items-center gap-1.5">
                                 <select
@@ -1618,9 +1699,9 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                                 />
                                 <button
                                   type="button"
-                                  disabled={submitting}
+                                  disabled={submitting || writesLocked}
                                   onClick={() => handleAdvanceDisburse(String(row.advance_id))}
-                                  className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded text-[11px] font-bold cursor-pointer"
+                                  className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded text-[11px] font-bold cursor-pointer disabled:opacity-50"
                                 >
                                   Disburse
                                 </button>

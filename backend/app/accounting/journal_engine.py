@@ -72,14 +72,13 @@ def post_journal_voucher(
     posted_by: str,
     journal_date: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Idempotent, fail-closed journal voucher posting.
-    - Validates debit/credit equality first.
-    - Replay returns existing voucher if identical.
-    - Replaying with conflicting financial amounts is rejected with ValueError.
-    - Partial writes are prevented by writing header in INCOMPLETE state and transitioning to POSTED only upon line verification.
+    Idempotent, fail-closed journal voucher posting delegated to Apps Script Single Write Owner.
     """
+    from app.apps_script_bridge import apps_script_bridge
+
     clean_ref_type = str(reference_type or "").strip().upper()
     clean_ref_id = str(reference_id or "").strip()
 
@@ -88,7 +87,6 @@ def post_journal_voucher(
 
     # 2. Idempotency & Conflict Check
     existing_headers = db.get_records("JournalHeaders", fresh=True)
-    existing_failed_header = None
     for row in existing_headers:
         if (
             str(row.get("reference_type", "")).strip().upper() == clean_ref_type
@@ -108,101 +106,57 @@ def post_journal_voucher(
                     if str(l.get("journal_id")) == str(row.get("journal_id"))
                 ]
                 return {**row, "lines": existing_lines, "is_replay": True}
-            elif status in {"INCOMPLETE", "FAILED"}:
-                existing_failed_header = row
 
-    if existing_failed_header:
-        # Prior attempt was incomplete or failed. Reuse header and purge partial lines before rewriting.
-        journal_id = str(existing_failed_header.get("journal_id"))
-        date_val = journal_date or business_today()
-        iso_now = now_iso()
-        old_lines = [l for l in db.get_records("JournalLines", fresh=True) if str(l.get("journal_id")) == journal_id]
-        for ol in old_lines:
-            line_id = str(ol.get("line_id", ""))
-            if line_id:
-                try:
-                    db.delete_record("JournalLines", "line_id", line_id)
-                except Exception:
-                    pass
+    date_val = journal_date or business_today()
+    iso_now = now_iso()
 
-        header_record = {
-            "journal_id": journal_id,
-            "journal_date": date_val,
-            "voucher_type": voucher_type.strip().upper(),
-            "reference_type": clean_ref_type,
-            "reference_id": clean_ref_id,
-            "narration": narration.strip(),
-            "total_debit": round_money(total_debit),
-            "total_credit": round_money(total_credit),
-            "posted_by": posted_by,
-            "posted_at": iso_now,
-            "status": "INCOMPLETE",
-            "reversal_of_id": "",
-        }
-        db.update_record("JournalHeaders", "journal_id", journal_id, header_record)
-    else:
-        # 3. Generate IDs
-        journal_id = db.generate_id("JournalHeaders") if hasattr(db, "generate_id") else f"JRN-{clean_ref_id}"
-        date_val = journal_date or business_today()
-        iso_now = now_iso()
+    prepared_lines = []
+    for idx, line in enumerate(lines):
+        code = str(line["account_code"]).strip()
+        account_meta = ACCOUNT_LOOKUP[code]
+        prepared_lines.append({
+            "line_no": idx + 1,
+            "account_code": code,
+            "account_name": account_meta["account_name"],
+            "debit_amount": round_money(to_decimal(line.get("debit_amount", line.get("debit", 0)) or 0)),
+            "credit_amount": round_money(to_decimal(line.get("credit_amount", line.get("credit", 0)) or 0)),
+            "entity_type": str(line.get("entity_type", "")).strip(),
+            "entity_id": str(line.get("entity_id", "")).strip(),
+            "notes": str(line.get("notes", "")).strip(),
+        })
 
-        header_record = {
-            "journal_id": journal_id,
-            "journal_date": date_val,
-            "voucher_type": voucher_type.strip().upper(),
-            "reference_type": clean_ref_type,
-            "reference_id": clean_ref_id,
-            "narration": narration.strip(),
-            "total_debit": round_money(total_debit),
-            "total_credit": round_money(total_credit),
-            "posted_by": posted_by,
-            "posted_at": iso_now,
-            "status": "INCOMPLETE",
-            "reversal_of_id": "",
-        }
+    header_payload = {
+        "journal_date": date_val,
+        "voucher_type": voucher_type.strip().upper(),
+        "reference_type": clean_ref_type,
+        "reference_id": clean_ref_id,
+        "narration": narration.strip(),
+        "total_debit": round_money(total_debit),
+        "total_credit": round_money(total_credit),
+        "posted_by": posted_by,
+        "posted_at": iso_now,
+        "status": "POSTED",
+        "reversal_of_id": "",
+        "lines": prepared_lines,
+    }
+    if extra_metadata:
+        header_payload["metadata"] = extra_metadata
 
-        # 4. Write Header in INCOMPLETE state (fail-closed protection against partial writes)
-        if not db.append_record("JournalHeaders", header_record, raise_on_error=True):
-            raise RuntimeError(f"Could not persist JournalHeader for {clean_ref_type}:{clean_ref_id}")
+    invalidate_tabs = ["JournalHeaders", "JournalLines"]
+    if extra_metadata and extra_metadata.get("incomplete_transaction_review"):
+        invalidate_tabs.append("IncompleteTransactions")
 
-    # 5. Write Lines
-    saved_lines = []
-    try:
-        for idx, line in enumerate(lines):
-            code = str(line["account_code"]).strip()
-            account_meta = ACCOUNT_LOOKUP[code]
-            line_id = f"{journal_id}-L{idx + 1}"
-            line_record = {
-                "line_id": line_id,
-                "journal_id": journal_id,
-                "line_no": idx + 1,
-                "account_code": code,
-                "account_name": account_meta["account_name"],
-                "debit_amount": round_money(to_decimal(line.get("debit_amount", line.get("debit", 0)) or 0)),
-                "credit_amount": round_money(to_decimal(line.get("credit_amount", line.get("credit", 0)) or 0)),
-                "entity_type": str(line.get("entity_type", "")).strip(),
-                "entity_id": str(line.get("entity_id", "")).strip(),
-                "notes": str(line.get("notes", "")).strip(),
-            }
-            if not db.append_record("JournalLines", line_record, raise_on_error=True):
-                raise RuntimeError(f"Could not persist JournalLine {line_id} for {journal_id}")
-            saved_lines.append(line_record)
-
-        # 6. Verify and Transition Header to POSTED Status
-        if not db.update_record("JournalHeaders", "journal_id", journal_id, {"status": "POSTED"}):
-            raise RuntimeError(f"Failed to activate JournalHeader {journal_id} to POSTED status.")
-        header_record["status"] = "POSTED"
-
-    except Exception as exc:
-        logger.error("Partial journal write failed for %s:%s: %s. Marking header FAILED.", clean_ref_type, clean_ref_id, exc)
-        try:
-            db.update_record("JournalHeaders", "journal_id", journal_id, {
-                "status": "FAILED",
-                "narration": f"[PARTIAL_WRITE_FAILED: {exc}] {header_record.get('narration', '')}".strip()[:200]
-            })
-        except Exception:
-            pass
-        raise RuntimeError(f"Journal voucher write failed: {exc}. Incomplete header will not affect balances.") from exc
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="POST_JOURNAL_VOUCHER",
+        target_tab="JournalHeaders",
+        payload=header_payload,
+        nonce=idempotency_key or f"JV-{clean_ref_type}-{clean_ref_id}",
+        actor_user_id=posted_by,
+        actor_role="ACCOUNTS",
+        id_field="journal_id",
+        invalidate_tabs=invalidate_tabs,
+    )
+    journal_id = str(bridge_res.get("allocated_id") or f"JV-{clean_ref_id}")
 
     db.log_audit(
         actor=posted_by,
@@ -213,11 +167,13 @@ def post_journal_voucher(
     )
 
     return {
-        **header_record,
-        "voucher_no": header_record.get("journal_id", ""),
-        "total_amount": header_record.get("total_debit", 0),
-        "lines": saved_lines,
+        **header_payload,
+        "journal_id": journal_id,
+        "voucher_no": journal_id,
+        "total_amount": header_payload["total_debit"],
+        "lines": prepared_lines,
         "is_replay": False,
+        **bridge_res,
     }
 
 
@@ -252,11 +208,11 @@ def append_journal_voucher(
         lines=normalized_lines,
         posted_by=posted_by or created_by,
         journal_date=journal_date,
+        idempotency_key=kwargs.get("idempotency_key"),
     )
     res["voucher_no"] = res.get("journal_id", "")
     res["total_amount"] = res.get("total_debit", 0)
     return res
-
 
 
 def reverse_journal_voucher(
@@ -264,10 +220,13 @@ def reverse_journal_voucher(
     reason: str,
     actor: str = "SYSTEM",
     reversed_by: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Creates a compensating reversal voucher for an existing posted journal entry.
+    Creates a compensating reversal voucher and marks the original header REVERSED atomically via Apps Script.
     """
+    from app.apps_script_bridge import apps_script_bridge
+
     operator = reversed_by or actor
     clean_jid = str(journal_id or "").strip()
     headers = db.get_records("JournalHeaders", fresh=True)
@@ -282,31 +241,43 @@ def reverse_journal_voucher(
     if not lines:
         raise ValueError(f"No journal lines found for voucher '{clean_jid}'.")
 
-    # Invert debits and credits
-    reversal_lines = []
-    for line in lines:
-        reversal_lines.append({
+    reversal_lines = [
+        {
             "account_code": line["account_code"],
             "debit_amount": line.get("credit_amount", 0),
             "credit_amount": line.get("debit_amount", 0),
             "entity_type": line.get("entity_type", ""),
             "entity_id": line.get("entity_id", ""),
             "notes": f"Reversal of line {line.get('line_no')}: {reason}",
-        })
+        }
+        for line in lines
+    ]
+    total_debit, total_credit = validate_journal_lines(reversal_lines)
 
-    rev_voucher = post_journal_voucher(
-        voucher_type="REVERSAL",
-        reference_type="JOURNAL_REVERSAL",
-        reference_id=clean_jid,
-        narration=f"Compensating reversal of {clean_jid}. Reason: {reason}",
-        lines=reversal_lines,
-        posted_by=operator,
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="REVERSE_JOURNAL_VOUCHER",
+        target_tab="JournalHeaders",
+        payload={
+            "original_journal_id": clean_jid,
+            "reason": reason,
+            "narration": f"Compensating reversal of {clean_jid}. Reason: {reason}",
+            "total_debit": round_money(total_debit),
+            "total_credit": round_money(total_credit),
+            "posted_by": operator,
+            "lines": reversal_lines,
+        },
+        nonce=idempotency_key or f"REV-{clean_jid}",
+        actor_user_id=operator,
+        actor_role="ACCOUNTS",
+        id_field="journal_id",
+        invalidate_tabs=["JournalHeaders", "JournalLines"],
     )
-
-    # Mark original voucher as REVERSED
-    db.update_record("JournalHeaders", "journal_id", clean_jid, {"status": "REVERSED"})
-
-    return rev_voucher
+    return {
+        "reversal_of_id": clean_jid,
+        "voucher_type": "REVERSAL",
+        "lines": reversal_lines,
+        **bridge_res,
+    }
 
 
 def calculate_trial_balance(

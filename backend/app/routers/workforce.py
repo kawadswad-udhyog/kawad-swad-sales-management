@@ -2,9 +2,10 @@ from datetime import datetime, date, timezone
 from typing import List, Optional, Dict, Any
 import calendar
 import logging
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
 from pydantic import BaseModel
 
+from app.apps_script_bridge import apps_script_bridge
 from app.sheets import db
 from app.auth import get_current_user
 from app.permissions import (
@@ -12,6 +13,7 @@ from app.permissions import (
     role_of, role_v2_of, is_employee, EMPLOYEE_ROLES,
     filter_confidential_record, filter_confidential_records,
 )
+from app.schema_registry import CONFIDENTIAL_PERSONAL_FIELDS
 from app.models import (
     EmployeeAttendanceRecord,
     EmployeeAttendanceCheckIn,
@@ -53,19 +55,16 @@ def _today_str() -> str:
     return date.today().isoformat()
 
 
+def _reject_auditor(user: dict) -> None:
+    if role_v2_of(user) == "AUDITOR":
+        raise HTTPException(status_code=403, detail="AUDITOR role is strictly read-only.")
+
+
 def _log_workforce_audit(action: str, entity_type: str, entity_id: str, actor_id: str, details: str = "") -> None:
     try:
-        db.append_record("WorkforceAuditLogs", {
-            "audit_id": db.get_next_id("WorkforceAuditLogs"),
-            "action": action,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "actor_id": actor_id,
-            "details": details,
-            "created_at": _now_iso(),
-        })
+        db.log_audit(actor_id, action, entity_type, entity_id, reason=details)
     except Exception as exc:
-        logger.warning(f"Failed to append workforce audit log: {exc}")
+        logger.warning(f"Failed to emit workforce audit log: {exc}")
 
 
 # ============================================================================
@@ -140,9 +139,11 @@ async def get_my_tasks(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/my-tasks/{task_id}/submit")
-async def submit_my_task(task_id: str, req: WorkAssignmentSubmit, current_user: dict = Depends(get_current_user)):
+async def submit_my_task(task_id: str, req: WorkAssignmentSubmit, request: Request, current_user: dict = Depends(get_current_user)):
     """Employee submits completed task with notes and proof."""
+    _reject_auditor(current_user)
     uid = str(current_user.get("user_id") or "").strip()
+    actor_role = role_v2_of(current_user)
     tasks = db.get_records("WorkAssignments", fresh=True) or []
     target = next((t for t in tasks if str(t.get("task_id") or "").strip() == task_id.strip()), None)
     if not target:
@@ -153,12 +154,22 @@ async def submit_my_task(task_id: str, req: WorkAssignmentSubmit, current_user: 
 
     now_str = _now_iso()
     updates = {
+        "task_id": task_id,
         "status": "SUBMITTED",
         "submission_notes": req.submission_notes,
         "proof_url": req.proof_url or "",
         "completed_at": now_str,
     }
-    db.update_record("WorkAssignments", "task_id", task_id, updates)
+    apps_script_bridge.delegate_governed_write(
+        action="SUBMIT_TASK",
+        target_tab="WorkAssignments",
+        payload=updates,
+        actor_user_id=uid,
+        actor_role=actor_role,
+        request=request,
+        id_field="task_id",
+        invalidate_tabs=["WorkAssignments"],
+    )
     _log_workforce_audit("SUBMIT_TASK", "WorkAssignments", task_id, uid, f"Task {task_id} submitted for review")
     return {"ok": True, "message": "Task submitted successfully for review.", "task_id": task_id, "status": "SUBMITTED"}
 
@@ -174,9 +185,11 @@ async def get_my_attendance(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/my-attendance/check-in")
-async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, current_user: dict = Depends(get_current_user)):
+async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, request: Request, current_user: dict = Depends(get_current_user)):
     """Clock in for today. Prevents duplicate check-in."""
+    _reject_auditor(current_user)
     uid = str(current_user.get("user_id") or "").strip()
+    actor_role = role_v2_of(current_user)
     user_name = str(current_user.get("full_name") or uid)
     today = _today_str()
     now_time = datetime.now().strftime("%H:%M:%S")
@@ -193,9 +206,7 @@ async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, current_user: d
             "record": existing,
         }
 
-    att_id = db.get_next_id("EmployeeAttendance")
     new_record = {
-        "attendance_id": att_id,
         "employee_id": uid,
         "employee_name": user_name,
         "attendance_date": today,
@@ -207,15 +218,28 @@ async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, current_user: d
         "verified_by": "SELF_CHECK_IN",
         "created_at": _now_iso(),
     }
-    db.append_record("EmployeeAttendance", new_record)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CHECK_IN_ATTENDANCE",
+        target_tab="EmployeeAttendance",
+        payload=new_record,
+        actor_user_id=uid,
+        actor_role=actor_role,
+        request=request,
+        id_field="attendance_id",
+        invalidate_tabs=["EmployeeAttendance"],
+    )
+    att_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("attendance_id") or "")
+    saved = bridge_res.get("record") or {**new_record, "attendance_id": att_id}
     _log_workforce_audit("CHECK_IN", "EmployeeAttendance", att_id, uid, f"Check in on {today} at {now_time}")
-    return {"ok": True, "message": f"Checked in successfully at {now_time}.", "attendance_id": att_id, "status": "PRESENT", "record": new_record}
+    return {"ok": True, "message": f"Checked in successfully at {now_time}.", "attendance_id": att_id, "status": "PRESENT", "record": saved}
 
 
 @router.post("/my-attendance/check-out")
-async def check_out_my_attendance(req: EmployeeAttendanceCheckOut, current_user: dict = Depends(get_current_user)):
+async def check_out_my_attendance(req: EmployeeAttendanceCheckOut, request: Request, current_user: dict = Depends(get_current_user)):
     """Clock out for today and calculate total hours."""
+    _reject_auditor(current_user)
     uid = str(current_user.get("user_id") or "").strip()
+    actor_role = role_v2_of(current_user)
     today = _today_str()
     now_time = datetime.now().strftime("%H:%M:%S")
 
@@ -239,17 +263,28 @@ async def check_out_my_attendance(req: EmployeeAttendanceCheckOut, current_user:
     if req.notes:
         notes = f"{notes} | Out: {req.notes}".strip(" |")
 
+    att_id = str(existing.get("attendance_id") or "")
     updates = {
+        "attendance_id": att_id,
         "check_out_time": now_time,
         "total_hours": total_hours,
         "notes": notes,
     }
-    db.update_record("EmployeeAttendance", "attendance_id", existing.get("attendance_id"), updates)
-    _log_workforce_audit("CHECK_OUT", "EmployeeAttendance", existing.get("attendance_id"), uid, f"Check out on {today} at {now_time} ({total_hours} hrs)")
+    apps_script_bridge.delegate_governed_write(
+        action="CHECK_OUT_ATTENDANCE",
+        target_tab="EmployeeAttendance",
+        payload=updates,
+        actor_user_id=uid,
+        actor_role=actor_role,
+        request=request,
+        id_field="attendance_id",
+        invalidate_tabs=["EmployeeAttendance"],
+    )
+    _log_workforce_audit("CHECK_OUT", "EmployeeAttendance", att_id, uid, f"Check out on {today} at {now_time} ({total_hours} hrs)")
     return {
         "ok": True,
         "message": f"Checked out successfully at {now_time}. Total hours: {total_hours}.",
-        "attendance_id": existing.get("attendance_id"),
+        "attendance_id": att_id,
         "status": "COMPLETED",
         "total_hours": total_hours,
         "record": {**existing, **updates},
@@ -287,7 +322,7 @@ async def get_my_profile(current_user: dict = Depends(get_current_user)):
     target = next((u for u in users if str(u.get("user_id") or "").strip() == uid), None)
     if not target:
         raise HTTPException(status_code=404, detail="Profile not found.")
-    return target
+    return {k: v for k, v in target.items() if k not in {"password_hash", "pin_hash"}}
 
 
 class EmployeeSelfProfileUpdate(BaseModel):
@@ -299,15 +334,27 @@ class EmployeeSelfProfileUpdate(BaseModel):
 
 
 @router.put("/my-profile")
-async def update_my_profile(req: EmployeeSelfProfileUpdate, current_user: dict = Depends(get_current_user)):
+async def update_my_profile(req: EmployeeSelfProfileUpdate, request: Request, current_user: dict = Depends(get_current_user)):
     """Employee updates own personal details (mobile, email, address, bank details)."""
+    _reject_auditor(current_user)
     uid = str(current_user.get("user_id") or "").strip()
+    actor_role = role_v2_of(current_user)
     updates = {k: v for k, v in req.dict().items() if v is not None}
     if not updates:
         return {"ok": True, "message": "No changes submitted."}
 
+    updates["user_id"] = uid
     updates["updated_at"] = _now_iso()
-    db.update_record("Users", "user_id", uid, updates)
+    apps_script_bridge.delegate_governed_write(
+        action="UPDATE_SELF_PROFILE",
+        target_tab="Users",
+        payload=updates,
+        actor_user_id=uid,
+        actor_role=actor_role,
+        request=request,
+        id_field="user_id",
+        invalidate_tabs=["Users"],
+    )
     _log_workforce_audit("UPDATE_SELF_PROFILE", "Users", uid, uid, f"Self-updated fields: {list(updates.keys())}")
     return {"ok": True, "message": "Profile updated successfully."}
 
@@ -323,7 +370,6 @@ async def get_my_projects(current_user: dict = Depends(get_current_user)):
     project_ids = {str(p.get("project_id") or "").strip() for p in my_projects}
     my_milestones = [m for m in milestones if str(m.get("project_id") or "").strip() in project_ids]
 
-    # Group milestones by project
     ms_by_proj: Dict[str, List[dict]] = {}
     for m in my_milestones:
         pid = str(m.get("project_id") or "").strip()
@@ -337,9 +383,11 @@ async def get_my_projects(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/my-projects/milestones/{milestone_id}/submit")
-async def submit_my_milestone(milestone_id: str, req: FreelancerMilestoneSubmit, current_user: dict = Depends(get_current_user)):
+async def submit_my_milestone(milestone_id: str, req: FreelancerMilestoneSubmit, request: Request, current_user: dict = Depends(get_current_user)):
     """Freelancer submits deliverable for a milestone."""
+    _reject_auditor(current_user)
     uid = str(current_user.get("user_id") or "").strip()
+    actor_role = role_v2_of(current_user)
     milestones = db.get_records("FreelancerMilestones", fresh=True) or []
     target_ms = next((m for m in milestones if str(m.get("milestone_id") or "").strip() == milestone_id.strip()), None)
     if not target_ms:
@@ -355,11 +403,21 @@ async def submit_my_milestone(milestone_id: str, req: FreelancerMilestoneSubmit,
         raise HTTPException(status_code=403, detail="You can only submit milestones for your own projects.")
 
     updates = {
+        "milestone_id": milestone_id,
         "status": "SUBMITTED",
         "submission_notes": req.submission_notes,
         "submission_link": req.submission_link or "",
     }
-    db.update_record("FreelancerMilestones", "milestone_id", milestone_id, updates)
+    apps_script_bridge.delegate_governed_write(
+        action="SUBMIT_MILESTONE",
+        target_tab="FreelancerMilestones",
+        payload=updates,
+        actor_user_id=uid,
+        actor_role=actor_role,
+        request=request,
+        id_field="milestone_id",
+        invalidate_tabs=["FreelancerMilestones"],
+    )
     _log_workforce_audit("SUBMIT_MILESTONE", "FreelancerMilestones", milestone_id, uid, f"Submitted milestone {milestone_id}")
     return {"ok": True, "message": "Milestone submitted successfully for Owner review.", "milestone_id": milestone_id, "status": "SUBMITTED"}
 
@@ -370,8 +428,8 @@ async def submit_my_milestone(milestone_id: str, req: FreelancerMilestoneSubmit,
 
 @router.get("/dashboard-metrics")
 async def get_workforce_dashboard_metrics(current_user: dict = Depends(get_current_user)):
-    """Summary metrics for Owner/PA workforce management dashboard."""
-    require_manager(current_user)
+    """Summary metrics for Owner/PA/HR/Auditor workforce management dashboard."""
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "AUDITOR"})
 
     users = db.get_records("Users", fresh=True) or []
     auth_users = db.get_records("AuthUsers", fresh=True) or []
@@ -525,17 +583,14 @@ async def list_labour(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/labour")
-async def create_labour(req: LabourCreate, current_user: dict = Depends(get_current_user)):
-    """Create a new labour master profile (generates LBR ID). Strips confidential bank fields for non-owners."""
-    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
+async def create_labour(req: LabourCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Create a new labour master profile via Apps Script bridge. Strips confidential bank fields for non-owners."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
     if not req.full_name or len(req.full_name.strip()) < 2:
         raise HTTPException(status_code=422, detail="Labour worker full name is required.")
 
-    actor_id = str(current_user.get("user_id") or "")
-    labour_id = db.get_next_id("LabourMaster")
-
     new_labour = {
-        "labour_id": labour_id,
         "full_name": req.full_name.strip(),
         "category": req.category or "GENERAL",
         "wage_type": req.wage_type or "DAILY",
@@ -550,17 +605,28 @@ async def create_labour(req: LabourCreate, current_user: dict = Depends(get_curr
         "notes": req.notes or "",
         "created_at": _now_iso(),
     }
-    db.append_record("LabourMaster", new_labour)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_LABOUR",
+        target_tab="LabourMaster",
+        payload=new_labour,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="labour_id",
+        invalidate_tabs=["LabourMaster"],
+    )
+    labour_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("labour_id") or "")
+    saved = bridge_res.get("record") or {**new_labour, "labour_id": labour_id}
     _log_workforce_audit("CREATE_LABOUR", "LabourMaster", labour_id, actor_id, f"Created labour {req.full_name}")
-    safe_labour = filter_confidential_record(new_labour, current_user, tab_name="LabourMaster")
+    safe_labour = filter_confidential_record(saved, current_user, tab_name="LabourMaster")
     return {"ok": True, "message": f"Labour worker {req.full_name} registered successfully.", "labour": safe_labour, "labour_id": labour_id}
 
 
 @router.put("/labour/{labour_id}")
-async def update_labour(labour_id: str, req: LabourUpdate, current_user: dict = Depends(get_current_user)):
-    """Update labour worker master details."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def update_labour(labour_id: str, req: LabourUpdate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Update labour worker master details. Non-owners cannot modify confidential bank/personal fields."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
 
     records = db.get_records("LabourMaster", fresh=True) or []
     target = next((l for l in records if str(l.get("labour_id") or "").strip() == labour_id.strip()), None)
@@ -568,10 +634,22 @@ async def update_labour(labour_id: str, req: LabourUpdate, current_user: dict = 
         raise HTTPException(status_code=404, detail="Labour record not found.")
 
     updates = {k: v for k, v in req.dict().items() if v is not None}
+    if not is_owner(current_user):
+        updates = {k: v for k, v in updates.items() if k.lower() not in CONFIDENTIAL_PERSONAL_FIELDS}
     if "active" in updates:
         updates["active"] = "true" if updates["active"] else "false"
+    updates["labour_id"] = labour_id
 
-    db.update_record("LabourMaster", "labour_id", labour_id, updates)
+    apps_script_bridge.delegate_governed_write(
+        action="UPDATE_LABOUR",
+        target_tab="LabourMaster",
+        payload=updates,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="labour_id",
+        invalidate_tabs=["LabourMaster"],
+    )
     _log_workforce_audit("UPDATE_LABOUR", "LabourMaster", labour_id, actor_id, f"Updated labour {labour_id}")
     return {"ok": True, "message": f"Labour {labour_id} updated successfully."}
 
@@ -583,13 +661,12 @@ async def list_labour_attendance(
     current_user: dict = Depends(get_current_user)
 ):
     """Get labour attendance records (optional filter by date), including legacy WorkerAttendance."""
-    require_manager(current_user)
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "PRODUCTION", "AUDITOR"})
     target_date = (attendance_date or date_str or "").strip()
     records = db.get_records("LabourAttendance", fresh=True) or []
     if target_date:
         records = [r for r in records if str(r.get("attendance_date") or "").strip() == target_date]
 
-    # Backward compatibility: include legacy WorkerAttendance
     legacy_att = db.get_records("WorkerAttendance", fresh=True) or []
     if target_date:
         legacy_att = [
@@ -629,10 +706,10 @@ async def list_labour_attendance(
 
 
 @router.post("/labour/attendance/bulk")
-async def save_labour_attendance_bulk(req: LabourAttendanceBulk, current_user: dict = Depends(get_current_user)):
-    """Save bulk daily attendance for labour workers."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def save_labour_attendance_bulk(req: LabourAttendanceBulk, request: Request, current_user: dict = Depends(get_current_user)):
+    """Save bulk daily attendance for labour workers atomically via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "PRODUCTION"})
     att_date = req.attendance_date.strip()
 
     labour_records = db.get_records("LabourMaster", fresh=True) or []
@@ -645,7 +722,8 @@ async def save_labour_attendance_bulk(req: LabourAttendanceBulk, current_user: d
         if str(r.get("attendance_date") or "").strip() == att_date
     }
 
-    saved_count = 0
+    updates_list = []
+    inserts_list = []
     for item in req.records:
         lid = item.labour_id.strip()
         labour = labour_map.get(lid)
@@ -656,7 +734,6 @@ async def save_labour_attendance_bulk(req: LabourAttendanceBulk, current_user: d
         wage_type = str(labour.get("wage_type") or "DAILY")
         base_rate = float(labour.get("base_rate") or 0.0)
 
-        # Calculate earned wage
         earned_wage = 0.0
         status_val = str(item.status or "PRESENT").upper()
         if status_val == "PRESENT":
@@ -684,18 +761,27 @@ async def save_labour_attendance_bulk(req: LabourAttendanceBulk, current_user: d
         }
 
         if lid in existing_map:
-            # Update existing
             old_rec = existing_map[lid]
             att_id = str(old_rec.get("attendance_id") or "")
-            db.update_record("LabourAttendance", "attendance_id", att_id, record_data)
+            updates_list.append({"attendance_id": att_id, **record_data})
         else:
-            # Insert new
-            att_id = db.get_next_id("LabourAttendance")
-            record_data["attendance_id"] = att_id
             record_data["created_at"] = _now_iso()
-            db.append_record("LabourAttendance", record_data)
+            inserts_list.append(record_data)
 
-        saved_count += 1
+    saved_count = len(updates_list) + len(inserts_list)
+    apps_script_bridge.delegate_governed_write(
+        action="BULK_LABOUR_ATTENDANCE",
+        target_tab="LabourAttendance",
+        payload={
+            "attendance_date": att_date,
+            "updates": updates_list,
+            "inserts": inserts_list,
+        },
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        invalidate_tabs=["LabourAttendance"],
+    )
 
     _log_workforce_audit("BULK_LABOUR_ATTENDANCE", "LabourAttendance", att_date, actor_id, f"Saved {saved_count} labour attendance records for {att_date}")
     return {"ok": True, "message": f"Successfully recorded attendance for {saved_count} workers on {att_date}."}
@@ -704,17 +790,17 @@ async def save_labour_attendance_bulk(req: LabourAttendanceBulk, current_user: d
 @router.get("/labour/work-entries")
 async def list_labour_work_entries(current_user: dict = Depends(get_current_user)):
     """List piece-rate and production work logs for labour."""
-    require_manager(current_user)
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "PRODUCTION", "AUDITOR"})
     entries = db.get_records("LabourWorkEntries", fresh=True) or []
     entries.sort(key=lambda x: str(x.get("entry_date") or ""), reverse=True)
     return entries
 
 
 @router.post("/labour/work-entries")
-async def create_labour_work_entry(req: LabourWorkEntryCreate, current_user: dict = Depends(get_current_user)):
-    """Record piece-rate or task-based work entry for a labour worker."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def create_labour_work_entry(req: LabourWorkEntryCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Record piece-rate or task-based work entry for a labour worker via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "PRODUCTION"})
 
     labour_records = db.get_records("LabourMaster", fresh=True) or []
     target = next((l for l in labour_records if str(l.get("labour_id") or "").strip() == req.labour_id.strip()), None)
@@ -737,12 +823,9 @@ async def create_labour_work_entry(req: LabourWorkEntryCreate, current_user: dic
     if float(req.units_completed or 0.0) < 0 or float(req.piece_rate or 0.0) < 0 or float(req.hours_logged or 0.0) < 0:
         raise HTTPException(status_code=422, detail="Completed units, piece rate and logged hours cannot be negative.")
 
-    # Relationship and range validation happens before reserving the entry ID.
-    entry_id = db.get_next_id("LabourWorkEntries")
     total_amount = round(float(req.units_completed or 0.0) * float(req.piece_rate or 0.0), 2)
 
     entry = {
-        "entry_id": entry_id,
         "labour_id": req.labour_id.strip(),
         "labour_name": str(target.get("full_name") or ""),
         "entry_date": req.entry_date or _today_str(),
@@ -758,9 +841,20 @@ async def create_labour_work_entry(req: LabourWorkEntryCreate, current_user: dic
         "notes": req.notes or "",
         "created_at": _now_iso(),
     }
-    db.append_record("LabourWorkEntries", entry)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_WORK_ENTRY",
+        target_tab="LabourWorkEntries",
+        payload=entry,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="entry_id",
+        invalidate_tabs=["LabourWorkEntries"],
+    )
+    entry_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("entry_id") or "")
+    saved = bridge_res.get("record") or {**entry, "entry_id": entry_id}
     _log_workforce_audit("CREATE_WORK_ENTRY", "LabourWorkEntries", entry_id, actor_id, f"Work entry {entry_id} for {req.labour_id} (Rs {total_amount})")
-    return {"ok": True, "message": f"Work entry recorded. Total: Rs {total_amount}.", "entry": entry, "entry_id": entry_id, "status": "APPROVED"}
+    return {"ok": True, "message": f"Work entry recorded. Total: Rs {total_amount}.", "entry": saved, "entry_id": entry_id, "status": "APPROVED"}
 
 
 # --- Work Tasks & Assignments ---
@@ -768,7 +862,7 @@ async def create_labour_work_entry(req: LabourWorkEntryCreate, current_user: dic
 @router.get("/tasks")
 async def list_tasks(status: Optional[str] = None, user_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     """List all work assignments."""
-    require_manager(current_user)
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "AUDITOR"})
     tasks = db.get_records("WorkAssignments", fresh=True) or []
     if status:
         tasks = [t for t in tasks if str(t.get("status") or "").upper() == status.upper()]
@@ -779,19 +873,17 @@ async def list_tasks(status: Optional[str] = None, user_id: Optional[str] = None
 
 
 @router.post("/tasks")
-async def create_task(req: WorkAssignmentCreate, current_user: dict = Depends(get_current_user)):
-    """Assign a work task to an employee."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def create_task(req: WorkAssignmentCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Assign a work task to an employee via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
 
     users = db.get_records("Users", fresh=True) or []
     assignee = next((u for u in users if str(u.get("user_id") or "").strip() == req.assigned_to_user_id.strip()), None)
     assignee_name = str(assignee.get("full_name") or req.assigned_to_user_id) if assignee else req.assigned_to_user_id
     assignee_role = str(assignee.get("role") or req.role or "") if assignee else (req.role or "")
 
-    task_id = db.get_next_id("WorkAssignments")
     task_record = {
-        "task_id": task_id,
         "title": req.title,
         "description": req.description or "",
         "assigned_to_user_id": req.assigned_to_user_id.strip(),
@@ -807,16 +899,27 @@ async def create_task(req: WorkAssignmentCreate, current_user: dict = Depends(ge
         "created_at": _now_iso(),
         "completed_at": "",
     }
-    db.append_record("WorkAssignments", task_record)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="ASSIGN_TASK",
+        target_tab="WorkAssignments",
+        payload=task_record,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="task_id",
+        invalidate_tabs=["WorkAssignments"],
+    )
+    task_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("task_id") or "")
+    saved = bridge_res.get("record") or {**task_record, "task_id": task_id}
     _log_workforce_audit("ASSIGN_TASK", "WorkAssignments", task_id, actor_id, f"Assigned task '{req.title}' to {assignee_name}")
-    return {"ok": True, "message": f"Task '{req.title}' assigned successfully.", "task": task_record}
+    return {"ok": True, "message": f"Task '{req.title}' assigned successfully.", "task": saved}
 
 
 @router.put("/tasks/{task_id}")
-async def update_task(task_id: str, req: WorkAssignmentUpdate, current_user: dict = Depends(get_current_user)):
-    """Update a task assignment."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def update_task(task_id: str, req: WorkAssignmentUpdate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Update a task assignment via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
 
     tasks = db.get_records("WorkAssignments", fresh=True) or []
     target = next((t for t in tasks if str(t.get("task_id") or "").strip() == task_id.strip()), None)
@@ -824,16 +927,26 @@ async def update_task(task_id: str, req: WorkAssignmentUpdate, current_user: dic
         raise HTTPException(status_code=404, detail="Task not found.")
 
     updates = {k: v for k, v in req.dict().items() if v is not None}
-    db.update_record("WorkAssignments", "task_id", task_id, updates)
+    updates["task_id"] = task_id
+    apps_script_bridge.delegate_governed_write(
+        action="UPDATE_TASK",
+        target_tab="WorkAssignments",
+        payload=updates,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="task_id",
+        invalidate_tabs=["WorkAssignments"],
+    )
     _log_workforce_audit("UPDATE_TASK", "WorkAssignments", task_id, actor_id, f"Updated task {task_id}")
     return {"ok": True, "message": f"Task {task_id} updated."}
 
 
 @router.post("/tasks/{task_id}/review")
-async def review_task(task_id: str, req: WorkAssignmentReview, current_user: dict = Depends(get_current_user)):
-    """Review submitted task: approve or reject."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def review_task(task_id: str, req: WorkAssignmentReview, request: Request, current_user: dict = Depends(get_current_user)):
+    """Review submitted task: approve or reject via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR"})
 
     tasks = db.get_records("WorkAssignments", fresh=True) or []
     target = next((t for t in tasks if str(t.get("task_id") or "").strip() == task_id.strip()), None)
@@ -847,14 +960,24 @@ async def review_task(task_id: str, req: WorkAssignmentReview, current_user: dic
     if new_status not in {"APPROVED", "REJECTED", "COMPLETED"}:
         raise HTTPException(status_code=422, detail="Review status must be APPROVED, REJECTED, or COMPLETED.")
 
-    updates = {
+    updates: Dict[str, Any] = {
+        "task_id": task_id,
         "status": new_status,
         "review_notes": req.review_notes or "",
     }
     if new_status in {"APPROVED", "COMPLETED"}:
         updates["completed_at"] = _now_iso()
 
-    db.update_record("WorkAssignments", "task_id", task_id, updates)
+    apps_script_bridge.delegate_governed_write(
+        action="REVIEW_TASK",
+        target_tab="WorkAssignments",
+        payload=updates,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="task_id",
+        invalidate_tabs=["WorkAssignments"],
+    )
     _log_workforce_audit("REVIEW_TASK", "WorkAssignments", task_id, actor_id, f"Reviewed task {task_id}: {new_status}")
     return {"ok": True, "message": f"Task {task_id} marked as {new_status}."}
 
@@ -864,7 +987,7 @@ async def review_task(task_id: str, req: WorkAssignmentReview, current_user: dic
 @router.get("/projects")
 async def list_projects(current_user: dict = Depends(get_current_user)):
     """List all freelancer projects with milestones."""
-    require_manager(current_user)
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "AUDITOR"})
     projects = db.get_records("FreelancerProjects", fresh=True) or []
     milestones = db.get_records("FreelancerMilestones", fresh=True) or []
 
@@ -882,18 +1005,16 @@ async def list_projects(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/projects")
-async def create_project(req: FreelancerProjectCreate, current_user: dict = Depends(get_current_user)):
-    """Create a new freelancer project."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def create_project(req: FreelancerProjectCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Create a new freelancer project via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_manager(current_user)
 
     users = db.get_records("Users", fresh=True) or []
     fl = next((u for u in users if str(u.get("user_id") or "").strip() == req.freelancer_user_id.strip()), None)
     fl_name = str(fl.get("full_name") or req.freelancer_user_id) if fl else req.freelancer_user_id
 
-    project_id = db.get_next_id("FreelancerProjects")
     project = {
-        "project_id": project_id,
         "title": req.title,
         "description": req.description or "",
         "freelancer_user_id": req.freelancer_user_id.strip(),
@@ -907,28 +1028,44 @@ async def create_project(req: FreelancerProjectCreate, current_user: dict = Depe
         "notes": req.notes or "",
         "created_at": _now_iso(),
     }
-    db.append_record("FreelancerProjects", project)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_PROJECT",
+        target_tab="FreelancerProjects",
+        payload=project,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="project_id",
+        invalidate_tabs=["FreelancerProjects"],
+    )
+    project_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("project_id") or "")
+    saved = bridge_res.get("record") or {**project, "project_id": project_id}
     _log_workforce_audit("CREATE_PROJECT", "FreelancerProjects", project_id, actor_id, f"Created project '{req.title}' for {fl_name}")
-    return {"ok": True, "message": f"Project '{req.title}' created.", "project": project}
+    return {"ok": True, "message": f"Project '{req.title}' created.", "project": saved}
 
 
 @router.get("/projects/{project_id}/milestones")
 async def list_project_milestones(project_id: str, current_user: dict = Depends(get_current_user)):
     """List milestones for a project."""
+    require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "FREELANCER", "AUDITOR"})
+    if role_of(current_user) == "FREELANCER":
+        uid = str(current_user.get("user_id") or "").strip()
+        projects = db.get_records("FreelancerProjects", fresh=True) or []
+        proj = next((p for p in projects if str(p.get("project_id") or "").strip() == project_id.strip()), None)
+        if not proj or str(proj.get("freelancer_user_id") or "").strip() != uid:
+            raise HTTPException(status_code=403, detail="Freelancers can only view milestones for their own projects.")
     milestones = db.get_records("FreelancerMilestones", fresh=True) or []
     proj_ms = [m for m in milestones if str(m.get("project_id") or "").strip() == project_id.strip()]
     return proj_ms
 
 
 @router.post("/projects/{project_id}/milestones")
-async def create_project_milestone(project_id: str, req: FreelancerMilestoneCreate, current_user: dict = Depends(get_current_user)):
-    """Add a milestone to a freelancer project."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def create_project_milestone(project_id: str, req: FreelancerMilestoneCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Add a milestone to a freelancer project via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_manager(current_user)
 
-    milestone_id = db.get_next_id("FreelancerMilestones")
     ms = {
-        "milestone_id": milestone_id,
         "project_id": project_id.strip(),
         "title": req.title,
         "description": req.description or "",
@@ -941,16 +1078,27 @@ async def create_project_milestone(project_id: str, req: FreelancerMilestoneCrea
         "approved_at": "",
         "created_at": _now_iso(),
     }
-    db.append_record("FreelancerMilestones", ms)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_MILESTONE",
+        target_tab="FreelancerMilestones",
+        payload=ms,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="milestone_id",
+        invalidate_tabs=["FreelancerMilestones"],
+    )
+    milestone_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("milestone_id") or "")
+    saved = bridge_res.get("record") or {**ms, "milestone_id": milestone_id}
     _log_workforce_audit("CREATE_MILESTONE", "FreelancerMilestones", milestone_id, actor_id, f"Added milestone '{req.title}' to {project_id}")
-    return {"ok": True, "message": f"Milestone '{req.title}' created.", "milestone": ms}
+    return {"ok": True, "message": f"Milestone '{req.title}' created.", "milestone": saved}
 
 
 @router.post("/milestones/{milestone_id}/review")
-async def review_project_milestone(milestone_id: str, req: FreelancerMilestoneReview, current_user: dict = Depends(get_current_user)):
-    """Owner/PA reviews freelancer milestone."""
-    require_manager(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def review_project_milestone(milestone_id: str, req: FreelancerMilestoneReview, request: Request, current_user: dict = Depends(get_current_user)):
+    """Owner/PA reviews freelancer milestone via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_manager(current_user)
 
     milestones = db.get_records("FreelancerMilestones", fresh=True) or []
     target = next((m for m in milestones if str(m.get("milestone_id") or "").strip() == milestone_id.strip()), None)
@@ -967,19 +1115,29 @@ async def review_project_milestone(milestone_id: str, req: FreelancerMilestoneRe
     if new_status not in {"APPROVED", "REJECTED"}:
         raise HTTPException(status_code=422, detail="Status must be APPROVED or REJECTED.")
 
-    updates = {
+    updates: Dict[str, Any] = {
+        "milestone_id": milestone_id,
         "status": new_status,
         "review_notes": req.review_notes or "",
     }
     if new_status == "APPROVED":
         updates["approved_at"] = _now_iso()
 
-    db.update_record("FreelancerMilestones", "milestone_id", milestone_id, updates)
+    apps_script_bridge.delegate_governed_write(
+        action="REVIEW_MILESTONE",
+        target_tab="FreelancerMilestones",
+        payload=updates,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="milestone_id",
+        invalidate_tabs=["FreelancerMilestones"],
+    )
     _log_workforce_audit("REVIEW_MILESTONE", "FreelancerMilestones", milestone_id, actor_id, f"Reviewed milestone {milestone_id}: {new_status}")
     return {"ok": True, "message": f"Milestone {milestone_id} marked as {new_status}."}
 
 
-# --- Salary Structures & Payroll Engine ---
+# --- Salary Structures & Payroll Engine (STRICTLY OWNER_ADMIN ONLY) ---
 
 @router.get("/salary-structures")
 async def list_salary_structures(current_user: dict = Depends(get_current_user)):
@@ -990,10 +1148,10 @@ async def list_salary_structures(current_user: dict = Depends(get_current_user))
 
 
 @router.post("/salary-structures")
-async def create_or_update_salary_structure(req: SalaryStructureCreate, current_user: dict = Depends(get_current_user)):
-    """Owner creates/updates salary structure (Owner only)."""
-    require_owner(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def create_or_update_salary_structure(req: SalaryStructureCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Owner creates/updates salary structure atomically via Apps Script bridge (Owner only)."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_owner(current_user)
 
     uid = req.user_id.strip()
     users = db.get_records("Users", fresh=True) or []
@@ -1004,7 +1162,7 @@ async def create_or_update_salary_structure(req: SalaryStructureCreate, current_
     structures = db.get_records("SalaryStructures", fresh=True) or []
     existing = next((s for s in structures if str(s.get("user_id") or "").strip() == uid), None)
 
-    struct_data = {
+    struct_data: Dict[str, Any] = {
         "user_id": uid,
         "basic_salary": float(req.basic_salary or 0.0),
         "hra": float(req.hra or 0.0),
@@ -1021,21 +1179,33 @@ async def create_or_update_salary_structure(req: SalaryStructureCreate, current_
 
     if existing:
         sid = str(existing.get("structure_id") or "")
-        db.update_record("SalaryStructures", "structure_id", sid, struct_data)
         struct_data["structure_id"] = sid
-        _log_workforce_audit("UPDATE_SALARY_STRUCTURE", "SalaryStructures", sid, actor_id, f"Updated structure for {uid}")
+        action = "UPDATE_SALARY_STRUCTURE"
         msg = f"Salary structure updated for {user_target.get('full_name')}."
     else:
-        sid = db.get_next_id("SalaryStructures")
-        struct_data["structure_id"] = sid
+        sid = ""
         struct_data["created_at"] = _now_iso()
-        db.append_record("SalaryStructures", struct_data)
-        # Also update user record with structure_id
-        db.update_record("Users", "user_id", uid, {"salary_structure_id": sid})
-        _log_workforce_audit("CREATE_SALARY_STRUCTURE", "SalaryStructures", sid, actor_id, f"Created structure for {uid}")
+        action = "CREATE_SALARY_STRUCTURE"
         msg = f"Salary structure created for {user_target.get('full_name')}."
 
-    return {"ok": True, "message": msg, "salary_structure": struct_data}
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="UPSERT_SALARY_STRUCTURE",
+        target_tab="SalaryStructures",
+        payload={
+            "salary_structure": struct_data,
+            "is_update": bool(existing),
+            "update_user_structure_id": not bool(existing),
+        },
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="structure_id",
+        invalidate_tabs=["SalaryStructures", "Users"],
+    )
+    resolved_sid = str(bridge_res.get("allocated_id") or sid or (bridge_res.get("record") or {}).get("structure_id") or "")
+    saved = bridge_res.get("record") or {**struct_data, "structure_id": resolved_sid}
+    _log_workforce_audit(action, "SalaryStructures", resolved_sid, actor_id, f"{action} for {uid}")
+    return {"ok": True, "message": msg, "salary_structure": saved}
 
 
 @router.get("/payroll")
@@ -1048,24 +1218,20 @@ async def list_payroll_runs(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/payroll/calculate")
-async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depends(get_current_user)):
+async def calculate_payroll_run(req: PayrollRunCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """
-    Calculate and generate a draft payroll run for a month (e.g. '2026-10') (Owner only).
-    Calculates pro-rata base salary, salesman sales commissions/incentives (verifying PAID and DELIVERED),
-    deductions, and creates itemized records in PayrollItems.
+    Calculate and generate a draft payroll run for a month (e.g. '2026-10') atomically via Apps Script bridge (Owner only).
     """
-    require_owner(current_user)
-    actor_id = str(current_user.get("user_id") or "")
-    run_month = req.month.strip()  # Format YYYY-MM
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_owner(current_user)
+    run_month = req.month.strip()
 
-    # Validate month format
     try:
         yr, mo = map(int, run_month.split("-"))
         _, days_in_month = calendar.monthrange(yr, mo)
     except Exception:
         raise HTTPException(status_code=422, detail="Invalid month format. Expected 'YYYY-MM'.")
 
-    # Check for existing run for this month
     existing_runs = db.get_records("PayrollRuns", fresh=True) or []
     dup_run = next((r for r in existing_runs if str(r.get("month") or "").strip() == run_month), None)
     if dup_run and str(dup_run.get("status") or "").upper() == "APPROVED":
@@ -1079,21 +1245,20 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
     sales = db.get_records("Sales", fresh=True) or []
     all_sale_items = db.get_records("SaleItems", fresh=True) or []
 
-    run_id = dup_run.get("payroll_run_id") if dup_run else db.get_next_id("PayrollRuns")
+    existing_run_id = str(dup_run.get("payroll_run_id") or "") if dup_run else ""
 
     total_gross = 0.0
     total_deductions = 0.0
     total_net = 0.0
     items_to_save = []
 
-    # Filter active non-owner employees
     active_employees = [
         u for u in users
         if str(u.get("active", "true")).lower() in {"true", "1", "yes"}
         and str(u.get("role", "")).upper() not in {"OWNER", "OWNER_ADMIN"}
     ]
 
-    for emp in active_employees:
+    for idx, emp in enumerate(active_employees):
         uid = str(emp.get("user_id") or "").strip()
         uname = str(emp.get("full_name") or uid)
         role = str(emp.get("role") or "SALESMAN").upper()
@@ -1108,7 +1273,6 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
         tds = float(struct.get("tds_deduction") or 0.0)
         other_ded = float(struct.get("other_deductions") or 0.0)
 
-        # Count attendance in this month
         month_prefix = f"{run_month}-"
         emp_att_records = [
             a for a in attendances
@@ -1119,17 +1283,13 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
         half_days = len([a for a in emp_att_records if str(a.get("status") or "").upper() == "HALF_DAY"])
         effective_days = present_days + (half_days * 0.5)
 
-        # If no attendance records found (e.g., salaried office staff or PA without daily clock-in),
-        # default to full month unless marked absent
         if not emp_att_records and base_monthly > 0:
             effective_days = float(days_in_month)
 
-        # Calculate earned base
         daily_rate = base_monthly / float(days_in_month) if days_in_month > 0 else 0.0
         earned_basic = round(daily_rate * effective_days, 2)
         earned_allowances = round(hra + transport + special, 2)
 
-        # Sales incentives: Enforce consistent rules with salary.py (PAID, DELIVERED, NOT CANCELLED)
         salesman_incentive = 0.0
         if role in {"SALESMAN", "FIELD_SALESMAN"}:
             emp_sales = [
@@ -1155,7 +1315,6 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
             if commission_rate > 0:
                 salesman_incentive = round(monthly_sales_amount * (commission_rate / 100.0), 2)
             else:
-                # Default Kawad Swad incentive: Rs 200 per 100 kg sold
                 slabs = int(monthly_kg_sold // 100)
                 salesman_incentive = round(slabs * 200.0, 2)
 
@@ -1167,10 +1326,9 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
         total_deductions += total_emp_ded
         total_net += net_pay
 
-        item_id = db.get_next_id("PayrollItems")
         items_to_save.append({
-            "item_id": item_id,
-            "payroll_run_id": run_id,
+            "line_index": idx,
+            "payroll_run_id": existing_run_id,
             "user_id": uid,
             "employee_id": uid,
             "employee_name": uname,
@@ -1191,8 +1349,7 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
             "notes": f"Attendance: {effective_days}/{days_in_month} days",
         })
 
-    payroll_run_record = {
-        "payroll_run_id": run_id,
+    payroll_run_record: Dict[str, Any] = {
         "month": run_month,
         "run_date": req.run_date or _today_str(),
         "total_employees": len(items_to_save),
@@ -1205,26 +1362,31 @@ async def calculate_payroll_run(req: PayrollRunCreate, current_user: dict = Depe
         "notes": req.notes or f"Calculated payroll run for {run_month}",
         "created_at": _now_iso(),
     }
+    if existing_run_id:
+        payroll_run_record["payroll_run_id"] = existing_run_id
 
-    if dup_run:
-        # Update run header and replace existing items
-        db.update_record("PayrollRuns", "payroll_run_id", run_id, payroll_run_record)
-        # Delete old items for this run
-        existing_items = db.get_records("PayrollItems", fresh=True) or []
-        for old_it in existing_items:
-            if str(old_it.get("payroll_run_id") or "").strip() == run_id:
-                db.delete_record("PayrollItems", "item_id", old_it.get("item_id"))
-    else:
-        db.append_record("PayrollRuns", payroll_run_record)
-
-    for it in items_to_save:
-        db.append_record("PayrollItems", it)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CALCULATE_PAYROLL",
+        target_tab="PayrollRuns",
+        payload={
+            "payroll_run": payroll_run_record,
+            "items": items_to_save,
+            "replace_existing_run_id": existing_run_id or None,
+        },
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="payroll_run_id",
+        invalidate_tabs=["PayrollRuns", "PayrollItems"],
+    )
+    run_id = str(bridge_res.get("allocated_id") or existing_run_id or (bridge_res.get("record") or {}).get("payroll_run_id") or "")
+    saved_run = bridge_res.get("record") or {**payroll_run_record, "payroll_run_id": run_id}
 
     _log_workforce_audit("CALCULATE_PAYROLL", "PayrollRuns", run_id, actor_id, f"Calculated payroll {run_month} for {len(items_to_save)} employees (Rs {round(total_net, 2)})")
     return {
         "ok": True,
         "message": f"Draft payroll calculated for {run_month} ({len(items_to_save)} employees).",
-        "payroll_run": payroll_run_record,
+        "payroll_run": saved_run,
         "payroll_run_id": run_id,
         "total_employees": len(items_to_save),
         "total_net": round(total_net, 2),
@@ -1244,10 +1406,10 @@ async def get_payroll_run_items(payroll_run_id: str, current_user: dict = Depend
 
 
 @router.put("/payroll/items/{item_id}")
-async def update_payroll_item(item_id: str, req: PayrollItemUpdate, current_user: dict = Depends(get_current_user)):
-    """Adjust deductions, incentives, bonus, or adjustments on a draft payroll item (Owner only)."""
-    require_owner(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def update_payroll_item(item_id: str, req: PayrollItemUpdate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Adjust deductions, incentives, bonus, or adjustments on a draft payroll item atomically via bridge (Owner only)."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_owner(current_user)
 
     items = db.get_records("PayrollItems", fresh=True) or []
     target = next((i for i in items if str(i.get("item_id") or "").strip() == item_id.strip()), None)
@@ -1271,7 +1433,8 @@ async def update_payroll_item(item_id: str, req: PayrollItemUpdate, current_user
     gross = round(earned_basic + allowances + incentive + bonus, 2)
     net = round(max(0.0, gross - deductions + adjustment), 2)
 
-    updates = {
+    updates: Dict[str, Any] = {
+        "item_id": item_id,
         "incentive_amount": incentive,
         "bonus_amount": bonus,
         "deductions": deductions,
@@ -1282,29 +1445,39 @@ async def update_payroll_item(item_id: str, req: PayrollItemUpdate, current_user
     if req.notes is not None:
         updates["notes"] = req.notes
 
-    db.update_record("PayrollItems", "item_id", item_id, updates)
+    run_items = [i for i in items if str(i.get("payroll_run_id") or "").strip() == run_id]
+    tot_gross = sum(gross if str(i.get("item_id") or "").strip() == item_id.strip() else float(i.get("gross_amount") or 0.0) for i in run_items)
+    tot_ded = sum(deductions if str(i.get("item_id") or "").strip() == item_id.strip() else float(i.get("deductions") or 0.0) for i in run_items)
+    tot_net = sum(net if str(i.get("item_id") or "").strip() == item_id.strip() else float(i.get("net_amount") or 0.0) for i in run_items)
 
-    # Recalculate and sync parent PayrollRuns totals
-    all_items = db.get_records("PayrollItems", fresh=True) or []
-    run_items = [i for i in all_items if str(i.get("payroll_run_id") or "").strip() == run_id]
-    tot_gross = sum(float(i.get("gross_amount") or 0.0) for i in run_items)
-    tot_ded = sum(float(i.get("deductions") or 0.0) for i in run_items)
-    tot_net = sum(float(i.get("net_amount") or 0.0) for i in run_items)
-    db.update_record("PayrollRuns", "payroll_run_id", run_id, {
-        "total_gross": round(tot_gross, 2),
-        "total_deductions": round(tot_ded, 2),
-        "total_net": round(tot_net, 2),
-    })
+    apps_script_bridge.delegate_governed_write(
+        action="UPDATE_PAYROLL_ITEM",
+        target_tab="PayrollItems",
+        payload={
+            "item_update": updates,
+            "run_totals_update": {
+                "payroll_run_id": run_id,
+                "total_gross": round(tot_gross, 2),
+                "total_deductions": round(tot_ded, 2),
+                "total_net": round(tot_net, 2),
+            },
+        },
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="item_id",
+        invalidate_tabs=["PayrollItems", "PayrollRuns"],
+    )
 
     _log_workforce_audit("UPDATE_PAYROLL_ITEM", "PayrollItems", item_id, actor_id, f"Adjusted payroll item {item_id}")
     return {"ok": True, "message": f"Payroll item {item_id} updated.", "net_amount": net}
 
 
 @router.post("/payroll/{payroll_run_id}/approve")
-async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(get_current_user)):
-    """Owner approves a draft payroll run."""
-    require_owner(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+async def approve_payroll_run(payroll_run_id: str, request: Request, current_user: dict = Depends(get_current_user)):
+    """Owner approves a draft payroll run via Apps Script bridge."""
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_owner(current_user)
 
     runs = db.get_records("PayrollRuns", fresh=True) or []
     target = next((r for r in runs if str(r.get("payroll_run_id") or "").strip() == payroll_run_id.strip()), None)
@@ -1314,7 +1487,6 @@ async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(
     if str(target.get("status") or "").upper() == "APPROVED":
         return {"ok": True, "message": "Payroll run is already approved.", "status": "APPROVED"}
 
-    # Ensure totals are verified and synced with all items
     all_items = db.get_records("PayrollItems", fresh=True) or []
     run_items = [i for i in all_items if str(i.get("payroll_run_id") or "").strip() == payroll_run_id.strip()]
     tot_gross = sum(float(i.get("gross_amount") or 0.0) for i in run_items)
@@ -1322,6 +1494,7 @@ async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(
     tot_net = sum(float(i.get("net_amount") or 0.0) for i in run_items)
 
     updates = {
+        "payroll_run_id": payroll_run_id,
         "status": "APPROVED",
         "total_gross": round(tot_gross, 2),
         "total_deductions": round(tot_ded, 2),
@@ -1329,7 +1502,16 @@ async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(
         "approved_by": actor_id,
         "approved_at": _now_iso(),
     }
-    db.update_record("PayrollRuns", "payroll_run_id", payroll_run_id, updates)
+    apps_script_bridge.delegate_governed_write(
+        action="APPROVE_PAYROLL",
+        target_tab="PayrollRuns",
+        payload=updates,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        request=request,
+        id_field="payroll_run_id",
+        invalidate_tabs=["PayrollRuns"],
+    )
     _log_workforce_audit("APPROVE_PAYROLL", "PayrollRuns", payroll_run_id, actor_id, f"Owner approved payroll {payroll_run_id}")
     return {"ok": True, "message": f"Payroll run {payroll_run_id} approved successfully.", "status": "APPROVED", **updates}
 
@@ -1337,17 +1519,13 @@ async def approve_payroll_run(payroll_run_id: str, current_user: dict = Depends(
 # --- Payments & Salary Receipts ---
 
 @router.post("/payments")
-async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: dict = Depends(get_current_user)):
+async def record_workforce_payment(req: WorkforcePaymentCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """
-    Record payment for:
-    - Payroll Item (SALARY)
-    - Labour Wage (LABOUR_WAGE)
-    - Freelancer Milestone (FREELANCER_MILESTONE)
-    Generates an Accounting Journal posting, a SalaryReceipts record, and marks the source item as PAID (Owner only).
-    Enforces idempotency: replays of existing payments return existing record without duplicate journal posting.
+    Record workforce disbursement atomically via Apps Script bridge (Owner only),
+    and post balanced double-entry accounting journal.
     """
-    require_owner(current_user)
-    actor_id = str(current_user.get("user_id") or "")
+    _reject_auditor(current_user)
+    actor_id, actor_role = require_owner(current_user)
     pay_type = req.payment_type.upper()
     pay_amount = float(req.amount or 0.0)
     pay_date = req.payment_date or _today_str()
@@ -1357,7 +1535,6 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
 
     clean_ref = str(req.reference_id or "").strip()
 
-    # Idempotency Check: check if payment for this reference_id and payment_type was already processed
     existing_payments = db.get_records("WorkforcePayments", fresh=True) or []
     dup_pay = next(
         (p for p in existing_payments if str(p.get("reference_id") or "").strip() == clean_ref and str(p.get("payment_type") or "").upper() == pay_type),
@@ -1380,41 +1557,20 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
             "already_recorded": True,
         }
 
-    # 1. Create Payment record in WorkforcePayments
-    pay_id = db.get_next_id("WorkforcePayments")
-    payment_record = {
-        "payment_id": pay_id,
-        "reference_id": clean_ref,
-        "payment_type": pay_type,
-        "recipient_id": req.recipient_id,
-        "recipient_name": req.recipient_name,
-        "amount": pay_amount,
-        "payment_method": req.payment_method or "BANK_TRANSFER",
-        "payment_reference": req.payment_reference or "",
-        "payment_date": pay_date,
-        "bank_account_credited": req.bank_account_credited or "",
-        "recorded_by": actor_id,
-        "accounting_journal_ref": "",
-        "notes": req.notes or "",
-        "created_at": _now_iso(),
-    }
-    db.append_record("WorkforcePayments", payment_record)
-
-    # 2. Update source item status
     role_or_category = "EMPLOYEE"
     gross = pay_amount
     deductions = 0.0
+    source_update: Optional[Dict[str, Any]] = None
 
     if pay_type == "SALARY":
         payroll_items = db.get_records("PayrollItems", fresh=True) or []
         target_item = next((i for i in payroll_items if str(i.get("item_id") or "").strip() == clean_ref), None)
         if target_item:
-            db.update_record("PayrollItems", "item_id", clean_ref, {"payment_status": "PAID", "payment_id": pay_id})
+            source_update = {"tab": "PayrollItems", "key_field": "item_id", "key_value": clean_ref, "updates": {"payment_status": "PAID"}}
             role_or_category = str(target_item.get("role") or "SALARIED")
             gross = float(target_item.get("gross_amount") or pay_amount)
             deductions = float(target_item.get("deductions") or 0.0)
-        
-        # Check recipient profile for role resolution if not determined from payroll item
+
         if (not target_item or role_or_category in {"EMPLOYEE", "SALARIED", "GENERAL"}) and req.recipient_id:
             users = db.get_records("Users", fresh=True) or []
             u_rec = next((u for u in users if str(u.get("user_id") or "").strip() == req.recipient_id.strip()), None)
@@ -1429,51 +1585,44 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
         milestones = db.get_records("FreelancerMilestones", fresh=True) or []
         target_ms = next((m for m in milestones if str(m.get("milestone_id") or "").strip() == clean_ref), None)
         if target_ms:
-            db.update_record("FreelancerMilestones", "milestone_id", clean_ref, {"status": "PAID", "payment_id": pay_id})
+            source_update = {"tab": "FreelancerMilestones", "key_field": "milestone_id", "key_value": clean_ref, "updates": {"status": "PAID"}}
             role_or_category = "FREELANCER"
     elif pay_type == "LABOUR_WAGE":
         role_or_category = "LABOUR"
         wage_records = db.get_records("LabourWageRecords", fresh=True) or []
         target_wr = next((w for w in wage_records if str(w.get("wage_record_id") or "").strip() == clean_ref), None)
         if target_wr:
-            db.update_record("LabourWageRecords", "wage_record_id", clean_ref, {
-                "payment_status": "PAID",
-                "paid_amount": pay_amount,
-                "paid_at": pay_date,
-                "payment_reference": req.payment_reference or "",
-                "receipt_id": pay_id,
-            })
+            source_update = {
+                "tab": "LabourWageRecords",
+                "key_field": "wage_record_id",
+                "key_value": clean_ref,
+                "updates": {
+                    "payment_status": "PAID",
+                    "paid_amount": pay_amount,
+                    "paid_at": pay_date,
+                    "payment_reference": req.payment_reference or "",
+                },
+            }
             gross = float(target_wr.get("gross_wage") or pay_amount)
             deductions = float(target_wr.get("advances_deducted") or 0.0)
 
-    # 3. Post balanced double-entry accounting journal
-    journal_ref = ""
-    try:
-        from app.accounting.postings import post_workforce_payment_journal
-        post_res = post_workforce_payment_journal({
-            "payment_id": pay_id,
-            "payment_type": pay_type,
-            "recipient_id": req.recipient_id,
-            "recipient_name": req.recipient_name,
-            "role_or_category": role_or_category,
-            "amount": pay_amount,
-            "payment_method": req.payment_method or "BANK_TRANSFER",
-            "payment_date": pay_date,
-        }, actor=actor_id)
-        if post_res and post_res.get("journal_id"):
-            journal_ref = str(post_res["journal_id"])
-            payment_record["accounting_journal_ref"] = journal_ref
-            db.update_record("WorkforcePayments", "payment_id", pay_id, {"accounting_journal_ref": journal_ref})
-    except Exception as exc:
-        logger.error(f"Failed to post accounting journal for workforce payment {pay_id}: {exc}")
-
-    # 4. Generate official Salary Receipt
-    receipt_id = db.get_next_id("SalaryReceipts")
-    receipt_number = f"REC-{datetime.now().strftime('%Y%m')}-{receipt_id.replace('RCPT', '')}"
+    now = _now_iso()
+    payment_record = {
+        "reference_id": clean_ref,
+        "payment_type": pay_type,
+        "recipient_id": req.recipient_id,
+        "recipient_name": req.recipient_name,
+        "amount": pay_amount,
+        "payment_method": req.payment_method or "BANK_TRANSFER",
+        "payment_reference": req.payment_reference or "",
+        "payment_date": pay_date,
+        "bank_account_credited": req.bank_account_credited or "",
+        "recorded_by": actor_id,
+        "accounting_journal_ref": "",
+        "notes": req.notes or "",
+        "created_at": now,
+    }
     receipt_record = {
-        "receipt_id": receipt_id,
-        "receipt_number": receipt_number,
-        "payment_id": pay_id,
         "recipient_id": req.recipient_id,
         "recipient_name": req.recipient_name,
         "recipient_type": pay_type,
@@ -1487,19 +1636,51 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, current_user: di
         "total_deductions": deductions,
         "net_paid": pay_amount,
         "notes": req.notes or f"Disbursed {pay_type} via {req.payment_method}",
-        "created_at": _now_iso(),
+        "created_at": now,
     }
-    db.append_record("SalaryReceipts", receipt_record)
+
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="RECORD_WORKFORCE_PAYMENT",
+        target_tab="WorkforcePayments",
+        payload={
+            "payment": payment_record,
+            "source_update": source_update,
+            "receipt": receipt_record,
+        },
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        nonce=f"WF-{pay_type}-{clean_ref}" if clean_ref else None,
+        request=request,
+        id_field="payment_id",
+        invalidate_tabs=["WorkforcePayments", "PayrollItems", "FreelancerMilestones", "LabourWageRecords", "SalaryReceipts"],
+    )
+    pay_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("payment_id") or "")
+    saved_payment = bridge_res.get("record") or {**payment_record, "payment_id": pay_id}
+
+    journal_ref = ""
+    from app.accounting.postings import post_workforce_payment_journal
+    post_res = post_workforce_payment_journal({
+        "payment_id": pay_id,
+        "payment_type": pay_type,
+        "recipient_id": req.recipient_id,
+        "recipient_name": req.recipient_name,
+        "role_or_category": role_or_category,
+        "amount": pay_amount,
+        "payment_method": req.payment_method or "BANK_TRANSFER",
+        "payment_date": pay_date,
+    }, actor=actor_id)
+    if post_res and post_res.get("journal_id"):
+        journal_ref = str(post_res["journal_id"])
 
     _log_workforce_audit("RECORD_PAYMENT", "WorkforcePayments", pay_id, actor_id, f"Disbursed Rs {pay_amount} to {req.recipient_name} ({pay_type}) [Journal: {journal_ref}]")
 
     return {
         "ok": True,
         "message": f"Payment of Rs {pay_amount} recorded for {req.recipient_name}.",
-        "payment": payment_record,
-        "receipt": receipt_record,
+        "payment": saved_payment,
+        "receipt": {**receipt_record, "payment_id": pay_id},
         "payment_id": pay_id,
-        "receipt_id": receipt_id,
+        "receipt_id": str((bridge_res.get("record") or {}).get("receipt_id") or ""),
         "amount": pay_amount,
         "status": "COMPLETED",
         "accounting_journal_ref": journal_ref,

@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 from typing import List
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
+from app.apps_script_bridge import apps_script_bridge
 from app.models import Expense, ExpenseCreate, ExpenseApproveRequest
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
-from app.permissions import is_manager, is_salesman
+from app.permissions import is_manager, is_salesman, require_module_action, require_manager
 from app.calculations.units import parse_currency_amount
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
@@ -12,14 +13,13 @@ router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
 @router.get("", response_model=List[Expense])
 async def list_expenses(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
-    role = current_user.get("role", "").upper()
 
     records = db.get_records("Expenses")
     expenses = []
     for r in records:
         s_user = str(r.get("salesman_user_id") or r.get("submitted_by_user_id") or "")
         sub_user = str(r.get("submitted_by_user_id") or r.get("salesman_user_id") or "")
-        if role not in ["OWNER", "OWNER_ADMIN", "PA"] and user_id not in [s_user, sub_user]:
+        if not is_manager(current_user) and user_id not in [s_user, sub_user]:
             continue
         expenses.append(Expense(
             expense_id=str(r.get("expense_id", "")),
@@ -41,17 +41,15 @@ async def list_expenses(current_user: dict = Depends(get_current_user)):
     return expenses
 
 @router.post("", response_model=Expense, dependencies=[Depends(require_sheets_connection)])
-async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_current_user)):
-    user_id = current_user.get("user_id")
+async def submit_expense(req: ExpenseCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    user_id, actor_role = require_module_action(current_user, "expenses", "create")
     salesman_id = req.salesman_user_id or user_id
     if is_salesman(current_user) and salesman_id != user_id:
         raise HTTPException(status_code=403, detail="A salesman can only submit an expense for themselves.")
-    now_iso = datetime.now(timezone.utc).isoformat()
-    expense_id = db.generate_id("Expenses")
+    now_iso_str = datetime.now(timezone.utc).isoformat()
 
     record = {
-        "expense_id": expense_id,
-        "expense_datetime": now_iso,
+        "expense_datetime": now_iso_str,
         "submitted_by_user_id": user_id,
         "salesman_user_id": salesman_id,
         "category": req.category,
@@ -67,8 +65,17 @@ async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_cu
         "related_closing_id": "",
         "notes": req.notes or "",
     }
-    if not db.append_record("Expenses", record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="The expense was not saved.")
+    res = apps_script_bridge.delegate_governed_write(
+        action="SUBMIT_EXPENSE",
+        target_tab="Expenses",
+        payload=record,
+        request=request,
+        actor_user_id=user_id,
+        actor_role=actor_role,
+        id_field="expense_id",
+        invalidate_tabs=["Expenses"],
+    )
+    expense_id = str(res.get("allocated_id") or "")
 
     db.log_audit(
         actor=user_id,
@@ -78,29 +85,40 @@ async def submit_expense(req: ExpenseCreate, current_user: dict = Depends(get_cu
         reason=f"Submitted expense ₹{req.amount} under {req.category}"
     )
 
-    return Expense(**{**record, "cash_reducing_expense": False})
+    return Expense(expense_id=expense_id, **{**record, "cash_reducing_expense": False})
 
 @router.post("/{expense_id}/approve", response_model=Expense, dependencies=[Depends(require_sheets_connection)])
-async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_user: dict = Depends(get_current_user)):
-    caller_role = current_user.get("role", "").upper()
-    if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owner or PA can approve expenses")
-
-    user_id = current_user.get("user_id")
-    now_iso = datetime.now(timezone.utc).isoformat()
+async def review_expense(expense_id: str, req: ExpenseApproveRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    user_id, actor_role = require_manager(current_user)
+    now_iso_str = datetime.now(timezone.utc).isoformat()
     status_str = "APPROVED" if req.approved else "REJECTED"
+
+    records = db.get_records("Expenses")
+    matched = next((r for r in records if str(r.get("expense_id")) == expense_id), None)
+    if not matched:
+        raise HTTPException(status_code=404, detail=f"Expense {expense_id} not found")
 
     is_cash_red = req.cash_reducing if getattr(req, "cash_reducing", None) is not None else req.approved
     updates = {
+        "expense_id": expense_id,
         "approval_status": status_str,
         "approved_by_user_id": user_id,
-        "approval_datetime": now_iso,
-        "approved_datetime": now_iso,
+        "approval_datetime": now_iso_str,
+        "approved_datetime": now_iso_str,
         "cash_reducing_expense": "true" if is_cash_red else "false",
         "notes": req.notes or "",
+        "post_accounting_journal": bool(req.approved),
     }
-    if not db.update_record("Expenses", "expense_id", expense_id, updates):
-        raise HTTPException(status_code=503, detail="The expense decision was not saved. It is still pending.")
+    apps_script_bridge.delegate_governed_write(
+        action="REVIEW_EXPENSE",
+        target_tab="Expenses",
+        payload=updates,
+        request=request,
+        actor_user_id=user_id,
+        actor_role=actor_role,
+        id_field="expense_id",
+        invalidate_tabs=["Expenses", "JournalHeaders", "JournalLines"],
+    )
 
     db.log_audit(
         actor=user_id,
@@ -110,20 +128,9 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
         reason=f"{status_str} expense {expense_id}: {req.notes or 'No remarks'}"
     )
 
-    records = db.get_records("Expenses")
-    matched = next((r for r in records if str(r.get("expense_id")) == expense_id), {})
-
-    # Double-Entry Accounting Journal Posting on Expense Approval
-    if req.approved:
-        try:
-            from app.accounting.postings import post_expense_journal
-            post_expense_journal(matched, user_id)
-        except Exception:
-            pass
-
     return Expense(
         expense_id=expense_id,
-        expense_datetime=str(matched.get("expense_datetime", now_iso)),
+        expense_datetime=str(matched.get("expense_datetime", now_iso_str)),
         submitted_by_user_id=str(matched.get("submitted_by_user_id") or matched.get("salesman_user_id") or ""),
         salesman_user_id=str(matched.get("salesman_user_id") or matched.get("submitted_by_user_id") or ""),
         category=str(matched.get("category", "")),
@@ -132,8 +139,8 @@ async def review_expense(expense_id: str, req: ExpenseApproveRequest, current_us
         receipt_link_or_file_ref=str(matched.get("receipt_link_or_file_ref") or matched.get("receipt_image_url") or ""),
         approval_status=status_str,
         approved_by_user_id=user_id,
-        approval_datetime=str(matched.get("approval_datetime") or matched.get("approved_datetime") or now_iso),
-        cash_reducing_expense=req.approved,
+        approval_datetime=now_iso_str,
+        cash_reducing_expense=bool(is_cash_red),
         related_closing_id=str(matched.get("related_closing_id", "")),
         notes=req.notes or "",
     )

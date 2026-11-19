@@ -1,9 +1,10 @@
 from typing import List, Any, Optional
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
+from app.apps_script_bridge import apps_script_bridge
 from app.models import Product, ProductCreate, ProductUpdate
 from app.sheets import db
 from app.auth import get_current_user
-from app.permissions import require_module_action
+from app.permissions import require_module_action, role_v2_of
 from app.schema_registry import VALID_RETAIL_PACK_WEIGHTS_G, DISCONTINUED_RETAIL_PACK_WEIGHTS_G
 
 router = APIRouter(prefix="/api/products", tags=["Products"])
@@ -51,8 +52,8 @@ async def list_products(current_user: dict = Depends(get_current_user)):
     return products
 
 @router.post("", response_model=Product)
-async def create_product(req: ProductCreate, current_user: dict = Depends(get_current_user)):
-    require_module_action(current_user, "catalogue", "create")
+async def create_product(req: ProductCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    actor_id, actor_role = require_module_action(current_user, "catalogue", "create")
 
     if int(req.pack_weight_g) in DISCONTINUED_RETAIL_PACK_WEIGHTS_G or (
         (req.retail_pack_only or str(req.selling_unit or "PACKET").strip().upper() == "PACKET")
@@ -63,9 +64,7 @@ async def create_product(req: ProductCreate, current_user: dict = Depends(get_cu
             detail=f"Retail SKU pack weight must be 200g, 500g, or 1000g (received {req.pack_weight_g}g).",
         )
 
-    product_id = db.generate_id("Products")
     record = {
-        "product_id": product_id,
         "sku": req.sku.strip(),
         "product_name": req.product_name.strip(),
         "category": req.category or "Papad",
@@ -78,11 +77,21 @@ async def create_product(req: ProductCreate, current_user: dict = Depends(get_cu
     }
     if req.recipe_id and req.recipe_id.strip():
         record["recipe_id"] = req.recipe_id.strip()
-    if not db.append_record("Products", record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Could not save product to persistent storage.")
+
+    res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_PRODUCT",
+        target_tab="Products",
+        payload=record,
+        request=request,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        id_field="product_id",
+        invalidate_tabs=["Products"],
+    )
+    product_id = str(res.get("allocated_id") or "")
 
     db.log_audit(
-        actor=current_user.get("user_id"),
+        actor=actor_id,
         action="CREATE_PRODUCT",
         entity_type="Products",
         entity_id=product_id,
@@ -105,8 +114,8 @@ async def create_product(req: ProductCreate, current_user: dict = Depends(get_cu
 
 @router.patch("/{product_id}", response_model=Product)
 @router.put("/{product_id}", response_model=Product)
-async def update_product(product_id: str, req: ProductUpdate, current_user: dict = Depends(get_current_user)):
-    require_module_action(current_user, "catalogue", "update")
+async def update_product(product_id: str, req: ProductUpdate, request: Request, current_user: dict = Depends(get_current_user)):
+    actor_id, actor_role = require_module_action(current_user, "catalogue", "update")
 
     records = db.get_records("Products")
     existing = next((r for r in records if str(_get_val(r, "product_id", default="")) == product_id), None)
@@ -146,14 +155,22 @@ async def update_product(product_id: str, req: ProductUpdate, current_user: dict
         updates["notes"] = req.notes.strip()
 
     if updates:
-        if not db.update_record("Products", "product_id", product_id, updates, raise_on_error=True):
-            raise HTTPException(status_code=503, detail="Could not update product in persistent storage.")
+        apps_script_bridge.delegate_governed_write(
+            action="UPDATE_PRODUCT",
+            target_tab="Products",
+            payload={"product_id": product_id, **updates},
+            request=request,
+            actor_user_id=actor_id,
+            actor_role=actor_role,
+            id_field="product_id",
+            invalidate_tabs=["Products"],
+        )
 
     merged = {**existing, **updates}
     p_name = merged.get("product_name") or product_id
 
     db.log_audit(
-        actor=current_user.get("user_id"),
+        actor=actor_id,
         action="UPDATE_PRODUCT",
         entity_type="Products",
         entity_id=product_id,

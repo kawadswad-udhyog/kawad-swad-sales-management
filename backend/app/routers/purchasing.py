@@ -15,11 +15,12 @@ import json
 import math
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.apps_script_bridge import apps_script_bridge
 from app.auth import get_current_user
-from app.permissions import is_manager, is_owner, require_manager, require_owner
+from app.permissions import is_owner, require_roles, role_v2_of
 from app.sheets import db
 from app.timeutil import now_iso, business_today
 from app.calculations.units import to_decimal, round_money, round_stock
@@ -32,19 +33,47 @@ from app.accounting.postings import (
 
 router = APIRouter(prefix="/api/purchasing", tags=["Purchasing"])
 
-PURCHASING_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN", "PA"}
+PROCUREMENT_READ_ROLES = {"OWNER_ADMIN", "PA", "PROCUREMENT", "STORE", "ACCOUNTS", "QUALITY", "AUDITOR"}
+PROCUREMENT_WRITE_ROLES = {"OWNER_ADMIN", "PA", "PROCUREMENT"}
+PROCUREMENT_RECEIVE_ROLES = {"OWNER_ADMIN", "PA", "PROCUREMENT", "STORE"}
+PROCUREMENT_BILL_ROLES = {"OWNER_ADMIN", "PA", "PROCUREMENT", "ACCOUNTS"}
+PROCUREMENT_PAYMENT_ROLES = {"OWNER_ADMIN", "ACCOUNTS"}
+
+
+def _reject_auditor(user: dict) -> None:
+    if role_v2_of(user) == "AUDITOR":
+        raise HTTPException(403, "AUDITOR role is strictly read-only.")
+
+
+def require_purchasing_read(user: dict):
+    return require_roles(user, PROCUREMENT_READ_ROLES, "Access denied. Purchasing view requires authorized ERP privileges.")
 
 
 def require_purchasing_access(user: dict):
-    if not is_manager(user):
-        raise HTTPException(403, "Access denied. Purchasing management requires Manager or PA privileges.")
-    return str(user.get("user_id", "")), str(user.get("role", "")).upper()
+    _reject_auditor(user)
+    return require_roles(user, PROCUREMENT_WRITE_ROLES, "Access denied. Purchasing management requires Owner, PA, or Procurement privileges.")
+
+
+def require_purchasing_receive(user: dict):
+    _reject_auditor(user)
+    return require_roles(user, PROCUREMENT_RECEIVE_ROLES, "Access denied. Goods receipt requires Owner, PA, Procurement, or Store privileges.")
+
+
+def require_purchasing_bill(user: dict):
+    _reject_auditor(user)
+    return require_roles(user, PROCUREMENT_BILL_ROLES, "Access denied. Recording supplier bills requires Owner, PA, Procurement, or Accounts privileges.")
+
+
+def require_purchasing_payment(user: dict):
+    _reject_auditor(user)
+    return require_roles(user, PROCUREMENT_PAYMENT_ROLES, "Access denied. Supplier payments require Owner or Accounts privileges.")
 
 
 def require_owner_access(user: dict):
+    _reject_auditor(user)
     if not is_owner(user):
         raise HTTPException(403, "Access denied. Action requires Owner privileges.")
-    return str(user.get("user_id", "")), str(user.get("role", "")).upper()
+    return str(user.get("user_id", "")), role_v2_of(user)
 
 
 # ============================================================================
@@ -164,14 +193,13 @@ class SupplierReturnCreate(BaseModel):
 
 @router.get("/suppliers")
 async def list_suppliers(user: dict = Depends(get_current_user)):
-    require_purchasing_access(user)
+    require_purchasing_read(user)
     return db.get_records("Suppliers", fresh=True)
 
 
 @router.post("/suppliers")
-async def create_supplier(req: SupplierCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_purchasing_access(user)
-    supp_id = db.generate_id("Suppliers")
+async def create_supplier(req: SupplierCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_purchasing_access(user)
     now = now_iso()
 
     # Duplicate name check
@@ -180,7 +208,6 @@ async def create_supplier(req: SupplierCreate, user: dict = Depends(get_current_
         raise HTTPException(400, f"Supplier with name '{req.supplier_name}' already exists.")
 
     row = {
-        "supplier_id": supp_id,
         "supplier_name": req.supplier_name.strip(),
         "contact_person": (req.contact_person or "").strip(),
         "mobile": (req.mobile or "").strip(),
@@ -193,19 +220,31 @@ async def create_supplier(req: SupplierCreate, user: dict = Depends(get_current_
         "created_by": actor,
         "notes": (req.notes or "").strip(),
     }
-    db.append_record("Suppliers", row, raise_on_error=True)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_SUPPLIER",
+        target_tab="Suppliers",
+        payload=row,
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="supplier_id",
+        invalidate_tabs=["Suppliers"],
+    )
+    supp_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("supplier_id") or "")
+    saved = bridge_res.get("record") or {**row, "supplier_id": supp_id}
     db.log_audit(actor, "CREATE_SUPPLIER", "Suppliers", supp_id, reason=f"Created supplier {req.supplier_name}")
-    return row
+    return saved
 
 
 @router.put("/suppliers/{supplier_id}")
-async def update_supplier(supplier_id: str, req: SupplierCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_purchasing_access(user)
+async def update_supplier(supplier_id: str, req: SupplierCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_purchasing_access(user)
     supp = next((s for s in db.get_records("Suppliers", fresh=True) if str(s.get("supplier_id")) == supplier_id), None)
     if not supp:
         raise HTTPException(404, f"Supplier {supplier_id} not found.")
 
     updates = {
+        "supplier_id": supplier_id,
         "supplier_name": req.supplier_name.strip(),
         "contact_person": (req.contact_person or "").strip(),
         "mobile": (req.mobile or "").strip(),
@@ -214,10 +253,21 @@ async def update_supplier(supplier_id: str, req: SupplierCreate, user: dict = De
         "city": (req.city or "Barwani").strip(),
         "gstin": (req.gstin or "").strip(),
         "notes": (req.notes or "").strip(),
+        "updated_by": actor,
+        "updated_at": now_iso(),
     }
-    db.update_record("Suppliers", "supplier_id", supplier_id, updates, raise_on_error=True)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="UPDATE_SUPPLIER",
+        target_tab="Suppliers",
+        payload=updates,
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="supplier_id",
+        invalidate_tabs=["Suppliers"],
+    )
     db.log_audit(actor, "UPDATE_SUPPLIER", "Suppliers", supplier_id, reason=f"Updated details for {req.supplier_name}")
-    return {**supp, **updates}
+    return bridge_res.get("record") or {**supp, **updates}
 
 
 # ============================================================================
@@ -226,7 +276,7 @@ async def update_supplier(supplier_id: str, req: SupplierCreate, user: dict = De
 
 @router.get("/orders")
 async def list_purchase_orders(user: dict = Depends(get_current_user)):
-    require_purchasing_access(user)
+    require_purchasing_read(user)
     orders = db.get_records("PurchaseOrders", fresh=True)
     items = db.get_records("PurchaseOrderItems", fresh=True)
     items_by_po = {}
@@ -245,20 +295,18 @@ async def list_purchase_orders(user: dict = Depends(get_current_user)):
 
 
 @router.post("/orders")
-async def create_purchase_order(req: PurchaseOrderCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_purchasing_access(user)
+async def create_purchase_order(req: PurchaseOrderCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_purchasing_access(user)
     suppliers = db.get_records("Suppliers", fresh=True)
     supp = next((s for s in suppliers if str(s.get("supplier_id")) == req.supplier_id), None)
     supp_name = str(supp.get("supplier_name")) if supp else (req.supplier_name or "Supplier")
 
-    po_id = db.generate_id("PurchaseOrders")
-    po_num = f"PO-{po_id.replace('PO-', '')}"
     now = now_iso()
     today = business_today()
 
     total_amt = Decimal("0")
     line_rows = []
-    for itm in req.items:
+    for idx, itm in enumerate(req.items):
         qty_dec = to_decimal(itm.ordered_quantity)
         rate_dec = to_decimal(itm.unit_price)
         base = qty_dec * rate_dec
@@ -267,8 +315,7 @@ async def create_purchase_order(req: PurchaseOrderCreate, user: dict = Depends(g
         total_amt += line_total
 
         line_rows.append({
-            "po_item_id": db.generate_id("PurchaseOrderItems"),
-            "po_id": po_id,
+            "line_index": idx,
             "raw_material_id": itm.raw_material_id,
             "material_name": itm.material_name,
             "ordered_quantity": float(round_stock(qty_dec)),
@@ -281,8 +328,6 @@ async def create_purchase_order(req: PurchaseOrderCreate, user: dict = Depends(g
         })
 
     po_record = {
-        "po_id": po_id,
-        "po_number": po_num,
         "supplier_id": req.supplier_id,
         "supplier_name": supp_name,
         "order_date": today,
@@ -296,17 +341,25 @@ async def create_purchase_order(req: PurchaseOrderCreate, user: dict = Depends(g
         "notes": (req.notes or "").strip(),
     }
 
-    db.append_record("PurchaseOrders", po_record, raise_on_error=True)
-    for lr in line_rows:
-        db.append_record("PurchaseOrderItems", lr, raise_on_error=True)
-
-    db.log_audit(actor, "CREATE_PURCHASE_ORDER", "PurchaseOrders", po_id, reason=f"Created PO {po_num} for ₹{float(total_amt):.2f}")
-    return {**po_record, "items": line_rows}
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_PURCHASE_ORDER",
+        target_tab="PurchaseOrders",
+        payload={"po": po_record, "items": line_rows},
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="po_id",
+        invalidate_tabs=["PurchaseOrders", "PurchaseOrderItems"],
+    )
+    po_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("po_id") or "")
+    saved_po = bridge_res.get("record") or {**po_record, "po_id": po_id}
+    db.log_audit(actor, "CREATE_PURCHASE_ORDER", "PurchaseOrders", po_id, reason=f"Created PO {saved_po.get('po_number', po_id)} for ₹{float(total_amt):.2f}")
+    return {**saved_po, "items": line_rows}
 
 
 @router.post("/orders/{po_id}/cancel")
-async def cancel_purchase_order(po_id: str, reason: str = Query(...), user: dict = Depends(get_current_user)):
-    actor, _ = require_owner_access(user)
+async def cancel_purchase_order(po_id: str, request: Request, reason: str = Query(...), user: dict = Depends(get_current_user)):
+    actor, actor_role = require_owner_access(user)
     orders = db.get_records("PurchaseOrders", fresh=True)
     po = next((p for p in orders if str(p.get("po_id")) == po_id), None)
     if not po:
@@ -315,10 +368,23 @@ async def cancel_purchase_order(po_id: str, reason: str = Query(...), user: dict
     if str(po.get("status")).upper() == "COMPLETED":
         raise HTTPException(400, "Cannot cancel a completed purchase order with recorded receipts.")
 
-    db.update_record("PurchaseOrders", "po_id", po_id, {
-        "status": "CANCELLED",
-        "notes": f"{po.get('notes', '')} [CANCELLED by {actor}: {reason}]".strip(),
-    }, raise_on_error=True)
+    apps_script_bridge.delegate_governed_write(
+        action="CANCEL_PURCHASE_ORDER",
+        target_tab="PurchaseOrders",
+        payload={
+            "po_id": po_id,
+            "status": "CANCELLED",
+            "reason": reason,
+            "notes": f"{po.get('notes', '')} [CANCELLED by {actor}: {reason}]".strip(),
+            "cancelled_by": actor,
+            "cancelled_at": now_iso(),
+        },
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="po_id",
+        invalidate_tabs=["PurchaseOrders"],
+    )
 
     db.log_audit(actor, "CANCEL_PURCHASE_ORDER", "PurchaseOrders", po_id, reason=reason)
     return {"ok": True, "po_id": po_id, "status": "CANCELLED"}
@@ -330,7 +396,7 @@ async def cancel_purchase_order(po_id: str, reason: str = Query(...), user: dict
 
 @router.get("/receipts")
 async def list_goods_receipts(user: dict = Depends(get_current_user)):
-    require_purchasing_access(user)
+    require_purchasing_read(user)
     receipts = db.get_records("GoodsReceipts", fresh=True)
     items = db.get_records("GoodsReceiptItems", fresh=True)
     items_by_grn = {}
@@ -349,31 +415,33 @@ async def list_goods_receipts(user: dict = Depends(get_current_user)):
 
 
 @router.post("/receipts")
-async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get_current_user)):
+async def create_goods_receipt(req: GoodsReceiptCreate, request: Request, user: dict = Depends(get_current_user)):
     """
-    Records an authorized Goods Receipt Note (GRN):
+    Records an authorized Goods Receipt Note (GRN) atomically via Apps Script bridge:
     1. Distinguishes delivered, accepted, and rejected quantities.
-    2. Appends accepted stock to RawMaterialLedger (movement_type=PURCHASE_RECEIPT), immediately updating stock.
-    3. Updates received_quantity on PurchaseOrderItems if PO is linked.
-    4. Automatically posts balanced double-entry accounting journal for accepted materials.
+    2. Delegates GoodsReceipts + GoodsReceiptItems + RawMaterialLedger + PO received_quantity updates.
+    3. Posts balanced double-entry accounting journal for accepted materials via Apps Script bridge.
     """
-    actor, _ = require_purchasing_access(user)
+    actor, actor_role = require_purchasing_receive(user)
     suppliers = db.get_records("Suppliers", fresh=True)
     supp = next((s for s in suppliers if str(s.get("supplier_id")) == req.supplier_id), None)
     supp_name = str(supp.get("supplier_name")) if supp else (req.supplier_name or "Supplier")
 
-    receipt_id = db.generate_id("GoodsReceipts")
-    grn_number = f"GRN-{receipt_id.replace('GRN-', '')}"
     now = now_iso()
     today = business_today()
     receipt_date = req.receipt_date or today
+
+    po_items = db.get_records("PurchaseOrderItems", fresh=True)
+    po_items_by_id = {str(p.get("po_item_id", "")).strip(): p for p in po_items}
 
     tot_accepted = 0.0
     tot_rejected = 0.0
     item_rows = []
     ledger_rows = []
+    po_item_updates = []
+    journal_candidates = []
 
-    for itm in req.items:
+    for idx, itm in enumerate(req.items):
         deliv = float(itm.delivered_quantity)
         acc = float(itm.accepted_quantity)
         rej = float(itm.rejected_quantity)
@@ -383,12 +451,9 @@ async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get
         tot_accepted += acc
         tot_rejected += rej
 
-        # 1. Create Stock Movement in RawMaterialLedger for accepted quantity
-        stock_mvt_id = ""
         if acc > 0:
-            stock_mvt_id = db.generate_id("RawMaterialLedger")
-            ledger_row = {
-                "raw_material_txn_id": stock_mvt_id,
+            ledger_rows.append({
+                "line_index": idx,
                 "txn_datetime": receipt_date,
                 "material_name": itm.material_name,
                 "raw_material_id": itm.raw_material_id,
@@ -397,44 +462,33 @@ async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get
                 "unit": itm.unit,
                 "rate_per_unit": itm.unit_rate,
                 "production_id": "",
-                "issue_txn_id": grn_number,
                 "created_by": actor,
-                "notes": f"GRN {grn_number} from {supp_name} (Inv: {req.invoice_reference})",
-            }
-            db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True)
-            ledger_rows.append(ledger_row)
+                "notes": f"GRN from {supp_name} (Inv: {req.invoice_reference})",
+            })
+            journal_candidates.append({
+                "line_index": idx,
+                "quantity": acc,
+                "purchase_rate": itm.unit_rate,
+                "freight_amount": 0.0,
+                "gst_amount": acc * itm.unit_rate * 0.05,
+                "gst_treatment": "RECOVERABLE_ITC",
+                "material_name": itm.material_name,
+                "supplier_name": supp_name,
+                "invoice_number": req.invoice_reference,
+                "receipt_date": receipt_date,
+            })
 
-            # Post double-entry journal voucher for inventory receipt
-            try:
-                receipt_dict = {
-                    "raw_material_txn_id": stock_mvt_id,
-                    "quantity": acc,
-                    "purchase_rate": itm.unit_rate,
-                    "freight_amount": 0.0,
-                    "gst_amount": acc * itm.unit_rate * 0.05,
-                    "gst_treatment": "RECOVERABLE_ITC",
-                    "material_name": itm.material_name,
-                    "supplier_name": supp_name,
-                    "invoice_number": req.invoice_reference,
-                    "receipt_date": receipt_date,
-                }
-                post_receipt_journal(receipt_dict, actor=actor)
-            except Exception as acct_err:
-                pass  # Non-fatal accounting posting
-
-        # 2. Update PO Item received quantity if linked
         if itm.po_item_id:
-            po_items = db.get_records("PurchaseOrderItems", fresh=True)
-            po_itm = next((p for p in po_items if str(p.get("po_item_id")) == itm.po_item_id), None)
+            po_itm = po_items_by_id.get(str(itm.po_item_id).strip())
             if po_itm:
                 old_recv = float(po_itm.get("received_quantity", 0) or 0)
-                db.update_record("PurchaseOrderItems", "po_item_id", itm.po_item_id, {
+                po_item_updates.append({
+                    "po_item_id": itm.po_item_id,
                     "received_quantity": old_recv + acc,
                 })
 
         item_rows.append({
-            "receipt_item_id": db.generate_id("GoodsReceiptItems"),
-            "receipt_id": receipt_id,
+            "line_index": idx,
             "po_item_id": itm.po_item_id or "",
             "raw_material_id": itm.raw_material_id,
             "material_name": itm.material_name,
@@ -444,13 +498,10 @@ async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get
             "unit": itm.unit,
             "unit_rate": itm.unit_rate,
             "rejection_reason": (itm.rejection_reason or "").strip(),
-            "stock_movement_id": stock_mvt_id,
             "notes": (itm.notes or "").strip(),
         })
 
     grn_record = {
-        "receipt_id": receipt_id,
-        "receipt_number": grn_number,
         "po_id": req.po_id or "",
         "supplier_id": req.supplier_id,
         "supplier_name": supp_name,
@@ -466,9 +517,31 @@ async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get
         "notes": (req.notes or "").strip(),
     }
 
-    db.append_record("GoodsReceipts", grn_record, raise_on_error=True)
-    for ir in item_rows:
-        db.append_record("GoodsReceiptItems", ir, raise_on_error=True)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="RECEIVE_GOODS",
+        target_tab="GoodsReceipts",
+        payload={
+            "grn": grn_record,
+            "items": item_rows,
+            "raw_material_ledger_rows": ledger_rows,
+            "po_item_updates": po_item_updates,
+        },
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="receipt_id",
+        invalidate_tabs=["GoodsReceipts", "GoodsReceiptItems", "RawMaterialLedger", "PurchaseOrderItems"],
+    )
+    receipt_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("receipt_id") or "")
+    saved_grn = bridge_res.get("record") or {**grn_record, "receipt_id": receipt_id}
+    grn_number = str(saved_grn.get("receipt_number") or receipt_id)
+
+    for jc in journal_candidates:
+        receipt_dict = {
+            **jc,
+            "raw_material_txn_id": f"{receipt_id}#L{jc['line_index']}",
+        }
+        post_receipt_journal(receipt_dict, actor=actor)
 
     db.log_audit(
         actor,
@@ -477,7 +550,7 @@ async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get
         receipt_id,
         reason=f"Received GRN {grn_number} ({tot_accepted} accepted, {tot_rejected} rejected) from {supp_name}",
     )
-    return {**grn_record, "items": item_rows}
+    return {**saved_grn, "items": item_rows}
 
 
 # ============================================================================
@@ -486,15 +559,15 @@ async def create_goods_receipt(req: GoodsReceiptCreate, user: dict = Depends(get
 
 @router.get("/bills")
 async def list_supplier_bills(user: dict = Depends(get_current_user)):
-    require_purchasing_access(user)
+    require_purchasing_read(user)
     bills = db.get_records("SupplierBills", fresh=True)
     bills.sort(key=lambda x: str(x.get("bill_date", "")), reverse=True)
     return bills
 
 
 @router.post("/bills")
-async def create_supplier_bill(req: SupplierBillCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_purchasing_access(user)
+async def create_supplier_bill(req: SupplierBillCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_purchasing_bill(user)
     suppliers = db.get_records("Suppliers", fresh=True)
     supp = next((s for s in suppliers if str(s.get("supplier_id")) == req.supplier_id), None)
     supp_name = str(supp.get("supplier_name")) if supp else (req.supplier_name or "Supplier")
@@ -505,12 +578,10 @@ async def create_supplier_bill(req: SupplierBillCreate, user: dict = Depends(get
     if dup:
         raise HTTPException(409, f"Supplier bill '{req.bill_number}' for {supp_name} has already been recorded.")
 
-    bill_id = db.generate_id("SupplierBills")
     now = now_iso()
     today = business_today()
 
     bill_row = {
-        "bill_id": bill_id,
         "bill_number": req.bill_number.strip(),
         "supplier_id": req.supplier_id,
         "supplier_name": supp_name,
@@ -529,9 +600,20 @@ async def create_supplier_bill(req: SupplierBillCreate, user: dict = Depends(get
         "created_at": now,
         "notes": (req.notes or "").strip(),
     }
-    db.append_record("SupplierBills", bill_row, raise_on_error=True)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="RECORD_SUPPLIER_BILL",
+        target_tab="SupplierBills",
+        payload=bill_row,
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="bill_id",
+        invalidate_tabs=["SupplierBills"],
+    )
+    bill_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("bill_id") or "")
+    saved_bill = bridge_res.get("record") or {**bill_row, "bill_id": bill_id}
     db.log_audit(actor, "RECORD_SUPPLIER_BILL", "SupplierBills", bill_id, reason=f"Recorded bill {req.bill_number} from {supp_name} for ₹{req.total_amount:.2f}")
-    return bill_row
+    return saved_bill
 
 
 # ============================================================================
@@ -697,15 +779,15 @@ def _idemp_lock_token(key: str) -> str:
 
 @router.get("/payments")
 async def list_supplier_payments(user: dict = Depends(get_current_user)):
-    require_purchasing_access(user)
+    require_purchasing_read(user)
     payments = [_enrich_payment_row(p) for p in db.get_records("SupplierPayments", fresh=True)]
     payments.sort(key=lambda x: str(x.get("payment_date", "")), reverse=True)
     return payments
 
 
 @router.post("/payments")
-async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner_access(user)
+async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_purchasing_payment(user)
 
     if not math.isfinite(req.amount) or req.amount <= 0:
         raise HTTPException(400, "Payment amount must be greater than zero.")
@@ -798,9 +880,6 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
                         "is_replay": True,
                     }
 
-        # Phase 2 Reference integrity (evaluated for new payments or incomplete recoveries):
-        # - CASH may leave external reference blank (""), never generate synthetic PAY-xxxxxx.
-        # - Non-cash modes require an actual bank/UPI/cheque reference number.
         if clean_method != "CASH" and len(clean_ref) < 2:
             raise HTTPException(
                 400,
@@ -835,7 +914,6 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
                     f"Bill {clean_bill_id} belongs to supplier {bill.get('supplier_id')}, not {clean_supplier_id}.",
                 )
             cur_bal = round(float(bill.get("balance_amount", 0) or 0), 2)
-            # Only enforce remaining balance on a brand-new attempt (not recovering an incomplete attempt that may already have updated the bill)
             spay_marker_present = existing_pay is not None and f"[spay:{existing_pay.get('payment_id')}]" in str(bill.get("notes", ""))
             if not spay_marker_present and float(req_amount) > cur_bal + 0.05:
                 raise HTTPException(
@@ -844,81 +922,74 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
                 )
 
         now = now_iso()
+        allocs_initial = (
+            [
+                {
+                    "bill_id": clean_bill_id,
+                    "bill_number": str(bill.get("bill_number", "")) if bill else "",
+                    "amount": float(req_amount),
+                    "allocated_at": now,
+                    "allocated_by": actor,
+                }
+            ]
+            if clean_bill_id
+            else []
+        )
+        pay_row = {
+            "bill_id": clean_bill_id,
+            "supplier_id": clean_supplier_id,
+            "supplier_name": supp_name,
+            "payment_date": payment_date_val,
+            "amount": req_amount,
+            "payment_method": clean_method,
+            "reference_number": clean_ref,
+            "status": "PAID",
+            "paid_by": actor,
+            "created_at": now,
+            "notes": (req.notes or "").strip(),
+            "payment_type": pay_type,
+            "allocated_amount": float(req_amount) if clean_bill_id else 0.0,
+            "unallocated_amount": 0.0 if clean_bill_id else float(req_amount),
+            "allocations_json": json.dumps(allocs_initial),
+            "idempotency_key": clean_idemp_key,
+        }
 
-        if existing_pay:
-            pay_id = str(existing_pay.get("payment_id", "")).strip()
-            pay_row = dict(existing_pay)
-        else:
-            pay_id = db.generate_id("SupplierPayments")
-            allocs_initial = (
-                [
-                    {
-                        "bill_id": clean_bill_id,
-                        "bill_number": str(bill.get("bill_number", "")) if bill else "",
-                        "amount": float(req_amount),
-                        "allocated_at": now,
-                        "allocated_by": actor,
-                    }
-                ]
-                if clean_bill_id
-                else []
-            )
-            pay_row = {
-                "payment_id": pay_id,
-                "bill_id": clean_bill_id,
-                "supplier_id": clean_supplier_id,
-                "supplier_name": supp_name,
-                "payment_date": payment_date_val,
-                "amount": req_amount,
-                "payment_method": clean_method,
-                "reference_number": clean_ref,
-                "status": "INCOMPLETE",
-                "paid_by": actor,
-                "created_at": now,
-                "notes": (req.notes or "").strip(),
-                "payment_type": pay_type,
-                "allocated_amount": float(req_amount) if clean_bill_id else 0.0,
-                "unallocated_amount": 0.0 if clean_bill_id else float(req_amount),
-                "allocations_json": json.dumps(allocs_initial),
-                "idempotency_key": clean_idemp_key,
-            }
-            db.append_record("SupplierPayments", pay_row, raise_on_error=True)
-
-        # Apply bill deduction once (guarded by [spay:<pay_id>] marker for crash recovery)
         new_bal = 0.0
         new_status = pay_type
+        bill_update_payload = None
         if bill is not None:
-            bill_notes = str(bill.get("notes", "") or "")
-            spay_tag = f"[spay:{pay_id}]"
-            if spay_tag in bill_notes:
-                new_bal = round(float(bill.get("balance_amount", 0) or 0), 2)
-                new_status = str(bill.get("payment_status", "PARTIALLY_PAID"))
-            else:
-                old_paid = float(bill.get("paid_amount", 0) or 0)
-                new_paid = round(old_paid + float(req_amount), 2)
-                tot_amt = float(bill.get("total_amount", 0) or 0)
-                new_bal = max(0.0, round(tot_amt - new_paid, 2))
-                new_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
-                updated_notes = f"{bill_notes} {spay_tag}".strip()
-                db.update_record(
-                    "SupplierBills",
-                    "bill_id",
-                    clean_bill_id,
-                    {
-                        "paid_amount": new_paid,
-                        "balance_amount": new_bal,
-                        "payment_status": new_status,
-                        "notes": updated_notes,
-                    },
-                    raise_on_error=True,
-                )
+            old_paid = float(bill.get("paid_amount", 0) or 0)
+            new_paid = round(old_paid + float(req_amount), 2)
+            tot_amt = float(bill.get("total_amount", 0) or 0)
+            new_bal = max(0.0, round(tot_amt - new_paid, 2))
+            new_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
+            bill_update_payload = {
+                "bill_id": clean_bill_id,
+                "paid_amount": new_paid,
+                "balance_amount": new_bal,
+                "payment_status": new_status,
+                "existing_notes": str(bill.get("notes", "") or ""),
+            }
 
-        # Post double-entry accounting journal (fail-closed, idempotent by SUPPLIER_PAYMENT:<pay_id>)
-        post_supplier_payment_journal(pay_row, actor=actor)
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="RECORD_SUPPLIER_PAYMENT",
+            target_tab="SupplierPayments",
+            payload={
+                "payment": pay_row,
+                "bill_update": bill_update_payload,
+            },
+            actor_user_id=actor,
+            actor_role=actor_role,
+            nonce=clean_idemp_key or None,
+            request=request,
+            id_field="payment_id",
+            invalidate_tabs=["SupplierPayments", "SupplierBills"],
+        )
+        pay_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("payment_id") or "")
+        saved_pay = bridge_res.get("record") or {**pay_row, "payment_id": pay_id}
 
-        # Mark payment record PAID after all downstream effects succeed
-        db.update_record("SupplierPayments", "payment_id", pay_id, {"status": "PAID"}, raise_on_error=True)
-        pay_row["status"] = "PAID"
+        # Post double-entry accounting journal (fail-closed via bridge)
+        post_supplier_payment_journal(saved_pay, actor=actor)
 
         audit_target = f"bill {bill.get('bill_number')}" if bill else "on-account advance"
         db.log_audit(
@@ -930,7 +1001,7 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
         )
         return {
             "ok": True,
-            "payment": _enrich_payment_row(pay_row),
+            "payment": _enrich_payment_row(saved_pay),
             "remaining_balance": new_bal,
             "bill_status": new_status,
             "payment_type": pay_type,
@@ -942,14 +1013,13 @@ async def record_supplier_payment(req: SupplierPaymentCreate, user: dict = Depen
 async def apply_supplier_advance_to_bill(
     payment_id: str,
     req: SupplierAdvanceApplyRequest,
+    request: Request,
     user: dict = Depends(get_current_user),
 ):
     """
-    Reconcile an existing On-Account / Advance supplier payment against a supplier bill.
-    Updates SupplierBills paid/balance amounts and SupplierPayments allocation tracking
-    WITHOUT creating a duplicate payment or double-posting accounting vouchers.
+    Reconcile an existing On-Account / Advance supplier payment against a supplier bill atomically via Apps Script bridge.
     """
-    actor, _ = require_owner_access(user)
+    actor, actor_role = require_purchasing_payment(user)
     clean_pay_id = str(payment_id or "").strip()
     clean_bill_id = str(req.bill_id or "").strip()
     clean_idemp_key = str(req.idempotency_key or "").strip()
@@ -959,7 +1029,6 @@ async def apply_supplier_advance_to_bill(
     if req.amount is not None and (not math.isfinite(req.amount) or req.amount <= 0):
         raise HTTPException(400, "Applied amount must be greater than zero.")
 
-    # Quick lookup to identify supplier_id for consistent lock ordering
     pre_payments = db.get_records("SupplierPayments", fresh=True)
     pre_pay = next((p for p in pre_payments if str(p.get("payment_id", "")).strip() == clean_pay_id), None)
     if not pre_pay:
@@ -994,7 +1063,6 @@ async def apply_supplier_advance_to_bill(
         enriched = _enrich_payment_row(pay_raw)
         allocs = list(enriched["allocations"])
 
-        # Idempotent replay guard with Decimal-safe comparison
         if clean_idemp_key:
             prior = next((a for a in allocs if str(a.get("idempotency_key", "")).strip() == clean_idemp_key), None)
             if prior:
@@ -1044,6 +1112,7 @@ async def apply_supplier_advance_to_bill(
         now = now_iso()
         alloc_tag = f"[spay-alloc:{clean_pay_id}:{clean_idemp_key or len(allocs) + 1}]"
         bill_notes = str(bill.get("notes", "") or "")
+        bill_updates: Dict[str, Any] = {}
         if alloc_tag not in bill_notes:
             old_paid = float(bill.get("paid_amount", 0) or 0)
             new_paid = round(old_paid + apply_amt, 2)
@@ -1051,13 +1120,12 @@ async def apply_supplier_advance_to_bill(
             new_bal = max(0.0, round(tot_amt - new_paid, 2))
             new_bill_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
             bill_updates = {
+                "bill_id": clean_bill_id,
                 "paid_amount": new_paid,
                 "balance_amount": new_bal,
                 "payment_status": new_bill_status,
                 "notes": f"{bill_notes} {alloc_tag}".strip(),
             }
-            db.update_record("SupplierBills", "bill_id", clean_bill_id, bill_updates, raise_on_error=True)
-            bill = {**bill, **bill_updates}
 
         new_alloc_entry = {
             "bill_id": clean_bill_id,
@@ -1072,11 +1140,29 @@ async def apply_supplier_advance_to_bill(
         new_allocated = round(float(enriched["allocated_amount"]) + apply_amt, 2)
         new_unallocated = max(0.0, round(float(enriched["amount"]) - new_allocated, 2))
         pay_updates = {
+            "payment_id": clean_pay_id,
             "allocated_amount": new_allocated,
             "unallocated_amount": new_unallocated,
             "allocations_json": json.dumps(allocs),
         }
-        db.update_record("SupplierPayments", "payment_id", clean_pay_id, pay_updates, raise_on_error=True)
+
+        apps_script_bridge.delegate_governed_write(
+            action="APPLY_SUPPLIER_ADVANCE",
+            target_tab="SupplierPayments",
+            payload={
+                "payment_update": pay_updates,
+                "bill_update": bill_updates or None,
+                "allocation": new_alloc_entry,
+            },
+            actor_user_id=actor,
+            actor_role=actor_role,
+            nonce=clean_idemp_key or None,
+            request=request,
+            id_field="payment_id",
+            invalidate_tabs=["SupplierPayments", "SupplierBills"],
+        )
+
+        updated_bill = {**bill, **bill_updates} if bill_updates else bill
         updated_pay = _enrich_payment_row({**pay_raw, **pay_updates})
 
         db.log_audit(
@@ -1089,7 +1175,7 @@ async def apply_supplier_advance_to_bill(
         return {
             "ok": True,
             "payment": updated_pay,
-            "bill": bill,
+            "bill": updated_bill,
             "applied_amount": apply_amt,
             "remaining_advance": new_unallocated,
             "is_replay": False,
@@ -1102,7 +1188,7 @@ async def apply_supplier_advance_to_bill(
 
 @router.get("/returns")
 async def list_supplier_returns(user: dict = Depends(get_current_user)):
-    require_purchasing_access(user)
+    require_purchasing_read(user)
     returns = db.get_records("SupplierReturns", fresh=True)
     items = db.get_records("SupplierReturnItems", fresh=True)
     items_by_ret = {}
@@ -1121,37 +1207,33 @@ async def list_supplier_returns(user: dict = Depends(get_current_user)):
 
 
 @router.post("/returns")
-async def create_supplier_return(req: SupplierReturnCreate, user: dict = Depends(get_current_user)):
+async def create_supplier_return(req: SupplierReturnCreate, request: Request, user: dict = Depends(get_current_user)):
     """
-    Supplier Return (Debit Note):
-    1. Validates return quantity against raw material inventory.
-    2. Deducts stock from RawMaterialLedger with movement_type=SUPPLIER_RETURN.
-    3. Posts accounting debit note reversing inventory and payable.
+    Supplier Return (Debit Note) atomically delegated via Apps Script bridge:
+    1. Deducts stock from RawMaterialLedger with movement_type=SUPPLIER_RETURN.
+    2. Posts accounting debit note reversing inventory and payable via Apps Script bridge.
     """
-    actor, _ = require_owner_access(user)
+    actor, actor_role = require_owner_access(user)
     suppliers = db.get_records("Suppliers", fresh=True)
     supp = next((s for s in suppliers if str(s.get("supplier_id")) == req.supplier_id), None)
     supp_name = str(supp.get("supplier_name")) if supp else (req.supplier_name or "Supplier")
 
-    return_id = db.generate_id("SupplierReturns")
-    ret_num = f"DN-{return_id.replace('SRET-', '')}"
     now = now_iso()
     today = business_today()
     ret_date = req.return_date or today
 
     total_return_val = Decimal("0")
     item_rows = []
+    ledger_rows = []
 
-    for itm in req.items:
+    for idx, itm in enumerate(req.items):
         qty_dec = to_decimal(itm.quantity)
         rate_dec = to_decimal(itm.unit_rate)
         val = qty_dec * rate_dec
         total_return_val += val
 
-        # Deduct stock from RawMaterialLedger
-        mvt_id = db.generate_id("RawMaterialLedger")
-        ledger_row = {
-            "raw_material_txn_id": mvt_id,
+        ledger_rows.append({
+            "line_index": idx,
             "txn_datetime": ret_date,
             "material_name": itm.material_name,
             "raw_material_id": itm.raw_material_id,
@@ -1160,15 +1242,12 @@ async def create_supplier_return(req: SupplierReturnCreate, user: dict = Depends
             "unit": itm.unit,
             "rate_per_unit": float(round_money(rate_dec)),
             "production_id": "",
-            "issue_txn_id": ret_num,
             "created_by": actor,
-            "notes": f"Debit Note {ret_num} return to {supp_name}: {itm.reason}",
-        }
-        db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True)
+            "notes": f"Debit Note return to {supp_name}: {itm.reason}",
+        })
 
         item_rows.append({
-            "return_item_id": db.generate_id("SupplierReturnItems"),
-            "return_id": return_id,
+            "line_index": idx,
             "raw_material_id": itm.raw_material_id,
             "material_name": itm.material_name,
             "quantity": float(round_stock(qty_dec)),
@@ -1176,13 +1255,10 @@ async def create_supplier_return(req: SupplierReturnCreate, user: dict = Depends
             "unit_rate": float(round_money(rate_dec)),
             "return_amount": float(round_money(val)),
             "reason": itm.reason,
-            "stock_movement_id": mvt_id,
             "notes": (itm.notes or "").strip(),
         })
 
     ret_record = {
-        "return_id": return_id,
-        "return_number": ret_num,
         "receipt_id": req.receipt_id or "",
         "supplier_id": req.supplier_id,
         "supplier_name": supp_name,
@@ -1195,26 +1271,36 @@ async def create_supplier_return(req: SupplierReturnCreate, user: dict = Depends
         "notes": (req.notes or "").strip(),
     }
 
-    db.append_record("SupplierReturns", ret_record, raise_on_error=True)
-    for ir in item_rows:
-        db.append_record("SupplierReturnItems", ir, raise_on_error=True)
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_SUPPLIER_RETURN",
+        target_tab="SupplierReturns",
+        payload={
+            "supplier_return": ret_record,
+            "items": item_rows,
+            "raw_material_ledger_rows": ledger_rows,
+        },
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="return_id",
+        invalidate_tabs=["SupplierReturns", "SupplierReturnItems", "RawMaterialLedger"],
+    )
+    return_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("return_id") or "")
+    saved_ret = bridge_res.get("record") or {**ret_record, "return_id": return_id}
+    ret_num = str(saved_ret.get("return_number") or return_id)
 
-    # Post accounting debit note
-    try:
-        ret_dict = {
-            "return_id": return_id,
-            "return_amount": float(total_return_val),
-            "supplier_name": supp_name,
-            "material_name": item_rows[0]["material_name"] if item_rows else "Material",
-            "tax_amount": float(total_return_val * Decimal("0.05")),
-            "return_date": ret_date,
-        }
-        post_supplier_return_journal(ret_dict, actor=actor)
-    except Exception as acct_err:
-        pass
+    ret_dict = {
+        "return_id": return_id,
+        "return_amount": float(total_return_val),
+        "supplier_name": supp_name,
+        "material_name": item_rows[0]["material_name"] if item_rows else "Material",
+        "tax_amount": float(total_return_val * Decimal("0.05")),
+        "return_date": ret_date,
+    }
+    post_supplier_return_journal(ret_dict, actor=actor)
 
     db.log_audit(actor, "CREATE_SUPPLIER_RETURN", "SupplierReturns", return_id, reason=f"Debit note {ret_num} to {supp_name} for ₹{float(total_return_val):.2f}")
-    return {**ret_record, "items": item_rows}
+    return {**saved_ret, "items": item_rows}
 
 
 # ============================================================================
@@ -1223,7 +1309,7 @@ async def create_supplier_return(req: SupplierReturnCreate, user: dict = Depends
 
 @router.get("/summary")
 async def purchasing_summary(user: dict = Depends(get_current_user)):
-    require_purchasing_access(user)
+    require_purchasing_read(user)
     suppliers = db.get_records("Suppliers", fresh=True)
     orders = db.get_records("PurchaseOrders", fresh=True)
     receipts = db.get_records("GoodsReceipts", fresh=True)

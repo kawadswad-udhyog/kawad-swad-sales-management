@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { apiRequest, getApiBaseUrl } from '../services/api';
+import { resolveCanonical12Role } from '../utils/permissions';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { StatCard } from '../components/common/StatCard';
@@ -99,8 +100,8 @@ export const ApprovalsView: React.FC = () => {
     durationMs: 0,
   });
 
-  // Check if current user has authorized approval rights (Owner, Owner Admin, or System Admin)
-  const canDecide = ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(currentUser?.role?.toUpperCase() || '');
+  // Check if current user has authorized approval rights (OWNER_ADMIN only; PA and AUDITOR cannot approve)
+  const canDecide = resolveCanonical12Role(currentUser?.role) === 'OWNER_ADMIN';
 
   const toggleExpand = (id: string) => {
     setExpandedPayloadIds((prev) => {
@@ -1428,7 +1429,7 @@ export const ApprovalsView: React.FC = () => {
                           canDecide ? (
                             <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
                               <button
-                                disabled={isBusy || (!isGoogleSheetsConnected && persistentWritesEnabled) || !bId}
+                                disabled={isBusy || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                                 onClick={() => (fromRequest ? handleDecideUserRequest(fromRequest, 'APPROVED') : handleApproveBatch(bId))}
                                 style={{
                                   padding: '5px 11px',
@@ -1445,7 +1446,7 @@ export const ApprovalsView: React.FC = () => {
                                 {isBusy ? 'Saving…' : 'Approve'}
                               </button>
                               <button
-                                disabled={isBusy || (!isGoogleSheetsConnected && persistentWritesEnabled) || !bId}
+                                disabled={isBusy || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                                 onClick={() => (fromRequest ? handleDecideUserRequest(fromRequest, 'REJECTED') : handleRejectBatch(bId))}
                                 style={{
                                   padding: '5px 10px',
@@ -1634,7 +1635,7 @@ export const ApprovalsView: React.FC = () => {
                             canDecide ? (
                               <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
                                 <button
-                                  disabled={isBusy || (!isGoogleSheetsConnected && persistentWritesEnabled)}
+                                  disabled={isBusy || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled}
                                   onClick={() => handleDecideUserRequest(r.request_id, 'APPROVED')}
                                   style={{
                                     padding: '5px 11px',
@@ -1651,7 +1652,7 @@ export const ApprovalsView: React.FC = () => {
                                   {isBusy ? 'Saving…' : 'Approve'}
                                 </button>
                                 <button
-                                  disabled={isBusy || (!isGoogleSheetsConnected && persistentWritesEnabled)}
+                                  disabled={isBusy || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled}
                                   onClick={() => handleDecideUserRequest(r.request_id, 'REJECTED')}
                                   style={{
                                     padding: '5px 10px',

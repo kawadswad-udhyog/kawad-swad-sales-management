@@ -233,6 +233,7 @@ export interface StoreContextType {
   isRefreshing: boolean;
   isGoogleSheetsConnected: boolean;
   persistentWritesEnabled: boolean;
+  appsScriptBridgeConfigured: boolean;
   connectionError: string | null;
   checkHealth: () => Promise<{ backendConnected: boolean; sheetsConnected: boolean; persistentWrites: boolean; error?: string }>;
   reconnectGoogleSheets: () => Promise<{ success: boolean; message: string }>;
@@ -278,6 +279,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [capabilities, setCapabilities] = useState<ErpCapabilitiesPayload | null>(null);
   const [isGoogleSheetsConnected, setIsGoogleSheetsConnected] = useState<boolean>(false);
   const [persistentWritesEnabled, setPersistentWritesEnabled] = useState<boolean>(false);
+  const [appsScriptBridgeConfigured, setAppsScriptBridgeConfigured] = useState<boolean>(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const clearSyncError = () => setSyncError(null);
@@ -308,6 +310,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     try {
       const caps = await fetchV2Capabilities();
       setCapabilities(caps);
+      setAppsScriptBridgeConfigured(Boolean(caps.apps_script_bridge_configured));
     } catch {
       // Non-fatal if user role or backend unavailable
     }
@@ -326,6 +329,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setIsBackendConnected(isOnline);
     setIsGoogleSheetsConnected(sheetsOk);
     setPersistentWritesEnabled(writesOk);
+    if (typeof res.apps_script_bridge_configured === 'boolean') {
+      setAppsScriptBridgeConfigured(res.apps_script_bridge_configured);
+    }
     setConnectionError(res.last_connection_error || null);
     if (!isOnline) {
       setStorageStatus('BACKEND_UNAVAILABLE');
@@ -405,6 +411,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     setCurrentUser(null);
     setCapabilities(null);
+    setAppsScriptBridgeConfigured(false);
     clearBusinessState();
   }, [clearBusinessState]);
 
@@ -1515,6 +1522,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isRefreshing,
         isGoogleSheetsConnected,
         persistentWritesEnabled,
+        appsScriptBridgeConfigured,
         connectionError,
         checkHealth,
         reconnectGoogleSheets,

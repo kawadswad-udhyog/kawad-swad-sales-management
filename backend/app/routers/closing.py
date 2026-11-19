@@ -1,10 +1,11 @@
 import logging
 from typing import List
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
+from app.apps_script_bridge import apps_script_bridge
 from app.models import DailyClosing, DailyClosingCreate, ClosingReviewRequest
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
-from app.permissions import is_manager
+from app.permissions import is_manager, require_module_action, require_manager
 from app.stock_math import salesman_available
 from app.timeutil import business_today, business_date_of, now_iso
 from app.calculations.units import parse_currency_amount
@@ -40,7 +41,6 @@ def _closing_from(record: dict) -> DailyClosing:
 @router.get("", response_model=List[DailyClosing])
 async def list_daily_closings(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
-    role = current_user.get("role", "").upper()
 
     records = db.get_records("DailyClosing")
     closings = []
@@ -53,8 +53,8 @@ async def list_daily_closings(current_user: dict = Depends(get_current_user)):
     return closings
 
 @router.post("", response_model=DailyClosing, dependencies=[Depends(require_sheets_connection)])
-async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Depends(get_current_user)):
-    user_id = current_user.get("user_id")
+async def submit_daily_closing(req: DailyClosingCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    user_id, actor_role = require_module_action(current_user, "sales", "create")
     today_str = business_today()
     stamped = now_iso()
     idem = str(getattr(req, "idempotency_key", "") or "").strip()
@@ -63,30 +63,6 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
     if idem:
         prior = next((r for r in existing_rows if str(r.get("idempotency_key", "")) == idem), None)
         if prior:
-            prior_closing_id = str(prior.get("closing_id", ""))
-            # Recover any pending expense links for this closing session
-            try:
-                import json
-                pending_links = [
-                    row for row in db.get_records("IncompleteTransactions", fresh=True)
-                    if str(row.get("transaction_type", "")) == "CLOSING_EXPENSE_LINK_PENDING"
-                    and str(row.get("status", "")).upper() == "LINK_FAILED"
-                ]
-                for plink in pending_links:
-                    try:
-                        p_data = json.loads(plink.get("payload_json", "{}"))
-                        if str(p_data.get("closing_id", "")) == prior_closing_id:
-                            target_exp_id = str(p_data.get("expense_id", ""))
-                            if target_exp_id and db.update_record("Expenses", "expense_id", target_exp_id, {"related_closing_id": prior_closing_id}):
-                                db.update_record("IncompleteTransactions", "transaction_id", plink["transaction_id"], {
-                                    "status": "RESOLVED",
-                                    "resolved_at": now_iso(),
-                                    "resolved_by": user_id,
-                                })
-                    except Exception as sub_rec_err:
-                        logger.warning("Error resolving pending expense link on retry: %s", sub_rec_err)
-            except Exception as rec_err:
-                logger.warning("Could not reconcile pending expense links for closing %s: %s", prior_closing_id, rec_err)
             return _closing_from(prior)
     if any(str(r.get("salesman_user_id")) == user_id and str(r.get("closing_date")) == today_str and str(r.get("closing_status", "")).upper() != "CANCELLED" for r in existing_rows):
         raise HTTPException(status_code=409, detail=f"A closing for {today_str} is already submitted. Open the existing closing instead of creating another.")
@@ -123,9 +99,7 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
         exp_dt = str(expense.get("expense_datetime") or expense.get("created_at") or "").strip()
         if business_date_of(exp_dt) != today_str:
             continue
-        # Prevent an expense from being deducted across multiple daily closing sessions
-        existing_rel_closing = str(expense.get("related_closing_id", "")).strip()
-        if existing_rel_closing:
+        if str(expense.get("related_closing_id", "")).strip():
             continue
         is_approved = str(expense.get("approval_status", "")).strip().upper() == "APPROVED"
         is_cash_reducing = str(expense.get("cash_reducing_expense", "")).strip().lower() in {"true", "1", "yes"}
@@ -157,9 +131,7 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
         if mismatches:
             stock_note = (stock_note + " | " if stock_note else "") + "; ".join(mismatches)
 
-    closing_id = db.generate_id("DailyClosing")
     record = {
-        "closing_id": closing_id,
         "closing_date": today_str,
         "salesman_user_id": user_id,
         "opening_cash": req.opening_cash,
@@ -179,51 +151,20 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
         "reviewed_by_user_id": "",
         "reviewed_at": "",
         "notes": req.notes or "",
+        "qualifying_expense_ids": qualifying_expense_ids,
     }
-    if not db.append_record("DailyClosing", record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="The daily closing was not saved.")
-
-    # Tag qualifying expenses with related_closing_id to prevent duplicate deductions
-    failed_expense_stamps = []
-    for exp_id in qualifying_expense_ids:
-        try:
-            if not db.update_record("Expenses", "expense_id", exp_id, {"related_closing_id": closing_id}):
-                raise RuntimeError(f"Database update returned false for expense {exp_id}")
-        except Exception as upd_err:
-            logger.error("Could not stamp related_closing_id on expense %s: %s", exp_id, upd_err)
-            failed_expense_stamps.append(exp_id)
-            try:
-                import json
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": db.generate_id("IncompleteTransactions"),
-                    "transaction_type": "CLOSING_EXPENSE_LINK_PENDING",
-                    "idempotency_key": f"closing-exp-link-{closing_id}-{exp_id}",
-                    "status": "LINK_FAILED",
-                    "payload_json": json.dumps({
-                        "closing_id": closing_id,
-                        "expense_id": exp_id,
-                        "salesman_user_id": user_id,
-                        "date": today_str,
-                    }),
-                    "error_details": str(upd_err),
-                    "error_message": str(upd_err),
-                    "created_at": stamped,
-                    "updated_at": stamped,
-                    "resolved_by": "",
-                    "resolved_at": "",
-                })
-            except Exception as inc_err:
-                logger.error("Failed to log incomplete closing expense link: %s", inc_err)
-
-    if failed_expense_stamps:
-        try:
-            curr_notes = str(record.get("notes", ""))
-            warn_note = f"[EXPENSE_LINK_PENDING:{','.join(failed_expense_stamps)}]"
-            updated_notes = f"{curr_notes} {warn_note}".strip()
-            db.update_record("DailyClosing", "closing_id", closing_id, {"notes": updated_notes})
-            record["notes"] = updated_notes
-        except Exception:
-            pass
+    res = apps_script_bridge.delegate_governed_write(
+        action="SUBMIT_DAILY_CLOSING",
+        target_tab="DailyClosing",
+        payload=record,
+        nonce=idem or None,
+        request=request,
+        actor_user_id=user_id,
+        actor_role=actor_role,
+        id_field="closing_id",
+        invalidate_tabs=["DailyClosing", "Expenses", "JournalHeaders", "JournalLines"],
+    )
+    closing_id = str(res.get("allocated_id") or "")
 
     db.log_audit(
         actor=user_id,
@@ -233,48 +174,37 @@ async def submit_daily_closing(req: DailyClosingCreate, current_user: dict = Dep
         reason=f"Submitted closing for {today_str}: expected ₹{expected_cash}, returned ₹{req.physical_cash_returned} (diff ₹{diff})"
     )
 
-    # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
-    try:
-        from app.accounting.postings import post_daily_closing_cash_remittance_journal
-        post_daily_closing_cash_remittance_journal(record, user_id)
-    except Exception as acct_err:
-        try:
-            db.append_record("IncompleteTransactions", {
-                "transaction_id": db.generate_id("IncompleteTransactions"),
-                "transaction_type": "ACCOUNTING_POSTING_PENDING",
-                "idempotency_key": f"acct-closing-{closing_id}",
-                "status": "POSTING_FAILED",
-                "payload_json": f'{{"closing_id": "{closing_id}", "type": "DAILY_CLOSING"}}',
-                "error_details": str(acct_err),
-                "created_at": stamped,
-                "updated_at": stamped,
-                "resolved_by": "",
-                "resolved_at": "",
-            })
-        except Exception:
-            pass
-
-    return _closing_from(record)
+    return _closing_from({**record, "closing_id": closing_id})
 
 
 @router.post("/{closing_id}/review", response_model=DailyClosing, dependencies=[Depends(require_sheets_connection)])
-async def review_daily_closing(closing_id: str, req: ClosingReviewRequest, current_user: dict = Depends(get_current_user)):
-    caller_role = current_user.get("role", "").upper()
-    if caller_role not in ["OWNER", "OWNER_ADMIN", "PA"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owner or PA can review closing")
-
-    user_id = current_user.get("user_id")
+async def review_daily_closing(closing_id: str, req: ClosingReviewRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    user_id, actor_role = require_manager(current_user)
     stamped = now_iso()
     new_status = "CONFIRMED" if req.confirmed else "NEEDS_CORRECTION"
 
+    records = db.get_records("DailyClosing")
+    matched = next((r for r in records if str(r.get("closing_id")) == closing_id), None)
+    if not matched:
+        raise HTTPException(status_code=404, detail=f"Closing {closing_id} not found")
+
     updates = {
+        "closing_id": closing_id,
         "closing_status": new_status,
         "reviewed_by_user_id": user_id,
         "reviewed_at": stamped,
         "notes": req.notes or "",
     }
-    if not db.update_record("DailyClosing", "closing_id", closing_id, updates):
-        raise HTTPException(status_code=503, detail="The closing review was not saved.")
+    apps_script_bridge.delegate_governed_write(
+        action="REVIEW_DAILY_CLOSING",
+        target_tab="DailyClosing",
+        payload=updates,
+        request=request,
+        actor_user_id=user_id,
+        actor_role=actor_role,
+        id_field="closing_id",
+        invalidate_tabs=["DailyClosing"],
+    )
 
     db.log_audit(
         actor=user_id,
@@ -284,23 +214,4 @@ async def review_daily_closing(closing_id: str, req: ClosingReviewRequest, curre
         reason=f"{new_status} closing {closing_id}"
     )
 
-    records = db.get_records("DailyClosing")
-    matched = next((r for r in records if str(r.get("closing_id")) == closing_id), {})
-    return DailyClosing(
-        closing_id=closing_id,
-        closing_date=str(matched.get("closing_date", "")),
-        salesman_user_id=str(matched.get("salesman_user_id", "")),
-        opening_cash=float(matched.get("opening_cash", 0.0) or 0.0),
-        cash_collected=float(matched.get("cash_collected", 0.0) or 0.0),
-        approved_cash_expenses=float(matched.get("approved_cash_expenses", 0.0) or 0.0),
-        expected_cash_return=float(matched.get("expected_cash_return", 0.0) or 0.0),
-        physical_cash_returned=float(matched.get("physical_cash_returned", 0.0) or 0.0),
-        cash_difference=float(matched.get("cash_difference", 0.0) or 0.0),
-        opening_stock_reference=str(matched.get("opening_stock_reference", "")),
-        stock_discrepancy_flag=str(matched.get("stock_discrepancy_flag", "false")).lower() == "true",
-        closing_status=new_status,
-        submitted_at=str(matched.get("submitted_at", stamped)),
-        reviewed_by_user_id=user_id,
-        reviewed_at=stamped,
-        notes=req.notes or "",
-    )
+    return _closing_from({**matched, **updates})

@@ -305,7 +305,11 @@ DEFAULT_ROLE_PERMISSIONS: Dict[str, Dict[str, List[str]]] = {
     "SALES": V2_ROLE_PERMISSIONS["SALES"],
     "HR": V2_ROLE_PERMISSIONS["HR"],
     "AUDITOR": V2_ROLE_PERMISSIONS["AUDITOR"],
-    "SOCIAL_MEDIA_ECOMMERCE_MANAGER": V2_ROLE_PERMISSIONS["CHANNELS"] if "CHANNELS" in V2_ROLE_PERMISSIONS else V2_ROLE_PERMISSIONS["SALES"],
+    "SOCIAL_MEDIA_ECOMMERCE_MANAGER": {
+        "catalogue": ["view"],
+        "channels": ["view", "create"],
+        "employee_portal": ["view_dashboard", "view_own_tasks", "update_own_tasks", "view_own_profile"],
+    },
     "FACTORY_WORKER": {"production": ["view"]},
     "DISPATCH": V2_ROLE_PERMISSIONS["STORE"],
 }

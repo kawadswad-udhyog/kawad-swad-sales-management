@@ -1448,6 +1448,18 @@ class SheetsDatabase:
         with self._lock:
             self._fail_once[tab_name] = count
 
+    def _assert_direct_mutation_allowed(self, op: str, tab_name: str) -> None:
+        """
+        Single-Write-Owner enforcement: FastAPI may never mutate live Google Sheets directly.
+        All runtime state changes must go through AppsScriptBridge. Direct store helpers only run
+        when SALES_TESTING=1 in-memory/shared-file fallback is explicitly active and disconnected.
+        """
+        if (self.is_connected and self.spreadsheet) or not self.allow_in_memory_fallback:
+            raise RuntimeError(
+                f"BLOCKED_PENDING_OWNER_SETUP: Direct Google Sheets mutation '{op}' on '{tab_name}' is disabled "
+                "under Blueprint v2.1 Single-Write-Owner architecture. Delegate through AppsScriptBridge."
+            )
+
     def append_record(
         self,
         tab_name: str,
@@ -1455,6 +1467,7 @@ class SheetsDatabase:
         raise_on_error: bool = False,
         authorize_header_update: bool = False,
     ) -> bool:
+        self._assert_direct_mutation_allowed("append_record", tab_name)
         if is_forbidden_scratch_tab(tab_name):
             err_msg = f"Write blocked: legacy scratch tab '{tab_name}' is forbidden."
             if raise_on_error:
@@ -1594,6 +1607,7 @@ class SheetsDatabase:
            Financial authorization remains fail-closed to prevent unverified updates.
         """
         with self._lock:
+            self._assert_direct_mutation_allowed("update_record", tab_name)
             if is_forbidden_scratch_tab(tab_name):
                 err_msg = f"Update blocked: legacy scratch tab '{tab_name}' is forbidden."
                 if raise_on_error:
@@ -1703,6 +1717,7 @@ class SheetsDatabase:
                 return False
 
     def delete_record(self, tab_name: str, id_field: str, id_value: str, raise_on_error: bool = False) -> bool:
+        self._assert_direct_mutation_allowed("delete_record", tab_name)
         if is_forbidden_scratch_tab(tab_name):
             err_msg = f"Delete blocked: legacy scratch tab '{tab_name}' is forbidden."
             if raise_on_error:
@@ -1783,10 +1798,9 @@ class SheetsDatabase:
     def generate_id(self, tab_name: str) -> str:
         """Allocate PREFIX-000001 from the highest existing value, claimed before use.
 
-        Two servers can request the same next number. Each appends a claim. The
-        earliest claim for that exact id wins; the other caller retries.
-        Existing historical ids are never renumbered.
+        Under Blueprint v2.1 Single-Write-Owner, runtime ID allocation happens inside Apps Script.
         """
+        self._assert_direct_mutation_allowed("generate_id", tab_name)
         prefix = ID_PREFIXES.get(tab_name, "ID")
         for _ in range(12):
             candidate = f"{prefix}-{self._max_sequence(tab_name, prefix) + 1:06d}"
@@ -1813,6 +1827,7 @@ class SheetsDatabase:
         return self.generate_id(tab_name)
 
     def allocate_bill_number(self) -> str:
+        self._assert_direct_mutation_allowed("allocate_bill_number", "Sales")
         from app.timeutil import business_month
         month = business_month()
         prefix = f"KS-BILL-{month}"
@@ -1846,6 +1861,18 @@ class SheetsDatabase:
     def log_audit(self, actor: str, action: str, entity_type: str, entity_id: str,
                   field_changed: str = "", old_val: str = "", new_val: str = "",
                   reason: str = "", approved_by: str = "", related_id: str = ""):
+        # AuditLog sheet writes happen atomically inside Apps Script governed writes.
+        # In non-testing runtime, record structured Python audit telemetry without mutating Google Sheets.
+        if (self.is_connected and self.spreadsheet) or not self.allow_in_memory_fallback:
+            logger.info(
+                "AUDIT actor=%s action=%s entity=%s:%s reason=%s",
+                actor,
+                action,
+                entity_type,
+                entity_id,
+                reason,
+            )
+            return
         try:
             audit_id = self.generate_id("AuditLog")
         except Exception:

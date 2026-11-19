@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
 from pydantic import BaseModel, Field
 
+from app.apps_script_bridge import apps_script_bridge
 from app.models import UserProfile, UserCreate, UserUpdate, UserStatusUpdate, CustomRoleCreate, CustomRoleResponse
 from app.sheets import db
 from app.auth import get_current_user
-from app.permissions import is_manager, is_owner, require_manager, require_owner
+from app.permissions import is_manager, is_owner, require_manager, require_owner, role_v2_of
 from app.user_service import (
     get_all_users_with_auth,
     validate_unique_username,
@@ -303,8 +304,8 @@ async def list_roles(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/roles")
-async def create_or_update_custom_role(req: CustomRoleCreate, current_user: dict = Depends(get_current_user)):
-    """Owner creates or updates custom role with module-based permissions."""
+async def create_or_update_custom_role(req: CustomRoleCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    """Owner creates or updates custom role with module-based permissions via Apps Script."""
     require_owner(current_user)
     from app.permissions import validate_custom_role_permissions, OWNERS
     import json
@@ -321,36 +322,54 @@ async def create_or_update_custom_role(req: CustomRoleCreate, current_user: dict
 
     actor_id = str(current_user.get("user_id") or "")
     existing = next((r for r in db.get_records("CustomRoles") if str(r.get("role_name", "")).upper() == clean_name), None)
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso_str = datetime.now(timezone.utc).isoformat()
 
     if existing:
         role_id = str(existing.get("role_id"))
-        db.update_record("CustomRoles", "role_id", role_id, {
-            "description": req.description or "",
-            "permissions_json": json.dumps(req.permissions),
-            "updated_at": now_iso,
-        }, raise_on_error=True)
+        res = apps_script_bridge.delegate_governed_write(
+            action="UPDATE_CUSTOM_ROLE",
+            target_tab="CustomRoles",
+            payload={
+                "role_id": role_id,
+                "role_name": clean_name,
+                "description": req.description or "",
+                "permissions_json": json.dumps(req.permissions),
+                "updated_at": now_iso_str,
+            },
+            request=request,
+            actor_user_id=actor_id,
+            actor_role=role_v2_of(current_user),
+            id_field="role_id",
+            invalidate_tabs=["CustomRoles"],
+        )
         db.log_audit(actor_id, "UPDATE_CUSTOM_ROLE", "CustomRoles", role_id, reason=f"Updated permissions for custom role {clean_name}")
-        return {"ok": True, "role_id": role_id, "role_name": clean_name, "message": f"Updated custom role {clean_name}"}
+        return {"ok": True, "role_id": role_id, "role_name": clean_name, "message": f"Updated custom role {clean_name}", **res}
     else:
-        role_id = db.generate_id("CustomRoles")
-        row = {
-            "role_id": role_id,
-            "role_name": clean_name,
-            "description": req.description or "",
-            "permissions_json": json.dumps(req.permissions),
-            "created_by": actor_id,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-        }
-        db.append_record("CustomRoles", row, raise_on_error=True)
+        res = apps_script_bridge.delegate_governed_write(
+            action="CREATE_CUSTOM_ROLE",
+            target_tab="CustomRoles",
+            payload={
+                "role_name": clean_name,
+                "description": req.description or "",
+                "permissions_json": json.dumps(req.permissions),
+                "created_by": actor_id,
+                "created_at": now_iso_str,
+                "updated_at": now_iso_str,
+            },
+            request=request,
+            actor_user_id=actor_id,
+            actor_role=role_v2_of(current_user),
+            id_field="role_id",
+            invalidate_tabs=["CustomRoles"],
+        )
+        role_id = str(res.get("allocated_id") or "")
         db.log_audit(actor_id, "CREATE_CUSTOM_ROLE", "CustomRoles", role_id, reason=f"Created custom role {clean_name}")
-        return {"ok": True, "role_id": role_id, "role_name": clean_name, "message": f"Created custom role {clean_name}"}
+        return {"ok": True, "role_id": role_id, "role_name": clean_name, "message": f"Created custom role {clean_name}", **res}
 
 
 @router.delete("/roles/{role_name}")
-async def delete_custom_role(role_name: str, current_user: dict = Depends(get_current_user)):
-    """Owner deletes a custom role if no active users are assigned to it."""
+async def delete_custom_role(role_name: str, request: Request, current_user: dict = Depends(get_current_user)):
+    """Owner deletes a custom role if no active users are assigned to it via Apps Script."""
     require_owner(current_user)
     clean_name = str(role_name or "").strip().upper()
 
@@ -358,7 +377,6 @@ async def delete_custom_role(role_name: str, current_user: dict = Depends(get_cu
     if not existing:
         raise HTTPException(404, f"Custom role '{clean_name}' not found.")
 
-    # Check if assigned to any user
     users = db.get_records("Users") or []
     auth_users = db.get_records("AuthUsers") or []
     assigned_count = sum(1 for u in users if str(u.get("role", "")).upper() == clean_name) + \
@@ -367,17 +385,24 @@ async def delete_custom_role(role_name: str, current_user: dict = Depends(get_cu
         raise HTTPException(400, f"Cannot delete role '{clean_name}': {assigned_count} employee(s) are assigned to it.")
 
     role_id = str(existing.get("role_id"))
-    db.update_record("CustomRoles", "role_id", role_id, {"deleted": "true", "active": "false"})
+    res = apps_script_bridge.delegate_governed_write(
+        action="DELETE_CUSTOM_ROLE",
+        target_tab="CustomRoles",
+        payload={"role_id": role_id, "role_name": clean_name, "deleted": "true", "active": "false"},
+        request=request,
+        actor_user_id=str(current_user.get("user_id") or ""),
+        actor_role=role_v2_of(current_user),
+        id_field="role_id",
+        invalidate_tabs=["CustomRoles"],
+    )
     db.log_audit(str(current_user.get("user_id")), "DELETE_CUSTOM_ROLE", "CustomRoles", role_id, reason=f"Deleted custom role {clean_name}")
-    return {"ok": True, "message": f"Custom role {clean_name} deleted."}
+    return {"ok": True, "message": f"Custom role {clean_name} deleted.", **res}
 
 
 @router.post("/reconcile-role-alias")
-async def reconcile_role_alias(user_id: str, current_user: dict = Depends(get_current_user)):
+async def reconcile_role_alias(user_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     """
-    Owner synchronizes canonical role mapping across Users and AuthUsers.
-    For example: USR-000003 where Users.role is FIELD_SALESMAN and AuthUsers.role is SALESMAN,
-    both map to canonical SALESMAN.
+    Owner synchronizes canonical role mapping across Users and AuthUsers via Apps Script.
     """
     require_owner(current_user)
     clean_uid = str(user_id or "").strip()
@@ -399,11 +424,27 @@ async def reconcile_role_alias(user_id: str, current_user: dict = Depends(get_cu
 
     changes = []
     if u_match and u_role != target_canonical:
-        db.update_record("Users", "user_id", clean_uid, {"role": target_canonical})
         changes.append(f"Users sheet role '{u_role}' -> '{target_canonical}'")
     if a_match and a_role != target_canonical:
-        db.update_record("AuthUsers", "user_id", clean_uid, {"role": target_canonical})
         changes.append(f"AuthUsers sheet role '{a_role}' -> '{target_canonical}'")
+
+    res = {}
+    if changes:
+        res = apps_script_bridge.delegate_governed_write(
+            action="RECONCILE_ROLE_ALIAS",
+            target_tab="Users",
+            payload={
+                "user_id": clean_uid,
+                "target_canonical_role": target_canonical,
+                "update_users": bool(u_match and u_role != target_canonical),
+                "update_auth_users": bool(a_match and a_role != target_canonical),
+            },
+            request=request,
+            actor_user_id=actor_id,
+            actor_role=role_v2_of(current_user),
+            id_field="user_id",
+            invalidate_tabs=["Users", "AuthUsers"],
+        )
 
     db.log_audit(actor_id, "RECONCILE_ROLE_ALIAS", "Users", clean_uid, reason=f"Reconciled role to canonical {target_canonical}: {'; '.join(changes) or 'Already aligned'}")
     return {
@@ -411,6 +452,7 @@ async def reconcile_role_alias(user_id: str, current_user: dict = Depends(get_cu
         "user_id": clean_uid,
         "canonical_role": target_canonical,
         "changes": changes,
-        "message": f"User {clean_uid} role aligned to {target_canonical}."
+        "message": f"User {clean_uid} role aligned to {target_canonical}.",
+        **res,
     }
 

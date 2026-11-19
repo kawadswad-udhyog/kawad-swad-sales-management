@@ -47,6 +47,8 @@ const MainAppContent: React.FC = () => {
     isBackendConnected,
     isGoogleSheetsConnected,
     persistentWritesEnabled,
+    appsScriptBridgeConfigured,
+    capabilities,
     connectionError,
     reconnectGoogleSheets,
   } = useStore();
@@ -293,6 +295,17 @@ const MainAppContent: React.FC = () => {
               <span>{isReconnecting ? 'Reconnecting…' : 'Reconnect Sheets'}</span>
             </button>
           )}
+        </div>
+      )}
+
+      {isBackendConnected && isGoogleSheetsConnected && persistentWritesEnabled && capabilities && !appsScriptBridgeConfigured && (
+        <div className="bg-amber-800 text-amber-50 px-4 py-2 flex items-center justify-between text-xs flex-wrap gap-2 border-b border-amber-700">
+          <div className="flex items-center gap-2">
+            <ShieldAlert size={15} className="text-amber-300 shrink-0" />
+            <div>
+              <span className="font-bold">Apps Script Gateway Pending (BLOCKED_PENDING_OWNER_SETUP):</span> Reads from Google Sheets remain active; all governed mutations fail closed until <code className="font-mono">SALES_APPS_SCRIPT_ENABLED</code>, <code className="font-mono">SALES_APPS_SCRIPT_WEBAPP_URL</code> &amp; <code className="font-mono">SALES_APPS_SCRIPT_SHARED_SECRET</code> are configured.
+            </div>
+          </div>
         </div>
       )}
 

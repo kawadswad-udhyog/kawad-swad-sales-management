@@ -42,6 +42,8 @@ export const Header: React.FC<HeaderProps> = ({
     isBackendConnected,
     isGoogleSheetsConnected,
     persistentWritesEnabled,
+    appsScriptBridgeConfigured,
+    capabilities,
     connectionError,
     reconnectGoogleSheets,
     refreshData,
@@ -83,6 +85,14 @@ export const Header: React.FC<HeaderProps> = ({
       text: 'text-amber-900',
       bg: 'bg-amber-50 border-amber-300',
       icon: <Database size={13} className="text-amber-600" />,
+    };
+  } else if (capabilities && !appsScriptBridgeConfigured) {
+    statusBadge = {
+      label: 'Gateway Pending',
+      dot: 'bg-amber-500',
+      text: 'text-amber-900',
+      bg: 'bg-amber-50 border-amber-300',
+      icon: <AlertTriangle size={13} className="text-amber-600" />,
     };
   }
 
@@ -283,7 +293,13 @@ export const Header: React.FC<HeaderProps> = ({
                 <div className="flex justify-between items-center">
                   <span className="text-slate-600 font-medium">Persistent Writes:</span>
                   <span className="font-bold text-slate-900">
-                    {persistentWritesEnabled ? 'Enabled (Governed Gateway)' : 'Locked / Blocked'}
+                    {persistentWritesEnabled ? 'Enabled (Authoritative Sheet)' : 'Locked / Blocked'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-600 font-medium">Apps Script Write Gateway:</span>
+                  <span className={`font-bold ${appsScriptBridgeConfigured ? 'text-emerald-700' : 'text-amber-700'}`}>
+                    {appsScriptBridgeConfigured ? 'Configured (Single Write Owner)' : 'Not Configured (BLOCKED_PENDING_OWNER_SETUP)'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">

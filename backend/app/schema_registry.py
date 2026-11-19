@@ -96,7 +96,22 @@ LOCKED_32_ID_PREFIXES: Dict[str, str] = {
     "SAL": "SalaryPayments",
     "EADV": "EmployeeAdvances",
     "AUD": "AuditLog",
-    "EXC": "ExceptionLogs",
+    # Snapshot uses ExceptionRegister; earlier blueprint draft referenced ExceptionLogs.
+    # Reconcile explicitly via TAB_RECONCILIATION_CONFLICTS before enabling writes.
+    "EXC": "ExceptionRegister",
+}
+
+TAB_RECONCILIATION_CONFLICTS: Dict[str, Dict[str, Any]] = {
+    "EXC": {
+        "canonical_prefix": "EXC",
+        "snapshot_tab": "ExceptionRegister",
+        "draft_tab": "ExceptionLogs",
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "notes": (
+            "Snapshot documents 'ExceptionRegister' while earlier draft code referenced 'ExceptionLogs'. "
+            "Exact live tab name and Row-1 headers require Owner verification before enabling writes."
+        ),
+    }
 }
 
 _ID_FORMAT_RE = re.compile(r"^([A-Z]{2,6})-[A-Z0-9_-]{3,}$")
@@ -189,130 +204,232 @@ ACCOUNTS_ADVANCE_DISBURSEMENT_ALLOWED_FIELDS: Set[str] = {
 
 
 # ---------------------------------------------------------------------------
-# 5. 15 Functional Database Groups & Header Governance
+# 5. Official 15 Blueprint v2.1 Database Groups & 255-Tab Governance
 # ---------------------------------------------------------------------------
 DATABASE_GROUPS_15: List[Dict[str, Any]] = [
     {
         "group_code": "00",
         "group_name": "Control & Setup",
         "module": "control",
-        "workbook_tabs": ["Settings", "ApprovalRequests", "AccountingPeriods", "AuditLog", "ExceptionLogs", "IdAllocations", "DBV5_FIELD_DICTIONARY_3074"],
+        "workbook_tabs": [
+            "Settings", "ApprovalRequests", "IdAllocations",
+            "RevokedTokens", "AuthUsers", "CustomRoles", "DBV5_FIELD_DICTIONARY_3074",
+        ],
         "header_mapping_status": "VERIFIED_CORE_AND_PENDING_XLSX",
     },
     {
         "group_code": "01",
-        "group_name": "Identity, Roles & Security",
-        "module": "security",
-        "workbook_tabs": ["Users", "AuthUsers", "CustomRoles", "RevokedTokens"],
-        "header_mapping_status": "VERIFIED_CORE",
+        "group_name": "Business & Master Data",
+        "module": "catalogue",
+        "workbook_tabs": ["Users", "Products", "ProductSKUs", "RawMaterials", "PackagingMaterials", "Recipes"],
+        "header_mapping_status": "VERIFIED_CORE_AND_PENDING_EXTENDED",
     },
     {
         "group_code": "02",
-        "group_name": "Master Catalogue & Recipes",
-        "module": "catalogue",
-        "workbook_tabs": ["Products", "RawMaterials", "Recipes", "Suppliers", "Customers"],
+        "group_name": "Procurement & Supplier",
+        "module": "procurement",
+        "workbook_tabs": [
+            "Suppliers", "PurchaseOrders", "PurchaseOrderItems",
+            "GoodsReceipts", "GoodsReceiptItems", "SupplierBills",
+            "SupplierPayments", "SupplierReturns", "SupplierReturnItems",
+        ],
         "header_mapping_status": "VERIFIED_CORE",
     },
     {
         "group_code": "03",
-        "group_name": "Procurement & Mill Intake",
-        "module": "procurement",
-        "workbook_tabs": ["PurchaseOrders", "PurchaseOrderItems", "GoodsReceipts", "GoodsReceiptItems", "SupplierReturns", "SupplierReturnItems", "MillingBatches"],
+        "group_name": "Inventory & Warehousing",
+        "module": "store",
+        "workbook_tabs": [
+            "RawMaterialLedger", "ProductionStockLedger", "ProductLots",
+            "LotMovements", "StockDiscrepancies", "IncompleteTransactions",
+        ],
         "header_mapping_status": "VERIFIED_CORE",
     },
     {
         "group_code": "04",
-        "group_name": "Warehouse, Store & Raw Material Ledger",
-        "module": "store",
-        "workbook_tabs": ["RawMaterialLedger", "ProductionStockLedger", "ProductLots", "LotMovements", "StockDiscrepancies"],
-        "header_mapping_status": "VERIFIED_CORE",
+        "group_name": "Milling & Production",
+        "module": "production",
+        "workbook_tabs": [
+            "MillingBatches", "ProductionBatches", "MaterialConsumptions",
+            "ProductionOutputs", "ProductionLosses", "ProductionWorkEntries",
+        ],
+        "header_mapping_status": "VERIFIED_CORE_AND_PENDING_EXTENDED",
     },
     {
         "group_code": "05",
-        "group_name": "Production Manufacturing",
-        "module": "production",
-        "workbook_tabs": ["ProductionBatches", "MaterialConsumptions", "ProductionOutputs", "ProductionLosses", "ProductionWorkEntries"],
-        "header_mapping_status": "PENDING_OWNER_MAPPING",
+        "group_name": "Quality & Food Safety",
+        "module": "quality",
+        "workbook_tabs": [
+            "QualityChecks", "QualityChecks_IPQC", "QualityChecks_FGQC",
+            "ProductLots", "ComplaintsRecalls",
+        ],
+        "header_mapping_status": "VERIFIED_CORE_AND_PENDING_EXTENDED",
     },
     {
         "group_code": "06",
-        "group_name": "Packaging & Retail SKUs",
+        "group_name": "Packaging & Finished Goods",
         "module": "packaging",
         "workbook_tabs": ["PackagingBatches", "PackagingOutputs"],
-        "header_mapping_status": "PENDING_OWNER_MAPPING",
+        "header_mapping_status": "VERIFIED_CORE_AND_PENDING_EXTENDED",
     },
     {
         "group_code": "07",
-        "group_name": "Quality Control & Food Safety",
-        "module": "quality",
-        "workbook_tabs": ["QualityChecks", "ProductLots", "ComplaintsRecalls"],
-        "header_mapping_status": "VERIFIED_CORE",
+        "group_name": "Sales & Customer",
+        "module": "sales",
+        "workbook_tabs": [
+            "Customers", "SalesOrders", "SalesOrderItems", "Sales", "SaleItems",
+            "Payments", "PaymentAllocations", "SalesmanStockLedger",
+            "ShopVisits", "DailyClosing", "CustomerReturns", "CustomerReturnItems",
+        ],
+        "header_mapping_status": "VERIFIED_CORE_AND_PENDING_EXTENDED",
     },
     {
         "group_code": "08",
-        "group_name": "Sales Orders, Invoicing & Field Route",
-        "module": "sales",
-        "workbook_tabs": ["Sales", "SaleItems", "Payments", "SalesmanStockLedger", "ShopVisits", "DailyClosing", "CustomerReturns", "CustomerReturnItems"],
-        "header_mapping_status": "VERIFIED_CORE",
-    },
-    {
-        "group_code": "09",
-        "group_name": "Distribution, Van Loading & Logistics",
-        "module": "logistics",
-        "workbook_tabs": ["VanLoadingPasses", "ProductionDispatches", "DistributionDispatches"],
-        "header_mapping_status": "PENDING_OWNER_MAPPING",
-    },
-    {
-        "group_code": "10",
-        "group_name": "E-Commerce & Marketplace Settlements",
+        "group_name": "Channel, Marketplace & Marketing",
         "module": "channels",
         "workbook_tabs": ["MarketplaceSettlements"],
         "header_mapping_status": "PENDING_OWNER_MAPPING",
     },
     {
-        "group_code": "11",
-        "group_name": "General Ledger & Accounting",
+        "group_code": "09",
+        "group_name": "Distribution & Logistics",
+        "module": "logistics",
+        "workbook_tabs": ["VanLoadingPasses", "ProductionDispatches", "DistributionDispatches"],
+        "header_mapping_status": "VERIFIED_CORE_AND_PENDING_EXTENDED",
+    },
+    {
+        "group_code": "10",
+        "group_name": "Finance & Accounting",
         "module": "accounting",
-        "workbook_tabs": ["ChartOfAccounts", "JournalHeaders", "JournalLines", "SupplierBills", "SupplierPayments", "Expenses", "CashLedger"],
+        "workbook_tabs": [
+            "ChartOfAccounts", "JournalHeaders", "JournalLines",
+            "AccountingPeriods", "Expenses", "CashLedger",
+        ],
         "header_mapping_status": "VERIFIED_CORE",
     },
     {
-        "group_code": "12",
-        "group_name": "Workforce, Attendance, Gig Wages & Confidential Payroll",
+        "group_code": "11",
+        "group_name": "Workforce & Payroll",
         "module": "workforce",
-        "workbook_tabs": ["Employees", "EmployeeAttendance", "SalaryStructures", "PayrollRuns", "PayrollItems", "SalaryPayments", "EmployeeAdvances", "WorkforcePayments", "SalaryReceipts", "LabourMaster", "LabourAttendance", "LabourWorkEntries", "LabourWageRecords", "Workers", "WorkerAttendance", "WorkAssignments"],
-        "header_mapping_status": "PENDING_OWNER_MAPPING",
+        "workbook_tabs": [
+            "Employees", "EmployeeDocuments", "EmployeeAttendance",
+            "WorkAssignments", "WorkActivityLogs", "SalaryStructures",
+            "PayrollRuns", "PayrollItems", "SalaryPayments", "SalaryIncentives",
+            "EmployeeAdvances", "WorkforcePayments", "SalaryReceipts",
+            "FreelancerProjects", "FreelancerMilestones",
+            "LabourMaster", "LabourAttendance", "LabourWorkEntries",
+            "LabourWageRecords", "Workers", "WorkerAttendance", "WorkforceAuditLogs",
+        ],
+        "header_mapping_status": "VERIFIED_WORKFORCE_AND_PENDING_EXTENDED",
+    },
+    {
+        "group_code": "12",
+        "group_name": "Governance, Compliance & Audit",
+        "module": "compliance_assets",
+        "workbook_tabs": ["AuditLog", "ExceptionRegister", "ComplianceRecords"],
+        "header_mapping_status": "VERIFIED_AUDIT_AND_PENDING_EXTENDED",
     },
     {
         "group_code": "13",
-        "group_name": "Compliance, Statutory, Assets & Maintenance",
+        "group_name": "Assets, Environment & Risk",
         "module": "compliance_assets",
-        "workbook_tabs": ["ComplianceRecords", "AssetsMaintenance"],
+        "workbook_tabs": ["AssetsMaintenance"],
         "header_mapping_status": "PENDING_OWNER_MAPPING",
     },
     {
         "group_code": "14",
-        "group_name": "Official Reports, Closings & Planning",
+        "group_name": "Reports & Planning",
         "module": "reports",
         "workbook_tabs": ["RPT_TrialBalance", "RPT_StockStatus", "RPT_SalesAndReceivables"],
         "header_mapping_status": "PENDING_OWNER_MAPPING",
     },
 ]
 
-# Tab mapping for extended v2 tables whose exact .xlsx column names were not supplied in workspace
+# Extended / unverified Blueprint v2.1 tabs whose exact .xlsx Row-1 headers have NOT been supplied in repo.
+# NEVER invent prefixes or auto-create these tabs; mark PENDING_OWNER_MAPPING or CONFLICT_RECONCILIATION_REQUIRED.
 EXTENDED_V2_TAB_CONTRACTS: Dict[str, Dict[str, Any]] = {
-    "Employees": {"prefix": "EMP", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "SalaryPayments": {"prefix": "SAL", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "EmployeeAdvances": {"prefix": "EADV", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "DistributionDispatches": {"prefix": "DSP", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "MarketplaceSettlements": {"prefix": "CHN", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "ComplianceRecords": {"prefix": "CMP", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "AssetsMaintenance": {"prefix": "AST", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "ExceptionLogs": {"prefix": "EXC", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "RPT_TrialBalance": {"prefix": "RPT", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "RPT_StockStatus": {"prefix": "RPT", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
-    "RPT_SalesAndReceivables": {"prefix": "RPT", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False},
+    "ProductSKUs": {"prefix": "SKU", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "01"},
+    "PackagingMaterials": {"prefix": "PKG", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "01"},
+    "MaterialConsumptions": {"prefix": "MCON", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "04"},
+    "ProductionOutputs": {"prefix": "POUT", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "04"},
+    "ProductionLosses": {"prefix": "PLOSS", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "04"},
+    "ProductionWorkEntries": {"prefix": "PWE", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "04"},
+    "QualityChecks_IPQC": {"prefix": "IPQC", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "05"},
+    "QualityChecks_FGQC": {"prefix": "FGQC", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "05"},
+    "PackagingOutputs": {"prefix": "PKOUT", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "06"},
+    "SalesOrders": {"prefix": "SO", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "07"},
+    "SalesOrderItems": {"prefix": "SOI", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "07"},
+    "PaymentAllocations": {"prefix": "RCPTA", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "07"},
+    "Employees": {"prefix": "EMP", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "11"},
+    "SalaryPayments": {"prefix": "SAL", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "11"},
+    "EmployeeAdvances": {"prefix": "EADV", "prefix_status": "LOCKED", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "11"},
+    "DistributionDispatches": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "09"},
+    "MarketplaceSettlements": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "08"},
+    "ComplianceRecords": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "12"},
+    "AssetsMaintenance": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "13"},
+    "ExceptionRegister": {"prefix": "EXC", "prefix_status": "LOCKED", "header_status": "CONFLICT_RECONCILIATION_REQUIRED", "auto_create": False, "group_code": "12"},
+    "ExceptionLogs": {"prefix": "EXC", "prefix_status": "LOCKED", "header_status": "CONFLICT_RECONCILIATION_REQUIRED", "auto_create": False, "group_code": "12"},
+    "RPT_TrialBalance": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "14"},
+    "RPT_StockStatus": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "14"},
+    "RPT_SalesAndReceivables": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "14"},
+    "DBV5_FIELD_DICTIONARY_3074": {"prefix": None, "prefix_status": "NOT_APPLICABLE", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "00"},
 }
+
+# Unverified / conflicting tabs that must FAIL CLOSED on writes until Owner supplies canonical Row-1 headers.
+PENDING_OWNER_MAPPING_TABS: Set[str] = {
+    tab for tab, meta in EXTENDED_V2_TAB_CONTRACTS.items()
+    if meta.get("header_status") in {"PENDING_OWNER_MAPPING", "CONFLICT_RECONCILIATION_REQUIRED"}
+}
+
+_TAB_TO_LOCKED_PREFIX: Dict[str, str] = {tab: pfx for pfx, tab in LOCKED_32_ID_PREFIXES.items()}
+
+
+def build_table_schema_registry(required_tabs: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Machine-readable Schema Registry merging:
+    - All verified core + workforce tables from REQUIRED_TABS / workforceSchemaUpgrade_2026-11-03-v1.gs
+    - All extended 255-tab Blueprint v2.1 entries marked PENDING_OWNER_MAPPING / CONFLICT_RECONCILIATION_REQUIRED
+    Never fabricates Row-1 headers for tables missing from repo truth.
+    """
+    group_lookup: Dict[str, str] = {}
+    for g in DATABASE_GROUPS_15:
+        for t in g.get("workbook_tabs", []):
+            group_lookup.setdefault(t, g["group_code"])
+
+    registry: Dict[str, Dict[str, Any]] = {}
+    for tab_name, headers in required_tabs.items():
+        registry[tab_name] = {
+            "tab_name": tab_name,
+            "group_code": group_lookup.get(tab_name, "00"),
+            "status": "VERIFIED_CORE",
+            "headers": list(headers),
+            "header_count": len(headers),
+            "locked_id_prefix": _TAB_TO_LOCKED_PREFIX.get(tab_name),
+            "confidential": tab_name in CONFIDENTIAL_TABS_NO_CACHE,
+            "auto_create": False,
+        }
+
+    for tab_name, contract in EXTENDED_V2_TAB_CONTRACTS.items():
+        if tab_name in registry:
+            continue
+        registry[tab_name] = {
+            "tab_name": tab_name,
+            "group_code": contract.get("group_code", group_lookup.get(tab_name, "00")),
+            "status": contract.get("header_status", "PENDING_OWNER_MAPPING"),
+            "headers": None,
+            "header_count": 0,
+            "locked_id_prefix": contract.get("prefix"),
+            "prefix_status": contract.get("prefix_status", "PENDING_OWNER_MAPPING"),
+            "confidential": tab_name in CONFIDENTIAL_TABS_NO_CACHE,
+            "auto_create": False,
+        }
+
+    return registry
+
+
+def get_table_schema_registry() -> Dict[str, Dict[str, Any]]:
+    from app.sheets import REQUIRED_TABS
+    return build_table_schema_registry(REQUIRED_TABS)
 
 
 # ---------------------------------------------------------------------------

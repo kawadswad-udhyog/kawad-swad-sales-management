@@ -8,9 +8,11 @@ from typing import Any, Dict, List, Optional
 from decimal import Decimal
 import json
 import threading
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from app.apps_script_bridge import apps_script_bridge
 from app.auth import get_current_user
+from app.permissions import role_v2_of
 from app.sheets import db
 from app.config import SALES_GOOGLE_SPREADSHEET_ID
 from app.accounting.customer_ledger import CrossProcessLock
@@ -52,13 +54,22 @@ from app.calculations import (
 
 router = APIRouter(prefix="/api/production", tags=["Production"])
 
-# Role permissions: Owner has full control including approvals; PA has data entry & operational access.
+# Role permissions: Owner has full control including approvals; PA/Production/Packaging have operational entry; AUDITOR is read-only.
 OWNER_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN"}
-PRODUCTION_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN", "PA"}
+PRODUCTION_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN", "PA", "PRODUCTION", "PACKAGING"}
+PRODUCTION_READ_ROLES = PRODUCTION_ROLES | {"STORE", "PROCUREMENT", "QUALITY", "ACCOUNTS", "SALES", "AUDITOR"}
 
 
 def actor_info(user: dict):
-    return str(user.get("user_id", "")), str(user.get("role", "")).upper()
+    return str(user.get("user_id", "")), role_v2_of(user)
+
+
+def _reject_auditor(user: dict):
+    if role_v2_of(user) == "AUDITOR":
+        raise HTTPException(
+            status_code=403,
+            detail="AUDITOR role is strictly read-only."
+        )
 
 
 class StatusValue(str):
@@ -90,6 +101,7 @@ class AttrDict(dict):
 
 def require_owner(user: dict):
     """Enforce strict Owner-only access for sensitive approval and recipe confirmation endpoints."""
+    _reject_auditor(user)
     actor, role = actor_info(user)
     if role not in OWNER_ROLES:
         raise HTTPException(
@@ -99,13 +111,25 @@ def require_owner(user: dict):
     return actor, role
 
 
+def require_production_read(user: dict):
+    """Allow authorized ERP roles (including read-only AUDITOR) to view production & stock reads."""
+    actor, role = actor_info(user)
+    if role not in PRODUCTION_READ_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only authorized production or audit roles can view production data."
+        )
+    return actor, role
+
+
 def require_production_access(user: dict):
-    """Allow Owner or PA to access production data entry, attendance, packaging, and overview."""
+    """Allow Owner, PA, Production, or Packaging to perform production operations (blocks AUDITOR)."""
+    _reject_auditor(user)
     actor, role = actor_info(user)
     if role not in PRODUCTION_ROLES:
         raise HTTPException(
             status_code=403,
-            detail="Only the Owner or PA can access production operations."
+            detail="Only the Owner, PA, or Production/Packaging operators can perform production operations."
         )
     return actor, role
 
@@ -126,10 +150,6 @@ def require_persistent_store():
             status_code=503,
             detail="Google Sheets is disconnected. Production and stock changes are blocked until the connection is restored."
         )
-
-
-def make_id(tab: str):
-    return db.generate_id(tab)
 
 
 def now():
@@ -496,9 +516,9 @@ _RAW_MATERIAL_MUTEX = threading.RLock()
 # -------------------------------------------------------------
 
 @router.post("/raw-materials")
-async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = Depends(get_current_user)):
-    """Explicit Owner-only master creation. Never creates stock or imports default material records."""
-    actor, _ = require_owner(user)
+async def create_raw_material_master(req: RawMaterialMasterCreate, request: Request, user: dict = Depends(get_current_user)):
+    """Explicit Owner-only master creation via Apps Script. Never creates stock or imports default material records."""
+    actor, actor_role = require_owner(user)
     require_persistent_store()
 
     name = " ".join(req.material_name.strip().split())
@@ -520,9 +540,7 @@ async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = 
             if str(field(row, "material_name", default="")).strip().casefold() == name.casefold()), None)
         if duplicate:
             raise HTTPException(409, f"Raw material '{name}' already exists as {field(duplicate, 'raw_material_id', default='')}.")
-        raw_material_id = db.generate_id("RawMaterials")
         created = {
-            "raw_material_id": raw_material_id,
             "material_name": name,
             "current_stock": 0,
             "unit": unit,
@@ -534,21 +552,26 @@ async def create_raw_material_master(req: RawMaterialMasterCreate, user: dict = 
             "created_at": now(),
             "created_by": actor,
         }
-        if not db.append_record("RawMaterials", created, raise_on_error=True):
-            raise HTTPException(503, "Raw material master could not be saved.")
-        stored = next((row for row in db.get_records("RawMaterials", fresh=True)
-            if str(field(row, "raw_material_id", default="")).strip() == raw_material_id), None)
-        required_values = ("raw_material_id", "material_name", "unit", "rate_status", "category", "active")
-        if not stored or any(str(field(stored, key, default="")).strip() != str(created[key]).strip() for key in required_values):
-            raise HTTPException(503, "Raw material master write did not pass read-back verification. Review the sheet before retrying.")
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="CREATE_RAW_MATERIAL_MASTER",
+            target_tab="RawMaterials",
+            payload=created,
+            actor_user_id=actor,
+            actor_role=actor_role,
+            request=request,
+            id_field="raw_material_id",
+            invalidate_tabs=["RawMaterials"],
+        )
+        raw_material_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("raw_material_id") or "")
+        saved = bridge_res.get("record") or {**created, "raw_material_id": raw_material_id}
         db.log_audit(actor, "CREATE_RAW_MATERIAL_MASTER", "RawMaterials", raw_material_id, reason=f"Created clean master record: {name}; initial stock set to zero.")
-        return created
+        return saved
 
 
 @router.patch("/raw-materials/{raw_material_id}/rate")
-async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpdate, user: dict = Depends(get_current_user)):
-    """Owner-only explicit reference-rate update. Purchase receipt rates remain transaction ledger facts."""
-    actor, _ = require_owner(user)
+async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpdate, request: Request, user: dict = Depends(get_current_user)):
+    """Owner-only explicit reference-rate update via Apps Script. Purchase receipt rates remain transaction ledger facts."""
+    actor, actor_role = require_owner(user)
     require_persistent_store()
     rate_status = req.rate_status.strip().upper()
     if rate_status not in {"PENDING", "ESTIMATED", "CONFIRMED"}:
@@ -563,22 +586,28 @@ async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpd
         if not material:
             raise HTTPException(404, "Raw material master not found.")
         updates = {
+            "raw_material_id": raw_material_id.strip(),
             "rate_per_unit": req.rate_per_unit if req.rate_per_unit is not None else "",
             "rate_status": rate_status,
+            "reason": req.reason.strip(),
         }
-        if not db.update_record("RawMaterials", "raw_material_id", raw_material_id, updates, raise_on_error=True):
-            raise HTTPException(503, "Raw material rate update could not be saved.")
-        stored = next((row for row in db.get_records("RawMaterials", fresh=True)
-            if str(field(row, "raw_material_id", default="")).strip() == raw_material_id.strip()), None)
-        if not stored or str(field(stored, "rate_status", default="")).upper() != rate_status:
-            raise HTTPException(503, "Raw material rate update failed read-back verification.")
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="UPDATE_RAW_MATERIAL_RATE",
+            target_tab="RawMaterials",
+            payload=updates,
+            actor_user_id=actor,
+            actor_role=actor_role,
+            request=request,
+            id_field="raw_material_id",
+            invalidate_tabs=["RawMaterials"],
+        )
         db.log_audit(actor, "UPDATE_RAW_MATERIAL_RATE", "RawMaterials", raw_material_id, reason=req.reason.strip())
-        return {**material, **updates}
+        return bridge_res.get("record") or {**material, **updates}
 
 
 @router.get("/raw-materials", response_model=List[RawMaterialBalanceItem])
 async def list_raw_materials(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     raw_master = db.get_records("RawMaterials", fresh=True)
     if not raw_master:
         return []
@@ -634,74 +663,18 @@ async def list_raw_materials(user: dict = Depends(get_current_user)):
 get_raw_material_balances = list_raw_materials
 
 
-def _ensure_raw_material_verification_audit(
-    *,
-    mat_id: str,
-    mat_name: str,
-    actor: str,
-    raw_material_txn_id: str,
-    old_val: str,
-    new_val: str,
-    reason: str,
-) -> Dict[str, Any]:
-    """Ensure an AuditLog entry exists for raw material opening stock verification."""
-    audit_rows = db.get_records("AuditLog", fresh=True)
-    for row in audit_rows:
-        if (
-            str(row.get("action", "")).strip().upper() == "VERIFY_RAW_MATERIAL_OPENING_STOCK"
-            and str(row.get("entity_type", "")).strip() == "RawMaterials"
-            and str(row.get("entity_id", "")).strip() == mat_id
-            and str(row.get("related_record_id", "")).strip() == raw_material_txn_id
-        ):
-            return row
-
-    try:
-        audit_id = db.generate_id("AuditLog")
-    except Exception:
-        audit_id = f"AUD-{hashlib.sha256(f'{mat_id}:{raw_material_txn_id}'.encode('utf-8')).hexdigest()[:10]}"
-
-    audit_rec = {
-        "audit_id": audit_id,
-        "event_datetime": now(),
-        "actor_user_id": actor,
-        "action": "VERIFY_RAW_MATERIAL_OPENING_STOCK",
-        "entity_type": "RawMaterials",
-        "entity_id": mat_id,
-        "field_changed": "opening_stock_verified",
-        "old_value": str(old_val),
-        "new_value": str(new_val),
-        "reason": f"{mat_name}: {reason}",
-        "approved_by_user_id": actor,
-        "related_record_id": raw_material_txn_id,
-    }
-    try:
-        if not db.append_record("AuditLog", audit_rec, raise_on_error=True):
-            raise HTTPException(
-                503,
-                "Verification ledger entry saved, but required AuditLog event could not be persisted. Safe to retry.",
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            503,
-            f"Verification ledger entry saved, but required AuditLog event could not be persisted: {exc}. Safe to retry.",
-        )
-    return audit_rec
-
-
 @router.post("/raw-materials/verify-opening-stock")
 async def verify_raw_material_opening_stock(
     req: RawMaterialOpeningVerificationRequest,
+    request: Request,
     user: dict = Depends(get_current_user),
 ):
     """
-    Owner-only physical opening / on-hand raw material stock verification.
+    Owner-only physical opening / on-hand raw material stock verification via Apps Script.
     Preserves RawMaterials.current_stock and historical ledger entries untouched.
-    Appends an auditable OPENING_STOCK_VERIFICATION adjustment entry to RawMaterialLedger.
     Idempotent across retries; rejects conflicting verifications with HTTP 409.
     """
-    actor, _ = require_owner(user)
+    actor, actor_role = require_owner(user)
     require_persistent_store()
 
     if not req.confirm_physical_count:
@@ -762,7 +735,6 @@ async def verify_raw_material_opening_stock(
             raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
             incomp_records = db.get_records("IncompleteTransactions", fresh=True)
 
-            # 1. Check IncompleteTransactions for idempotency key conflict/replay
             if clean_idemp_key:
                 existing_incomp = next(
                     (t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key),
@@ -781,7 +753,6 @@ async def verify_raw_material_opening_stock(
                             "Conflict: Idempotency key reused with conflicting physical verification parameters.",
                         )
 
-            # 2. Check RawMaterialLedger for existing OPENING_STOCK_VERIFICATION (by idempotency key or material)
             existing_verifs = [
                 r for r in raw_ledger
                 if str(r.get("movement_type", "")).strip().upper() == "OPENING_STOCK_VERIFICATION"
@@ -839,39 +810,12 @@ async def verify_raw_material_opening_stock(
                         f"Conflicting re-verification ({physical_val} {unit}) rejected.",
                     )
 
-                # Exact idempotent replay -> ensure AuditLog and IncompleteTransactions are complete
                 ex_txn_id = str(ex_row.get("raw_material_txn_id") or ex_row.get("ledger_id") or "").strip()
                 ex_prev = float(ex_meta.get("previous_available", 0.0))
                 ex_recorded_open = float(ex_meta.get("recorded_opening_stock", 0.0))
                 ex_var = float(ex_meta.get("variance", ex_row.get("quantity", 0.0)) or 0.0)
                 ex_by = str(ex_meta.get("verified_by") or ex_row.get("created_by") or actor).strip()
                 ex_at = str(ex_meta.get("verified_at") or ex_row.get("txn_datetime") or "").strip()
-
-                _ensure_raw_material_verification_audit(
-                    mat_id=mat_id,
-                    mat_name=mat_name,
-                    actor=ex_by,
-                    raw_material_txn_id=ex_txn_id,
-                    old_val=str(ex_prev),
-                    new_val=str(ex_phys if ex_phys is not None else physical_val),
-                    reason=ex_reason or clean_reason,
-                )
-
-                if clean_idemp_key:
-                    incomp_match = next(
-                        (t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key),
-                        None,
-                    )
-                    if incomp_match and str(incomp_match.get("status", "")).upper() != "COMPLETED":
-                        try:
-                            db.update_record("IncompleteTransactions", "transaction_id", incomp_match["transaction_id"], {
-                                "status": "COMPLETED",
-                                "resolved_by": actor,
-                                "resolved_at": now(),
-                                "updated_at": now(),
-                            })
-                        except Exception:
-                            pass
 
                 return {
                     "status": "CONFIRMED",
@@ -902,33 +846,6 @@ async def verify_raw_material_opening_stock(
 
             verified_at = now()
             txn_dt = f"{clean_date}T00:00:00" if clean_date else verified_at
-
-            incomp_txn_id = None
-            if clean_idemp_key:
-                incomp_txn_id = make_id("IncompleteTransactions")
-                try:
-                    db.append_record("IncompleteTransactions", {
-                        "transaction_id": incomp_txn_id,
-                        "transaction_type": "RAW_MATERIAL_OPENING_VERIFICATION",
-                        "idempotency_key": clean_idemp_key,
-                        "status": "IN_PROGRESS",
-                        "payload_json": json.dumps({
-                            "payload_hash": payload_hash,
-                            "raw_material_id": mat_id,
-                            "physical_count": physical_val,
-                            "reason": clean_reason,
-                            "verified_date": clean_date,
-                        }),
-                        "error_details": "",
-                        "created_at": verified_at,
-                        "updated_at": verified_at,
-                        "resolved_by": "",
-                        "resolved_at": "",
-                    }, raise_on_error=True)
-                except Exception as exc:
-                    raise HTTPException(503, f"Could not record verification intent: {exc}. Safe to retry.")
-
-            ledger_txn_id = make_id("RawMaterialLedger")
             verification_ref = clean_idemp_key or f"PHYS-VERIFY-{mat_id}-{business_today()}"
             meta_notes = json.dumps({
                 "verification_type": "PHYSICAL_OPENING_STOCK",
@@ -945,7 +862,6 @@ async def verify_raw_material_opening_stock(
             })
 
             ledger_row = {
-                "raw_material_txn_id": ledger_txn_id,
                 "txn_datetime": txn_dt,
                 "material_name": mat_name,
                 "raw_material_id": mat_id,
@@ -957,31 +873,25 @@ async def verify_raw_material_opening_stock(
                 "issue_txn_id": verification_ref,
                 "created_by": actor,
                 "notes": meta_notes,
+                "audit_action": "VERIFY_RAW_MATERIAL_OPENING_STOCK",
+                "audit_reason": f"{mat_name}: {clean_reason}",
+                "old_available": str(recorded_available),
+                "new_available": str(physical_val),
             }
 
-            if not db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True):
-                raise HTTPException(503, "Could not record physical opening stock verification.")
-
-            if incomp_txn_id:
-                try:
-                    db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
-                        "status": "COMPLETED",
-                        "resolved_by": actor,
-                        "resolved_at": now(),
-                        "updated_at": now(),
-                    })
-                except Exception:
-                    pass
-
-            _ensure_raw_material_verification_audit(
-                mat_id=mat_id,
-                mat_name=mat_name,
-                actor=actor,
-                raw_material_txn_id=ledger_txn_id,
-                old_val=str(recorded_available),
-                new_val=str(physical_val),
-                reason=clean_reason,
+            bridge_res = apps_script_bridge.delegate_governed_write(
+                action="VERIFY_RAW_MATERIAL_OPENING_STOCK",
+                target_tab="RawMaterialLedger",
+                payload=ledger_row,
+                actor_user_id=actor,
+                actor_role=actor_role,
+                nonce=clean_idemp_key or None,
+                request=request,
+                id_field="raw_material_txn_id",
+                invalidate_tabs=["RawMaterialLedger", "RawMaterials", "AuditLog"],
             )
+            ledger_txn_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("raw_material_txn_id") or "")
+            db.log_audit(actor, "VERIFY_RAW_MATERIAL_OPENING_STOCK", "RawMaterials", mat_id, reason=f"{mat_name}: {clean_reason}")
 
             return {
                 "status": "CONFIRMED",
@@ -1005,11 +915,10 @@ async def verify_raw_material_opening_stock(
 
 
 @router.post("/raw-materials/receive", response_model=RawMaterialReceiveResponse)
-async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depends(get_current_user)):
-    actor, _ = require_production_access(user)
+async def receive_raw_material(req: RawMaterialReceiveRequest, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_production_access(user)
     require_persistent_store()
 
-    # 1. Input sanitization and basic validations
     clean_mat_id = (req.raw_material_id or req.material_id or req.material_name or "").strip()
     if not clean_mat_id:
         raise HTTPException(422, "Raw material identification is required.")
@@ -1025,27 +934,22 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
 
     if treatment not in {"RECOVERABLE_ITC", "CAPITALIZED_TO_COST", "EXEMPT_NIL_RATED"}:
         raise HTTPException(422, "gst_treatment must be RECOVERABLE_ITC, CAPITALIZED_TO_COST, or EXEMPT_NIL_RATED")
-
     if req.quantity <= 0:
         raise HTTPException(422, "Quantity must be strictly greater than zero")
-
     if req.purchase_rate <= 0:
         raise HTTPException(422, "Purchase rate must be strictly greater than zero")
 
     freight_val = float(req.freight_amount or 0.0)
     other_val = float(req.other_expenses if req.other_expenses is not None else (req.other_expenses_amount or 0.0))
     gst_val = float(req.gst_amount or 0.0)
-
     if freight_val < 0 or other_val < 0 or gst_val < 0:
         raise HTTPException(422, "Expenses and GST amounts cannot be negative")
 
-    # Standardize unit
     try:
         std_qty, std_unit = normalize_to_canonical_unit(req.quantity, req.unit)
     except Exception as unit_err:
         raise HTTPException(422, f"Invalid unit or quantity: {unit_err}")
 
-    # Build canonical fingerprint payload dict for idempotency comparison
     payload_dict = {
         "raw_material_id": clean_mat_id,
         "quantity": round_stock(std_qty),
@@ -1064,7 +968,6 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
     line_key = f"INV:{clean_invoice}:L:{line_no}"
 
     with _RAW_MATERIAL_MUTEX, contextlib.ExitStack() as _rm_lock_stack:
-        # 2. Resolve material in master data
         raw_master = db.get_records("RawMaterials", fresh=True)
         mat_row = next(
             (r for r in raw_master
@@ -1072,7 +975,6 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
              or str(field(r, "material_name", default="")).strip().lower() == clean_mat_id.lower()),
             None
         )
-
         if not mat_row:
             raise HTTPException(422, f"Raw material '{clean_mat_id}' not found in RawMaterials master. Create and approve the master record first.")
 
@@ -1081,22 +983,17 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
         _rm_lock_stack.enter_context(CrossProcessLock("raw_material", resolved_mat_id))
         raw_master = db.get_records("RawMaterials", fresh=True)
 
-        # 3. Check IncompleteTransactions for idempotency key
         incomp_records = db.get_records("IncompleteTransactions", fresh=True)
         existing_txn = next((t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key), None)
         if existing_txn:
-            stored_payload_str = str(existing_txn.get("payload_json", "")).strip()
             stored_hash = None
             try:
-                stored_data = json.loads(stored_payload_str)
-                stored_hash = stored_data.get("payload_hash")
+                stored_hash = json.loads(str(existing_txn.get("payload_json", "")).strip()).get("payload_hash")
             except Exception:
                 pass
-
             if stored_hash and stored_hash != payload_hash:
                 raise HTTPException(409, "Conflict: Idempotency key reused with conflicting request payload parameters.")
 
-        # 4. Check RawMaterialLedger for existing line
         raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
         existing_line = next(
             (r for r in raw_ledger
@@ -1106,16 +1003,12 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
              and str(r.get("movement_type", "")).strip().upper() == "PURCHASE_RECEIPT"),
             None
         )
-
         if existing_line:
-            notes_str = str(existing_line.get("notes", ""))
             stored_hash = None
             try:
-                meta = json.loads(notes_str)
-                stored_hash = meta.get("payload_hash")
+                stored_hash = json.loads(str(existing_line.get("notes", ""))).get("payload_hash")
             except Exception:
                 pass
-
             if stored_hash and stored_hash != payload_hash:
                 raise HTTPException(409, f"Conflict: Invoice line '{line_key}' already recorded with different details.")
 
@@ -1150,55 +1043,20 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
                 message=f"Consignment already recorded in ledger as {existing_line.get('raw_material_txn_id')}. No duplicate stock added.",
             )
 
-        # 5. Compute Landed Cost Math
         base_value_dec = to_decimal(round_money(to_decimal(req.quantity) * to_decimal(req.purchase_rate)))
         freight_dec = to_decimal(freight_val)
         other_dec = to_decimal(other_val)
         gst_dec = to_decimal(gst_val)
-
-        if treatment == "CAPITALIZED_TO_COST":
-            total_landed_dec = base_value_dec + freight_dec + other_dec + gst_dec
-        else:
-            total_landed_dec = base_value_dec + freight_dec + other_dec
-
+        total_landed_dec = (
+            base_value_dec + freight_dec + other_dec + gst_dec
+            if treatment == "CAPITALIZED_TO_COST"
+            else base_value_dec + freight_dec + other_dec
+        )
         effective_unit_rate = round_money(total_landed_dec / to_decimal(std_qty))
 
         bal_before = calculate_raw_material_balance(canonical_mat_name, raw_master, raw_ledger)
         prev_avail = float(bal_before.get("available", 0.0))
 
-        # 6. Record in-flight intent in IncompleteTransactions
-        incomp_txn_id = make_id("IncompleteTransactions")
-        intent_payload = {
-            "payload_hash": payload_hash,
-            "raw_material_id": resolved_mat_id,
-            "material_name": canonical_mat_name,
-            "quantity": std_qty,
-            "unit": std_unit,
-            "effective_unit_cost": effective_unit_rate,
-            "invoice_number": clean_invoice,
-            "line_number": line_no,
-            "line_key": line_key,
-        }
-        try:
-            if not db.append_record("IncompleteTransactions", {
-                "transaction_id": incomp_txn_id,
-                "transaction_type": "RAW_MATERIAL_RECEIPT",
-                "idempotency_key": clean_idemp_key,
-                "status": "IN_PROGRESS",
-                "payload_json": json.dumps(intent_payload),
-                "error_details": "",
-                "created_at": now(),
-                "updated_at": now(),
-                "resolved_by": "",
-                "resolved_at": "",
-            }, raise_on_error=True):
-                raise RuntimeError("Failed to record intent in IncompleteTransactions.")
-        except Exception as incomp_err:
-            logger.error("Failed to record intent in IncompleteTransactions: %s", incomp_err)
-            raise HTTPException(503, f"Storage error recording transaction intent: {incomp_err}. Safe to retry.")
-
-        # 7. Append single row to RawMaterialLedger
-        ledger_txn_id = db.generate_id("RawMaterialLedger")
         notes_metadata = json.dumps({
             "_v": 1,
             "kind": "PURCHASE_RECEIPT",
@@ -1218,9 +1076,7 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
             "effective_unit_cost": float(effective_unit_rate),
             "operator_remarks": (req.notes or "").strip(),
         })
-
         ledger_row = {
-            "raw_material_txn_id": ledger_txn_id,
             "txn_datetime": req.receipt_date or now(),
             "material_name": canonical_mat_name,
             "raw_material_id": resolved_mat_id,
@@ -1234,42 +1090,23 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
             "notes": notes_metadata,
         }
 
-        try:
-            if not db.append_record("RawMaterialLedger", ledger_row, raise_on_error=True):
-                raise RuntimeError("Failed to append raw material receiving transaction to ledger.")
-        except Exception as write_err:
-            try:
-                db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
-                    "status": "PARTIAL_FAILED",
-                    "error_details": str(write_err),
-                    "updated_at": now(),
-                })
-            except Exception:
-                pass
-            raise HTTPException(503, f"Storage write error recording raw material receipt: {write_err}. Safe to retry.")
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="RECEIVE_RAW_MATERIAL",
+            target_tab="RawMaterialLedger",
+            payload=ledger_row,
+            actor_user_id=actor,
+            actor_role=actor_role,
+            nonce=clean_idemp_key,
+            request=request,
+            id_field="raw_material_txn_id",
+            invalidate_tabs=["RawMaterialLedger", "RawMaterials"],
+        )
+        ledger_txn_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("raw_material_txn_id") or "")
 
-        # 8. Post-write verification
         raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
-        verified_row = next((r for r in raw_ledger_after if str(r.get("raw_material_txn_id", "")).strip() == ledger_txn_id), None)
-        if not verified_row:
-            raise HTTPException(503, "Verification failed: appended ledger row could not be confirmed. Safe to retry.")
-
-        # 9. Compute new balance
         bal_after = calculate_raw_material_balance(canonical_mat_name, raw_master, raw_ledger_after)
         new_avail = float(bal_after.get("available", 0.0))
 
-        # 10. Mark IncompleteTransactions completed
-        try:
-            db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
-                "status": "COMPLETED",
-                "resolved_by": actor,
-                "resolved_at": now(),
-                "updated_at": now(),
-            })
-        except Exception as comp_err:
-            logger.debug("Non-fatal: IncompleteTransactions complete update error: %s", comp_err)
-
-        # 11. Audit log
         db.log_audit(
             actor,
             "RECEIVE_RAW_MATERIAL",
@@ -1278,40 +1115,20 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
             reason=f"Received {std_qty} {std_unit} of {canonical_mat_name} (Invoice {clean_invoice}, Line {line_no}) at landed rate ₹{effective_unit_rate}/{std_unit}"
         )
 
-        # 12. Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
-        try:
-            from app.accounting.postings import post_receipt_journal
-            receipt_dict = {
-                "raw_material_txn_id": ledger_txn_id,
-                "material_name": canonical_mat_name,
-                "quantity": std_qty,
-                "purchase_rate": float(req.purchase_rate),
-                "freight_amount": float(freight_dec),
-                "gst_amount": float(gst_dec),
-                "gst_treatment": treatment,
-                "supplier_name": (req.supplier_name or "").strip(),
-                "invoice_number": clean_invoice,
-                "receipt_date": req.receipt_date or now()[:10],
-            }
-            post_receipt_journal(receipt_dict, actor)
-        except Exception as acct_err:
-            logger.error("Non-fatal accounting posting error for receipt %s: %s", ledger_txn_id, acct_err)
-            try:
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": make_id("IncompleteTransactions"),
-                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
-                    "idempotency_key": f"acct-receipt-{ledger_txn_id}",
-                    "status": "POSTING_FAILED",
-                    "payload_json": json.dumps({"ledger_txn_id": ledger_txn_id, "type": "RECEIPT"}),
-                    "error_details": str(acct_err),
-                    "created_at": now(),
-                    "updated_at": now(),
-                    "resolved_by": "",
-                    "resolved_at": "",
-                })
-            except Exception:
-                pass
-
+        from app.accounting.postings import post_receipt_journal
+        receipt_dict = {
+            "raw_material_txn_id": ledger_txn_id,
+            "material_name": canonical_mat_name,
+            "quantity": std_qty,
+            "purchase_rate": float(req.purchase_rate),
+            "freight_amount": float(freight_dec),
+            "gst_amount": float(gst_dec),
+            "gst_treatment": treatment,
+            "supplier_name": (req.supplier_name or "").strip(),
+            "invoice_number": clean_invoice,
+            "receipt_date": req.receipt_date or now()[:10],
+        }
+        post_receipt_journal(receipt_dict, actor)
 
         return RawMaterialReceiveResponse(
             success=True,
@@ -1343,11 +1160,10 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, user: dict = Depe
 
 
 @router.post("/milling/record", response_model=DalMillingResponse)
-async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_production_access(user)
+async def record_dal_milling_batch(req: DalMillingCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_production_access(user)
     require_persistent_store()
 
-    # 1. Resolve source Dal and target Flour
     source_id = (req.source_material_id or req.whole_dal_id or "").strip()
     dal_id, mapping = resolve_dal_flour_pair(source_id)
     if not dal_id or not mapping:
@@ -1361,10 +1177,8 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
 
     if req.input_quantity_kg <= 0:
         raise HTTPException(422, "Input quantity must be strictly greater than zero.")
-
     if req.flour_output_kg <= 0:
         raise HTTPException(422, "Flour output quantity must be strictly greater than zero.")
-
     if req.flour_output_kg > req.input_quantity_kg:
         raise HTTPException(
             422,
@@ -1403,7 +1217,6 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
         if not truthy(field(source_master, "active", default="true")) or not truthy(field(flour_master, "active", default="true")):
             raise HTTPException(409, "Milling is blocked because source or target raw material is inactive.")
 
-        # 2. Check Idempotency and Replay in RawMaterialLedger (Completed Output)
         existing_milling_out = next(
             (r for r in raw_ledger
              if str(r.get("movement_type", "")).strip().upper() == "MILLING_OUTPUT"
@@ -1412,16 +1225,12 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                   (clean_idemp_key in str(r.get("notes", ""))))),
             None
         )
-
         if existing_milling_out:
-            stored_notes = str(existing_milling_out.get("notes", ""))
             stored_hash = None
             try:
-                meta = json.loads(stored_notes)
-                stored_hash = meta.get("payload_hash")
+                stored_hash = json.loads(str(existing_milling_out.get("notes", ""))).get("payload_hash")
             except Exception:
                 pass
-
             if stored_hash and stored_hash != payload_hash:
                 raise HTTPException(409, f"Conflict: Milling batch '{clean_idemp_key}' already recorded with different parameters.")
 
@@ -1430,23 +1239,8 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             existing_in_row = next((r for r in raw_ledger if str(r.get("issue_txn_id", "")) == existing_batch_id and str(r.get("movement_type", "")).upper() == "MILLING_CONSUMPTION"), None)
             existing_in_id = str(existing_in_row.get("raw_material_txn_id", "")) if existing_in_row else ""
 
-            # Ensure IncompleteTransactions is reconciled to COMPLETED
-            incomp_records = db.get_records("IncompleteTransactions", fresh=True)
-            incomp_txn = next((t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key), None)
-            if incomp_txn and str(incomp_txn.get("status", "")).upper() != "COMPLETED":
-                try:
-                    db.update_record("IncompleteTransactions", "transaction_id", incomp_txn["transaction_id"], {
-                        "status": "COMPLETED",
-                        "resolved_by": actor,
-                        "resolved_at": now(),
-                        "updated_at": now(),
-                    })
-                except Exception:
-                    pass
-
             cur_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger)
             cur_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger)
-
             return DalMillingResponse(
                 success=True,
                 status="ALREADY_RECORDED",
@@ -1474,7 +1268,6 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 message=f"[Idempotent Replay] Milling batch already recorded as {existing_batch_id}. Stock balance intact.",
             )
 
-        # 3. Forward-Recovery Check: Leg 1 committed, but Leg 2 missing
         existing_milling_in = next(
             (r for r in raw_ledger
              if str(r.get("movement_type", "")).strip().upper() == "MILLING_CONSUMPTION"
@@ -1483,16 +1276,12 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                   (clean_idemp_key in str(r.get("notes", ""))))),
             None
         )
-
         if existing_milling_in:
-            stored_notes = str(existing_milling_in.get("notes", ""))
             stored_hash = None
             try:
-                meta = json.loads(stored_notes)
-                stored_hash = meta.get("payload_hash")
+                stored_hash = json.loads(str(existing_milling_in.get("notes", ""))).get("payload_hash")
             except Exception:
                 pass
-
             if stored_hash and stored_hash != payload_hash:
                 raise HTTPException(409, f"Conflict: Partial milling batch '{clean_idemp_key}' exists with conflicting parameters.")
 
@@ -1500,7 +1289,6 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             existing_in_id = str(existing_milling_in.get("raw_material_txn_id", ""))
             existing_dal_rate = float(existing_milling_in.get("rate_per_unit", 0))
 
-            # Precision calculations via Decimal
             rec_in_qty_dec = to_decimal(round_stock(req.input_quantity_kg))
             rec_out_qty_dec = to_decimal(round_stock(req.flour_output_kg))
             rec_exp_dec = to_decimal(round_money(milling_exp))
@@ -1512,7 +1300,6 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             rec_loss_kg = float(round_stock(rec_in_qty_dec - rec_out_qty_dec))
             rec_loss_pct = float(round_ratio((rec_loss_kg / float(req.input_quantity_kg)) * 100))
 
-            output_txn_id = db.generate_id("RawMaterialLedger")
             output_notes = json.dumps({
                 "_v": 1,
                 "kind": "MILLING_OUTPUT",
@@ -1536,7 +1323,6 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 "recovered": True,
             })
             leg2_row = {
-                "raw_material_txn_id": output_txn_id,
                 "txn_datetime": req.milling_date or now(),
                 "material_name": mapping["target_flour_name"],
                 "raw_material_id": mapping["target_flour_id"],
@@ -1549,67 +1335,48 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 "created_by": actor,
                 "notes": output_notes,
             }
-            if not db.append_record("RawMaterialLedger", leg2_row, raise_on_error=True):
-                raise HTTPException(503, "Storage error during flour receipt recovery. Safe to retry.")
-
-            # Post-write readback verification
+            milling_batch_row = {
+                "milling_batch_id": existing_batch_id,
+                "batch_date": req.milling_date or now()[:10],
+                "source_material_id": dal_id,
+                "source_material_name": mapping["canonical_dal_name"],
+                "input_quantity_kg": float(req.input_quantity_kg),
+                "target_flour_id": mapping["target_flour_id"],
+                "target_flour_name": mapping["target_flour_name"],
+                "flour_output_kg": float(req.flour_output_kg),
+                "processing_loss_kg": rec_loss_kg,
+                "yield_ratio": round_ratio(float(req.flour_output_kg) / float(req.input_quantity_kg)),
+                "source_unit_rate": existing_dal_rate,
+                "milling_expenses": float(milling_exp),
+                "total_flour_cost": rec_total_flour_cost,
+                "flour_unit_cost": rec_flour_unit_rate,
+                "status": "COMPLETED",
+                "created_by": actor,
+                "created_at": now(),
+                "notes": (req.notes or "").strip(),
+            }
+            bridge_res = apps_script_bridge.delegate_governed_write(
+                action="RECOVER_MILLING_BATCH",
+                target_tab="RawMaterialLedger",
+                payload={"leg2_row": leg2_row, "milling_batch_row": milling_batch_row},
+                actor_user_id=actor,
+                actor_role=actor_role,
+                nonce=clean_idemp_key,
+                request=request,
+                id_field="raw_material_txn_id",
+                invalidate_tabs=["RawMaterialLedger", "MillingBatches", "RawMaterials"],
+            )
+            output_txn_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("raw_material_txn_id") or "")
             raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
-            verified_leg2 = next((r for r in raw_ledger_after if str(r.get("raw_material_txn_id", "")).strip() == output_txn_id), None)
-            if not verified_leg2:
-                raise HTTPException(503, "Verification failed: recovered flour output could not be confirmed. Safe to retry.")
-
-            # Update IncompleteTransactions
-            incomp_records = db.get_records("IncompleteTransactions", fresh=True)
-            incomp_txn = next((t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key), None)
-            if incomp_txn:
-                try:
-                    db.update_record("IncompleteTransactions", "transaction_id", incomp_txn["transaction_id"], {
-                        "status": "COMPLETED",
-                        "resolved_by": actor,
-                        "resolved_at": now(),
-                        "updated_at": now(),
-                    })
-                except Exception:
-                    pass
-
+            post_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger_after)
+            post_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger_after)
             db.log_audit(
                 actor,
                 "RECOVER_MILLING_BATCH",
                 "RawMaterialLedger",
                 existing_batch_id,
-                reason=f"Recovered and committed missing flour output for batch {existing_batch_id} ({req.flour_output_kg} kg {mapping['target_flour_name']} at ₹{rec_flour_unit_rate}/kg)"
+                reason=f"Recovered missing flour output for batch {existing_batch_id} ({req.flour_output_kg} kg {mapping['target_flour_name']} at ₹{rec_flour_unit_rate}/kg)",
             )
-
-            # Sync MillingBatches sheet
-            try:
-                existing_mb = next((b for b in db.get_records("MillingBatches") if str(b.get("milling_batch_id", "")).strip() == existing_batch_id), None)
-                if not existing_mb:
-                    db.append_record("MillingBatches", {
-                        "milling_batch_id": existing_batch_id,
-                        "batch_date": req.milling_date or now()[:10],
-                        "source_material_id": dal_id,
-                        "source_material_name": mapping["canonical_dal_name"],
-                        "input_quantity_kg": float(req.input_quantity_kg),
-                        "target_flour_id": mapping["target_flour_id"],
-                        "target_flour_name": mapping["target_flour_name"],
-                        "flour_output_kg": float(req.flour_output_kg),
-                        "processing_loss_kg": rec_loss_kg,
-                        "yield_ratio": round_ratio(float(req.flour_output_kg) / float(req.input_quantity_kg)),
-                        "source_unit_rate": existing_dal_rate,
-                        "milling_expenses": float(milling_exp),
-                        "total_flour_cost": rec_total_flour_cost,
-                        "flour_unit_cost": rec_flour_unit_rate,
-                        "status": "COMPLETED",
-                        "created_by": actor,
-                        "created_at": now(),
-                        "notes": (req.notes or "").strip(),
-                    })
-            except Exception as mb_err:
-                logger.warning(f"Could not sync MillingBatches in recovery: {mb_err}")
-
-            post_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger_after)
-            post_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger_after)
-
             return DalMillingResponse(
                 success=True,
                 status="SUCCESS",
@@ -1631,10 +1398,9 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 new_whole_stock=float(post_whole.get("available", 0.0)),
                 new_flour_stock=float(post_flour.get("available", 0.0)),
                 is_replay=False,
-                message=f"✓ Forward-recovered and completed milling batch {existing_batch_id}. Milled {req.input_quantity_kg} kg {mapping['canonical_dal_name']} → {req.flour_output_kg} kg {mapping['target_flour_name']} at ₹{rec_flour_unit_rate}/kg.",
+                message=f"Forward-recovered and completed milling batch {existing_batch_id}. Milled {req.input_quantity_kg} kg {mapping['canonical_dal_name']} -> {req.flour_output_kg} kg {mapping['target_flour_name']} at ₹{rec_flour_unit_rate}/kg.",
             )
 
-        # 4. Check Stock Availability (for fresh batch) using confirmed available balance
         cur_whole_bal = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger)
         confirmed_whole = float(cur_whole_bal.get("confirmed_available", cur_whole_bal.get("available", 0.0)))
         available_whole = float(cur_whole_bal.get("available", 0.0))
@@ -1652,21 +1418,17 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 f"Insufficient {mapping['canonical_dal_name']} stock: requested {req.input_quantity_kg} kg but available balance is {available_whole} kg."
             )
 
-        # 5. Check IncompleteTransactions for conflict
         incomp_records = db.get_records("IncompleteTransactions", fresh=True)
         existing_txn = next((t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key), None)
         if existing_txn:
-            stored_payload_str = str(existing_txn.get("payload_json", "")).strip()
             stored_hash = None
             try:
-                stored_data = json.loads(stored_payload_str)
-                stored_hash = stored_data.get("payload_hash")
+                stored_hash = json.loads(str(existing_txn.get("payload_json", "")).strip()).get("payload_hash")
             except Exception:
                 pass
             if stored_hash and stored_hash != payload_hash:
                 raise HTTPException(409, "Conflict: Idempotency key reused with conflicting request payload parameters.")
 
-        # 6. Compute Landed Cost Math using Decimal
         dal_rate_info = get_latest_purchase_rate(mapping["canonical_dal_name"], raw_master, raw_ledger)
         if dal_rate_info.get("status") != "CONFIRMED" or dal_rate_info.get("rate_per_canonical_unit") in (None, ""):
             raise HTTPException(422, f"Confirmed source dal rate is required for {mapping['canonical_dal_name']}.")
@@ -1691,49 +1453,9 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
         loss_kg = float(round_stock(loss_kg_dec))
         loss_pct = float(round_ratio(loss_pct_dec))
 
-        # 7. Allocate IDs
-        incomp_txn_id = make_id("IncompleteTransactions")
-        input_txn_id = db.generate_id("RawMaterialLedger")
-        output_txn_id = db.generate_id("RawMaterialLedger")
-        milling_batch_id = f"MIL-{input_txn_id.replace('RML-', '')}"
-
-        # 8. Record Intent in IncompleteTransactions (Fail-closed)
-        intent_payload = {
-            "payload_hash": payload_hash,
-            "milling_batch_id": milling_batch_id,
-            "source_material_id": dal_id,
-            "input_quantity_kg": float(req.input_quantity_kg),
-            "target_flour_id": mapping["target_flour_id"],
-            "flour_output_kg": float(req.flour_output_kg),
-            "milling_expenses": float(milling_exp),
-            "flour_unit_cost": float(flour_unit_rate),
-            "input_txn_id": input_txn_id,
-            "output_txn_id": output_txn_id,
-            "idempotency_key": clean_idemp_key,
-        }
-        try:
-            if not db.append_record("IncompleteTransactions", {
-                "transaction_id": incomp_txn_id,
-                "transaction_type": "DAL_MILLING",
-                "idempotency_key": clean_idemp_key,
-                "status": "IN_PROGRESS",
-                "payload_json": json.dumps(intent_payload),
-                "error_details": "",
-                "created_at": now(),
-                "updated_at": now(),
-                "resolved_by": "",
-                "resolved_at": "",
-            }, raise_on_error=True):
-                raise RuntimeError("Failed to record milling intent in IncompleteTransactions.")
-        except Exception as incomp_err:
-            logger.error("Failed to record milling intent: %s", incomp_err)
-            raise HTTPException(503, f"Storage error recording milling intent: {incomp_err}. Safe to retry.")
-
-        # 9. Leg 1: Deduct Whole Dal from RawMaterialLedger
         input_notes = json.dumps({
             "_v": 1,
             "kind": "MILLING_CONSUMPTION",
-            "milling_batch_id": milling_batch_id,
             "idempotency_key": clean_idemp_key,
             "payload_hash": payload_hash,
             "target_flour_id": mapping["target_flour_id"],
@@ -1748,48 +1470,9 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             "batch_reference": clean_batch_ref,
             "operator_notes": (req.notes or "").strip(),
         })
-        leg1_row = {
-            "raw_material_txn_id": input_txn_id,
-            "txn_datetime": req.milling_date or now(),
-            "material_name": mapping["canonical_dal_name"],
-            "raw_material_id": (req.whole_dal_id or req.source_material_id or dal_id).strip(),
-            "movement_type": "MILLING_CONSUMPTION",
-            "quantity": float(req.input_quantity_kg),
-            "unit": "kg",
-            "rate_per_unit": float(dal_unit_rate),
-            "production_id": "",
-            "issue_txn_id": milling_batch_id,
-            "created_by": actor,
-            "notes": input_notes,
-        }
-        try:
-            if not db.append_record("RawMaterialLedger", leg1_row, raise_on_error=True):
-                raise RuntimeError("Failed to append whole dal deduction row to RawMaterialLedger.")
-        except Exception as leg1_err:
-            try:
-                db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
-                    "status": "PARTIAL_FAILED",
-                    "error_details": f"Leg 1 failure: {leg1_err}",
-                    "updated_at": now(),
-                })
-            except Exception:
-                pass
-            raise HTTPException(503, f"Storage error during dal deduction: {leg1_err}. Safe to retry.")
-
-        # Update intent status to INPUT_COMMITTED
-        try:
-            db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
-                "status": "INPUT_COMMITTED",
-                "updated_at": now(),
-            })
-        except Exception:
-            pass
-
-        # 10. Leg 2: Credit Flour to RawMaterialLedger
         output_notes = json.dumps({
             "_v": 1,
             "kind": "MILLING_OUTPUT",
-            "milling_batch_id": milling_batch_id,
             "idempotency_key": clean_idemp_key,
             "payload_hash": payload_hash,
             "source_material_id": dal_id,
@@ -1807,65 +1490,9 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             "batch_reference": clean_batch_ref,
             "operator_notes": (req.notes or "").strip(),
         })
-        leg2_row = {
-            "raw_material_txn_id": output_txn_id,
-            "txn_datetime": req.milling_date or now(),
-            "material_name": mapping["target_flour_name"],
-            "raw_material_id": (req.flour_id or mapping["target_flour_id"]).strip(),
-            "movement_type": "MILLING_OUTPUT",
-            "quantity": float(req.flour_output_kg),
-            "unit": "kg",
-            "rate_per_unit": float(flour_unit_rate),
-            "production_id": "",
-            "issue_txn_id": milling_batch_id,
-            "created_by": actor,
-            "notes": output_notes,
-        }
-        try:
-            if not db.append_record("RawMaterialLedger", leg2_row, raise_on_error=True):
-                raise RuntimeError("Failed to append flour output row to RawMaterialLedger.")
-        except Exception as leg2_err:
-            try:
-                db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
-                    "status": "PARTIAL_FAILED",
-                    "error_details": f"Leg 2 failure: {leg2_err}",
-                    "updated_at": now(),
-                })
-            except Exception:
-                pass
-            raise HTTPException(503, f"Storage error during flour receipt: {leg2_err}. Safe to retry.")
 
-        # 11. Post-write readback verification
-        raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
-        verified_leg1 = next((r for r in raw_ledger_after if str(r.get("raw_material_txn_id", "")).strip() == input_txn_id), None)
-        verified_leg2 = next((r for r in raw_ledger_after if str(r.get("raw_material_txn_id", "")).strip() == output_txn_id), None)
-        if not verified_leg1 or not verified_leg2:
-            raise HTTPException(503, "Verification failed: appended milling ledger rows could not be confirmed. Safe to retry.")
-
-        # 12. Mark IncompleteTransactions COMPLETED
-        try:
-            db.update_record("IncompleteTransactions", "transaction_id", incomp_txn_id, {
-                "status": "COMPLETED",
-                "resolved_by": actor,
-                "resolved_at": now(),
-                "updated_at": now(),
-            })
-        except Exception:
-            pass
-
-        # 13. Audit Log
-        db.log_audit(
-            actor,
-            "RECORD_MILLING_BATCH",
-            "RawMaterialLedger",
-            milling_batch_id,
-            reason=f"Milled {req.input_quantity_kg} kg of {mapping['canonical_dal_name']} into {req.flour_output_kg} kg of {mapping['target_flour_name']} (Loss: {loss_kg} kg / {loss_pct}%) at ₹{flour_unit_rate}/kg"
-        )
-
-        # Record in dedicated MillingBatches sheet
-        try:
-            milling_batch_row = {
-                "milling_batch_id": milling_batch_id,
+        milling_payload = {
+            "milling_batch": {
                 "batch_date": req.milling_date or now()[:10],
                 "source_material_id": dal_id,
                 "source_material_name": mapping["canonical_dal_name"],
@@ -1883,45 +1510,70 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
                 "created_by": actor,
                 "created_at": now(),
                 "notes": (req.notes or "").strip(),
-            }
-            db.append_record("MillingBatches", milling_batch_row)
-        except Exception as mb_err:
-            logger.warning(f"Could not append to MillingBatches: {mb_err}")
+            },
+            "leg1_consumption": {
+                "txn_datetime": req.milling_date or now(),
+                "material_name": mapping["canonical_dal_name"],
+                "raw_material_id": (req.whole_dal_id or req.source_material_id or dal_id).strip(),
+                "movement_type": "MILLING_CONSUMPTION",
+                "quantity": float(req.input_quantity_kg),
+                "unit": "kg",
+                "rate_per_unit": float(dal_unit_rate),
+                "production_id": "",
+                "created_by": actor,
+                "notes": input_notes,
+            },
+            "leg2_output": {
+                "txn_datetime": req.milling_date or now(),
+                "material_name": mapping["target_flour_name"],
+                "raw_material_id": (req.flour_id or mapping["target_flour_id"]).strip(),
+                "movement_type": "MILLING_OUTPUT",
+                "quantity": float(req.flour_output_kg),
+                "unit": "kg",
+                "rate_per_unit": float(flour_unit_rate),
+                "production_id": "",
+                "created_by": actor,
+                "notes": output_notes,
+            },
+        }
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="RECORD_MILLING_BATCH",
+            target_tab="MillingBatches",
+            payload=milling_payload,
+            actor_user_id=actor,
+            actor_role=actor_role,
+            nonce=clean_idemp_key,
+            request=request,
+            id_field="milling_batch_id",
+            invalidate_tabs=["MillingBatches", "RawMaterialLedger", "RawMaterials"],
+        )
+        milling_batch_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("milling_batch_id") or "")
+        saved_rec = bridge_res.get("record") or {}
+        input_txn_id = str(saved_rec.get("input_txn_id") or "")
+        output_txn_id = str(saved_rec.get("output_txn_id") or "")
 
-        # 14. Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
-        try:
-            from app.accounting.postings import post_milling_journal
-            milling_dict = {
-                "milling_batch_id": milling_batch_id,
-                "input_quantity_kg": float(req.input_quantity_kg),
-                "flour_output_kg": float(req.flour_output_kg),
-                "source_unit_rate": float(dal_unit_rate),
-                "milling_expenses": float(milling_exp),
-                "milling_date": req.milling_date or now()[:10],
-            }
-            post_milling_journal(milling_dict, actor)
-        except Exception as acct_err:
-            logger.error("Non-fatal accounting posting error for milling %s: %s", milling_batch_id, acct_err)
-            try:
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": make_id("IncompleteTransactions"),
-                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
-                    "idempotency_key": f"acct-milling-{milling_batch_id}",
-                    "status": "POSTING_FAILED",
-                    "payload_json": json.dumps({"milling_batch_id": milling_batch_id, "type": "MILLING"}),
-                    "error_details": str(acct_err),
-                    "created_at": now(),
-                    "updated_at": now(),
-                    "resolved_by": "",
-                    "resolved_at": "",
-                })
-            except Exception:
-                pass
+        raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
+        db.log_audit(
+            actor,
+            "RECORD_MILLING_BATCH",
+            "RawMaterialLedger",
+            milling_batch_id,
+            reason=f"Milled {req.input_quantity_kg} kg of {mapping['canonical_dal_name']} into {req.flour_output_kg} kg of {mapping['target_flour_name']} (Loss: {loss_kg} kg / {loss_pct}%) at ₹{flour_unit_rate}/kg",
+        )
 
-        # 15. Calculate post-milling balances
+        from app.accounting.postings import post_milling_journal
+        milling_dict = {
+            "milling_batch_id": milling_batch_id,
+            "input_quantity_kg": float(req.input_quantity_kg),
+            "flour_output_kg": float(req.flour_output_kg),
+            "source_unit_rate": float(dal_unit_rate),
+            "milling_expenses": float(milling_exp),
+            "milling_date": req.milling_date or now()[:10],
+        }
+        post_milling_journal(milling_dict, actor)
+
         post_whole = calculate_raw_material_balance(mapping["canonical_dal_name"], raw_master, raw_ledger_after)
         post_flour = calculate_raw_material_balance(mapping["target_flour_name"], raw_master, raw_ledger_after)
-
 
         return DalMillingResponse(
             success=True,
@@ -1947,13 +1599,13 @@ async def record_dal_milling_batch(req: DalMillingCreate, user: dict = Depends(g
             new_whole_stock=float(post_whole.get("available", 0.0)),
             new_flour_stock=float(post_flour.get("available", 0.0)),
             is_replay=False,
-            message=f"✓ Milled {req.input_quantity_kg} kg {mapping['canonical_dal_name']} into {req.flour_output_kg} kg {mapping['target_flour_name']} (Batch: {milling_batch_id}, Loss: {loss_kg} kg / {loss_pct}%). Landed flour rate: ₹{flour_unit_rate}/kg.",
+            message=f"Milled {req.input_quantity_kg} kg {mapping['canonical_dal_name']} into {req.flour_output_kg} kg {mapping['target_flour_name']} (Batch: {milling_batch_id}, Loss: {loss_kg} kg / {loss_pct}%). Landed flour rate: ₹{flour_unit_rate}/kg.",
         )
 
 
 @router.get("/milling/history", response_model=List[DalMillingHistoryItem])
 async def list_milling_history(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     raw_ledger = db.get_records("RawMaterialLedger", fresh=False)
     milling_outputs = [r for r in raw_ledger if str(r.get("movement_type", "")).strip().upper() == "MILLING_OUTPUT"]
 
@@ -1993,7 +1645,7 @@ async def list_milling_history(user: dict = Depends(get_current_user)):
 
 @router.get("/milling")
 async def list_milling_batches(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     milling_records = db.get_records("MillingBatches", fresh=True)
     if milling_records:
         milling_records.sort(key=lambda x: str(x.get("batch_date", "") or x.get("created_at", "")), reverse=True)
@@ -2013,8 +1665,8 @@ class StockAdjustmentRequest(BaseModel):
 
 
 @router.post("/raw-materials/adjustment")
-async def adjust_raw_material_stock(req: StockAdjustmentRequest, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+async def adjust_raw_material_stock(req: StockAdjustmentRequest, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_owner(user)
     require_persistent_store()
 
     with _RAW_MATERIAL_MUTEX, contextlib.ExitStack() as _rm_lock_stack:
@@ -2027,12 +1679,10 @@ async def adjust_raw_material_stock(req: StockAdjustmentRequest, user: dict = De
         clean_mat_name = str(field(mat, "material_name"))
         _rm_lock_stack.enter_context(CrossProcessLock("raw_material", clean_mat_id))
 
-        txn_id = make_id("RawMaterialLedger")
         mvt_type = "PURCHASE_RECEIPT" if req.quantity_change > 0 else "PRODUCTION_CONSUMPTION"
         adj_notes = f"[{req.adjustment_type}] {req.reason.strip()} (Adjustment by {actor})"
 
         row = {
-            "raw_material_txn_id": txn_id,
             "txn_datetime": now(),
             "material_name": clean_mat_name,
             "raw_material_id": clean_mat_id,
@@ -2045,8 +1695,17 @@ async def adjust_raw_material_stock(req: StockAdjustmentRequest, user: dict = De
             "created_by": actor,
             "notes": adj_notes,
         }
-        if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
-            raise HTTPException(503, "Could not persist raw material adjustment.")
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="ADJUST_RAW_MATERIAL_STOCK",
+            target_tab="RawMaterialLedger",
+            payload=row,
+            actor_user_id=actor,
+            actor_role=actor_role,
+            request=request,
+            id_field="raw_material_txn_id",
+            invalidate_tabs=["RawMaterialLedger", "RawMaterials"],
+        )
+        txn_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("raw_material_txn_id") or "")
 
         db.log_audit(
             actor,
@@ -2059,8 +1718,8 @@ async def adjust_raw_material_stock(req: StockAdjustmentRequest, user: dict = De
 
 
 @router.post("/finished-goods/adjustment")
-async def adjust_finished_goods_stock(req: StockAdjustmentRequest, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+async def adjust_finished_goods_stock(req: StockAdjustmentRequest, request: Request, user: dict = Depends(get_current_user)):
+    actor, actor_role = require_owner(user)
     require_persistent_store()
 
     products = db.get_records("Products", fresh=True)
@@ -2073,10 +1732,8 @@ async def adjust_finished_goods_stock(req: StockAdjustmentRequest, user: dict = 
     clean_sku = str(field(prod, "sku"))
     pack_g = int(float(field(prod, "pack_weight_g", default=0) or 0))
 
-    mvt_id = make_id("ProductionStockLedger")
     mvt_type = "PACKETS_PACKAGED" if req.quantity_change > 0 else "CHANNEL_DISPATCH"
     row = {
-        "movement_id": mvt_id,
         "txn_datetime": now(),
         "movement_type": mvt_type,
         "product_id": clean_pid,
@@ -2092,8 +1749,17 @@ async def adjust_finished_goods_stock(req: StockAdjustmentRequest, user: dict = 
         "created_by": actor,
         "notes": f"[{req.adjustment_type}] {req.reason.strip()} (By {actor})",
     }
-    if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-        raise HTTPException(503, "Could not persist finished goods stock adjustment.")
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="ADJUST_FINISHED_GOODS_STOCK",
+        target_tab="ProductionStockLedger",
+        payload=row,
+        actor_user_id=actor,
+        actor_role=actor_role,
+        request=request,
+        id_field="movement_id",
+        invalidate_tabs=["ProductionStockLedger", "Products"],
+    )
+    mvt_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("movement_id") or "")
 
     db.log_audit(
         actor,
@@ -2117,7 +1783,7 @@ async def list_unified_stock_movements(
     - ProductionStockLedger (Bulk Papad & Factory Finished Goods)
     - SalesmanStockLedger (Warehouse & Field Salesman Stock)
     """
-    require_production_access(user)
+    require_production_read(user)
     movements = []
 
     # 1. Raw Material Movements
@@ -2174,7 +1840,7 @@ async def list_unified_stock_movements(
 
 @router.get("/summary")
 async def summary(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     ledger = db.get_records("ProductionStockLedger")
     products_records = db.get_records("Products")
     salesman_ledger = db.get_records("SalesmanStockLedger")
@@ -2230,7 +1896,7 @@ async def summary(user: dict = Depends(get_current_user)):
 
 @router.get("/finished-goods-register")
 async def get_finished_goods_register(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     products_records = db.get_records("Products", fresh=True)
     production_ledger = db.get_records("ProductionStockLedger", fresh=True)
     salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
@@ -2250,18 +1916,17 @@ async def get_finished_goods_register(user: dict = Depends(get_current_user)):
 
 @router.get("/workers")
 async def workers(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     return db.get_records("Workers")
 
 
 @router.post("/workers")
-async def add_worker(req: WorkerCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_production_access(user)
+async def add_worker(req: WorkerCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, role = require_production_access(user)
     require_persistent_store()
     if any(str(field(w, "worker_name")).strip().lower() == req.worker_name.strip().lower() and truthy(field(w, "active", default="true")) for w in db.get_records("Workers")):
         raise HTTPException(409, "An active worker with this name already exists")
     rec = {
-        "worker_id": make_id("Workers"),
         "worker_name": req.worker_name.strip(),
         "mobile": req.mobile.strip(),
         "daily_wage": req.daily_wage,
@@ -2270,15 +1935,24 @@ async def add_worker(req: WorkerCreate, user: dict = Depends(get_current_user)):
         "created_at": now(),
         "created_by": actor,
     }
-    if not db.append_record("Workers", rec, raise_on_error=True):
-        raise HTTPException(503, "Could not save worker")
-    db.log_audit(actor, "CREATE_WORKER", "Workers", rec["worker_id"], reason=f"Created worker {rec['worker_name']}")
-    return rec
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_WORKER",
+        target_tab="Workers",
+        payload={"record": rec},
+        actor_user_id=actor,
+        actor_role=role,
+        request=request,
+        id_field="worker_id",
+        invalidate_tabs=["Workers"],
+    )
+    saved = bridge_res.get("record") or {**rec, "worker_id": bridge_res.get("allocated_id") or ""}
+    db.log_audit(actor, "CREATE_WORKER", "Workers", str(saved.get("worker_id", "")), reason=f"Created worker {rec['worker_name']}")
+    return saved
 
 
 @router.get("/attendance")
 async def attendance(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     records = db.get_records("WorkerAttendance") or []
     # Count occurrences of (worker_id, attendance_date) to detect duplicate rows in sheet
     counts: Dict[tuple, int] = {}
@@ -2299,13 +1973,13 @@ async def attendance(user: dict = Depends(get_current_user)):
 
 
 @router.post("/attendance")
-async def record_attendance(req: AttendanceCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_production_access(user)
+async def record_attendance(req: AttendanceCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, role = require_production_access(user)
     require_persistent_store()
     status_value = req.status.strip().upper()
     if status_value not in {"PRESENT", "ABSENT", "HALF_DAY"}:
         raise HTTPException(400, "Attendance must be PRESENT, ABSENT, or HALF_DAY")
-    
+
     worker_id_clean = req.worker_id.strip()
     date_clean = req.attendance_date.strip()
 
@@ -2323,7 +1997,6 @@ async def record_attendance(req: AttendanceCreate, user: dict = Depends(get_curr
         daily_wage = float(field(worker, "daily_wage", default=0) or 0)
         payable = daily_wage if status_value == "PRESENT" else daily_wage * 0.5 if status_value == "HALF_DAY" else 0
         rec = {
-            "attendance_id": make_id("WorkerAttendance"),
             "worker_id": worker_id_clean,
             "worker_name_snapshot": field(worker, "worker_name"),
             "attendance_date": date_clean,
@@ -2334,20 +2007,29 @@ async def record_attendance(req: AttendanceCreate, user: dict = Depends(get_curr
             "created_at": now(),
             "created_by": actor,
         }
-        if not db.append_record("WorkerAttendance", rec, raise_on_error=True):
-            raise HTTPException(503, "Could not save attendance")
-        db.log_audit(actor, "RECORD_WORKER_ATTENDANCE", "WorkerAttendance", rec["attendance_id"], reason=f"{rec['worker_name_snapshot']} {status_value} on {date_clean}")
-        return rec
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="RECORD_WORKER_ATTENDANCE",
+            target_tab="WorkerAttendance",
+            payload={"record": rec},
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="attendance_id",
+            invalidate_tabs=["WorkerAttendance"],
+        )
+        saved = bridge_res.get("record") or {**rec, "attendance_id": bridge_res.get("allocated_id") or ""}
+        db.log_audit(actor, "RECORD_WORKER_ATTENDANCE", "WorkerAttendance", str(saved.get("attendance_id", "")), reason=f"{rec['worker_name_snapshot']} {status_value} on {date_clean}")
+        return saved
 
 
 @router.post("/attendance/bulk", response_model=BulkAttendanceResponse)
-async def record_bulk_attendance(req: BulkAttendanceCreate, user: dict = Depends(get_current_user)):
+async def record_bulk_attendance(req: BulkAttendanceCreate, request: Request, user: dict = Depends(get_current_user)):
     """
     Mark bulk attendance for multiple active workers on a single date.
     Prevents duplicate attendance records, validates active workers, calculates daily wages,
     and returns a summary of saved vs skipped records.
     """
-    actor, _ = require_production_access(user)
+    actor, role = require_production_access(user)
     require_persistent_store()
 
     date_clean = req.attendance_date.strip()
@@ -2360,7 +2042,7 @@ async def record_bulk_attendance(req: BulkAttendanceCreate, user: dict = Depends
     with _ATTENDANCE_LOCK:
         workers = db.get_records("Workers", fresh=True) or []
         workers_by_id = {str(field(w, "worker_id")).strip(): w for w in workers}
-        
+
         attendance_records = db.get_records("WorkerAttendance", fresh=True) or []
         existing_worker_ids = {
             str(field(a, "worker_id")).strip()
@@ -2368,7 +2050,7 @@ async def record_bulk_attendance(req: BulkAttendanceCreate, user: dict = Depends
             if str(field(a, "attendance_date")).strip() == date_clean
         }
 
-        saved_records = []
+        pending_records = []
         skipped_workers = []
 
         for item in req.records:
@@ -2402,9 +2084,7 @@ async def record_bulk_attendance(req: BulkAttendanceCreate, user: dict = Depends
             daily_wage = float(field(worker, "daily_wage", default=0) or 0)
             payable = daily_wage if status_value == "PRESENT" else (daily_wage * 0.5 if status_value == "HALF_DAY" else 0.0)
 
-            att_id = make_id("WorkerAttendance")
             rec = {
-                "attendance_id": att_id,
                 "worker_id": w_id,
                 "worker_name_snapshot": field(worker, "worker_name"),
                 "attendance_date": date_clean,
@@ -2415,12 +2095,22 @@ async def record_bulk_attendance(req: BulkAttendanceCreate, user: dict = Depends
                 "created_at": now(),
                 "created_by": actor,
             }
-
-            if not db.append_record("WorkerAttendance", rec, raise_on_error=True):
-                raise HTTPException(503, f"Could not save attendance for worker {field(worker, 'worker_name')}")
-
             existing_worker_ids.add(w_id)
-            saved_records.append(rec)
+            pending_records.append(rec)
+
+        saved_records = []
+        if pending_records:
+            bridge_res = apps_script_bridge.delegate_governed_write(
+                action="RECORD_BULK_WORKER_ATTENDANCE",
+                target_tab="WorkerAttendance",
+                payload={"attendance_date": date_clean, "records": pending_records},
+                actor_user_id=actor,
+                actor_role=role,
+                request=request,
+                invalidate_tabs=["WorkerAttendance"],
+            )
+            returned = (bridge_res.get("record") or {}).get("records") if isinstance(bridge_res.get("record"), dict) else None
+            saved_records = returned if isinstance(returned, list) else pending_records
 
         db.log_audit(
             actor,
@@ -2446,9 +2136,9 @@ async def record_bulk_attendance(req: BulkAttendanceCreate, user: dict = Depends
 
 
 @router.put("/attendance/{attendance_id}")
-async def update_attendance(attendance_id: str, req: AttendanceUpdate, user: dict = Depends(get_current_user)):
+async def update_attendance(attendance_id: str, req: AttendanceUpdate, request: Request, user: dict = Depends(get_current_user)):
     """Audited correction workflow for existing attendance records."""
-    actor, _ = require_production_access(user)
+    actor, role = require_production_access(user)
     require_persistent_store()
     records = db.get_records("WorkerAttendance", fresh=True) or []
     existing = next((r for r in records if str(field(r, "attendance_id")).strip() == attendance_id.strip()), None)
@@ -2467,43 +2157,58 @@ async def update_attendance(attendance_id: str, req: AttendanceUpdate, user: dic
         "updated_at": now(),
         "updated_by": actor,
     }
-    if not db.update_record("WorkerAttendance", "attendance_id", attendance_id, updates, raise_on_error=True):
-        raise HTTPException(503, "Could not update attendance record")
+    apps_script_bridge.delegate_governed_write(
+        action="CORRECT_WORKER_ATTENDANCE",
+        target_tab="WorkerAttendance",
+        payload={"attendance_id": attendance_id.strip(), "updates": updates},
+        actor_user_id=actor,
+        actor_role=role,
+        request=request,
+        id_field="attendance_id",
+        invalidate_tabs=["WorkerAttendance"],
+    )
     db.log_audit(actor, "CORRECT_WORKER_ATTENDANCE", "WorkerAttendance", attendance_id, reason=f"Changed status from {field(existing, 'status')} to {new_status}: {req.notes}")
     return {**existing, **updates}
 
 
 @router.delete("/attendance/{attendance_id}")
-async def delete_duplicate_attendance(attendance_id: str, user: dict = Depends(get_current_user)):
+async def delete_duplicate_attendance(attendance_id: str, request: Request, user: dict = Depends(get_current_user)):
     """Owner audited cleanup workflow for duplicate attendance records."""
-    actor, _ = require_owner(user)
+    actor, role = require_owner(user)
     require_persistent_store()
     records = db.get_records("WorkerAttendance", fresh=True) or []
     existing = next((r for r in records if str(field(r, "attendance_id")).strip() == attendance_id.strip()), None)
     if not existing:
         raise HTTPException(404, "Attendance record not found")
-    
+
     # Check if this record is indeed a duplicate (same worker and date exists)
     w_id = str(field(existing, "worker_id")).strip()
     a_dt = str(field(existing, "attendance_date")).strip()
     duplicates = [r for r in records if str(field(r, "worker_id")).strip() == w_id and str(field(r, "attendance_date")).strip() == a_dt]
     if len(duplicates) <= 1:
         raise HTTPException(400, "Cannot delete unique attendance record. Use update/correction workflow to adjust.")
-    
-    if not db.delete_record("WorkerAttendance", "attendance_id", attendance_id, raise_on_error=True):
-        raise HTTPException(503, "Could not remove attendance record")
+
+    apps_script_bridge.delegate_governed_write(
+        action="REMOVE_DUPLICATE_ATTENDANCE",
+        target_tab="WorkerAttendance",
+        payload={"attendance_id": attendance_id.strip(), "worker_id": w_id, "attendance_date": a_dt},
+        actor_user_id=actor,
+        actor_role=role,
+        request=request,
+        invalidate_tabs=["WorkerAttendance"],
+    )
     db.log_audit(actor, "REMOVE_DUPLICATE_ATTENDANCE", "WorkerAttendance", attendance_id, reason=f"Removed duplicate attendance row for {field(existing, 'worker_name_snapshot')} on {a_dt}")
     return {"status": "DELETED", "attendance_id": attendance_id}
 
 
 @router.get("/recipes")
 async def recipes(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     return db.get_records("Recipes")
 
 
 @router.post("/recipes")
-async def save_recipe(req: RecipeSave, user: dict = Depends(get_current_user)):
+async def save_recipe(req: RecipeSave, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()
 
@@ -2548,10 +2253,8 @@ async def save_recipe(req: RecipeSave, user: dict = Depends(get_current_user)):
             if str(field(r, "product_id")) == req.product_id
         ]
         version = (max(existing_versions) if existing_versions else 0) + 1
-        recipe_id = make_id("Recipes")
 
         rec = {
-            "recipe_id": recipe_id,
             "product_id": req.product_id,
             "product_name_snapshot": prod_name,
             "version": version,
@@ -2564,19 +2267,25 @@ async def save_recipe(req: RecipeSave, user: dict = Depends(get_current_user)):
             "approved_by": actor if req.approved else "",
             "approved_at": now() if req.approved else "",
         }
-        if not db.append_record("Recipes", rec, raise_on_error=True):
-            raise HTTPException(503, "Could not save recipe")
-        stored = next((r for r in db.get_records("Recipes", fresh=True) if str(field(r, "recipe_id", default="")).strip() == recipe_id), None)
-        if not stored or str(field(stored, "items_json", default="")) != str(rec["items_json"]):
-            raise HTTPException(503, "Recipe write could not be verified by read-back. Check Recipes before retrying.")
-        db.log_audit(actor, "CREATE_RECIPE", "Recipes", recipe_id, reason=f"Recipe version {version} for {prod_name}")
-        return rec
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="CREATE_RECIPE",
+            target_tab="Recipes",
+            payload={"record": rec},
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="recipe_id",
+            invalidate_tabs=["Recipes"],
+        )
+        saved = bridge_res.get("record") or {**rec, "recipe_id": bridge_res.get("allocated_id") or ""}
+        db.log_audit(actor, "CREATE_RECIPE", "Recipes", str(saved.get("recipe_id", "")), reason=f"Recipe version {version} for {prod_name}")
+        return saved
 
 
 @router.get("/recipes/master")
 async def get_master_recipes(user: dict = Depends(get_current_user)):
     """Return saved recipe records only. Static examples are not operational master data."""
-    require_production_access(user)
+    require_production_read(user)
     rows = db.get_records("Recipes", fresh=True)
     if not rows:
         return []
@@ -2648,8 +2357,8 @@ async def bootstrap_master_recipes(user: dict = Depends(get_current_user)):
 
 
 @router.post("/recipes/master/{recipe_id}/confirm")
-async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, user: dict = Depends(get_current_user)):
-    actor, _ = require_owner(user)
+async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, request: Request, user: dict = Depends(get_current_user)):
+    actor, role = require_owner(user)
     require_persistent_store()
     if not req.approved:
         raise HTTPException(422, "Owner confirmation endpoint only accepts approved=true. Create a draft with POST /recipes.")
@@ -2707,7 +2416,6 @@ async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, user:
         now_value = now()
         approved = {
             **draft,
-            "recipe_id": make_id("Recipes"),
             "version": next_version,
             "approved": "true",
             "expected_yield_kg": float(expected_yield),
@@ -2717,25 +2425,32 @@ async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, user:
             "approved_at": now_value,
             "notes": f"{source_marker} | " + (req.change_notes or f"Approved as immutable version {next_version} from draft {recipe_id}."),
         }
-        if not db.append_record("Recipes", approved, raise_on_error=True):
-            raise HTTPException(503, "Approved recipe version could not be saved.")
-        stored = next((r for r in db.get_records("Recipes", fresh=True) if str(field(r, "recipe_id", default="")).strip() == approved["recipe_id"]), None)
-        if not stored:
-            raise HTTPException(503, "Approved recipe write could not be verified by read-back.")
-        db.log_audit(actor, "APPROVE_RECIPE_VERSION", "Recipes", approved["recipe_id"], reason=f"Approved new immutable version {next_version} from draft {recipe_id}.")
-        return approved
+        approved.pop("recipe_id", None)
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="APPROVE_RECIPE_VERSION",
+            target_tab="Recipes",
+            payload={"source_draft_recipe_id": recipe_id.strip(), "record": approved},
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="recipe_id",
+            invalidate_tabs=["Recipes"],
+        )
+        saved = bridge_res.get("record") or {**approved, "recipe_id": bridge_res.get("allocated_id") or ""}
+        db.log_audit(actor, "APPROVE_RECIPE_VERSION", "Recipes", str(saved.get("recipe_id", "")), reason=f"Approved new immutable version {next_version} from draft {recipe_id}.")
+        return saved
 
 
 @router.post("/recipes/calculate")
 async def calculate_custom_recipe_cost(req: RecipeCalculateRequest, user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     return calculate_recipe_cost_estimate(req.items, req.expected_yield_kg)
 
 
 @router.get("/recipes/mapping-audit")
 async def get_recipe_mapping_audit(user: dict = Depends(get_current_user)):
     """Read-only diagnostic audit of Products -> Recipes mappings without mutating Google Sheets."""
-    require_production_access(user)
+    require_production_read(user)
     products_list = db.get_records("Products", fresh=False)
     recipes_list = db.get_records("Recipes", fresh=False)
     return audit_product_recipe_mappings(products_list, recipes_list, [])
@@ -2747,13 +2462,13 @@ async def get_recipe_mapping_audit(user: dict = Depends(get_current_user)):
 
 @router.get("/batches")
 async def batches(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     return db.get_records("ProductionBatches")
 
 
 @router.post("/batches")
-async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_production_access(user)
+async def create_batch(req: ProductionCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, role = require_production_access(user)
     require_persistent_store()
 
     req_pid = (req.product_id or "").strip()
@@ -2791,15 +2506,6 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
     if req.process_loss_kg > 0 and not str(req.loss_reason or "").strip():
         raise HTTPException(422, "A reason is required for recorded process loss.")
 
-    reconciliation = reconcile_production_output(
-        saleable_output_kg=saleable_kg,
-        gross_output_kg=gross_kg,
-        rejected_output_kg=req.wastage_kg,
-        process_loss_kg=req.process_loss_kg,
-        flour_base_used_kg=req.flour_base_used_kg,
-        benchmark_yield_ratio=None,
-    )
-
     # A production batch can only be linked to a persisted, approved recipe version.
     target_recipe_id = (req.recipe_id or "").strip()
     all_recipes = db.get_records("Recipes", fresh=True)
@@ -2829,10 +2535,18 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
         benchmark_yield_ratio=expected_yield,
     )
 
-    batch_id = make_id("ProductionBatches")
+    material_issue_plan = None
+    if req.auto_issue_materials:
+        material_issue_plan = _plan_recipe_material_issue(
+            prod_id_clean="",
+            prod_obj=product,
+            production_kg=float(reconciliation["saleable_output_kg"] or 0),
+            target_recipe=resolved,
+            actor=actor,
+            notes=req.notes,
+        )
+
     rec = {
-        "production_id": batch_id,
-        "batch_id": batch_id,
         "production_date": req.production_date,
         "product_id": req.product_id,
         "product_name_snapshot": field(product, "product_name"),
@@ -2850,7 +2564,7 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
         "yield_variance_kg": reconciliation["yield_variance_kg"] if reconciliation["yield_variance_kg"] is not None else 0.0,
         "recipe_id": target_recipe_id,
         "recipe_version": target_recipe_ver,
-        "materials_issued": "false",
+        "materials_issued": "true" if (req.auto_issue_materials and material_issue_plan) else "false",
         "material_issue_txn_id": "",
         "status": "PENDING",
         "notes": req.notes,
@@ -2861,55 +2575,35 @@ async def create_batch(req: ProductionCreate, user: dict = Depends(get_current_u
         "approved_at": "",
     }
 
-    if not db.append_record("ProductionBatches", rec, raise_on_error=True):
-        raise HTTPException(503, "Could not save production batch")
-    stored_batch = next((row for row in db.get_records("ProductionBatches", fresh=True) if str(field(row, "production_id", "batch_id", default="")).strip() == batch_id), None)
-    if not stored_batch:
-        raise HTTPException(503, "Production batch append could not be verified by read-back. No material issue was started.")
-
-    # If auto_issue_materials is requested, execute immediate explicit issuance
-    if req.auto_issue_materials:
-        try:
-            issue_res = execute_material_issue(batch_id, actor, notes=req.notes, force_recipe_id=target_recipe_id)
-            rec["materials_issued"] = "true"
-            rec["material_issue_txn_id"] = str(issue_res.get("material_issue_txn_id", ""))
-            rec["recipe_id"] = str(issue_res.get("recipe_id") or target_recipe_id)
-            rec["recipe_version"] = str(issue_res.get("recipe_version") or target_recipe_ver)
-        except Exception as exc:
-            # Clean up the pending batch record so an orphaned unissued batch is not left behind
-            try:
-                db.delete_record("ProductionBatches", "production_id", batch_id)
-            except Exception:
-                pass
-            raise exc
-
-    db.log_audit(actor, "CREATE_PRODUCTION_BATCH", "ProductionBatches", batch_id, reason=f"{rec['net_quantity_kg']} kg {rec['product_name_snapshot']}; pending approval")
-    
-    # Also link to ApprovalRequests for Owner dashboard visibility
-    try:
-        from app.routers.approvals import create_approval_request
-        create_approval_request(
-            request_type="PRODUCTION_BATCH",
-            target_user_id=batch_id,
-            payload={
-                "production_id": batch_id,
-                "batch_id": batch_id,
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_PRODUCTION_BATCH",
+        target_tab="ProductionBatches",
+        payload={
+            "record": rec,
+            "auto_issue_materials": bool(req.auto_issue_materials),
+            "material_issue_plan": material_issue_plan,
+            "approval_request": {
+                "request_type": "PRODUCTION_BATCH",
                 "product_id": req.product_id,
                 "product_name": field(product, "product_name"),
                 "net_quantity_kg": reconciliation["saleable_output_kg"],
-                "recipe_id": rec["recipe_id"],
-                "recipe_version": rec["recipe_version"],
-                "materials_issued": rec["materials_issued"],
-                "material_issue_txn_id": rec["material_issue_txn_id"],
+                "recipe_id": target_recipe_id,
+                "recipe_version": target_recipe_ver,
                 "notes": req.notes,
+                "requested_by": actor,
+                "requested_by_name": str(user.get("full_name") or actor),
             },
-            requested_by=actor,
-            requested_by_name=str(user.get("full_name") or actor),
-        )
-    except Exception as exc:
-        logger.warning(f"Could not link ApprovalRequest for batch {batch_id}: {exc}")
-
-    return AttrDict(rec)
+        },
+        actor_user_id=actor,
+        actor_role=role,
+        request=request,
+        id_field="production_id",
+        invalidate_tabs=["ProductionBatches", "RawMaterialLedger", "RawMaterials", "ApprovalRequests"],
+    )
+    batch_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("production_id") or "")
+    saved = bridge_res.get("record") or {**rec, "production_id": batch_id, "batch_id": batch_id}
+    db.log_audit(actor, "CREATE_PRODUCTION_BATCH", "ProductionBatches", batch_id, reason=f"{rec['net_quantity_kg']} kg {rec['product_name_snapshot']}; pending approval")
+    return AttrDict(saved)
 
 
 _BATCH_LOCKS: Dict[str, threading.RLock] = {}
@@ -2924,11 +2618,196 @@ def get_batch_lock(production_id: str) -> threading.RLock:
         return _BATCH_LOCKS[clean_id]
 
 
+def _plan_recipe_material_issue(
+    *,
+    prod_id_clean: str,
+    prod_obj: dict,
+    production_kg: float,
+    target_recipe: dict,
+    actor: str,
+    notes: str = "",
+) -> Dict[str, Any]:
+    """Validate recipe ingredients, unit conversions, and confirmed raw-material stock without direct DB writes."""
+    target_recipe_id = str(field(target_recipe, "recipe_id", default="") or target_recipe.get("recipe_id", "")).strip()
+    target_recipe_ver = str(field(target_recipe, "version", default="1") or target_recipe.get("version", "1")).strip()
+
+    raw_items = []
+    if isinstance(target_recipe.get("items_json"), str):
+        try:
+            raw_items = json.loads(target_recipe["items_json"])
+        except Exception as exc:
+            logger.error("Failed to parse items_json for recipe %s: %s", target_recipe_id, exc)
+            raw_items = []
+    elif isinstance(target_recipe.get("items"), list):
+        raw_items = target_recipe["items"]
+
+    if not raw_items:
+        raise HTTPException(400, f"Recipe '{target_recipe_id}' contains no ingredient items.")
+
+    raw_master = db.get_records("RawMaterials", fresh=True)
+    raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+    aggregated: Dict[str, Dict[str, Any]] = {}
+
+    for item in raw_items:
+        item_name = str(item.get("material_name") or item.get("raw_material_id") or item.get("material_id") or "").strip()
+        if not item_name:
+            continue
+
+        mat_row = next(
+            (r for r in raw_master
+             if str(field(r, "material_name", "raw_material_name", "name", default="")).strip().lower() == item_name.lower()
+             or str(field(r, "raw_material_id", default="")).strip().lower() == item_name.lower()),
+            None
+        )
+        if not mat_row:
+            raise HTTPException(400, f"Raw material '{item_name}' is missing from RawMaterials master. Add it before issuing materials.")
+
+        raw_mat_id = str(field(mat_row, "raw_material_id", default="")).strip() or item_name
+        canonical_name = str(field(mat_row, "material_name", default=item_name)).strip()
+        stock_unit = str(field(mat_row, "unit", default="kg")).strip()
+
+        mat_cat = str(field(mat_row, "category", default="")).strip().upper()
+        if mat_cat == "WHOLE_GRAIN" or "whole" in canonical_name.lower() or raw_mat_id.startswith("RM-WHOLE-"):
+            raise HTTPException(
+                400,
+                f"Formulation violation: Cannot issue '{canonical_name}' for papad production. Whole dal cannot be consumed directly by papad recipes; it must first be milled into flour."
+            )
+
+        if item.get("quantity_used") is not None:
+            exp_yield = float(production_kg or 100.0)
+            item_qty_per_kg = float(item["quantity_used"] or 0) / exp_yield if exp_yield > 0 else float(item["quantity_used"] or 0)
+            item_unit = str(item.get("unit", stock_unit)).strip()
+        elif item.get("quantity_per_kg") is not None:
+            item_qty_per_kg = float(item["quantity_per_kg"] or 0)
+            item_unit = str(item.get("unit", stock_unit)).strip()
+        elif item.get("quantity") is not None:
+            exp_yield = float(field(target_recipe, "expected_yield_kg", default=0) or 0)
+            if exp_yield <= 0:
+                raise HTTPException(422, "Approved recipe must contain a positive expected_yield_kg.")
+            item_qty_per_kg = float(item["quantity"] or 0) / exp_yield if exp_yield > 0 else float(item["quantity"] or 0)
+            item_unit = str(item.get("unit", stock_unit)).strip()
+        else:
+            item_qty_per_kg = 0.0
+            item_unit = stock_unit
+
+        iu_low = item_unit.lower()
+        su_low = stock_unit.lower()
+        if iu_low in {"g", "gram", "grams", "ml", "milliliter", "milliliters", "millilitres"}:
+            if su_low in {"kg", "kilogram", "kgs", "l", "liter", "litres", "litre"}:
+                item_qty_per_kg = item_qty_per_kg / 1000.0
+        elif iu_low in {"kg", "kilogram", "kgs", "l", "liter", "litres", "litre"}:
+            if su_low in {"g", "gram", "grams", "ml", "milliliter", "milliliters", "millilitres"}:
+                item_qty_per_kg = item_qty_per_kg * 1000.0
+
+        required_qty = round(item_qty_per_kg * production_kg, 4)
+
+        agg_key = raw_mat_id.lower()
+        if agg_key not in aggregated:
+            rate_info = get_latest_purchase_rate(canonical_name, raw_master, raw_ledger)
+            aggregated[agg_key] = {
+                "raw_material_id": raw_mat_id,
+                "material_name": canonical_name,
+                "stock_unit": stock_unit,
+                "required_qty": 0.0,
+                "rate_per_unit": rate_info.get("rate_per_canonical_unit") or "",
+            }
+        aggregated[agg_key]["required_qty"] = round(aggregated[agg_key]["required_qty"] + required_qty, 4)
+
+    lock_mat_ids = sorted(
+        {str(plan["raw_material_id"]).strip() for plan in aggregated.values() if str(plan.get("raw_material_id", "")).strip()}
+    )
+    with _RAW_MATERIAL_MUTEX, contextlib.ExitStack() as _rm_lock_stack:
+        for _mid in lock_mat_ids:
+            _rm_lock_stack.enter_context(CrossProcessLock("raw_material", _mid))
+
+        raw_master = db.get_records("RawMaterials", fresh=True)
+        raw_ledger = db.get_records("RawMaterialLedger", fresh=True)
+        existing_deductions = [
+            x for x in raw_ledger
+            if prod_id_clean
+            and str(field(x, "production_id", default="")).strip() == prod_id_clean
+            and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+        ]
+
+        missing_plans: Dict[str, Dict[str, Any]] = {}
+        for agg_key, plan in aggregated.items():
+            existing_for_mat = [
+                x for x in existing_deductions
+                if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
+                or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
+            ]
+            already_deducted = round(sum(float(field(x, "quantity", default=0) or 0) for x in existing_for_mat), 4)
+            total_required = round(plan["required_qty"], 4)
+            needed = round(total_required - already_deducted, 4)
+
+            if already_deducted > total_required + 0.001:
+                raise HTTPException(
+                    409,
+                    f"Deduction anomaly for '{plan['material_name']}': already deducted {already_deducted} {plan['stock_unit']}, "
+                    f"exceeding required {total_required} {plan['stock_unit']}. Manual reconciliation required."
+                )
+
+            if needed > 0.0001:
+                missing_plans[agg_key] = {
+                    **plan,
+                    "already_deducted_qty": already_deducted,
+                    "needed_qty": needed,
+                }
+
+        for agg_key, plan in missing_plans.items():
+            name = plan["material_name"]
+            needed = plan["needed_qty"]
+            stock_bal = calculate_raw_material_balance(name, raw_master, raw_ledger, exclude_production_id=prod_id_clean)
+            confirmed_avail = round(float(stock_bal.get("confirmed_available", stock_bal["available"])) - plan["already_deducted_qty"], 4)
+            if confirmed_avail < needed:
+                if not stock_bal.get("opening_stock_verified", False) and float(stock_bal.get("opening_stock", 0.0)) > 0:
+                    raise HTTPException(
+                        400,
+                        f"Cannot issue {name}: recorded opening stock ({stock_bal.get('opening_stock', 0.0)} {plan['stock_unit']}) is UNVERIFIED. "
+                        f"Confirmed available stock is {max(0.0, confirmed_avail)} {plan['stock_unit']}, but {needed} {plan['stock_unit']} is needed. "
+                        f"Owner must verify physical opening stock first."
+                    )
+                raise HTTPException(
+                    400,
+                    f"Insufficient stock for {name}: need {needed} {plan['stock_unit']}, available {max(0.0, confirmed_avail)}."
+                )
+
+        deduction_rows = []
+        ts_now = now()
+        for agg_key, plan in missing_plans.items():
+            needed = plan["needed_qty"]
+            if needed <= 0:
+                continue
+            deduction_rows.append({
+                "txn_datetime": ts_now,
+                "material_name": plan["material_name"],
+                "raw_material_id": plan["raw_material_id"],
+                "movement_type": "PRODUCTION_CONSUMPTION",
+                "quantity": needed,
+                "unit": plan["stock_unit"],
+                "rate_per_unit": plan["rate_per_unit"],
+                "production_id": prod_id_clean,
+                "created_by": actor,
+                "notes": notes or f"Batch {prod_id_clean or '(pending)'} material issue under Recipe {target_recipe_id} (v{target_recipe_ver})",
+            })
+
+    return {
+        "recipe_id": target_recipe_id,
+        "recipe_version": target_recipe_ver,
+        "aggregated": aggregated,
+        "missing_plans": missing_plans,
+        "existing_deductions": existing_deductions,
+        "deduction_rows": deduction_rows,
+    }
+
+
 def execute_material_issue(
     production_id: str,
     actor: str,
+    actor_role: str = "PA",
     notes: str = "",
     force_recipe_id: Optional[str] = None,
+    request: Optional[Request] = None,
 ) -> Dict[str, Any]:
     """
     Idempotent and recoverable raw-material issuance engine.
@@ -3186,16 +3065,24 @@ def execute_material_issue(
             if not missing_plans:
                 if not is_materials_issued:
                     issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
-                    try:
-                        db.update_record("ProductionBatches", "production_id", prod_id_clean, {
-                            "materials_issued": "true",
-                            "material_issue_txn_id": issue_txn_id,
-                            "recipe_id": target_recipe_id,
-                            "recipe_version": str(target_recipe_ver),
-                        }, raise_on_error=True)
-                    except Exception as recov_exc:
-                        logger.error("Failed to update status on recovery for %s: %s", prod_id_clean, recov_exc)
-                        raise HTTPException(503, "Could not update batch status during recovery. Safe to retry.")
+                    apps_script_bridge.delegate_governed_write(
+                        action="RECOVER_RAW_MATERIALS_STATUS",
+                        target_tab="ProductionBatches",
+                        payload={
+                            "production_id": prod_id_clean,
+                            "updates": {
+                                "materials_issued": "true",
+                                "material_issue_txn_id": issue_txn_id,
+                                "recipe_id": target_recipe_id,
+                                "recipe_version": str(target_recipe_ver),
+                            },
+                        },
+                        actor_user_id=actor,
+                        actor_role=actor_role,
+                        request=request,
+                        id_field="production_id",
+                        invalidate_tabs=["ProductionBatches"],
+                    )
                     db.log_audit(actor, "RECOVER_RAW_MATERIALS_STATUS", "ProductionBatches", prod_id_clean, reason="Marked materials_issued after verifying complete ledger entries.")
 
                 return {
@@ -3225,133 +3112,50 @@ def execute_material_issue(
                         f"Insufficient stock for {name}: need {needed} {plan['stock_unit']}, available {max(0.0, confirmed_avail)}."
                     )
 
-            # 8. Record in-flight intent in IncompleteTransactions
+            # 8. Build missing deduction rows and delegate atomically via Apps Script
             issue_txn_id = existing_issue_txn_id or f"RML-ISSUE-{prod_id_clean}"
-            idempotency_key = f"RAW_ISSUE_{prod_id_clean}"
-            try:
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": make_id("IncompleteTransactions"),
-                    "transaction_type": "RAW_MATERIAL_ISSUE",
-                    "idempotency_key": idempotency_key,
-                    "status": "IN_PROGRESS",
-                    "payload_json": json.dumps({"production_id": prod_id_clean, "recipe_id": target_recipe_id, "needed": {k: p["needed_qty"] for k, p in missing_plans.items()}}),
-                    "error_details": "",
-                    "created_at": now(),
-                    "updated_at": now(),
-                    "resolved_by": "",
-                    "resolved_at": "",
+            deduction_rows = []
+            ts_now = now()
+            for agg_key, plan in missing_plans.items():
+                needed = plan["needed_qty"]
+                if needed <= 0:
+                    continue
+                deduction_rows.append({
+                    "txn_datetime": ts_now,
+                    "material_name": plan["material_name"],
+                    "raw_material_id": plan["raw_material_id"],
+                    "movement_type": "PRODUCTION_CONSUMPTION",
+                    "quantity": needed,
+                    "unit": plan["stock_unit"],
+                    "rate_per_unit": plan["rate_per_unit"],
+                    "production_id": prod_id_clean,
+                    "issue_txn_id": issue_txn_id,
+                    "created_by": actor,
+                    "notes": notes or f"Batch {prod_id_clean} material issue under Recipe {target_recipe_id} (v{target_recipe_ver})",
                 })
-            except Exception as exc:
-                logger.debug("Non-fatal: IncompleteTransactions logging bypassed: %s", exc)
 
-            # 9. Append missing deduction rows
-            appended_rows = []
-            try:
-                for agg_key, plan in missing_plans.items():
-                    needed = plan["needed_qty"]
-                    if needed <= 0:
-                        continue
-
-                    mat_clean = re.sub(r'[^a-zA-Z0-9]', '', plan['raw_material_id'] or plan['material_name'])[:10]
-                    existing_count = len([x for x in existing_deductions if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key])
-                    suffix = f"-{existing_count + 1}" if existing_count > 0 else ""
-                    txn_id = f"RML-{prod_id_clean}-{mat_clean}{suffix}"
-
-                    row = {
-                        "raw_material_txn_id": txn_id,
-                        "txn_datetime": now(),
-                        "material_name": plan["material_name"],
-                        "raw_material_id": plan["raw_material_id"],
-                        "movement_type": "PRODUCTION_CONSUMPTION",
-                        "quantity": needed,
-                        "unit": plan["stock_unit"],
-                        "rate_per_unit": plan["rate_per_unit"],
-                        "production_id": prod_id_clean,
-                        "issue_txn_id": issue_txn_id,
-                        "created_by": actor,
-                        "notes": f"Batch {prod_id_clean} material issue under Recipe {target_recipe_id} (v{target_recipe_ver})",
-                    }
-                    if not db.append_record("RawMaterialLedger", row, raise_on_error=True):
-                        raise RuntimeError(f"Could not record raw material deduction for '{plan['material_name']}' in ledger.")
-                    appended_rows.append(row)
-            except Exception as exc:
-                logger.error("Error during raw material deduction appends for batch %s: %s", prod_id_clean, exc)
-                try:
-                    db.append_record("IncompleteTransactions", {
-                        "transaction_id": make_id("IncompleteTransactions"),
-                        "transaction_type": "RAW_MATERIAL_ISSUE",
-                        "idempotency_key": idempotency_key,
-                        "status": "PARTIAL_FAILED",
-                        "payload_json": json.dumps({"production_id": prod_id_clean, "appended_count": len(appended_rows)}),
-                        "error_details": str(exc),
-                        "created_at": now(),
-                        "updated_at": now(),
-                        "resolved_by": "",
-                        "resolved_at": "",
-                    })
-                except Exception:
-                    pass
-                raise HTTPException(503, f"Raw material deduction interrupted: {exc}. Safe to retry; existing deductions are preserved.")
-
-            # 10. Post-deduction verification
-            raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
-            all_deductions_after = [
-                x for x in raw_ledger_after
-                if str(field(x, "production_id", default="")).strip() == prod_id_clean
-                and str(field(x, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
-            ]
-
-            for agg_key, plan in aggregated.items():
-                total_deducted = round(sum(
-                    float(field(x, "quantity", default=0) or 0)
-                    for x in all_deductions_after
-                    if str(field(x, "raw_material_id", default="")).strip().lower() == agg_key
-                    or str(field(x, "material_name", default="")).strip().lower() == plan["material_name"].lower()
-                ), 4)
-                if abs(total_deducted - plan["required_qty"]) > 0.001:
-                    raise HTTPException(
-                        503,
-                        f"Material issuance verification failed for '{plan['material_name']}': "
-                        f"deducted {total_deducted} != required {plan['required_qty']}. Safe to retry."
-                    )
-
-            # 11. Update batch materials_issued status
             batch_updates = {
                 "materials_issued": "true",
                 "material_issue_txn_id": issue_txn_id,
                 "recipe_id": target_recipe_id,
                 "recipe_version": str(target_recipe_ver),
             }
-            try:
-                saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, batch_updates, raise_on_error=True)
-                if not saved:
-                    saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, batch_updates, raise_on_error=True)
-            except Exception as upd_exc:
-                logger.error("Failed to update ProductionBatches for %s: %s", prod_id_clean, upd_exc)
-                saved = False
-
-            if not saved:
-                raise HTTPException(
-                    503,
-                    "Material deductions succeeded and verified, but failed to update batch status. "
-                    "Safe to retry; retry will update status without duplicating deductions."
-                )
-
-            try:
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": make_id("IncompleteTransactions"),
-                    "transaction_type": "RAW_MATERIAL_ISSUE",
-                    "idempotency_key": idempotency_key,
-                    "status": "COMPLETED",
-                    "payload_json": json.dumps({"production_id": prod_id_clean, "issue_txn_id": issue_txn_id}),
-                    "error_details": "",
-                    "created_at": now(),
-                    "updated_at": now(),
-                    "resolved_by": actor,
-                    "resolved_at": now(),
-                })
-            except Exception:
-                pass
+            apps_script_bridge.delegate_governed_write(
+                action="ISSUE_RAW_MATERIALS",
+                target_tab="RawMaterialLedger",
+                payload={
+                    "production_id": prod_id_clean,
+                    "issue_txn_id": issue_txn_id,
+                    "recipe_id": target_recipe_id,
+                    "recipe_version": str(target_recipe_ver),
+                    "deductions": deduction_rows,
+                    "batch_updates": batch_updates,
+                },
+                actor_user_id=actor,
+                actor_role=actor_role,
+                request=request,
+                invalidate_tabs=["RawMaterialLedger", "RawMaterials", "ProductionBatches", "IncompleteTransactions"],
+            )
 
             db.log_audit(actor, "ISSUE_RAW_MATERIALS", "ProductionBatches", prod_id_clean, reason=f"Issued raw materials for {production_kg} kg papad under Recipe {target_recipe_id}")
 
@@ -3361,7 +3165,7 @@ def execute_material_issue(
                 "material_issue_txn_id": issue_txn_id,
                 "recipe_id": target_recipe_id,
                 "recipe_version": target_recipe_ver,
-                "deductions_appended": len(appended_rows),
+                "deductions_appended": len(deduction_rows),
                 "total_items_issued": len(aggregated),
                 "deductions": [
                     {
@@ -3379,16 +3183,12 @@ def execute_material_issue(
 @router.post("/batches/{production_id}/issue-materials")
 async def issue_materials(
     production_id: str,
+    request: Request,
     user: Any = Depends(get_current_user),
     req: Optional[MaterialIssueRequest] = None,
 ):
     """
-    Issue raw materials to a production batch.
-    Deducts raw materials exactly once, snapshots purchase rates, and assigns a unique transaction ID.
-    Idempotent and recoverable:
-    - Re-calling for an already issued batch returns ALREADY_ISSUED without re-deducting.
-    - Interrupted / partially issued batches resume missing items without duplicating.
-    - Pre-flight stock check verifies full remaining requirement before any write.
+    Issue raw materials to a production batch atomically via Apps Script.
     """
     actual_user = user
     notes = ""
@@ -3398,27 +3198,24 @@ async def issue_materials(
     elif req is not None:
         notes = req.notes
 
-    actor, _ = require_production_access(actual_user)
+    actor, role = require_production_access(actual_user)
     require_persistent_store()
-    return execute_material_issue(production_id, actor, notes=notes)
+    return execute_material_issue(production_id, actor, actor_role=role, notes=notes, request=request)
 
 
 @router.post("/batches/{production_id}/approval")
-async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = Depends(get_current_user)):
+async def approve_batch(production_id: str, req: ApprovalRequest, request: Request, user: dict = Depends(get_current_user)):
     """
-    Approve production batch.
-    - If materials were already issued, DO NOT deduct them again.
-    - If not issued, issues them idempotently.
-    - Crediting bulk output to inventory occurs exactly once.
+    Approve or reject production batch atomically via Apps Script.
     """
-    actor, _ = require_owner(user)
+    actor, role = require_owner(user)
     require_persistent_store()
 
     prod_id_clean = str(production_id or "").strip()
     with get_batch_lock(prod_id_clean):
-        batches = db.get_records("ProductionBatches", fresh=True)
+        batches_list = db.get_records("ProductionBatches", fresh=True)
         rec = next(
-            (b for b in batches if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
+            (b for b in batches_list if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
             None
         )
         if not rec:
@@ -3428,56 +3225,158 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
         if current_status != "PENDING":
             raise HTTPException(409, "This batch has already been reviewed")
 
+        pending_req_ids = [
+            str(app_req.get("request_id"))
+            for app_req in db.get_records("ApprovalRequests")
+            if str(app_req.get("target_user_id", "")).strip() == prod_id_clean
+            and str(app_req.get("status", "")).upper() == "PENDING"
+        ]
+
         if not req.approved:
             updates = {"status": "REJECTED", "approved_by": actor, "approved_at": now(), "approval_notes": req.notes}
-            saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
-            if not saved:
-                saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
-            if not saved:
-                raise HTTPException(503, "Rejection was not saved.")
-            
-            # Also sync corresponding ApprovalRequests
-            try:
-                for app_req in db.get_records("ApprovalRequests"):
-                    if str(app_req.get("target_user_id", "")).strip() == prod_id_clean and str(app_req.get("status", "")).upper() == "PENDING":
-                        db.update_record("ApprovalRequests", "request_id", str(app_req.get("request_id")), {
-                            "status": "REJECTED",
-                            "decided_by": actor,
-                            "decided_at": now(),
-                            "decision_notes": req.notes or "Rejected by Owner",
-                        })
-            except Exception as sync_err:
-                logger.warning(f"Could not sync ApprovalRequest rejection for batch {prod_id_clean}: {sync_err}")
-
+            apps_script_bridge.delegate_governed_write(
+                action="REJECT_PRODUCTION_BATCH",
+                target_tab="ProductionBatches",
+                payload={
+                    "production_id": prod_id_clean,
+                    "updates": updates,
+                    "approval_request_ids": pending_req_ids,
+                    "approval_decision": {
+                        "status": "REJECTED",
+                        "decided_by": actor,
+                        "decided_at": now(),
+                        "decision_notes": req.notes or "Rejected by Owner",
+                    },
+                },
+                actor_user_id=actor,
+                actor_role=role,
+                request=request,
+                id_field="production_id",
+                invalidate_tabs=["ProductionBatches", "ApprovalRequests"],
+            )
             db.log_audit(actor, "REJECT_PRODUCTION", "ProductionBatches", prod_id_clean, reason=req.notes)
             return {**rec, **updates}
 
-        # Ensure materials are issued idempotently and recoverably
+        # Ensure materials are issued atomically if not yet issued
         is_issued = truthy(field(rec, "materials_issued"))
+        planned_deductions = []
+        material_issue_plan = None
         if not is_issued:
-            execute_material_issue(prod_id_clean, actor)
+            prod_id_b = str(field(rec, "product_id", default="")).strip()
+            prod_name_b = str(field(rec, "product_name_snapshot", default="")).strip()
+            prod_obj_b = next(
+                (p for p in db.get_records("Products", fresh=True)
+                 if (prod_id_b and str(field(p, "product_id", default="")).strip() == prod_id_b)
+                 or (prod_name_b and str(field(p, "product_name", default="")).strip().lower() == prod_name_b.lower())),
+                None,
+            )
+            if not prod_obj_b:
+                raise HTTPException(404, f"Product '{prod_id_b or prod_name_b}' is missing from Products master.")
+            if not truthy(field(prod_obj_b, "active", default="true")):
+                raise HTTPException(409, f"Product '{prod_id_b or prod_name_b}' is inactive; material issue is blocked.")
+            all_recipes_b = db.get_records("Recipes", fresh=True)
+            target_recipe_b = resolve_product_recipe(
+                product=prod_obj_b,
+                recipes_records=all_recipes_b,
+                master_recipes=[],
+                requested_recipe_id=str(field(rec, "recipe_id", default="")).strip() or None,
+                require_approved=False if db.get_records("RawMaterialLedger", fresh=True) else True,
+            )
+            batch_kg_b = float(field(rec, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0)
+            plan_b = _plan_recipe_material_issue(
+                prod_id_clean=prod_id_clean,
+                prod_obj=prod_obj_b,
+                production_kg=batch_kg_b,
+                target_recipe=target_recipe_b,
+                actor=actor,
+                notes=req.notes,
+            )
+            if plan_b["deduction_rows"]:
+                issue_txn_id = str(field(rec, "material_issue_txn_id", default="")).strip() or f"RML-ISSUE-{prod_id_clean}"
+                planned_deductions = [{**r, "issue_txn_id": issue_txn_id} for r in plan_b["deduction_rows"]]
+                material_issue_plan = {
+                    "issue_txn_id": issue_txn_id,
+                    "recipe_id": plan_b["recipe_id"],
+                    "recipe_version": plan_b["recipe_version"],
+                    "deductions": planned_deductions,
+                }
 
         production_kg = float(req.actual_yield_kg if req.actual_yield_kg is not None else (field(rec, "net_quantity_kg", "saleable_output_kg", "quantity_kg", default=0) or 0))
 
-        # Post bulk output to inventory exactly once
         existing_bulk = next((x for x in db.get_records("ProductionStockLedger", fresh=True) if str(field(x, "reference_id")) == prod_id_clean and str(field(x, "movement_type")).upper() == "BULK_PRODUCED"), None)
-        if not existing_bulk:
-            stock = {
-                "movement_id": make_id("ProductionStockLedger"),
-                "txn_datetime": now(),
-                "movement_type": "BULK_PRODUCED",
-                "product_id": field(rec, "product_id"),
-                "bulk_product_key": str(field(rec, "product_name_snapshot")).strip().lower(),
-                "product_name_snapshot": field(rec, "product_name_snapshot"),
-                "quantity_kg": production_kg,
-                "quantity_packets": 0,
-                "channel": "FACTORY_BULK",
-                "reference_id": prod_id_clean,
-                "created_by": actor,
-                "notes": req.notes,
-            }
-            if not db.append_record("ProductionStockLedger", stock, raise_on_error=True):
-                raise HTTPException(503, "Could not record bulk stock.")
+        bulk_stock_movement = None if existing_bulk else {
+            "txn_datetime": now(),
+            "movement_type": "BULK_PRODUCED",
+            "product_id": field(rec, "product_id"),
+            "bulk_product_key": str(field(rec, "product_name_snapshot")).strip().lower(),
+            "product_name_snapshot": field(rec, "product_name_snapshot"),
+            "quantity_kg": production_kg,
+            "quantity_packets": 0,
+            "channel": "FACTORY_BULK",
+            "reference_id": prod_id_clean,
+            "created_by": actor,
+            "notes": req.notes,
+        }
+
+        raw_deductions = [
+            row for row in db.get_records("RawMaterialLedger", fresh=True)
+            if str(field(row, "production_id", default="")).strip() == prod_id_clean
+            and str(field(row, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
+        ] + planned_deductions
+        raw_master = db.get_records("RawMaterials", fresh=True)
+        purchase_ledger = db.get_records("RawMaterialLedger", fresh=True)
+        missing_rates = []
+        material_total = Decimal("0")
+        for deduction in raw_deductions:
+            name = str(field(deduction, "material_name", default="")).strip()
+            material_id = str(field(deduction, "raw_material_id", default="")).strip()
+            quantity = to_decimal(field(deduction, "quantity", default=0) or 0)
+            unit = str(field(deduction, "unit", default="kg")).strip()
+            canonical_qty, _ = normalize_to_canonical_unit(quantity, unit)
+            rate = field(deduction, "rate_per_unit", default=None)
+            if rate in (None, "") or str(rate).strip().lower() in {"0", "0.0", "pending", "none", "null"}:
+                rate_lookup = get_latest_purchase_rate(name or material_id, raw_master, purchase_ledger)
+                rate = rate_lookup.get("rate_per_canonical_unit") if rate_lookup.get("status") == "CONFIRMED" else None
+            if rate is None:
+                missing_rates.append(name or material_id or "Unknown material")
+                continue
+            rate_value = to_decimal(rate)
+            if rate_value <= 0:
+                missing_rates.append(name or material_id or "Unknown material")
+                continue
+            material_total += to_decimal(canonical_qty) * rate_value
+
+        labour_rows = [
+            row for row in db.get_records("LabourWorkEntries", fresh=True)
+            if str(field(row, "batch_id", default="")).strip() == prod_id_clean
+            and str(field(row, "approved_by", default="")).strip()
+        ]
+        labour_total = sum(
+            (to_decimal(field(row, "total_amount", default=0) or 0) for row in labour_rows),
+            Decimal("0"),
+        )
+
+        if not raw_deductions:
+            valuation_status = "PENDING_MATERIAL_ISSUE_EVIDENCE"
+        elif missing_rates:
+            valuation_status = "PENDING_CONFIRMED_MATERIAL_RATES"
+        elif not labour_rows:
+            valuation_status = "PENDING_BATCH_LABOUR_ALLOCATION"
+        else:
+            valuation_status = "PENDING_APPROVED_OVERHEAD_ALLOCATION"
+
+        review = {
+            "production_id": prod_id_clean,
+            "status": valuation_status,
+            "measured_material_cost": str(round_money(material_total)) if raw_deductions and not missing_rates else None,
+            "approved_batch_labour_cost": str(round_money(labour_total)),
+            "electricity_cost": None,
+            "factory_overhead": None,
+            "total_actual_cost": None,
+            "missing_rate_materials": sorted(set(missing_rates)),
+            "labour_entry_count": len(labour_rows),
+            "scope": "DIRECT MATERIAL AND BATCH-LINKED LABOUR ONLY. FULL ACTUAL COST AND INVENTORY JOURNAL BLOCKED UNTIL APPROVED OVERHEAD ALLOCATION EXISTS.",
+        }
 
         updates = {
             "status": "APPROVED",
@@ -3487,138 +3386,38 @@ async def approve_batch(production_id: str, req: ApprovalRequest, user: dict = D
             "materials_issued": "true",
             "actual_yield_kg": production_kg,
             "net_quantity_kg": production_kg,
+            "cost_status": valuation_status,
         }
-        saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
-        if not saved:
-            saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
-        if not saved:
-            raise HTTPException(503, "Batch status could not be saved. Existing ledger entries remain safe.")
+        if material_issue_plan:
+            updates["recipe_id"] = material_issue_plan["recipe_id"]
+            updates["recipe_version"] = str(material_issue_plan["recipe_version"])
 
-        # Also sync corresponding ApprovalRequests
-        try:
-            for app_req in db.get_records("ApprovalRequests"):
-                if str(app_req.get("target_user_id", "")).strip() == prod_id_clean and str(app_req.get("status", "")).upper() == "PENDING":
-                    db.update_record("ApprovalRequests", "request_id", str(app_req.get("request_id")), {
-                        "status": "EXECUTED",
-                        "decided_by": actor,
-                        "decided_at": now(),
-                        "executed_at": now(),
-                        "decision_notes": req.notes or "Approved by Owner",
-                    })
-        except Exception as sync_err:
-            logger.warning(f"Could not sync ApprovalRequest for batch {prod_id_clean}: {sync_err}")
-
-        db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
-
-        # Production valuation is assessed without fabricating missing rates,
-        # assigning the day's wages to one batch, or using formula estimates as actual.
-        try:
-            raw_deductions = [
-                row for row in db.get_records("RawMaterialLedger", fresh=True)
-                if str(field(row, "production_id", default="")).strip() == prod_id_clean
-                and str(field(row, "movement_type", default="")).strip().upper() == "PRODUCTION_CONSUMPTION"
-            ]
-            raw_master = db.get_records("RawMaterials", fresh=True)
-            purchase_ledger = db.get_records("RawMaterialLedger", fresh=True)
-            missing_rates = []
-            material_total = Decimal("0")
-            for deduction in raw_deductions:
-                name = str(field(deduction, "material_name", default="")).strip()
-                material_id = str(field(deduction, "raw_material_id", default="")).strip()
-                quantity = to_decimal(field(deduction, "quantity", default=0) or 0)
-                unit = str(field(deduction, "unit", default="kg")).strip()
-                canonical_qty, _ = normalize_to_canonical_unit(quantity, unit)
-                rate = field(deduction, "rate_per_unit", default=None)
-                if rate in (None, "") or str(rate).strip().lower() in {"0", "0.0", "pending", "none", "null"}:
-                    rate_lookup = get_latest_purchase_rate(name or material_id, raw_master, purchase_ledger)
-                    rate = rate_lookup.get("rate_per_canonical_unit") if rate_lookup.get("status") == "CONFIRMED" else None
-                if rate is None:
-                    missing_rates.append(name or material_id or "Unknown material")
-                    continue
-                rate_value = to_decimal(rate)
-                if rate_value <= 0:
-                    missing_rates.append(name or material_id or "Unknown material")
-                    continue
-                material_total += to_decimal(canonical_qty) * rate_value
-
-            labour_rows = [
-                row for row in db.get_records("LabourWorkEntries", fresh=True)
-                if str(field(row, "batch_id", default="")).strip() == prod_id_clean
-                and str(field(row, "approved_by", default="")).strip()
-            ]
-            labour_total = sum(
-                (to_decimal(field(row, "total_amount", default=0) or 0) for row in labour_rows),
-                Decimal("0"),
-            )
-
-            if not raw_deductions:
-                valuation_status = "PENDING_MATERIAL_ISSUE_EVIDENCE"
-            elif missing_rates:
-                valuation_status = "PENDING_CONFIRMED_MATERIAL_RATES"
-            elif not labour_rows:
-                valuation_status = "PENDING_BATCH_LABOUR_ALLOCATION"
-            else:
-                valuation_status = "PENDING_APPROVED_OVERHEAD_ALLOCATION"
-
-            review = {
+        apps_script_bridge.delegate_governed_write(
+            action="APPROVE_PRODUCTION_BATCH",
+            target_tab="ProductionBatches",
+            payload={
                 "production_id": prod_id_clean,
-                "status": valuation_status,
-                "measured_material_cost": str(round_money(material_total)) if raw_deductions and not missing_rates else None,
-                "approved_batch_labour_cost": str(round_money(labour_total)),
-                "electricity_cost": None,
-                "factory_overhead": None,
-                "total_actual_cost": None,
-                "missing_rate_materials": sorted(set(missing_rates)),
-                "labour_entry_count": len(labour_rows),
-                "scope": "DIRECT MATERIAL AND BATCH-LINKED LABOUR ONLY. FULL ACTUAL COST AND INVENTORY JOURNAL BLOCKED UNTIL APPROVED OVERHEAD ALLOCATION EXISTS.",
-            }
-            updates["cost_status"] = valuation_status
-            updates["cost_review"] = review
-
-            review_key = f"PRODUCTION_COSTING:{prod_id_clean}"
-            review_rows = db.get_records("IncompleteTransactions", fresh=True)
-            existing = next((row for row in review_rows if str(field(row, "idempotency_key", default="")).strip() == review_key), None)
-            review_fields = {
-                "transaction_type": "PRODUCTION_COSTING_REVIEW",
-                "status": valuation_status,
-                "payload_json": json.dumps(review, sort_keys=True),
-                "error_details": "",
-                "updated_at": now(),
-            }
-            if existing:
-                db.update_record("IncompleteTransactions", "transaction_id", str(field(existing, "transaction_id")), review_fields, raise_on_error=True)
-            else:
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": make_id("IncompleteTransactions"),
-                    "transaction_type": "PRODUCTION_COSTING_REVIEW",
-                    "idempotency_key": review_key,
-                    "status": valuation_status,
-                    "payload_json": json.dumps(review, sort_keys=True),
-                    "error_details": "",
-                    "created_at": now(),
-                    "updated_at": now(),
-                    "resolved_by": "",
-                    "resolved_at": "",
-                }, raise_on_error=True)
-        except Exception as acct_err:
-
-            logger.error("Non-fatal accounting posting error for batch %s: %s", prod_id_clean, acct_err)
-            try:
-                db.append_record("IncompleteTransactions", {
-                    "transaction_id": make_id("IncompleteTransactions"),
-                    "transaction_type": "ACCOUNTING_POSTING_PENDING",
-                    "idempotency_key": f"acct-prod-{prod_id_clean}",
-                    "status": "POSTING_FAILED",
-                    "payload_json": json.dumps({"production_id": prod_id_clean, "type": "PRODUCTION"}),
-                    "error_details": str(acct_err),
-                    "created_at": now(),
-                    "updated_at": now(),
-                    "resolved_by": "",
-                    "resolved_at": "",
-                })
-            except Exception:
-                pass
-
+                "updates": updates,
+                "material_issue_plan": material_issue_plan,
+                "bulk_stock_movement": bulk_stock_movement,
+                "approval_request_ids": pending_req_ids,
+                "approval_decision": {
+                    "status": "EXECUTED",
+                    "decided_by": actor,
+                    "decided_at": now(),
+                    "executed_at": now(),
+                    "decision_notes": req.notes or "Approved by Owner",
+                },
+                "cost_review": review,
+            },
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="production_id",
+            invalidate_tabs=["ProductionBatches", "ProductionStockLedger", "RawMaterialLedger", "RawMaterials", "ApprovalRequests", "IncompleteTransactions"],
+        )
+        db.log_audit(actor, "APPROVE_PRODUCTION", "ProductionBatches", prod_id_clean, reason=f"Approved {production_kg} kg and credited bulk inventory.")
+        updates["cost_review"] = review
         return AttrDict({**rec, **updates})
 
 
@@ -3632,7 +3431,7 @@ async def available_bulk_batches(product_id: Optional[str] = None, user: dict = 
     """
     Get all approved production batches with unpackaged bulk stock balance and actual cost per kg.
     """
-    require_production_access(user)
+    require_production_read(user)
     ledger = db.get_records("ProductionStockLedger", fresh=True)
     batches_data = db.get_records("ProductionBatches", fresh=True)
     return calculate_batch_bulk_balances(ledger, batches_data, product_id)
@@ -3640,7 +3439,7 @@ async def available_bulk_batches(product_id: Optional[str] = None, user: dict = 
 
 @router.get("/packaging")
 async def packaging(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     rows = db.get_records("PackagingBatches")
     enriched = []
     for row in rows:
@@ -3660,12 +3459,12 @@ async def packaging(user: dict = Depends(get_current_user)):
 @router.get("/packaging/discrepancies-summary")
 async def packaging_discrepancies_summary(user: dict = Depends(get_current_user)):
     """Read-only reconciliation summary distinguishing historical unresolved and pending discrepancies."""
-    require_production_access(user)
+    require_production_read(user)
     return summarize_packaging_discrepancies(db.get_records("PackagingBatches"))
 
 
 @router.post("/packaging")
-async def create_packaging(req: PackagingCreate, user: dict = Depends(get_current_user)):
+async def create_packaging(req: PackagingCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()
     is_user_owner = role in OWNER_ROLES
@@ -3832,10 +3631,8 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
 
     # Block completion if unexplained discrepancy exists without verified Owner approval
     if is_discrepancy and not is_discrepancy_authorized:
-        # Save a recoverable pending-review record
-        pack_id = make_id("PackagingBatches")
+        # Save a recoverable pending-review record + ApprovalRequest atomically via Apps Script
         pending_rec = {
-            "packaging_id": pack_id,
             "packaging_date": req.packaging_date,
             "product_id": req.product_id,
             "product_name_snapshot": field(product, "product_name"),
@@ -3857,15 +3654,13 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             "created_at": now(),
             "created_by": actor,
         }
-        db.append_record("PackagingBatches", pending_rec)
-
-        try:
-            from app.routers.approvals import create_approval_request
-            create_approval_request(
-                request_type="PACKAGING_DISCREPANCY",
-                target_user_id=pack_id,
-                payload={
-                    "packaging_id": pack_id,
+        apps_script_bridge.delegate_governed_write(
+            action="RECORD_PACKAGING_PENDING_REVIEW",
+            target_tab="PackagingBatches",
+            payload={
+                "record": pending_rec,
+                "approval_request": {
+                    "request_type": "PACKAGING_DISCREPANCY",
                     "product_id": req.product_id,
                     "product_name": field(product, "product_name"),
                     "bulk_kg_used": req.bulk_kg_used,
@@ -3873,12 +3668,16 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
                     "unexplained_variance_kg": unexplained_variance,
                     "tolerance_kg": active_tol,
                     "notes": req.notes,
+                    "requested_by": actor,
+                    "requested_by_name": str(user.get("full_name") or actor),
                 },
-                requested_by=actor,
-                requested_by_name=str(user.get("full_name") or actor),
-            )
-        except Exception as appr_err:
-            logger.warning(f"Could not link ApprovalRequest for packaging discrepancy {pack_id}: {appr_err}")
+            },
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="packaging_id",
+            invalidate_tabs=["PackagingBatches", "ApprovalRequests"],
+        )
 
         raise HTTPException(
             status_code=422,
@@ -3933,15 +3732,14 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
     except ValueError as val_err:
         raise HTTPException(400, detail=str(val_err))
 
-    # Reconcile incomplete packaging batch without double-writing if existing_pack exists
+    # Reconcile incomplete packaging batch atomically via Apps Script if existing_pack exists
     if existing_pack:
         pack_id = str(field(existing_pack, "packaging_id"))
-
+        missing_bulk_movements = []
         existing_bulk_mvt = next((m for m in ledger if str(field(m, "reference_id")) == pack_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
         if not existing_bulk_mvt:
             for alloc in allocation_res["allocations"]:
-                row = {
-                    "movement_id": make_id("ProductionStockLedger"),
+                missing_bulk_movements.append({
                     "txn_datetime": now(),
                     "movement_type": "BULK_PACKAGED",
                     "quantity_kg": alloc["quantity_kg"],
@@ -3956,20 +3754,18 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
                     "total_cost": alloc["total_cost"],
                     "created_by": actor,
                     "notes": f"Reconciled retry allocation from batch {alloc['batch_id']}: {req.notes}",
-                }
-                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                    raise HTTPException(503, "Could not record bulk stock deduction during recovery.")
+                })
 
+        missing_sku_movements = []
         for weight_g, packet_count in [(200, req.packets_200g), (500, req.packets_500g), (1000, req.packets_1000g)]:
             if packet_count <= 0:
                 continue
-            sku_product = next((p for p in db.get_records("Products") if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
+            sku_product = next((p for p in all_products if str(field(p, "product_name")).strip().lower() == bulk_key and int(float(field(p, "pack_weight_g", default=0) or 0)) == weight_g and truthy(field(p, "active", default="true"))), None)
             if sku_product:
                 target_sku_id = str(field(sku_product, "product_id"))
                 existing_sku_mvt = next((m for m in ledger if str(field(m, "reference_id")) == pack_id and str(field(m, "product_id")) == target_sku_id and str(field(m, "movement_type")).upper() == "PACKETS_PACKAGED"), None)
                 if not existing_sku_mvt:
-                    row = {
-                        "movement_id": make_id("ProductionStockLedger"),
+                    missing_sku_movements.append({
                         "txn_datetime": now(),
                         "movement_type": "PACKETS_PACKAGED",
                         "quantity_kg": 0,
@@ -3983,9 +3779,7 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
                         "reference_id": pack_id,
                         "created_by": actor,
                         "notes": f"Reconciled retry: {req.notes}",
-                    }
-                    if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                        raise HTTPException(503, f"Could not record {weight_g}g packet stock during recovery.")
+                    })
 
         update_payload = {"status": "RECORDED", "notes": f"{req.notes} [RECONCILED]"}
         if is_discrepancy_authorized:
@@ -3994,11 +3788,24 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             update_payload["discrepancy_explanation"] = req.discrepancy_explanation
             update_payload["discrepancy_approved_by"] = discrepancy_approver
             update_payload["discrepancy_approved_at"] = now()
-        db.update_record("PackagingBatches", "packaging_id", pack_id, update_payload)
+
+        apps_script_bridge.delegate_governed_write(
+            action="RECONCILE_PACKAGING_BATCH",
+            target_tab="PackagingBatches",
+            payload={
+                "packaging_id": pack_id,
+                "updates": update_payload,
+                "stock_movements": missing_bulk_movements + missing_sku_movements,
+            },
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="packaging_id",
+            invalidate_tabs=["PackagingBatches", "ProductionStockLedger"],
+        )
         existing_pack.update(update_payload)
         db.log_audit(actor, "RECONCILE_PACKAGING", "PackagingBatches", pack_id, reason=f"Reconciled packaging batch {pack_id}")
         return existing_pack
-
 
     bulk_movements = []
     for alloc in allocation_res["allocations"]:
@@ -4016,12 +3823,47 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
             "notes": f"Packaging from batch {alloc['batch_id']}",
         })
 
-    movements = bulk_movements + sku_movements
+    ts_now = now()
+    movements = [{**m, "txn_datetime": ts_now, "created_by": actor, "notes": req.notes} for m in (bulk_movements + sku_movements)]
 
-    # New Packaging Record
-    pack_id = make_id("PackagingBatches")
+    from app.accounting.postings import post_packaging_batch_journal
+    from app.calculations.costing import get_sku_packing_costs, calculate_finished_sku_cost
+
+    bulk_cost = to_decimal(allocation_res["total_bulk_cost"])
+    effective_bulk_cost_per_kg = to_decimal(allocation_res["effective_bulk_cost_per_kg"])
+    mat_cost = Decimal("0.00")
+    lab_cost = Decimal("0.00")
+    rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+    sku_cost_updates = []
+
+    for sm in sku_movements:
+        sm_pid = str(sm.get("product_id"))
+        sm_prod = next((p for p in all_products if str(field(p, "product_id")) == sm_pid), None)
+        sm_qty = to_decimal(sm.get("quantity_packets", 0) or 0)
+        sm_weight = sm.get("pack_weight_g", 500)
+        p_mat, p_lab = get_sku_packing_costs(sm_prod, rm_master)
+        mat_cost += to_decimal(p_mat) * sm_qty
+        lab_cost += to_decimal(p_lab) * sm_qty
+
+        sku_calc = calculate_finished_sku_cost(
+            pack_weight_grams=sm_weight,
+            production_cost_per_saleable_kg=float(effective_bulk_cost_per_kg),
+            packaging_material_cost_per_packet=float(p_mat),
+            packing_labour_per_packet=float(p_lab),
+        )
+        unit_packet_cost = sku_calc.get("finished_packet_cost")
+        if unit_packet_cost is not None and sm_prod:
+            sku_cost_updates.append({
+                "product_id": sm_pid,
+                "updates": {
+                    "standard_cost": float(unit_packet_cost),
+                    "unit_cost": float(unit_packet_cost),
+                },
+            })
+
+    total_fin_cost = bulk_cost + mat_cost + lab_cost
+
     rec = {
-        "packaging_id": pack_id,
         "packaging_date": req.packaging_date,
         "product_id": req.product_id,
         "product_name_snapshot": field(product, "product_name"),
@@ -4051,140 +3893,71 @@ async def create_packaging(req: PackagingCreate, user: dict = Depends(get_curren
         "batch_allocations_json": json.dumps(allocation_res["allocations"]),
         "bulk_cost": float(allocation_res["total_bulk_cost"]),
         "bulk_cost_per_kg": float(allocation_res["effective_bulk_cost_per_kg"]),
+        "packaging_material_cost": float(round_money(mat_cost)),
+        "packaging_labor_cost": float(round_money(lab_cost)),
+        "total_finished_cost": float(round_money(total_fin_cost)),
         "cost_status": allocation_res.get("cost_status", "ACTUAL"),
     }
-    if not db.append_record("PackagingBatches", rec, raise_on_error=True):
-        raise HTTPException(503, "Could not save packaging record")
 
-    # Stock ledger postings
-    try:
-        for m in movements:
-            row = {
-                "movement_id": make_id("ProductionStockLedger"),
-                "txn_datetime": now(),
-                **m,
-                "reference_id": pack_id,
-                "created_by": actor,
-                "notes": req.notes,
-            }
-            if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                raise RuntimeError("Failed to append stock ledger movement")
-    except Exception as exc:
-        try:
-            db.update_record("PackagingBatches", "packaging_id", pack_id, {"status": "INCOMPLETE", "notes": f"INCOMPLETE_STOCK_WRITE: {exc}"})
-        except Exception:
-            pass
-        raise HTTPException(503, f"Packaging record saved but stock ledger writes failed ({exc}). Marked as INCOMPLETE. Reconcile before retrying.")
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="RECORD_PACKAGING_BATCH",
+        target_tab="PackagingBatches",
+        payload={
+            "record": rec,
+            "stock_movements": movements,
+            "sku_cost_updates": sku_cost_updates,
+        },
+        actor_user_id=actor,
+        actor_role=role,
+        request=request,
+        id_field="packaging_id",
+        invalidate_tabs=["PackagingBatches", "ProductionStockLedger", "Products"],
+    )
+    pack_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("packaging_id") or "")
+    saved = bridge_res.get("record") or {**rec, "packaging_id": pack_id}
 
     db.log_audit(actor, "RECORD_PACKAGING", "PackagingBatches", pack_id, reason=f"Used {req.bulk_kg_used} kg, packed {total_packets} packets, variance {unexplained_variance:+.3f} kg")
 
-    # Double-Entry Accounting Journal Posting (Non-blocking / Resilient)
-    try:
-        from app.accounting.postings import post_packaging_batch_journal
-        from app.calculations.costing import (
-            get_sku_packing_costs,
-            calculate_finished_sku_cost,
-        )
+    pack_dict = {
+        "packaging_id": pack_id,
+        "product_name_snapshot": field(product, "product_name"),
+        "bulk_kg_used": req.bulk_kg_used,
+        "total_packets": total_packets,
+        "packaging_date": req.packaging_date or now()[:10],
+        "bulk_cost": float(round_money(bulk_cost)),
+        "packaging_material_cost": float(round_money(mat_cost)),
+        "packaging_labor_cost": float(round_money(lab_cost)),
+        "cost_status": allocation_res.get("cost_status", "ACTUAL"),
+        "has_estimated_cost": allocation_res.get("has_estimated_cost", False),
+        "batch_allocations_json": json.dumps(allocation_res["allocations"]),
+    }
+    post_packaging_batch_journal(pack_dict, bulk_cost=bulk_cost, packing_material_cost=mat_cost, packing_labor_cost=lab_cost, actor=actor)
 
-        bulk_cost = to_decimal(allocation_res["total_bulk_cost"])
-        effective_bulk_cost_per_kg = to_decimal(allocation_res["effective_bulk_cost_per_kg"])
-        mat_cost = Decimal("0.00")
-        lab_cost = Decimal("0.00")
-        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
-
-        for sm in sku_movements:
-            sm_pid = str(sm.get("product_id"))
-            sm_prod = next((p for p in all_products if str(field(p, "product_id")) == sm_pid), None)
-            sm_qty = to_decimal(sm.get("quantity_packets", 0) or 0)
-            sm_weight = sm.get("pack_weight_g", 500)
-            p_mat, p_lab = get_sku_packing_costs(sm_prod, rm_master)
-            mat_cost += to_decimal(p_mat) * sm_qty
-            lab_cost += to_decimal(p_lab) * sm_qty
-
-            # Update SKU finished goods standard cost in Products for accurate downstream sales COGS
-            sku_calc = calculate_finished_sku_cost(
-                pack_weight_grams=sm_weight,
-                production_cost_per_saleable_kg=float(effective_bulk_cost_per_kg),
-                packaging_material_cost_per_packet=float(p_mat),
-                packing_labour_per_packet=float(p_lab),
-            )
-            unit_packet_cost = sku_calc.get("finished_packet_cost")
-            if unit_packet_cost is not None and sm_prod:
-                db.update_record("Products", "product_id", sm_pid, {
-                    "standard_cost": float(unit_packet_cost),
-                    "unit_cost": float(unit_packet_cost),
-                })
-
-        total_fin_cost = bulk_cost + mat_cost + lab_cost
-        db.update_record("PackagingBatches", "packaging_id", pack_id, {
-            "packaging_material_cost": float(round_money(mat_cost)),
-            "packaging_labor_cost": float(round_money(lab_cost)),
-            "total_finished_cost": float(round_money(total_fin_cost)),
-            "cost_status": allocation_res.get("cost_status", "ACTUAL"),
-        })
-        rec["packaging_material_cost"] = float(round_money(mat_cost))
-        rec["packaging_labor_cost"] = float(round_money(lab_cost))
-        rec["total_finished_cost"] = float(round_money(total_fin_cost))
-
-        pack_dict = {
-            "packaging_id": pack_id,
-            "product_name_snapshot": field(product, "product_name"),
-            "bulk_kg_used": req.bulk_kg_used,
-            "total_packets": total_packets,
-            "packaging_date": req.packaging_date or now()[:10],
-            "bulk_cost": float(round_money(bulk_cost)),
-            "packaging_material_cost": float(round_money(mat_cost)),
-            "packaging_labor_cost": float(round_money(lab_cost)),
-            "cost_status": allocation_res.get("cost_status", "ACTUAL"),
-            "has_estimated_cost": allocation_res.get("has_estimated_cost", False),
-            "batch_allocations_json": json.dumps(allocation_res["allocations"]),
-        }
-        post_packaging_batch_journal(pack_dict, bulk_cost=bulk_cost, packing_material_cost=mat_cost, packing_labor_cost=lab_cost, actor=actor)
-    except Exception as acct_err:
-        logger.error("Non-fatal accounting posting error for packaging %s: %s", pack_id, acct_err)
-        try:
-            db.append_record("IncompleteTransactions", {
-                "transaction_id": make_id("IncompleteTransactions"),
-                "transaction_type": "ACCOUNTING_POSTING_PENDING",
-                "idempotency_key": f"acct-pack-{pack_id}",
-                "status": "POSTING_FAILED",
-                "payload_json": json.dumps({"packaging_id": pack_id, "type": "PACKAGING"}),
-                "error_details": str(acct_err),
-                "created_at": now(),
-                "updated_at": now(),
-                "resolved_by": "",
-                "resolved_at": "",
-            })
-        except Exception:
-            pass
-
-    rec["packaging_batch_id"] = pack_id
-    rec["packaging_id"] = pack_id
-    rec["packets_produced"] = total_packets
-    rec["status"] = StatusValue(rec.get("status", "RECORDED"))
-    return AttrDict(rec)
-
+    saved["packaging_batch_id"] = pack_id
+    saved["packaging_id"] = pack_id
+    saved["packets_produced"] = total_packets
+    saved["status"] = StatusValue(saved.get("status", "RECORDED"))
+    return AttrDict(saved)
 
 
 @router.post("/batches/{production_id}/resolve-legacy-cost")
 async def resolve_legacy_cost(
     production_id: str,
     req: ResolveLegacyCostRequest,
+    request: Request,
     user: dict = Depends(get_current_user),
 ):
     """
-    Owner-controlled resolution of legacy production batch cost.
-    Updates the batch actual/estimated cost per kg, records the audit trail,
-    and updates any associated bulk production stock movements.
+    Owner-controlled resolution of legacy production batch cost via Apps Script.
     """
-    actor, _ = require_owner(user)
+    actor, role = require_owner(user)
     require_persistent_store()
 
     prod_id_clean = str(production_id or "").strip()
     with get_batch_lock(prod_id_clean):
-        batches = db.get_records("ProductionBatches", fresh=True)
+        batches_list = db.get_records("ProductionBatches", fresh=True)
         rec = next(
-            (b for b in batches if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
+            (b for b in batches_list if str(field(b, "production_id", "batch_id", default="")).strip() == prod_id_clean),
             None
         )
         if not rec:
@@ -4205,23 +3978,32 @@ async def resolve_legacy_cost(
             "cost_resolved_at": now(),
         }
 
-        saved = db.update_record("ProductionBatches", "production_id", prod_id_clean, updates)
-        if not saved:
-            saved = db.update_record("ProductionBatches", "batch_id", prod_id_clean, updates)
-        if not saved:
-            raise HTTPException(503, "Failed to update legacy batch cost.")
-
-        # Also update ProductionStockLedger BULK_PRODUCED entries for this batch
-        bulk_mvts = [
-            m for m in db.get_records("ProductionStockLedger", fresh=True)
+        bulk_mvt_ids = [
+            str(field(m, "movement_id"))
+            for m in db.get_records("ProductionStockLedger", fresh=True)
             if str(field(m, "reference_id")) == prod_id_clean
             and str(field(m, "movement_type")).upper() == "BULK_PRODUCED"
+            and str(field(m, "movement_id", default="")).strip()
         ]
-        for bm in bulk_mvts:
-            db.update_record("ProductionStockLedger", "movement_id", str(field(bm, "movement_id")), {
-                "unit_cost_per_kg": float(req.cost_per_kg),
-                "total_cost": tot_cost,
-            })
+
+        apps_script_bridge.delegate_governed_write(
+            action="RESOLVE_LEGACY_BATCH_COST",
+            target_tab="ProductionBatches",
+            payload={
+                "production_id": prod_id_clean,
+                "updates": updates,
+                "bulk_movement_ids": bulk_mvt_ids,
+                "bulk_movement_updates": {
+                    "unit_cost_per_kg": float(req.cost_per_kg),
+                    "total_cost": tot_cost,
+                },
+            },
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="production_id",
+            invalidate_tabs=["ProductionBatches", "ProductionStockLedger"],
+        )
 
         db.log_audit(actor, "RESOLVE_LEGACY_BATCH_COST", "ProductionBatches", prod_id_clean, reason=f"Resolved cost to ₹{req.cost_per_kg}/kg ({valid_status}) - {req.notes}")
 
@@ -4237,11 +4019,11 @@ async def resolve_legacy_cost(
 
 
 @router.post("/packaging/{packaging_id}/recover")
-async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_user)):
+async def recover_packaging(packaging_id: str, request: Request, user: dict = Depends(get_current_user)):
     """
-    Recover an INCOMPLETE packaging batch by idempotently posting any missing stock movements and accounting vouchers.
+    Recover an INCOMPLETE packaging batch by delegating idempotent recovery of missing stock movements and status via Apps Script.
     """
-    actor, _ = require_production_access(user)
+    actor, role = require_production_access(user)
     require_persistent_store()
 
     batch = next((p for p in db.get_records("PackagingBatches", fresh=True) if str(field(p, "packaging_id")) == packaging_id), None)
@@ -4275,7 +4057,6 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
     p500 = int(float(field(batch, "packets_500g", default=0) or 0))
     p1000 = int(float(field(batch, "packets_1000g", default=0) or 0))
 
-    # Multi-batch aware bulk movements check
     allocations_raw = field(batch, "batch_allocations_json", default=None)
     allocations = []
     if allocations_raw:
@@ -4284,6 +4065,7 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
         except Exception:
             allocations = []
 
+    missing_movements: List[Dict[str, Any]] = []
     if allocations and isinstance(allocations, list):
         for alloc in allocations:
             b_id = str(alloc.get("batch_id", "")).strip()
@@ -4295,8 +4077,7 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
                 None
             )
             if not existing_alloc_mvt and alloc_qty > 0:
-                row = {
-                    "movement_id": make_id("ProductionStockLedger"),
+                missing_movements.append({
                     "txn_datetime": now(),
                     "movement_type": "BULK_PACKAGED",
                     "quantity_kg": alloc_qty,
@@ -4311,15 +4092,11 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
                     "total_cost": float(alloc.get("total_cost", 0) or 0),
                     "created_by": actor,
                     "notes": f"Recovered multi-batch bulk deduction from {b_id}",
-                }
-                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                    raise HTTPException(503, f"Could not append recovered bulk movement for batch {b_id}.")
+                })
     else:
-        # Check existing bulk deduction
         existing_bulk = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"), None)
         if not existing_bulk and bulk_kg > 0:
-            row = {
-                "movement_id": make_id("ProductionStockLedger"),
+            missing_movements.append({
                 "txn_datetime": now(),
                 "movement_type": "BULK_PACKAGED",
                 "quantity_kg": bulk_kg,
@@ -4331,11 +4108,8 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
                 "reference_id": packaging_id,
                 "created_by": actor,
                 "notes": "Recovered bulk deduction for incomplete batch",
-            }
-            if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                raise HTTPException(503, "Could not append recovered bulk movement.")
+            })
 
-    # Check packet movements
     all_prods = db.get_records("Products", fresh=True)
     for weight_g, count in [(200, p200), (500, p500), (1000, p1000)]:
         if count <= 0:
@@ -4345,8 +4119,7 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
             target_id = str(field(sku_prod, "product_id"))
             existing_sku = next((m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "product_id")) == target_id and str(field(m, "movement_type")).upper() == "PACKETS_PACKAGED"), None)
             if not existing_sku:
-                row = {
-                    "movement_id": make_id("ProductionStockLedger"),
+                missing_movements.append({
                     "txn_datetime": now(),
                     "movement_type": "PACKETS_PACKAGED",
                     "quantity_kg": 0,
@@ -4360,11 +4133,46 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
                     "reference_id": packaging_id,
                     "created_by": actor,
                     "notes": "Recovered packet movement for incomplete batch",
-                }
-                if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                    raise HTTPException(503, f"Could not append recovered {weight_g}g packet movement.")
+                })
 
-    # Recover accounting vouchers if missing
+    pending_incomplete_ids = []
+    try:
+        for it in db.get_records("IncompleteTransactions", fresh=True):
+            it_key = str(it.get("idempotency_key", ""))
+            it_payload = str(it.get("payload_json", ""))
+            if (packaging_id in it_key or packaging_id in it_payload) and str(it.get("status", "")).upper() != "COMPLETED":
+                tx_id = str(it.get("transaction_id", "")).strip()
+                if tx_id:
+                    pending_incomplete_ids.append(tx_id)
+    except Exception:
+        pass
+
+    apps_script_bridge.delegate_governed_write(
+        action="RECOVER_PACKAGING",
+        target_tab="PackagingBatches",
+        payload={
+            "packaging_id": packaging_id,
+            "stock_movements": missing_movements,
+            "incomplete_transaction_ids": pending_incomplete_ids,
+            "incomplete_transaction_updates": {
+                "status": "COMPLETED",
+                "resolved_by": actor,
+                "resolved_at": now(),
+                "notes": f"Recovered by {actor}",
+            },
+            "packaging_updates": {
+                "status": "RECORDED",
+                "notes": f"{field(batch, 'notes')} [RECOVERED]",
+            },
+        },
+        actor_user_id=actor,
+        actor_role=role,
+        request=request,
+        id_field="packaging_id",
+        invalidate_tabs=["PackagingBatches", "ProductionStockLedger", "IncompleteTransactions"],
+    )
+
+    # Recover accounting vouchers if missing via Apps Script-delegated accounting posting
     try:
         from app.accounting.postings import post_packaging_batch_journal
         headers = db.get_records("JournalHeaders", fresh=True)
@@ -4393,26 +4201,11 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
                 "batch_allocations_json": field(batch, "batch_allocations_json", default=""),
             }
             post_packaging_batch_journal(pack_dict, bulk_cost=b_cost, packing_material_cost=m_cost, packing_labor_cost=l_cost, actor=actor)
+    except HTTPException:
+        raise
     except Exception as acct_err:
         logger.warning(f"Accounting recovery note for packaging {packaging_id}: {acct_err}")
 
-    # Mark any pending IncompleteTransactions for this packaging batch as COMPLETED
-    try:
-        for it in db.get_records("IncompleteTransactions", fresh=True):
-            it_key = str(it.get("idempotency_key", ""))
-            it_payload = str(it.get("payload_json", ""))
-            if packaging_id in it_key or packaging_id in it_payload:
-                if str(it.get("status", "")).upper() != "COMPLETED":
-                    db.update_record("IncompleteTransactions", "transaction_id", str(it.get("transaction_id")), {
-                        "status": "COMPLETED",
-                        "resolved_by": actor,
-                        "resolved_at": now(),
-                        "notes": f"Recovered by {actor}",
-                    })
-    except Exception:
-        pass
-
-    db.update_record("PackagingBatches", "packaging_id", packaging_id, {"status": "RECORDED", "notes": f"{field(batch, 'notes')} [RECOVERED]"})
     db.log_audit(actor, "RECOVER_PACKAGING", "PackagingBatches", packaging_id, reason="Recovered missing ledger movements and accounting vouchers for packaging batch")
     return {"status": "RECORDED", "packaging_id": packaging_id, "message": "Incomplete packaging movements and vouchers recovered."}
 
@@ -4420,65 +4213,19 @@ async def recover_packaging(packaging_id: str, user: dict = Depends(get_current_
 _PACKAGING_DISCREPANCY_MUTEX = threading.RLock()
 
 
-def _ensure_packaging_discrepancy_audit(
-    *,
-    packaging_id: str,
-    actor: str,
-    explanation: str,
-) -> Dict[str, Any]:
-    """Ensure an AuditLog entry exists for packaging discrepancy approval."""
-    audit_rows = db.get_records("AuditLog", fresh=True)
-    for row in audit_rows:
-        if (
-            str(row.get("action", "")).strip().upper() == "APPROVE_PACKAGING_DISCREPANCY"
-            and str(row.get("entity_type", "")).strip() == "PackagingBatches"
-            and str(row.get("entity_id", "")).strip() == packaging_id
-        ):
-            return row
-
-    try:
-        audit_id = db.generate_id("AuditLog")
-    except Exception:
-        audit_id = f"AUD-{hashlib.sha256(f'PKG:{packaging_id}'.encode('utf-8')).hexdigest()[:10]}"
-
-    audit_rec = {
-        "audit_id": audit_id,
-        "event_datetime": now(),
-        "actor_user_id": actor,
-        "action": "APPROVE_PACKAGING_DISCREPANCY",
-        "entity_type": "PackagingBatches",
-        "entity_id": packaging_id,
-        "field_changed": "discrepancy_approved",
-        "old_value": "false",
-        "new_value": "true",
-        "reason": explanation,
-        "approved_by_user_id": actor,
-        "related_record_id": packaging_id,
-    }
-    try:
-        if not db.append_record("AuditLog", audit_rec, raise_on_error=True):
-            raise HTTPException(
-                503,
-                "Discrepancy reconciliation saved, but required AuditLog event could not be persisted. Safe to retry.",
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            503,
-            f"Discrepancy reconciliation saved, but required AuditLog event could not be persisted: {exc}. Safe to retry.",
-        )
-    return audit_rec
-
-
 @router.post("/packaging/{packaging_id}/approve-discrepancy")
-async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyApprovalRequest, user: dict = Depends(get_current_user)):
+async def approve_packaging_discrepancy(
+    packaging_id: str,
+    req: DiscrepancyApprovalRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
     """
-    Approve an unexplained packing discrepancy.
+    Approve an unexplained packing discrepancy via Apps Script Single Write Owner.
     Preserves original quantities, saves explanation, records approving Owner, and posts stock movements if pending.
     Idempotent across retries, serialized per packaging_id, and rejects conflicting re-approvals with HTTP 409.
     """
-    actor, _ = require_owner(user)
+    actor, role = require_owner(user)
     require_persistent_store()
 
     clean_explanation = (req.explanation or "").strip()
@@ -4523,14 +4270,13 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
         p500 = int(float(field(batch, "packets_500g", default=0) or 0))
         p1000 = int(float(field(batch, "packets_1000g", default=0) or 0))
 
-        # Ensure bulk stock deduction exists (idempotent check)
+        missing_movements: List[Dict[str, Any]] = []
         existing_bulk = next(
             (m for m in ledger if str(field(m, "reference_id")) == packaging_id and str(field(m, "movement_type")).upper() == "BULK_PACKAGED"),
             None,
         )
         if not existing_bulk:
-            row = {
-                "movement_id": make_id("ProductionStockLedger"),
+            missing_movements.append({
                 "txn_datetime": now(),
                 "movement_type": "BULK_PACKAGED",
                 "quantity_kg": bulk_kg,
@@ -4542,11 +4288,8 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
                 "reference_id": packaging_id,
                 "created_by": actor,
                 "notes": f"Discrepancy approved deduction: {clean_explanation}",
-            }
-            if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                raise HTTPException(503, "Could not record bulk stock deduction.")
+            })
 
-        # Ensure finished packets exist (idempotent check)
         all_products = db.get_records("Products", fresh=True)
         for weight_g, count in [(200, p200), (500, p500), (1000, p1000)]:
             if count <= 0:
@@ -4568,8 +4311,7 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
                     None,
                 )
                 if not existing_sku:
-                    row = {
-                        "movement_id": make_id("ProductionStockLedger"),
+                    missing_movements.append({
                         "txn_datetime": now(),
                         "movement_type": "PACKETS_PACKAGED",
                         "quantity_kg": 0,
@@ -4583,12 +4325,11 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
                         "reference_id": packaging_id,
                         "created_by": actor,
                         "notes": f"Discrepancy approved packet credit: {clean_explanation}",
-                    }
-                    if not db.append_record("ProductionStockLedger", row, raise_on_error=True):
-                        raise HTTPException(503, "Could not record packet stock.")
+                    })
 
+        batch_updates: Optional[Dict[str, Any]] = None
         if not already_approved:
-            updates = {
+            batch_updates = {
                 "status": "RECORDED",
                 "difference_status": "APPROVED_DISCREPANCY",
                 "discrepancy_approved": "true",
@@ -4596,10 +4337,68 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
                 "discrepancy_approved_by": actor,
                 "discrepancy_approved_at": now(),
             }
-            if not db.update_record("PackagingBatches", "packaging_id", packaging_id, updates, raise_on_error=True):
-                raise HTTPException(503, "Could not update PackagingBatches approval status.")
 
-        # Reconcile accounting journal in JournalHeaders if missing
+        pending_approval_ids = []
+        try:
+            for appr in db.get_records("ApprovalRequests", fresh=True):
+                if (
+                    str(field(appr, "target_user_id", default="")).strip() == packaging_id
+                    and str(field(appr, "request_type", default="")).strip().upper() == "PACKAGING_DISCREPANCY"
+                    and str(field(appr, "status", default="")).strip().upper() == "PENDING"
+                ):
+                    req_id = str(field(appr, "request_id", default="")).strip()
+                    if req_id:
+                        pending_approval_ids.append(req_id)
+        except Exception as appr_upd_err:
+            logger.debug(f"ApprovalRequest scan bypassed: {appr_upd_err}")
+
+        audit_rows = db.get_records("AuditLog", fresh=True)
+        has_audit = any(
+            str(row.get("action", "")).strip().upper() == "APPROVE_PACKAGING_DISCREPANCY"
+            and str(row.get("entity_type", "")).strip() == "PackagingBatches"
+            and str(row.get("entity_id", "")).strip() == packaging_id
+            for row in audit_rows
+        )
+        audit_actor = str(field(batch, "discrepancy_approved_by", default=actor) or actor)
+        audit_event = None if has_audit else {
+            "event_datetime": now(),
+            "actor_user_id": audit_actor,
+            "action": "APPROVE_PACKAGING_DISCREPANCY",
+            "entity_type": "PackagingBatches",
+            "entity_id": packaging_id,
+            "field_changed": "discrepancy_approved",
+            "old_value": "false",
+            "new_value": "true",
+            "reason": existing_explanation or clean_explanation,
+            "approved_by_user_id": audit_actor,
+            "related_record_id": packaging_id,
+        }
+
+        if missing_movements or batch_updates or pending_approval_ids or audit_event:
+            apps_script_bridge.delegate_governed_write(
+                action="APPROVE_PACKAGING_DISCREPANCY",
+                target_tab="PackagingBatches",
+                payload={
+                    "packaging_id": packaging_id,
+                    "stock_movements": missing_movements,
+                    "packaging_updates": batch_updates,
+                    "approval_request_ids": pending_approval_ids,
+                    "approval_request_updates": {
+                        "status": "APPROVED",
+                        "approved_by": actor,
+                        "approved_at": now(),
+                        "notes": f"Discrepancy approved: {clean_explanation}",
+                    },
+                    "audit_event": audit_event,
+                },
+                actor_user_id=actor,
+                actor_role=role,
+                request=request,
+                id_field="packaging_id",
+                invalidate_tabs=["PackagingBatches", "ProductionStockLedger", "ApprovalRequests", "AuditLog"],
+            )
+
+        # Reconcile accounting journal in JournalHeaders if missing via Apps Script-delegated posting
         try:
             from app.accounting.postings import post_packaging_batch_journal
             headers = db.get_records("JournalHeaders", fresh=True)
@@ -4628,32 +4427,12 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
                     "batch_allocations_json": field(batch, "batch_allocations_json", default=""),
                 }
                 post_packaging_batch_journal(pack_dict, bulk_cost=b_cost, packing_material_cost=m_cost, packing_labor_cost=l_cost, actor=actor)
+        except HTTPException:
+            raise
         except Exception as acct_err:
             logger.warning(f"Accounting posting on discrepancy approval for packaging {packaging_id}: {acct_err}")
 
-        # Mark associated ApprovalRequests as APPROVED
-        try:
-            for appr in db.get_records("ApprovalRequests", fresh=True):
-                if (
-                    str(field(appr, "target_user_id", default="")).strip() == packaging_id
-                    and str(field(appr, "request_type", default="")).strip().upper() == "PACKAGING_DISCREPANCY"
-                    and str(field(appr, "status", default="")).strip().upper() == "PENDING"
-                ):
-                    req_id = str(field(appr, "request_id", default="")).strip()
-                    db.update_record("ApprovalRequests", "request_id", req_id, {
-                        "status": "APPROVED",
-                        "approved_by": actor,
-                        "approved_at": now(),
-                        "notes": f"Discrepancy approved: {clean_explanation}",
-                    })
-        except Exception as appr_upd_err:
-            logger.debug(f"ApprovalRequest update bypassed: {appr_upd_err}")
-
-        _ensure_packaging_discrepancy_audit(
-            packaging_id=packaging_id,
-            actor=str(field(batch, "discrepancy_approved_by", default=actor) or actor),
-            explanation=existing_explanation or clean_explanation,
-        )
+        db.log_audit(actor, "APPROVE_PACKAGING_DISCREPANCY", "PackagingBatches", packaging_id, reason=existing_explanation or clean_explanation)
 
         if already_approved:
             return {
@@ -4676,14 +4455,15 @@ async def approve_packaging_discrepancy(packaging_id: str, req: DiscrepancyAppro
 # -------------------------------------------------------------
 
 @router.post("/dispatch")
-async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
-    actor, _ = require_production_access(user)
+async def dispatch(req: DispatchCreate, request: Request, user: dict = Depends(get_current_user)):
+    actor, role = require_production_access(user)
     require_persistent_store()
 
     product = next((p for p in db.get_records("Products") if str(field(p, "product_id")) == req.product_id), None)
     if not product:
         raise HTTPException(404, "Product not found")
-    if req.channel.upper() not in {"ECOMMERCE", "RETAIL", "SALESMAN", "WHOLESALE", "DISTRIBUTOR", "WAREHOUSE"}:
+    channel_upper = req.channel.upper()
+    if channel_upper not in {"ECOMMERCE", "RETAIL", "SALESMAN", "WHOLESALE", "DISTRIBUTOR", "WAREHOUSE"}:
         raise HTTPException(400, "Unsupported distribution channel")
 
     # Block dispatch if a non-released ProductLot is referenced via reference or active hold for product
@@ -4714,14 +4494,13 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
         ref_clean = req.reference.strip()
         existing_disp = next((d for d in db.get_records("ProductionDispatches") if str(field(d, "reference")).strip() == ref_clean), None)
         if existing_disp:
-            # Reject conflicting reuse of idempotency reference
             old_pid = str(field(existing_disp, "product_id", default="")).strip()
             old_chan = str(field(existing_disp, "channel", default="")).strip().upper()
             old_dest = str(field(existing_disp, "destination", default="")).strip()
             old_qty = int(float(field(existing_disp, "quantity_packets", default=0) or 0))
 
             if (old_pid != req.product_id.strip() or
-                old_chan != req.channel.strip().upper() or
+                old_chan != channel_upper or
                 old_dest != (req.destination or "").strip() or
                 old_qty != req.quantity_packets):
                 raise HTTPException(
@@ -4734,56 +4513,49 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
             if disp_status == "DISPATCHED_NOT_SALE":
                 return existing_disp
 
-            # Reconcile incomplete dispatch
+            missing_prod_movement = None
             existing_prod_mvt = next((m for m in ledger if str(field(m, "reference_id")) == disp_id and str(field(m, "movement_type")).upper() == "CHANNEL_DISPATCH"), None)
             if not existing_prod_mvt:
-                movement = {
-                    "movement_id": make_id("ProductionStockLedger"),
+                missing_prod_movement = {
                     "txn_datetime": now(),
                     "movement_type": "CHANNEL_DISPATCH",
                     "product_id": req.product_id,
                     "product_name_snapshot": field(product, "product_name"),
                     "quantity_kg": 0,
                     "quantity_packets": req.quantity_packets,
-                    "channel": req.channel.upper(),
+                    "channel": channel_upper,
                     "reference_id": disp_id,
                     "destination": req.destination,
                     "created_by": actor,
                     "notes": f"Reconciled retry: {req.notes}",
                 }
-                if not db.append_record("ProductionStockLedger", movement, raise_on_error=True):
-                    raise HTTPException(503, "Production stock deduction failed during dispatch recovery.")
 
-            if req.channel.upper() == "WAREHOUSE":
-                with CrossProcessLock("stock_product", req.product_id):
-                    salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
-                    existing_wh_mvt = next((m for m in salesman_ledger if str(field(m, "reference_id")) == disp_id and str(field(m, "txn_type")).upper() == "COMPANY_RECEIPT"), None)
-                    if not existing_wh_mvt:
-                        if not db.append_record("SalesmanStockLedger", {
-                            "stock_txn_id": make_id("SalesmanStockLedger"),
-                            "txn_datetime": now(),
-                            "salesman_user_id": "",
-                            "product_id": req.product_id,
-                            "sku_snapshot": field(product, "sku"),
-                            "txn_type": "COMPANY_RECEIPT",
-                            "quantity": req.quantity_packets,
-                            "unit": "PACKET",
-                            "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
-                            "related_sale_id": "",
-                            "issued_by_user_id": actor,
-                            "received_by_user_id": "WAREHOUSE",
-                            "confirmed_by_user_id": actor,
-                            "reference_id": disp_id,
-                            "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'} (Reconciled retry).",
-                        }, raise_on_error=True):
-                            raise HTTPException(503, "Warehouse stock movement failed during dispatch recovery.")
-
-            if req.channel.upper() == "SALESMAN" and req.destination:
-                salesman_ledger = db.get_records("SalesmanStockLedger")
+            missing_salesman_movement = None
+            if channel_upper == "WAREHOUSE":
+                salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
+                existing_wh_mvt = next((m for m in salesman_ledger if str(field(m, "reference_id")) == disp_id and str(field(m, "txn_type")).upper() == "COMPANY_RECEIPT"), None)
+                if not existing_wh_mvt:
+                    missing_salesman_movement = {
+                        "txn_datetime": now(),
+                        "salesman_user_id": "",
+                        "product_id": req.product_id,
+                        "sku_snapshot": field(product, "sku"),
+                        "txn_type": "COMPANY_RECEIPT",
+                        "quantity": req.quantity_packets,
+                        "unit": "PACKET",
+                        "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+                        "related_sale_id": "",
+                        "issued_by_user_id": actor,
+                        "received_by_user_id": "WAREHOUSE",
+                        "confirmed_by_user_id": actor,
+                        "reference_id": disp_id,
+                        "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'} (Reconciled retry).",
+                    }
+            elif channel_upper == "SALESMAN" and req.destination:
+                salesman_ledger = db.get_records("SalesmanStockLedger", fresh=True)
                 existing_salesman_mvt = next((m for m in salesman_ledger if str(field(m, "reference_id")) == disp_id), None)
                 if not existing_salesman_mvt:
-                    if not db.append_record("SalesmanStockLedger", {
-                        "stock_txn_id": make_id("SalesmanStockLedger"),
+                    missing_salesman_movement = {
                         "txn_datetime": now(),
                         "salesman_user_id": req.destination,
                         "product_id": req.product_id,
@@ -4798,21 +4570,34 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
                         "confirmed_by_user_id": actor,
                         "reference_id": disp_id,
                         "notes": "Factory dispatch to salesman (Reconciled retry).",
-                    }, raise_on_error=True):
-                        raise HTTPException(503, "Salesman stock movement failed during dispatch recovery.")
+                    }
 
-            db.update_record("ProductionDispatches", "dispatch_id", disp_id, {"status": "DISPATCHED_NOT_SALE", "notes": f"{req.notes} [RECONCILED]"})
+            updates = {"status": "DISPATCHED_NOT_SALE", "notes": f"{req.notes} [RECONCILED]"}
+            apps_script_bridge.delegate_governed_write(
+                action="RECONCILE_DISPATCH",
+                target_tab="ProductionDispatches",
+                payload={
+                    "dispatch_id": disp_id,
+                    "updates": updates,
+                    "production_stock_movement": missing_prod_movement,
+                    "salesman_stock_movement": missing_salesman_movement,
+                },
+                actor_user_id=actor,
+                actor_role=role,
+                request=request,
+                id_field="dispatch_id",
+                invalidate_tabs=["ProductionDispatches", "ProductionStockLedger", "SalesmanStockLedger"],
+            )
             existing_disp["status"] = "DISPATCHED_NOT_SALE"
             db.log_audit(actor, "RECONCILE_DISPATCH", "ProductionDispatches", disp_id, reason=f"Recovered dispatch {disp_id} with reference {ref_clean}")
             return existing_disp
 
-    disp_id = make_id("ProductionDispatches")
+    ts_now = now()
     rec = {
-        "dispatch_id": disp_id,
-        "dispatch_datetime": now(),
+        "dispatch_datetime": ts_now,
         "product_id": req.product_id,
         "product_name_snapshot": field(product, "product_name"),
-        "channel": req.channel.upper(),
+        "channel": channel_upper,
         "destination": req.destination,
         "quantity_packets": req.quantity_packets,
         "reference": req.reference,
@@ -4820,81 +4605,78 @@ async def dispatch(req: DispatchCreate, user: dict = Depends(get_current_user)):
         "created_by": actor,
         "notes": req.notes,
     }
-    if not db.append_record("ProductionDispatches", rec, raise_on_error=True):
-        raise HTTPException(503, "Could not save dispatch record")
-
-    try:
-        movement = {
-            "movement_id": make_id("ProductionStockLedger"),
-            "txn_datetime": now(),
-            "movement_type": "CHANNEL_DISPATCH",
+    prod_movement = {
+        "txn_datetime": ts_now,
+        "movement_type": "CHANNEL_DISPATCH",
+        "product_id": req.product_id,
+        "product_name_snapshot": field(product, "product_name"),
+        "quantity_kg": 0,
+        "quantity_packets": req.quantity_packets,
+        "channel": channel_upper,
+        "destination": req.destination,
+        "created_by": actor,
+        "notes": req.notes,
+    }
+    salesman_movement = None
+    if channel_upper == "WAREHOUSE":
+        salesman_movement = {
+            "txn_datetime": ts_now,
+            "salesman_user_id": "",
             "product_id": req.product_id,
-            "product_name_snapshot": field(product, "product_name"),
-            "quantity_kg": 0,
-            "quantity_packets": req.quantity_packets,
-            "channel": req.channel.upper(),
-            "reference_id": disp_id,
-            "destination": req.destination,
-            "created_by": actor,
-            "notes": req.notes,
+            "sku_snapshot": field(product, "sku"),
+            "txn_type": "COMPANY_RECEIPT",
+            "quantity": req.quantity_packets,
+            "unit": "PACKET",
+            "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+            "related_sale_id": "",
+            "issued_by_user_id": actor,
+            "received_by_user_id": "WAREHOUSE",
+            "confirmed_by_user_id": actor,
+            "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'}. Internal stock transfer.",
         }
-        if not db.append_record("ProductionStockLedger", movement, raise_on_error=True):
-            raise RuntimeError("ProductionStockLedger append returned False")
+    elif channel_upper == "SALESMAN" and req.destination:
+        salesman_movement = {
+            "txn_datetime": ts_now,
+            "salesman_user_id": req.destination,
+            "product_id": req.product_id,
+            "sku_snapshot": field(product, "sku"),
+            "txn_type": "SALESMAN_POSITIVE_ADJUSTMENT",
+            "quantity": req.quantity_packets,
+            "unit": "PACKET",
+            "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
+            "related_sale_id": "",
+            "issued_by_user_id": actor,
+            "received_by_user_id": req.destination,
+            "confirmed_by_user_id": actor,
+            "notes": "Factory dispatch to salesman. This is a stock transfer, not a sale.",
+        }
 
-        if req.channel.upper() == "WAREHOUSE":
-            with CrossProcessLock("stock_product", req.product_id):
-                if not db.append_record("SalesmanStockLedger", {
-                    "stock_txn_id": make_id("SalesmanStockLedger"),
-                    "txn_datetime": now(),
-                    "salesman_user_id": "",
-                    "product_id": req.product_id,
-                    "sku_snapshot": field(product, "sku"),
-                    "txn_type": "COMPANY_RECEIPT",
-                    "quantity": req.quantity_packets,
-                    "unit": "PACKET",
-                    "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
-                    "related_sale_id": "",
-                    "issued_by_user_id": actor,
-                    "received_by_user_id": "WAREHOUSE",
-                    "confirmed_by_user_id": actor,
-                    "reference_id": disp_id,
-                    "notes": f"Factory dispatch to Warehouse: {req.destination or 'Central Warehouse'}. Internal stock transfer.",
-                }, raise_on_error=True):
-                    raise RuntimeError("SalesmanStockLedger append returned False for WAREHOUSE dispatch")
+    with CrossProcessLock("stock_product", req.product_id):
+        bridge_res = apps_script_bridge.delegate_governed_write(
+            action="PRODUCTION_STOCK_DISPATCH",
+            target_tab="ProductionDispatches",
+            payload={
+                "record": rec,
+                "production_stock_movement": prod_movement,
+                "salesman_stock_movement": salesman_movement,
+            },
+            actor_user_id=actor,
+            actor_role=role,
+            request=request,
+            id_field="dispatch_id",
+            invalidate_tabs=["ProductionDispatches", "ProductionStockLedger", "SalesmanStockLedger"],
+        )
 
-        if req.channel.upper() == "SALESMAN" and req.destination:
-            if not db.append_record("SalesmanStockLedger", {
-                "stock_txn_id": make_id("SalesmanStockLedger"),
-                "txn_datetime": now(),
-                "salesman_user_id": req.destination,
-                "product_id": req.product_id,
-                "sku_snapshot": field(product, "sku"),
-                "txn_type": "SALESMAN_POSITIVE_ADJUSTMENT",
-                "quantity": req.quantity_packets,
-                "unit": "PACKET",
-                "pack_weight_g": int(float(field(product, "pack_weight_g", default=0) or 0)),
-                "related_sale_id": "",
-                "issued_by_user_id": actor,
-                "received_by_user_id": req.destination,
-                "confirmed_by_user_id": actor,
-                "reference_id": disp_id,
-                "notes": "Factory dispatch to salesman. This is a stock transfer, not a sale.",
-            }, raise_on_error=True):
-                raise RuntimeError("SalesmanStockLedger append returned False")
-    except Exception as exc:
-        try:
-            db.update_record("ProductionDispatches", "dispatch_id", disp_id, {"status": "INCOMPLETE_STOCK_WRITE", "notes": f"INCOMPLETE_STOCK_WRITE: {exc}"})
-        except Exception:
-            pass
-        raise HTTPException(503, f"Dispatch was saved but stock deduction failed ({exc}). Marked as INCOMPLETE. Reconcile before retrying.")
-
+    disp_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("dispatch_id") or "")
+    saved = bridge_res.get("record") or {**rec, "dispatch_id": disp_id}
+    saved["dispatch_id"] = disp_id
     db.log_audit(actor, "PRODUCTION_STOCK_DISPATCH", "ProductionDispatches", disp_id, reason=f"{req.quantity_packets} packets transferred to {req.channel}: {req.destination}")
-    return rec
+    return saved
 
 
 @router.get("/dispatches")
 async def dispatches(user: dict = Depends(get_current_user)):
-    require_production_access(user)
+    require_production_read(user)
     return db.get_records("ProductionDispatches")
 
 
@@ -4905,7 +4687,7 @@ async def dispatches(user: dict = Depends(get_current_user)):
 @router.get("/costing/batch/{production_id}")
 async def get_batch_costing(production_id: str, user: dict = Depends(get_current_user)):
     """Read batch-attributed direct cost only; never allocate the whole day's wages."""
-    require_production_access(user)
+    require_production_read(user)
     batch = next((b for b in db.get_records("ProductionBatches", fresh=True)
                   if str(field(b, "production_id", "batch_id")) == production_id), None)
     if not batch:
@@ -4965,7 +4747,7 @@ async def get_sku_costing(product_id: str, user: dict = Depends(get_current_user
     """
     Calculate finished packet cost for a given SKU based on its net weight and production cost.
     """
-    require_production_access(user)
+    require_production_read(user)
     product = next((p for p in db.get_records("Products") if str(field(p, "product_id")) == product_id), None)
     if not product:
         raise HTTPException(404, "Product not found")

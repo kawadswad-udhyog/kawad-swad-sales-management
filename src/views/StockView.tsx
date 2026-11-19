@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
+import { resolveCanonical12Role } from '../utils/permissions';
 import { StockTxnType, FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary, VanLoadingPass, VanLoadingItem } from '../types';
 import {
   apiRequest,
@@ -52,9 +53,12 @@ export const StockView: React.FC = () => {
     refreshData,
   } = useStore();
 
-  const isManager = currentUser?.role === 'OWNER' || currentUser?.role === 'PA';
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isAuditor = canonicalRole === 'AUDITOR';
+  const isFieldSalesman = canonicalRole === 'FIELD_SALESMAN';
+  const isManager = !isAuditor && (canonicalRole === 'OWNER_ADMIN' || canonicalRole === 'PA');
   const activeProducts = products.filter((p) => p.active);
-  const activeSalesmen = users.filter((u) => u.role === 'SALESMAN' && u.active);
+  const activeSalesmen = users.filter((u) => resolveCanonical12Role(u.role) === 'FIELD_SALESMAN' && u.active);
 
   const [stockTab, setStockTab] = useState<'register' | 'movements' | 'physical' | 'van_loading'>('register');
   const [registerItems, setRegisterItems] = useState<FinishedGoodsRegisterItem[]>([]);
@@ -193,9 +197,9 @@ export const StockView: React.FC = () => {
 
   const pendingSalesmanPasses = useMemo(() => {
     return loadingPasses.filter(
-      (p) => p.status === 'PENDING_ACCEPTANCE' && (currentUser?.role !== 'SALESMAN' || p.salesman_user_id === currentUser?.user_id)
+      (p) => p.status === 'PENDING_ACCEPTANCE' && (!isFieldSalesman || p.salesman_user_id === currentUser?.user_id)
     );
-  }, [loadingPasses, currentUser]);
+  }, [loadingPasses, currentUser, isFieldSalesman]);
 
   const handleCreateLoadingPass = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -483,12 +487,12 @@ export const StockView: React.FC = () => {
   };
 
   // Filter salesman stock & ledger for salesman role
-  const visibleSalesmanStock = currentUser?.role === 'SALESMAN'
-    ? salesmanStockSummary.filter((s) => s.salesman_user_id === currentUser.user_id)
+  const visibleSalesmanStock = isFieldSalesman
+    ? salesmanStockSummary.filter((s) => s.salesman_user_id === currentUser?.user_id)
     : salesmanStockSummary;
 
-  const visibleTransactions = currentUser?.role === 'SALESMAN'
-    ? stockTransactions.filter((t) => t.salesman_user_id === currentUser.user_id)
+  const visibleTransactions = isFieldSalesman
+    ? stockTransactions.filter((t) => t.salesman_user_id === currentUser?.user_id)
     : stockTransactions;
 
   const userNameMap = useMemo(() => {
@@ -2189,7 +2193,7 @@ export const StockView: React.FC = () => {
                               </button>
 
                               {/* Salesman or Manager can accept if pending */}
-                              {isPending && (currentUser?.role !== 'SALESMAN' || pass.salesman_user_id === currentUser?.user_id) && (
+                              {!isAuditor && isPending && (!isFieldSalesman || pass.salesman_user_id === currentUser?.user_id) && (
                                 <button
                                   type="button"
                                   onClick={() => handleAcceptPass(pass.pass_id)}
@@ -2336,7 +2340,7 @@ export const StockView: React.FC = () => {
                   >
                     Close
                   </button>
-                  {viewingPass.status === 'PENDING_ACCEPTANCE' && (currentUser?.role !== 'SALESMAN' || viewingPass.salesman_user_id === currentUser?.user_id) && (
+                  {!isAuditor && viewingPass.status === 'PENDING_ACCEPTANCE' && (!isFieldSalesman || viewingPass.salesman_user_id === currentUser?.user_id) && (
                     <button
                       type="button"
                       onClick={() => handleAcceptPass(viewingPass.pass_id)}

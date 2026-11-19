@@ -4,12 +4,14 @@ Provides endpoints for Chart of Accounts, Trial Balance, P&L, Balance Sheet, and
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.apps_script_bridge import apps_script_bridge
 from app.auth import get_current_user
 from app.sheets import db
-from app.permissions import is_manager, is_owner
+from app.permissions import is_manager, is_owner, role_v2_of
+from app.timeutil import now_iso
 from app.accounting.chart_of_accounts import CHART_OF_ACCOUNTS
 from app.accounting.journal_engine import (
     calculate_trial_balance,
@@ -25,10 +27,11 @@ router = APIRouter(prefix="/api/accounting", tags=["Accounting"])
 def require_accounting_access(user: dict, write: bool = False):
     role = str(user.get("role", "")).upper()
     allowed_read = {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "ACCOUNTS", "PA", "AUDITOR"}
-    allowed_write = {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "ACCOUNTS", "PA"}
+    # Blueprint v2.1: PA has read-only access to accounting ("view" only); only OWNER_ADMIN or ACCOUNTS may write.
+    allowed_write = {"OWNER", "OWNER_ADMIN", "ADMIN", "ACCOUNTANT", "ACCOUNTS"}
     allowed = allowed_write if write else allowed_read
     if role not in allowed:
-        raise HTTPException(403, "Access restricted to authorized Accounting, Owner, PA, or Auditor roles.")
+        raise HTTPException(403, "Access restricted to authorized Accounting, Owner, or read-only PA/Auditor roles.")
     return str(user.get("user_id", "")), role
 
 
@@ -114,6 +117,7 @@ async def list_journal_vouchers(
 @router.post("/vouchers")
 async def create_manual_journal_voucher(
     req: ManualJournalVoucherCreate,
+    request: Request,
     user: dict = Depends(get_current_user),
 ):
     actor, _ = require_accounting_access(user, write=True)
@@ -126,8 +130,11 @@ async def create_manual_journal_voucher(
             lines=[l.model_dump() if hasattr(l, 'model_dump') else l.dict() for l in req.lines],
             posted_by=actor,
             journal_date=req.journal_date,
+            idempotency_key=apps_script_bridge.extract_request_nonce(request=request),
         )
         return voucher
+    except HTTPException:
+        raise
     except ValueError as val_err:
         raise HTTPException(422, detail=str(val_err))
     except Exception as exc:
@@ -138,12 +145,20 @@ async def create_manual_journal_voucher(
 async def reverse_voucher(
     journal_id: str,
     req: ReversalRequest,
+    request: Request,
     user: dict = Depends(get_current_user),
 ):
     actor, _ = require_accounting_access(user, write=True)
     try:
-        rev = reverse_journal_voucher(journal_id=journal_id, reason=req.reason, actor=actor)
+        rev = reverse_journal_voucher(
+            journal_id=journal_id,
+            reason=req.reason,
+            actor=actor,
+            idempotency_key=apps_script_bridge.extract_request_nonce(request=request),
+        )
         return rev
+    except HTTPException:
+        raise
     except ValueError as val_err:
         raise HTTPException(400, detail=str(val_err))
     except Exception as exc:
@@ -384,6 +399,7 @@ async def list_accounting_periods(user: dict = Depends(get_current_user)):
 @router.post("/periods/{period_id}/close")
 async def close_accounting_period(
     period_id: str,
+    request: Request,
     user: dict = Depends(get_current_user),
 ):
     if not is_owner(user):
@@ -392,25 +408,28 @@ async def close_accounting_period(
     actor = str(user.get("user_id", "OWNER"))
     periods = db.get_records("AccountingPeriods", fresh=True)
     per = next((p for p in periods if str(p.get("period_id")) == period_id), None)
-    if not per:
-        # Create closed period
-        per_row = {
-            "period_id": period_id,
-            "period_name": period_id,
-            "start_date": "2026-10-01",
-            "end_date": "2026-10-31",
-            "is_closed": "true",
-            "closed_by": actor,
-            "closed_at": now_iso(),
-        }
-        db.append_record("AccountingPeriods", per_row)
-        return per_row
+    stamped = now_iso()
 
-    db.update_record("AccountingPeriods", "period_id", period_id, {
+    payload = {
+        "period_id": period_id,
+        "period_name": str((per or {}).get("period_name") or period_id),
+        "start_date": str((per or {}).get("start_date") or "2026-10-01"),
+        "end_date": str((per or {}).get("end_date") or "2026-10-31"),
         "is_closed": "true",
         "closed_by": actor,
-        "closed_at": now_iso(),
-    })
+        "closed_at": stamped,
+        "create_if_missing": not bool(per),
+    }
+    res = apps_script_bridge.delegate_governed_write(
+        action="CLOSE_ACCOUNTING_PERIOD",
+        target_tab="AccountingPeriods",
+        payload=payload,
+        request=request,
+        actor_user_id=actor,
+        actor_role=role_v2_of(user),
+        id_field="period_id",
+        invalidate_tabs=["AccountingPeriods"],
+    )
     db.log_audit(actor, "CLOSE_ACCOUNTING_PERIOD", "AccountingPeriods", period_id, reason=f"Closed accounting period {period_id}")
-    return {"ok": True, "period_id": period_id, "is_closed": True}
+    return {"ok": True, "period_id": period_id, "is_closed": True, **res}
 

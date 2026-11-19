@@ -176,7 +176,7 @@ export const EmployeeOverviewView: React.FC<EmployeeOverviewViewProps> = ({ onNa
           <p className="text-[11px] text-slate-500 mt-1">Open assignments needing action</p>
         </div>
 
-        {role === 'SALESMAN' && (
+        {(role === 'SALESMAN' || role === 'FIELD_SALESMAN') && (
           <>
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
               <div className="flex items-center justify-between text-slate-500 mb-2">

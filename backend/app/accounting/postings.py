@@ -405,7 +405,22 @@ def post_packaging_batch_journal(
             "notes": "Direct packaging and sealing labor",
         })
 
-    res = post_journal_voucher(
+    estimated_review = None
+    if is_estimated:
+        import json as _json
+        from app.timeutil import now_iso as _now_iso
+        ts = _now_iso()
+        estimated_review = {
+            "transaction_type": "ESTIMATED_COST_REVIEW_REQUIRED",
+            "idempotency_key": f"acct-est-pack-{pack_id}",
+            "status": "PENDING_REVIEW",
+            "payload_json": _json.dumps({"packaging_id": pack_id, "bulk_cost": float(r_bulk), "valuation_status": "ESTIMATED"}),
+            "error_details": "Voucher posted with provisional estimated rates. Requires Owner actual cost confirmation.",
+            "created_at": ts,
+            "updated_at": ts,
+        }
+
+    return post_journal_voucher(
         voucher_type=voucher_type,
         reference_type="PACKAGING_BATCH",
         reference_id=pack_id,
@@ -413,29 +428,8 @@ def post_packaging_batch_journal(
         lines=lines,
         posted_by=actor,
         journal_date=str(pack_data.get("packaging_date", "")).strip() or None,
+        extra_metadata={"incomplete_transaction_review": estimated_review} if estimated_review else None,
     )
-
-    if is_estimated:
-        try:
-            from app.sheets import db
-            from app.time_utils import now
-            from app.id_generator import make_id
-            db.append_record("IncompleteTransactions", {
-                "transaction_id": make_id("IncompleteTransactions"),
-                "transaction_type": "ESTIMATED_COST_REVIEW_REQUIRED",
-                "idempotency_key": f"acct-est-pack-{pack_id}",
-                "status": "PENDING_REVIEW",
-                "payload_json": json.dumps({"packaging_id": pack_id, "bulk_cost": float(r_bulk), "valuation_status": "ESTIMATED"}),
-                "error_details": "Voucher posted with provisional estimated rates. Requires Owner actual cost confirmation.",
-                "created_at": now(),
-                "updated_at": now(),
-                "resolved_by": "",
-                "resolved_at": "",
-            })
-        except Exception:
-            pass
-
-    return res
 
 
 def post_sale_journal(

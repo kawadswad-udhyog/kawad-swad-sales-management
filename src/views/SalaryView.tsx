@@ -1,17 +1,30 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { SalaryIncentive } from '../types';
+import { resolveCanonical12Role } from '../utils/permissions';
 
 export const SalaryView: React.FC = () => {
   const {
+    currentUser,
     users,
     salaryIncentives,
     calculatePayroll,
     approveSalaryIncentive,
     markSalaryIncentivePaid,
+    isBackendConnected,
+    isGoogleSheetsConnected,
+    persistentWritesEnabled,
   } = useStore();
 
-  const activeSalesmen = users.filter((u) => u.role === 'SALESMAN' && u.active);
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isOwnerAdmin = canonicalRole === 'OWNER_ADMIN';
+  const isAuditor = canonicalRole === 'AUDITOR';
+  const writesLocked =
+    isAuditor || !isOwnerAdmin || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
+
+  const activeSalesmen = users.filter(
+    (u) => resolveCanonical12Role(u.role) === 'FIELD_SALESMAN' && u.active
+  );
 
   const [salesmanId, setSalesmanId] = useState(activeSalesmen[0]?.user_id || '');
   const [periodStart, setPeriodStart] = useState('2026-10-01');
@@ -21,10 +34,25 @@ export const SalaryView: React.FC = () => {
   const [blockRate, setBlockRate] = useState(150);
   const [baseSalary, setBaseSalary] = useState(7000);
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+  const [payingRecord, setPayingRecord] = useState<SalaryIncentive | null>(null);
+  const [paymentRefInput, setPaymentRefInput] = useState('');
+
+  if (!isOwnerAdmin && !isAuditor) {
+    return (
+      <div className="card notice-error">
+        Access restricted: Confidential payroll &amp; salary records are restricted to Owner Admin (read-only audit permitted for Auditor).
+      </div>
+    );
+  }
 
   const handleCalculate = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
+
+    if (writesLocked) {
+      setNotice({ msg: 'Payroll calculation is locked until Owner authorization and storage gateway are active.', error: true });
+      return;
+    }
 
     if (!salesmanId) {
       setNotice({ msg: 'Please select a salesman.', error: true });
@@ -58,19 +86,36 @@ export const SalaryView: React.FC = () => {
   };
 
   const handleApprove = async (item: SalaryIncentive) => {
-    await approveSalaryIncentive(item.record_id);
-    setNotice({ msg: `Approved ${item.record_type} for ₹${item.calculated_amount}. Persisted to records.` });
+    if (writesLocked) return;
+    try {
+      await approveSalaryIncentive(item.record_id);
+      setNotice({ msg: `Approved ${item.record_type} for ₹${item.calculated_amount}. Persisted to records.` });
+    } catch (err: unknown) {
+      setNotice({ msg: err instanceof Error ? err.message : 'Approval failed', error: true });
+    }
   };
 
-  const handlePay = async (item: SalaryIncentive) => {
-    const ref = window.prompt(
-      'Enter bank transfer / NEFT / UPI payment reference:',
-      `NEFT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-01`
-    );
-    if (!ref || !ref.trim()) return;
+  const openPayDialog = (item: SalaryIncentive) => {
+    setPayingRecord(item);
+    setPaymentRefInput(`NEFT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-01`);
+  };
 
-    await markSalaryIncentivePaid(item.record_id, ref.trim());
-    setNotice({ msg: `Marked paid with reference: ${ref.trim()}. Persisted to records.` });
+  const handleConfirmPay = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!payingRecord || writesLocked) return;
+    const cleanRef = paymentRefInput.trim();
+    if (!cleanRef) {
+      setNotice({ msg: 'Payment reference number is required.', error: true });
+      return;
+    }
+    try {
+      await markSalaryIncentivePaid(payingRecord.record_id, cleanRef);
+      setNotice({ msg: `Marked paid with reference: ${cleanRef}. Persisted to records.` });
+      setPayingRecord(null);
+      setPaymentRefInput('');
+    } catch (err: unknown) {
+      setNotice({ msg: err instanceof Error ? err.message : 'Payment update failed', error: true });
+    }
   };
 
   return (
@@ -83,96 +128,134 @@ export const SalaryView: React.FC = () => {
         </div>
       )}
 
-      <div className="card">
-        <h2>Calculate Salesman Payroll &amp; Incentives</h2>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Rules include only issued, delivered, and fully paid sales with qualifying kilograms.
-          Defaults: 7 trial days, ₹10/kg trial incentive, ₹150 per completed 100 kg volume block,
-          ₹7,000 base salary.
-        </p>
+      {isOwnerAdmin && (
+        <div className="card">
+          <h2>Calculate Salesman Payroll &amp; Incentives</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Rules include only issued, delivered, and fully paid sales with qualifying kilograms.
+            Defaults: 7 trial days, ₹10/kg trial incentive, ₹150 per completed 100 kg volume block,
+            ₹7,000 base salary.
+          </p>
 
-        <form className="inline" onSubmit={handleCalculate}>
-          <label>
-            Salesman
-            <select
-              required
-              value={salesmanId}
-              onChange={(e) => setSalesmanId(e.target.value)}
+          <form className="inline" onSubmit={handleCalculate}>
+            <label>
+              Salesman
+              <select
+                required
+                value={salesmanId}
+                onChange={(e) => setSalesmanId(e.target.value)}
+              >
+                {activeSalesmen.map((u) => (
+                  <option key={u.user_id} value={u.user_id}>
+                    {u.full_name} ({u.user_id})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              Period start
+              <input
+                type="date"
+                required
+                value={periodStart}
+                onChange={(e) => setPeriodStart(e.target.value)}
+              />
+            </label>
+
+            <label>
+              Period end
+              <input
+                type="date"
+                required
+                value={periodEnd}
+                onChange={(e) => setPeriodEnd(e.target.value)}
+              />
+            </label>
+
+            <label>
+              Trial window (days)
+              <input
+                type="number"
+                min="0"
+                value={trialDays}
+                onChange={(e) => setTrialDays(Number(e.target.value))}
+              />
+            </label>
+
+            <label>
+              Trial rate (₹/kg)
+              <input
+                type="number"
+                min="0"
+                step="0.5"
+                value={trialRate}
+                onChange={(e) => setTrialRate(Number(e.target.value))}
+              />
+            </label>
+
+            <label>
+              100kg block rate (₹)
+              <input
+                type="number"
+                min="0"
+                value={blockRate}
+                onChange={(e) => setBlockRate(Number(e.target.value))}
+              />
+            </label>
+
+            <label>
+              Base monthly salary (₹)
+              <input
+                type="number"
+                min="0"
+                value={baseSalary}
+                onChange={(e) => setBaseSalary(Number(e.target.value))}
+              />
+            </label>
+
+            <div style={{ marginTop: '6px' }}>
+              <button type="submit" disabled={writesLocked}>
+                {writesLocked ? 'Writes Locked' : 'Calculate payroll'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {payingRecord && isOwnerAdmin && (
+        <div className="card" style={{ border: '1px solid #166534', background: '#f0fdf4' }}>
+          <h3 style={{ marginTop: 0 }}>
+            Disburse Salary / Incentive: <code>{payingRecord.record_id}</code> (₹
+            {Number(payingRecord.approved_amount || payingRecord.calculated_amount).toFixed(2)})
+          </h3>
+          <form className="inline" onSubmit={handleConfirmPay}>
+            <label>
+              Bank Transfer / NEFT / UPI Reference
+              <input
+                type="text"
+                required
+                value={paymentRefInput}
+                onChange={(e) => setPaymentRefInput(e.target.value)}
+                placeholder="e.g. NEFT-261119-01"
+              />
+            </label>
+            <button type="submit" disabled={writesLocked}>
+              Confirm Payment
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                setPayingRecord(null);
+                setPaymentRefInput('');
+              }}
             >
-              {activeSalesmen.map((u) => (
-                <option key={u.user_id} value={u.user_id}>
-                  {u.full_name} ({u.user_id})
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label>
-            Period start
-            <input
-              type="date"
-              required
-              value={periodStart}
-              onChange={(e) => setPeriodStart(e.target.value)}
-            />
-          </label>
-
-          <label>
-            Period end
-            <input
-              type="date"
-              required
-              value={periodEnd}
-              onChange={(e) => setPeriodEnd(e.target.value)}
-            />
-          </label>
-
-          <label>
-            Trial window (days)
-            <input
-              type="number"
-              min="0"
-              value={trialDays}
-              onChange={(e) => setTrialDays(Number(e.target.value))}
-            />
-          </label>
-
-          <label>
-            Trial rate (₹/kg)
-            <input
-              type="number"
-              min="0"
-              step="0.5"
-              value={trialRate}
-              onChange={(e) => setTrialRate(Number(e.target.value))}
-            />
-          </label>
-
-          <label>
-            100kg block rate (₹)
-            <input
-              type="number"
-              min="0"
-              value={blockRate}
-              onChange={(e) => setBlockRate(Number(e.target.value))}
-            />
-          </label>
-
-          <label>
-            Base monthly salary (₹)
-            <input
-              type="number"
-              min="0"
-              value={baseSalary}
-              onChange={(e) => setBaseSalary(Number(e.target.value))}
-            />
-          </label>
-
-          <div style={{ marginTop: '6px' }}>
-            <button type="submit">Calculate payroll</button>
-          </div>
-        </form>
-      </div>
+              Cancel
+            </button>
+          </form>
+        </div>
+      )}
 
       <div className="card">
         <div className="toolbar">
@@ -195,7 +278,7 @@ export const SalaryView: React.FC = () => {
                   <th>Amount</th>
                   <th>Status</th>
                   <th>Payment Ref</th>
-                  <th>Actions</th>
+                  {isOwnerAdmin && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -251,32 +334,36 @@ export const SalaryView: React.FC = () => {
                       </span>
                     </td>
                     <td className="muted">{r.payment_reference || '—'}</td>
-                    <td>
-                      <div className="actions">
-                        {(r.approval_status === 'PENDING' || r.approval_status === 'PROPOSED') && (
-                          <button
-                            className="secondary"
-                            style={{ padding: '3px 8px', fontSize: '0.78rem', background: '#dcfce7', color: '#166534' }}
-                            onClick={() => handleApprove(r)}
-                          >
-                            Approve
-                          </button>
-                        )}
-                        {r.approval_status === 'APPROVED' && !r.paid_datetime && (
-                          <button
-                            style={{ padding: '3px 8px', fontSize: '0.78rem' }}
-                            onClick={() => handlePay(r)}
-                          >
-                            Mark Paid
-                          </button>
-                        )}
-                        {r.paid_datetime && (
-                          <span style={{ fontSize: '0.8rem', color: '#166534', fontWeight: 600 }}>
-                            ✓ Disbursed
-                          </span>
-                        )}
-                      </div>
-                    </td>
+                    {isOwnerAdmin && (
+                      <td>
+                        <div className="actions">
+                          {(r.approval_status === 'PENDING' || r.approval_status === 'PROPOSED') && (
+                            <button
+                              className="secondary"
+                              disabled={writesLocked}
+                              style={{ padding: '3px 8px', fontSize: '0.78rem', background: '#dcfce7', color: '#166534' }}
+                              onClick={() => handleApprove(r)}
+                            >
+                              Approve
+                            </button>
+                          )}
+                          {r.approval_status === 'APPROVED' && !r.paid_datetime && (
+                            <button
+                              disabled={writesLocked}
+                              style={{ padding: '3px 8px', fontSize: '0.78rem' }}
+                              onClick={() => openPayDialog(r)}
+                            >
+                              Mark Paid
+                            </button>
+                          )}
+                          {r.paid_datetime && (
+                            <span style={{ fontSize: '0.8rem', color: '#166534', fontWeight: 600 }}>
+                              ✓ Disbursed
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

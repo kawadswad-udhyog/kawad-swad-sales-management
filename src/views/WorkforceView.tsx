@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../context/StoreContext';
 import { getAuthToken, apiFetch } from '../services/api';
+import { resolveCanonical12Role } from '../utils/permissions';
 import {
   Users,
   UserPlus,
@@ -98,7 +99,9 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [actionSuccess, setActionSuccess] = useState('');
   const [actionError, setActionError] = useState('');
 
-  const isOwner = currentUser?.role === 'OWNER' || String(currentUser?.role || '') === 'OWNER_ADMIN';
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isOwner = canonicalRole === 'OWNER_ADMIN';
+  const isAuditor = canonicalRole === 'AUDITOR';
 
   // Loaders
   const loadMetrics = async () => {
@@ -163,14 +166,16 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     loadLabour();
     loadTasks();
     loadProjects();
-    loadPayroll();
-    loadReceipts();
+    if (isOwner) {
+      loadPayroll();
+      loadReceipts();
+    }
     loadAuditLogs();
   };
 
   useEffect(() => {
     refreshAll();
-  }, [token]);
+  }, [token, isOwner]);
 
   // Labour Attendance State for Bulk Entry
   const [attDate, setAttDate] = useState(new Date().toISOString().slice(0, 10));
@@ -444,8 +449,12 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           { id: 'labour_attendance', label: 'Daily Labour Attendance', icon: <Clock size={15} /> },
           { id: 'tasks', label: 'Work Assignments', icon: <CheckSquare size={15} /> },
           { id: 'projects', label: 'Freelancer Projects', icon: <FileCheck size={15} /> },
-          { id: 'payroll', label: 'Salary & Wages', icon: <Coins size={15} /> },
-          { id: 'receipts', label: 'Salary Slips', icon: <Download size={15} /> },
+          ...(isOwner
+            ? [
+                { id: 'payroll', label: 'Salary & Wages (Owner)', icon: <Coins size={15} /> },
+                { id: 'receipts', label: 'Salary Slips (Owner)', icon: <Download size={15} /> },
+              ]
+            : []),
           { id: 'audit', label: 'Audit Register', icon: <Shield size={15} /> },
         ].map((tab) => (
           <button
@@ -503,26 +512,28 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           </div>
 
           {/* Quick Action Hub */}
-          <div className="bg-gradient-to-r from-slate-900 to-slate-950 rounded-2xl p-6 text-white border border-slate-800 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div>
-              <h3 className="text-base font-bold text-white m-0">Monthly Payroll & Wage Processing</h3>
-              <p className="text-xs text-slate-300 mt-1 max-w-xl">
-                Kawad Swad double-entry engine automatically computes attendance pro-rata wages, applies salesman 100kg-slab incentives, and generates auditable voucher receipts.
-              </p>
+          {isOwner && !isAuditor && (
+            <div className="bg-gradient-to-r from-slate-900 to-slate-950 rounded-2xl p-6 text-white border border-slate-800 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold text-white m-0">Monthly Payroll & Wage Processing</h3>
+                <p className="text-xs text-slate-300 mt-1 max-w-xl">
+                  Kawad Swad double-entry engine automatically computes attendance pro-rata wages, applies salesman 100kg-slab incentives, and generates auditable voucher receipts.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setActiveTab('payroll');
+                    setShowCalcPayrollModal(true);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Coins size={15} />
+                  <span>Run Monthly Payroll</span>
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  setActiveTab('payroll');
-                  setShowCalcPayrollModal(true);
-                }}
-                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
-              >
-                <Coins size={15} />
-                <span>Run Monthly Payroll</span>
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -564,7 +575,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                   <th className="py-3 px-4">System Role</th>
                   <th className="py-3 px-4">Designation</th>
                   <th className="py-3 px-4">Department</th>
-                  <th className="py-3 px-4 text-right">Base Pay</th>
+                  {isOwner && <th className="py-3 px-4 text-right">Base Pay</th>}
                   <th className="py-3 px-4">Contact</th>
                   <th className="py-3 px-4 text-center">Status</th>
                 </tr>
@@ -591,9 +602,11 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                       </td>
                       <td className="py-3 px-4">{emp.designation || emp.role}</td>
                       <td className="py-3 px-4">{emp.department || 'Operations'}</td>
-                      <td className="py-3 px-4 text-right font-bold text-slate-900">
-                        ₹{Number(emp.basic_salary || 0).toLocaleString('en-IN')}
-                      </td>
+                      {isOwner && (
+                        <td className="py-3 px-4 text-right font-bold text-slate-900">
+                          ₹{Number(emp.basic_salary || 0).toLocaleString('en-IN')}
+                        </td>
+                      )}
                       <td className="py-3 px-4 text-slate-500">{emp.mobile || emp.email || '--'}</td>
                       <td className="py-3 px-4 text-center">
                         <span

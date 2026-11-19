@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 from typing import List
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
+from app.apps_script_bridge import apps_script_bridge
 from app.models import Customer, CustomerCreate
 from app.sheets import db
 from app.auth import get_current_user
+from app.permissions import require_module_action
 
 router = APIRouter(prefix="/api/customers", tags=["Customers"])
 
@@ -34,7 +36,8 @@ async def list_customers(current_user: dict = Depends(get_current_user)):
     return customers
 
 @router.post("", response_model=Customer)
-async def create_customer(req: CustomerCreate, current_user: dict = Depends(get_current_user)):
+async def create_customer(req: CustomerCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    actor_id, actor_role = require_module_action(current_user, "sales", "create")
     clean_shop_name = (req.shop_name or "").strip()
     if not clean_shop_name or len(clean_shop_name) < 2:
         raise HTTPException(
@@ -42,10 +45,8 @@ async def create_customer(req: CustomerCreate, current_user: dict = Depends(get_
             detail="A meaningful customer or business name is required (minimum 2 characters).",
         )
 
-    customer_id = db.generate_id("Customers")
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso_str = datetime.now(timezone.utc).isoformat()
     record = {
-        "customer_id": customer_id,
         "customer_type": (req.customer_type or "RETAILER").strip(),
         "shop_name": clean_shop_name,
         "shopkeeper_name": (req.shopkeeper_name or "").strip(),
@@ -57,14 +58,23 @@ async def create_customer(req: CustomerCreate, current_user: dict = Depends(get_
         "gstin": (req.gstin or "").strip(),
         "map_location": (req.map_location or "").strip(),
         "active": "true",
-        "created_at": now_iso,
+        "created_at": now_iso_str,
         "notes": (req.notes or "").strip(),
     }
-    if not db.append_record("Customers", record, raise_on_error=True):
-        raise HTTPException(status_code=503, detail="Could not save customer to persistent storage.")
+    res = apps_script_bridge.delegate_governed_write(
+        action="CREATE_CUSTOMER",
+        target_tab="Customers",
+        payload=record,
+        request=request,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        id_field="customer_id",
+        invalidate_tabs=["Customers"],
+    )
+    customer_id = str(res.get("allocated_id") or "")
 
     db.log_audit(
-        actor=current_user.get("user_id"),
+        actor=actor_id,
         action="CREATE_CUSTOMER",
         entity_type="Customers",
         entity_id=customer_id,
@@ -84,12 +94,13 @@ async def create_customer(req: CustomerCreate, current_user: dict = Depends(get_
         gstin=record["gstin"],
         map_location=record["map_location"],
         active=True,
-        created_at=now_iso,
+        created_at=now_iso_str,
         notes=record["notes"],
     )
 
 @router.put("/{customer_id}", response_model=Customer)
-async def update_customer(customer_id: str, req: CustomerCreate, current_user: dict = Depends(get_current_user)):
+async def update_customer(customer_id: str, req: CustomerCreate, request: Request, current_user: dict = Depends(get_current_user)):
+    actor_id, actor_role = require_module_action(current_user, "sales", "create")
     clean_shop_name = (req.shop_name or "").strip()
     if not clean_shop_name or len(clean_shop_name) < 2:
         raise HTTPException(
@@ -113,11 +124,20 @@ async def update_customer(customer_id: str, req: CustomerCreate, current_user: d
     existing = next((r for r in db.get_records("Customers") if str(r.get("customer_id", "")) == customer_id), None)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
-    if not db.update_record("Customers", "customer_id", customer_id, updates, raise_on_error=True):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Customer could not be saved. Check the Google Sheets connection and retry.")
+
+    apps_script_bridge.delegate_governed_write(
+        action="UPDATE_CUSTOMER",
+        target_tab="Customers",
+        payload={"customer_id": customer_id, **updates},
+        request=request,
+        actor_user_id=actor_id,
+        actor_role=actor_role,
+        id_field="customer_id",
+        invalidate_tabs=["Customers"],
+    )
 
     db.log_audit(
-        actor=current_user.get("user_id"),
+        actor=actor_id,
         action="UPDATE_CUSTOMER",
         entity_type="Customers",
         entity_id=customer_id,

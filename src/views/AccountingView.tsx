@@ -28,6 +28,7 @@ import type {
   GstSummaryReport,
 } from '../types';
 import { useStore } from '../context/StoreContext';
+import { resolveCanonical12Role } from '../utils/permissions';
 import {
   Scale,
   TrendingUp,
@@ -70,8 +71,10 @@ type AccountingTab =
   | 'reconciliation';
 
 export const AccountingView: React.FC = () => {
-  const { currentUser } = useStore();
-  const isOwnerOrAdmin = currentUser?.role === 'OWNER';
+  const { currentUser, isBackendConnected, isGoogleSheetsConnected, persistentWritesEnabled } = useStore();
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isOwnerOrAdmin = canonicalRole === 'OWNER_ADMIN';
+  const writesLocked = !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
 
   const [activeTab, setActiveTab] = useState<AccountingTab>('trial-balance');
   const [asOfDate, setAsOfDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -925,11 +928,12 @@ export const AccountingView: React.FC = () => {
                         </div>
                         {isOwnerOrAdmin && !isReversed && v.voucher_type !== 'REVERSAL' && (
                           <button
+                            disabled={writesLocked}
                             onClick={(e) => {
                               e.stopPropagation();
                               setReversalTarget(v);
                             }}
-                            className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors flex items-center gap-1 border border-rose-200"
+                            className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors flex items-center gap-1 border border-rose-200 disabled:opacity-50"
                             title="Generate compensating reversal voucher"
                           >
                             <RotateCcw size={12} />
@@ -1116,7 +1120,7 @@ export const AccountingView: React.FC = () => {
                     type="checkbox"
                     checked={confirmLiveExecution}
                     onChange={(e) => setConfirmLiveExecution(e.target.checked)}
-                    disabled={!isOwnerOrAdmin || reconciling}
+                    disabled={!isOwnerOrAdmin || reconciling || writesLocked}
                     className="mt-0.5 rounded border-amber-400 text-emerald-800 focus:ring-emerald-700 h-4 w-4"
                   />
                   <span>
@@ -1126,7 +1130,7 @@ export const AccountingView: React.FC = () => {
 
                 <button
                   onClick={async () => {
-                    if (!confirmLiveExecution || !isOwnerOrAdmin) return;
+                    if (!confirmLiveExecution || !isOwnerOrAdmin || writesLocked) return;
                     try {
                       setReconciling(true);
                       setError(null);
@@ -1142,7 +1146,7 @@ export const AccountingView: React.FC = () => {
                       setReconciling(false);
                     }
                   }}
-                  disabled={!confirmLiveExecution || !isOwnerOrAdmin || reconciling || loading}
+                  disabled={!confirmLiveExecution || !isOwnerOrAdmin || reconciling || loading || writesLocked}
                   className="px-5 py-2.5 text-xs font-bold text-white bg-emerald-800 hover:bg-emerald-900 disabled:bg-slate-300 disabled:text-slate-500 rounded-xl transition-all shadow-sm flex items-center gap-2 shrink-0"
                 >
                   <CheckCircle2 size={16} />

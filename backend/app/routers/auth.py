@@ -1,9 +1,10 @@
 import time
 from typing import Dict, List, Optional
-from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Request
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
+from app.apps_script_bridge import apps_script_bridge
 from app.models import LoginRequest, TokenResponse
 from app.sheets import db
 from app.auth import (
@@ -13,10 +14,10 @@ from app.auth import (
     hash_password,
     password_needs_reset,
     revoke_token,
-    revoke_all_user_sessions,
+    _USER_REVOKED_AT,
     security,
 )
-from app.permissions import ui_role
+from app.permissions import ui_role, role_v2_of
 from app.timeutil import now_iso
 
 router = APIRouter(tags=["Authentication"])
@@ -158,7 +159,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/api/auth/change-password")
-async def change_password(req: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
+async def change_password(req: ChangePasswordRequest, request: Request, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id") or "")
     rows = db.get_records("AuthUsers", fresh=True)
     match = next((row for row in rows if str(row.get("user_id")) == user_id), None)
@@ -168,16 +169,25 @@ async def change_password(req: ChangePasswordRequest, current_user: dict = Depen
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     if req.new_password == req.current_password:
         raise HTTPException(status_code=422, detail="Choose a different password")
-    
-    # Invalidate all existing sessions across devices
-    revoke_all_user_sessions(user_id, reason="User changed password")
 
-    updated = db.update_record("AuthUsers", "user_id", user_id, {
-        "password_hash": hash_password(req.new_password),
-        "must_change_password": "false",
-    }, raise_on_error=True)
-    if not updated:
-        raise HTTPException(status_code=503, detail="Password was not saved. Try again.")
+    revoke_ts = now_iso()
+    res = apps_script_bridge.delegate_governed_write(
+        action="CHANGE_PASSWORD",
+        target_tab="AuthUsers",
+        payload={
+            "user_id": user_id,
+            "password_hash": hash_password(req.new_password),
+            "must_change_password": "false",
+            "sessions_revoked_at": revoke_ts,
+            "revoke_all_sessions": True,
+        },
+        request=request,
+        actor_user_id=user_id,
+        actor_role=role_v2_of(current_user),
+        id_field="user_id",
+        invalidate_tabs=["AuthUsers"],
+    )
+    _USER_REVOKED_AT[user_id.strip().lower()] = time.time()
     db.log_audit(user_id, "CHANGE_PASSWORD", "AuthUsers", user_id, reason="User changed password and invalidated prior sessions")
-    return {"ok": True}
+    return {"ok": True, **res}
 
