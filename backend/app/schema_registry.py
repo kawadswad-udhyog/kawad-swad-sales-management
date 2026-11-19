@@ -166,25 +166,25 @@ LEGACY_TO_LOCKED_ID_PREFIX_ALIASES: Dict[str, Dict[str, Any]] = {
         "legacy_prefix": "CUS",
         "locked_prefix": "CUST",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "JournalHeaders": {
         "legacy_prefix": "JRN",
         "locked_prefix": "JV",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "JournalLines": {
         "legacy_prefix": "JLN",
         "locked_prefix": "JVL",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "PackagingBatches": {
         "legacy_prefix": "PKG",
@@ -198,49 +198,65 @@ LEGACY_TO_LOCKED_ID_PREFIX_ALIASES: Dict[str, Dict[str, Any]] = {
         "legacy_prefix": "PAY",
         "locked_prefix": "RCPT",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "ProductionBatches": {
         "legacy_prefix": "PRB",
         "locked_prefix": "PB",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "ProductionStockLedger": {
         "legacy_prefix": "PST",
         "locked_prefix": "MOV",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "RawMaterials": {
         "legacy_prefix": "RWM",
         "locked_prefix": "RM",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "SaleItems": {
         "legacy_prefix": "ITEM",
         "locked_prefix": "INVI",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
     },
     "Sales": {
         "legacy_prefix": "SALE",
         "locked_prefix": "INV",
         "allow_on_read": True,
-        "allow_on_new_allocation": True,
+        "allow_on_new_allocation": False,
         "collides_with_locked_tab": None,
-        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+        "migration_status": "CANONICAL_ONLY_ON_NEW_ALLOCATION_LEGACY_READ_COMPAT",
+    },
+}
+
+# Legacy core tables whose sheets.ID_PREFIXES collide with a different canonical LOCKED_32_ID_PREFIXES table.
+# Historical rows remain readable, while new governed allocations using the colliding prefix are rejected
+# until Owner reconciles a non-colliding canonical prefix for the legacy table.
+COLLIDING_LEGACY_PREFIX_TABS: Dict[str, Dict[str, str]] = {
+    "SalaryReceipts": {
+        "colliding_prefix": "RCPT",
+        "locked_owner_tab": "Payments",
+        "conflict_key": "RCPT_PREFIX_COLLISION",
+    },
+    "SalaryIncentives": {
+        "colliding_prefix": "SAL",
+        "locked_owner_tab": "SalaryPayments",
+        "conflict_key": "SAL_PREFIX_COLLISION",
     },
 }
 
@@ -395,23 +411,40 @@ def validate_table_id_prefix(
 ) -> bool:
     """
     Validate an identifier against the centralized table prefix contract.
-    Rejects malformed IDs, wrong-table prefixes, and colliding legacy prefixes (e.g. PKG-* on new
-    PackagingBatches allocations).
+    - Rejects malformed IDs and wrong-table prefixes.
+    - On new allocations (`for_new_allocation=True`):
+      * Strictly requires the canonical locked prefix (legacy aliases in
+        LEGACY_TO_LOCKED_ID_PREFIX_ALIASES are rejected on new allocation).
+      * Rejects cross-table colliding legacy prefixes (PKG on PackagingBatches,
+        RCPT on SalaryReceipts, SAL on SalaryIncentives).
+    - On historical reads (`for_new_allocation=False`):
+      * Preserves read compatibility for documented legacy prefixes.
     """
+    clean_tab = str(tab_name or "").strip()
     clean = str(identifier or "").strip().upper()
     if not clean:
         return False
-    allowed = get_allowed_id_prefixes_for_tab(
-        tab_name,
-        for_new_allocation=for_new_allocation,
-        explicit_locked_prefix=explicit_locked_prefix,
-    )
-    if not allowed:
-        return True
+
     m = _ID_FORMAT_RE.match(clean)
     if not m:
         return False
     prefix = m.group(1)
+
+    collision = COLLIDING_LEGACY_PREFIX_TABS.get(clean_tab)
+    if collision and prefix == collision["colliding_prefix"]:
+        return not for_new_allocation
+
+    allowed = get_allowed_id_prefixes_for_tab(
+        clean_tab,
+        for_new_allocation=for_new_allocation,
+        explicit_locked_prefix=explicit_locked_prefix,
+    )
+    if not allowed:
+        # Block accidentally allocating another table's locked prefix on a non-locked table
+        locked_owner = LOCKED_32_ID_PREFIXES.get(prefix)
+        if for_new_allocation and locked_owner and locked_owner != clean_tab:
+            return False
+        return True
     return prefix in allowed
 
 

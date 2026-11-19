@@ -58,6 +58,9 @@ if "fastapi" not in sys.modules:
             def exception_handler(self, *args, **kwargs): return lambda f: f
         class BackgroundTasks:
             def add_task(self, *args, **kwargs): pass
+        class Request:
+            def __init__(self, headers=None):
+                self.headers = dict(headers or {})
         @staticmethod
         def Depends(f): return f
         @staticmethod
@@ -68,6 +71,7 @@ if "fastapi" not in sys.modules:
     mock_mod = MockFastAPIModule("fastapi")
     mock_mod.FastAPI = MockFastAPIModule.FastAPI
     mock_mod.BackgroundTasks = MockFastAPIModule.BackgroundTasks
+    mock_mod.Request = MockFastAPIModule.Request
     mock_mod.Query = MockFastAPIModule.Query
     mock_mod.APIRouter = MockFastAPIModule.APIRouter
     mock_mod.HTTPException = MockFastAPIModule.HTTPException

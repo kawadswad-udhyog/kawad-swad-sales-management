@@ -862,24 +862,48 @@ export interface DatabaseGroupInfo {
   header_mapping_status: string;
 }
 
+export interface TabReconciliationConflictItem {
+  prefix?: string;
+  canonical_prefix?: string;
+  primary_tab?: string;
+  canonical_tab?: string;
+  snapshot_tab?: string;
+  conflicting_tab?: string;
+  draft_tab?: string;
+  status?: string;
+  header_status?: string;
+  resolution_required?: string;
+  notes?: string;
+  [key: string]: unknown;
+}
+
 export interface SchemaRegistryPayload {
   cleaned_tab_baseline: number;
   database_groups: DatabaseGroupInfo[];
   locked_32_id_prefixes: Record<string, string>;
+  legacy_to_locked_id_prefix_aliases?: Record<string, Record<string, unknown>>;
   forbidden_scratch_prefixes: string[];
   confidential_no_cache_tabs: string[];
   pending_owner_mapping_tabs?: string[];
-  tab_reconciliation_conflicts?: Array<{
-    prefix?: string;
-    primary_tab?: string;
-    conflicting_tab?: string;
-    status?: string;
-    resolution_required?: string;
-    notes?: string;
-    [key: string]: unknown;
-  }>;
+  conflicting_core_schema_tabs?: string[];
+  schema_header_variances?: Record<string, Record<string, unknown>>;
+  tab_reconciliation_conflicts?: TabReconciliationConflictItem[] | Record<string, TabReconciliationConflictItem>;
   table_registry_summary?: {
     total_catalogued_tabs: number;
+    cleaned_tab_baseline?: number;
+    declared_database_groups?: number;
+    group_tab_references_total?: number;
+    core_required_tabs_count?: number;
+    extended_v2_contracts_count?: number;
+    unique_catalogued_workbook_tabs?: number;
+    unmapped_workbook_tabs_remaining?: number;
+    pending_owner_mapping_tabs_count?: number;
+    conflicting_core_schema_tabs_count?: number;
+    approved_core_schema_reconciliations_count?: number;
+    write_blocked_schema_tabs_count?: number;
+    duplicate_group_placements?: Record<string, string[]>;
+    coverage_complete?: boolean;
+    coverage_status?: string;
     status_counts: Record<string, number>;
   };
   table_schema_registry?: Record<string, Record<string, any>>;

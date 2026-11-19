@@ -29,6 +29,7 @@ import {
   updateV2Policy,
   isUnknownOutcomeError,
   ApiHttpError,
+  ApiOutcomeUnknownError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
 } from '../services/api';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
@@ -277,10 +278,14 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleGovernedError = (err: unknown, nonce: string) => {
     if (isUnknownOutcomeError(err)) {
+      const correlationId =
+        err instanceof ApiOutcomeUnknownError || err instanceof ApiHttpError
+          ? err.correlationId
+          : undefined;
       setBanner({
         state: 'PENDING_UNKNOWN',
         nonce,
-        correlationId: err.correlationId,
+        correlationId,
         message: UNKNOWN_OUTCOME_STANDARD_MSG,
       });
       return;
@@ -644,8 +649,6 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
           <div className="flex items-start gap-2.5">
             {banner.state === 'CONFIRMED' ? (
               <CheckCircle2 size={18} className="text-emerald-700 shrink-0 mt-0.5" />
-            ) : banner.state === 'PENDING_UNKNOWN' ? (
-              <Clock size={18} className="text-amber-700 shrink-0 mt-0.5" />
             ) : (
               <AlertTriangle size={18} className="text-red-700 shrink-0 mt-0.5" />
             )}
@@ -653,8 +656,6 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
               <div className="font-bold uppercase tracking-wider text-[11px]">
                 {banner.state === 'CONFIRMED'
                   ? 'CONFIRMED'
-                  : banner.state === 'PENDING_UNKNOWN'
-                  ? 'PENDING_UNKNOWN — STATUS NOT CONFIRMED'
                   : banner.state === 'BLOCKED_PENDING_OWNER_SETUP'
                   ? 'BLOCKED_PENDING_OWNER_SETUP (NOT SAVED)'
                   : 'NOT SAVED'}
@@ -1535,16 +1536,39 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                 </div>
               </div>
 
-              {(schemaRegistry.tab_reconciliation_conflicts?.length || 0) > 0 && (
+              {(() => {
+                const rawConflicts = schemaRegistry.tab_reconciliation_conflicts;
+                const conflictList = Array.isArray(rawConflicts)
+                  ? rawConflicts
+                  : rawConflicts && typeof rawConflicts === 'object'
+                  ? Object.entries(rawConflicts).map(([key, item]) => ({ prefix: key, ...item }))
+                  : [];
+                if (conflictList.length === 0) return null;
+                return (
+                  <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-xs text-red-950 space-y-2">
+                    <div className="font-bold uppercase tracking-wider text-[11px] text-red-800">
+                      CONFLICT_RECONCILIATION_REQUIRED — Tab &amp; Prefix Conflicts ({conflictList.length})
+                    </div>
+                    {conflictList.map((c, idx) => (
+                      <div key={idx} className="bg-white/80 border border-red-200 rounded-lg p-2.5 font-mono text-[11px]">
+                        <strong>{String(c.canonical_prefix || c.prefix || 'CONFLICT')}:</strong>{' '}
+                        {String(c.primary_tab || c.snapshot_tab || c.canonical_tab || '')} vs{' '}
+                        {String(c.conflicting_tab || c.draft_tab || '')} —{' '}
+                        {String(c.resolution_required || c.notes || 'Owner reconciliation required before write.')}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {(schemaRegistry.conflicting_core_schema_tabs?.length || 0) > 0 && (
                 <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-xs text-red-950 space-y-2">
                   <div className="font-bold uppercase tracking-wider text-[11px] text-red-800">
-                    CONFLICT_RECONCILIATION_REQUIRED — Dual-Tab Naming Conflicts
+                    CORE_SCHEMA_CONFLICT_UNRECONCILED ({schemaRegistry.conflicting_core_schema_tabs!.length} Core Tabs Write-Blocked Until Owner Row-1 Header Reconciliation)
                   </div>
-                  {schemaRegistry.tab_reconciliation_conflicts!.map((c, idx) => (
-                    <div key={idx} className="bg-white/80 border border-red-200 rounded-lg p-2.5 font-mono text-[11px]">
-                      <strong>{String(c.prefix || 'CONFLICT')}:</strong> {String(c.primary_tab || '')} vs {String(c.conflicting_tab || '')} — {String(c.resolution_required || c.notes || 'Owner reconciliation required before write.')}
-                    </div>
-                  ))}
+                  <div className="font-mono text-[11px] text-red-900 break-words">
+                    {schemaRegistry.conflicting_core_schema_tabs!.join(', ')}
+                  </div>
                 </div>
               )}
 
@@ -1575,11 +1599,19 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
             </div>
           )}
 
-          {controlSubTab === 'exceptions' && (schemaRegistry?.tab_reconciliation_conflicts?.length || 0) > 0 && (
+          {controlSubTab === 'exceptions' &&
+            (() => {
+              const rawConflicts = schemaRegistry?.tab_reconciliation_conflicts;
+              const hasConflicts = Array.isArray(rawConflicts)
+                ? rawConflicts.length > 0
+                : Boolean(rawConflicts && Object.keys(rawConflicts).length > 0);
+              return hasConflicts;
+            })() && (
             <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-xs text-red-950">
-              <strong>Reconciliation Gate Active (CONFLICT_RECONCILIATION_REQUIRED):</strong> Both{' '}
-              <code className="font-mono">ExceptionRegister</code> and{' '}
-              <code className="font-mono">ExceptionLogs</code> appear in workbook baselines. Owner reconciliation is required before mutating exception registers.
+              <strong>Reconciliation Gate Active (CONFLICT_RECONCILIATION_REQUIRED):</strong> Canonical exception tab is{' '}
+              <code className="font-mono">ExceptionRegister</code> (legacy draft alias{' '}
+              <code className="font-mono">ExceptionLogs</code> deprecated); Row-1 physical headers remain{' '}
+              <code className="font-mono">PENDING_OWNER_MAPPING</code> before writes are permitted.
             </div>
           )}
         </div>

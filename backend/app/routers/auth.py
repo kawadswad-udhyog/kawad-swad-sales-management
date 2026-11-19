@@ -14,6 +14,7 @@ from app.auth import (
     hash_password,
     password_needs_reset,
     revoke_token,
+    require_sheets_connection,
     _USER_REVOKED_AT,
     security,
 )

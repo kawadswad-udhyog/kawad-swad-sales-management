@@ -551,21 +551,40 @@ class AppsScriptBridge:
                 http_status=422,
             )
 
-        schema_block = get_schema_write_block_reason(clean_tab)
-        if schema_block is not None:
-            return BridgeResult(
-                status="BLOCKED_PENDING_OWNER_SETUP",
-                correlation_id=corr_id,
-                nonce=clean_nonce,
-                error_code=str(schema_block.get("error_code") or "PENDING_OWNER_MAPPING"),
-                dependency=str(schema_block.get("dependency") or "OWNER_SCHEMA_MAPPING_DEPENDENCY"),
-                message=str(
+        # Fail-closed schema write gate across primary tab AND any secondary/child tabs touched by the action.
+        # Prevents bypassing DB-002 core schema conflict or extended pending-mapping blocks via alternate actions.
+        candidate_write_tabs: List[str] = [clean_tab]
+        secondary_tabs_to_check = requested_inv if requested_inv else sorted(spec.allowed_invalidate_tabs)
+        for sec_tab in secondary_tabs_to_check:
+            if sec_tab not in candidate_write_tabs:
+                candidate_write_tabs.append(sec_tab)
+        for child_check in spec.readback.child_checks:
+            if child_check.tab not in candidate_write_tabs:
+                candidate_write_tabs.append(child_check.tab)
+
+        for candidate_tab in candidate_write_tabs:
+            schema_block = get_schema_write_block_reason(candidate_tab)
+            if schema_block is not None:
+                is_secondary = candidate_tab != clean_tab
+                base_msg = str(
                     schema_block.get("message")
-                    or f"Governed write blocked for '{clean_tab}'. Data was NOT SAVED."
-                ),
-                retryable=False,
-                http_status=503,
-            )
+                    or f"Governed write blocked for '{candidate_tab}'. Data was NOT SAVED."
+                )
+                msg = (
+                    f"Action '{clean_action}' blocked on secondary table '{candidate_tab}': {base_msg}"
+                    if is_secondary
+                    else base_msg
+                )
+                return BridgeResult(
+                    status="BLOCKED_PENDING_OWNER_SETUP",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    error_code=str(schema_block.get("error_code") or "PENDING_OWNER_MAPPING"),
+                    dependency=str(schema_block.get("dependency") or "OWNER_SCHEMA_MAPPING_DEPENDENCY"),
+                    message=msg,
+                    retryable=False,
+                    http_status=503,
+                )
 
         payload_hash = self.compute_payload_hash(
             action=clean_action,

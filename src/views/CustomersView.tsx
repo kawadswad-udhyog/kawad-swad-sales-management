@@ -197,7 +197,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
                 }}
                 cancelLabel="Cancel"
                 saveLabel={isSubmitting ? 'Saving...' : 'Save Customer'}
-                isSubmitting={isSubmitting}
+                isLoading={isSubmitting}
               />
             }
           >
