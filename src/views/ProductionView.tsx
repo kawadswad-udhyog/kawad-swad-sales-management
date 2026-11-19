@@ -17,9 +17,14 @@ import {
   DalMillingResult,
   DalMillingHistoryItem,
   createSubmissionNonce,
+  extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
 } from '../services/api';
 import { useStore } from '../context/StoreContext';
+import { resolveCanonical12Role } from '../utils/permissions';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
 
 type Product = { product_id: string; product_name: string; sku: string; active: boolean; pack_weight_g: number; recipe_id?: string };
@@ -38,8 +43,7 @@ const input: React.CSSProperties = { padding: '9px 10px', border: '1px solid #cb
 const btn: React.CSSProperties = { padding: '9px 13px', border: 0, borderRadius: 7, background: '#166534', color: 'white', fontWeight: 600, cursor: 'pointer' };
 const today = new Date().toISOString().slice(0, 10);
 
-const UNKNOWN_OUTCOME_MSG =
-  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+const UNKNOWN_OUTCOME_MSG = UNKNOWN_OUTCOME_STANDARD_MSG;
 
 export interface ProductionViewProps {
   initialTab?: string;
@@ -75,6 +79,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState<'success' | 'error' | null>(null);
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
   const actionMessageRef = useRef<string | null>(null);
 
   const showSuccess = (text: string) => {
@@ -206,8 +211,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   }, [pack.product_id]);
   
   const role = String(currentUser?.role || '').toUpperCase();
-  const isOwner = ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(role);
-  const canManage = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA'].includes(role);
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isAuditor = canonicalRole === 'AUDITOR';
+  const isOwner = !isAuditor && ['OWNER', 'OWNER_ADMIN', 'ADMIN'].includes(role);
+  const canManage = !isAuditor && ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA'].includes(role);
   const activeProducts = useMemo(() => products.filter(p => p.active !== false && String(p.active).toLowerCase() !== 'false'), [products]);
 
   const isDuplicateAttendance = useMemo(() => {
@@ -481,17 +488,20 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const runAction = async (
     fn: () => Promise<unknown>,
     defaultSuccess: string,
-    targetedRefresh?: () => Promise<void>
+    targetedRefresh?: () => Promise<void>,
+    fallbackNonce?: string
   ): Promise<boolean> => {
-    if (busy) return false;
+    if (busy || isAuditor) return false;
     setBusy(true);
     setMessage('');
     setMessageType(null);
+    setUnknownOutcome(null);
     actionMessageRef.current = null;
     try {
       const result = await fn();
       const customMsg = typeof result === 'string' && result.trim() ? result.trim() : null;
       const finalMsg = customMsg || actionMessageRef.current || defaultSuccess;
+      setUnknownOutcome(null);
       showSuccess(finalMsg);
       try {
         if (targetedRefresh) {
@@ -505,6 +515,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       }
       return true;
     } catch (e: any) {
+      const unknownInfo = extractUnknownOutcomeInfo(e, fallbackNonce, defaultSuccess);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       showError(isUnknownOutcomeError(e) ? UNKNOWN_OUTCOME_MSG : e?.message || 'Action failed.');
       return false;
     } finally {
@@ -594,6 +606,11 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           Factory recipe formulation batches, raw dal milling, packaging, and finished stock register
         </p>
       </div>
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
+      />
 
       {message && (
         <div

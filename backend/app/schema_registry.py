@@ -96,20 +96,27 @@ LOCKED_32_ID_PREFIXES: Dict[str, str] = {
     "SAL": "SalaryPayments",
     "EADV": "EmployeeAdvances",
     "AUD": "AuditLog",
-    # Snapshot uses ExceptionRegister; earlier blueprint draft referenced ExceptionLogs.
-    # Reconcile explicitly via TAB_RECONCILIATION_CONFLICTS before enabling writes.
+    # Reconciled to canonical 'ExceptionRegister' matching AuditAndExceptions.gs in the 255-tab workbook.
     "EXC": "ExceptionRegister",
+}
+
+DEPRECATED_TAB_ALIASES: Dict[str, str] = {
+    "ExceptionLogs": "ExceptionRegister",
 }
 
 TAB_RECONCILIATION_CONFLICTS: Dict[str, Dict[str, Any]] = {
     "EXC": {
         "canonical_prefix": "EXC",
+        "canonical_tab": "ExceptionRegister",
         "snapshot_tab": "ExceptionRegister",
         "draft_tab": "ExceptionLogs",
-        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "status": "RECONCILED_TO_EXCEPTION_REGISTER",
+        "header_status": "PENDING_OWNER_MAPPING",
+        "reconciled_source": "AuditAndExceptions.gs (verified 255-tab workbook)",
         "notes": (
-            "Snapshot documents 'ExceptionRegister' while earlier draft code referenced 'ExceptionLogs'. "
-            "Exact live tab name and Row-1 headers require Owner verification before enabling writes."
+            "Tab name conflict reconciled to canonical 'ExceptionRegister' matching AuditAndExceptions.gs "
+            "in the verified 255-tab workbook (legacy draft alias 'ExceptionLogs' deprecated). "
+            "Physical Row-1 column headers remain PENDING_OWNER_MAPPING until supplied by Owner."
         ),
     },
     "PKG_PREFIX_COLLISION": {
@@ -261,19 +268,26 @@ CONFIDENTIAL_TABS_NO_CACHE: Set[str] = {
 CONFIDENTIAL_PERSONAL_FIELDS: Set[str] = {
     "bank_details_reference",
     "bank_details",
+    "bank_name",
     "bank_account_no",
     "bank_ifsc",
     "bank_account_credited",
     "ifsc_code",
     "account_number",
+    "upi_id",
     "aadhaar",
     "aadhaar_no",
     "aadhaar_number",
+    "aadhar",
+    "aadhar_no",
     "pan",
     "pan_no",
     "pan_number",
     "passport",
     "passport_no",
+    "gov_id",
+    "id_proof",
+    "personal_id",
     "document_references",
     "salary_structure_id",
     "basic_salary",
@@ -481,8 +495,15 @@ EXTENDED_V2_TAB_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "MarketplaceSettlements": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "08"},
     "ComplianceRecords": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "12"},
     "AssetsMaintenance": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "13"},
-    "ExceptionRegister": {"prefix": "EXC", "prefix_status": "LOCKED", "header_status": "CONFLICT_RECONCILIATION_REQUIRED", "auto_create": False, "group_code": "12"},
-    "ExceptionLogs": {"prefix": "EXC", "prefix_status": "LOCKED", "header_status": "CONFLICT_RECONCILIATION_REQUIRED", "auto_create": False, "group_code": "12"},
+    "ExceptionRegister": {
+        "prefix": "EXC",
+        "prefix_status": "LOCKED",
+        "header_status": "PENDING_OWNER_MAPPING",
+        "tab_name_reconciled": True,
+        "reconciled_from": "AuditAndExceptions.gs",
+        "auto_create": False,
+        "group_code": "12",
+    },
     "RPT_TrialBalance": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "14"},
     "RPT_StockStatus": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "14"},
     "RPT_SalesAndReceivables": {"prefix": None, "prefix_status": "PENDING_OWNER_MAPPING", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "14"},

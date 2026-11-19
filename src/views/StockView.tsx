@@ -10,8 +10,12 @@ import {
   reportVanLoadingDiscrepancy,
   cancelVanLoadingPass,
   createSubmissionNonce,
+  extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
 } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import {
   Truck,
   CheckCircle2,
@@ -40,8 +44,7 @@ import {
   CancelButton,
 } from '../components/common/FormComponents';
 
-const UNKNOWN_OUTCOME_MSG =
-  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+const UNKNOWN_OUTCOME_MSG = UNKNOWN_OUTCOME_STANDARD_MSG;
 
 export const StockView: React.FC = () => {
   const {
@@ -169,6 +172,7 @@ export const StockView: React.FC = () => {
   const [discSubmitting, setDiscSubmitting] = useState(false);
   const [reviewNonces, setReviewNonces] = useState<Record<string, string>>({});
   const [reviewingDiscId, setReviewingDiscId] = useState<string | null>(null);
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   const loadLoadingPasses = async () => {
     try {
@@ -263,6 +267,7 @@ export const StockView: React.FC = () => {
       }, activeNonce);
 
       setCreatePassNonce('');
+      setUnknownOutcome(null);
       setLoadingPassNotice({
         msg: `Loading Pass ${created.pass_number} created successfully! Waiting for salesman verification and acceptance.`,
       });
@@ -271,6 +276,8 @@ export const StockView: React.FC = () => {
       await loadLoadingPasses();
       await refreshData();
     } catch (err: any) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Create Van Loading Pass');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setLoadingPassNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to create van loading pass',
         error: true,
@@ -295,6 +302,7 @@ export const StockView: React.FC = () => {
         delete next[passIdOrNumber];
         return next;
       });
+      setUnknownOutcome(null);
       setLoadingPassNotice({
         msg: `Stock loading pass ${accepted.pass_number} verified and accepted! Van inventory has been credited and warehouse inventory deducted.`,
       });
@@ -304,6 +312,8 @@ export const StockView: React.FC = () => {
         setViewingPass(accepted);
       }
     } catch (err: any) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Accept Loading Pass ${passIdOrNumber}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setLoadingPassNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to accept loading pass',
         error: true,
@@ -333,6 +343,7 @@ export const StockView: React.FC = () => {
         activeNonce
       );
       setDiscrepancyNonce('');
+      setUnknownOutcome(null);
       setDiscrepancyError(null);
       setLoadingPassNotice({
         msg: `Discrepancy on ${updated.pass_number} recorded. The warehouse manager has been notified for resolution.`,
@@ -342,6 +353,8 @@ export const StockView: React.FC = () => {
       await loadLoadingPasses();
       await refreshData();
     } catch (err: any) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Report Van Loading Discrepancy');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setDiscrepancyError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -372,6 +385,7 @@ export const StockView: React.FC = () => {
         return next;
       });
       setCancelPassTargetId(null);
+      setUnknownOutcome(null);
       setLoadingPassNotice({ msg: `Loading pass ${cancelled.pass_number} cancelled.` });
       await loadLoadingPasses();
       await refreshData();
@@ -379,6 +393,8 @@ export const StockView: React.FC = () => {
         setViewingPass(cancelled);
       }
     } catch (err: any) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Cancel Loading Pass ${passIdOrNumber}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setLoadingPassNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to cancel loading pass',
         error: true,
@@ -429,12 +445,15 @@ export const StockView: React.FC = () => {
         delete next[batchKey];
         return next;
       });
+      setUnknownOutcome(null);
       setBatchNotice({ msg: `Successfully updated cost for batch ${batchKey} to ₹${resolveRate}/kg (${resolveStatus}).` });
       setResolvingBatchId(null);
       setResolveRate(0);
       setResolveNotes('');
       await loadBulkBatches();
     } catch (err: any) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Resolve Batch Cost ${batchKey}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setBatchNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to resolve batch cost.',
         error: true,
@@ -514,11 +533,14 @@ export const StockView: React.FC = () => {
       });
       setReconNonce('');
       setReconFallbackRef('');
+      setUnknownOutcome(null);
       setReconNotice({ msg: res.message || 'Physical stock reconciled and ledger balance updated successfully.' });
       setReconReason('');
       setReconReference('');
       await Promise.allSettled([loadRegister(), refreshData()]);
     } catch (err: any) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Physical Opening Stock Reconciliation');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setReconNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Reconciliation failed',
         error: true,
@@ -554,10 +576,13 @@ export const StockView: React.FC = () => {
       }, activeNonce);
 
       setMovementNonce('');
+      setUnknownOutcome(null);
       setNotice({ msg: `Stock movement "${txnType}" recorded successfully.` });
       setNotes('');
       loadRegister();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Record Stock Movement (${txnType})`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       const errorMsg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : err instanceof Error
@@ -589,9 +614,12 @@ export const StockView: React.FC = () => {
         reason: discReason.trim() || 'Physical stock audit reconciliation',
       }, activeNonce);
       setDiscSubmitNonce('');
+      setUnknownOutcome(null);
       setNotice({ msg: 'Stock physical count submitted for review. Unexplained differences are preserved for verification and not treated as automatic losses.' });
       setDiscReason('');
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Submit Stock Discrepancy');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       const errStr = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : `Failed to submit discrepancy: ${err instanceof Error ? err.message : String(err)}`;
@@ -621,9 +649,12 @@ export const StockView: React.FC = () => {
         delete next[key];
         return next;
       });
+      setUnknownOutcome(null);
       setNotice({ msg: `Discrepancy ${action === 'APPROVE' ? 'approved and stock adjusted' : 'rejected'}.` });
       loadRegister();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `${action} Stock Discrepancy ${discrepancyId}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       const errStr = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : `Review failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -784,6 +815,11 @@ export const StockView: React.FC = () => {
           Ready-to-sell packet stock across Factory, Warehouse, Field Salesmen, and Channels
         </p>
       </div>
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
+      />
 
       <div className="flex items-center gap-1.5 p-1.5 bg-slate-100 rounded-xl overflow-x-auto border border-slate-200/60">
         <button

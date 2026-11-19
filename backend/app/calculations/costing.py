@@ -1,10 +1,13 @@
 """
-Authoritative Costing Engine
-Implements Part 2 and Part 6 of the specification.
+Authoritative Costing Engine (REG-03: CALC-018 to CALC-023).
+Reads configurable CA policy statuses (PENDING_CA_APPROVAL) from app.schema_registry
+without hardcoding unapproved GST/HSN, overhead absorption, or inventory valuation rates.
+See: docs/CALCULATION_REGISTER_REG03.md
 """
 
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
+from app.schema_registry import get_ca_policies
 from .units import (
     normalize_to_canonical_unit,
     round_money,
@@ -19,13 +22,14 @@ def get_latest_purchase_rate(
     as_of_datetime: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Determine the latest valid purchase rate for a raw material.
+    [CALC-018] Determine the latest valid purchase rate for a raw material.
     Rules:
     - Exclude cancelled/invalid purchases.
     - Exclude future-dated purchases if as_of_datetime is provided.
     - Convert purchase unit to canonical stock unit (kg/L).
     - If no purchase rate exists, check RawMaterials master.
     - If still missing, return status 'MISSING_RATE' and do NOT silently return 0.
+    - Inventory valuation method policy status (FIFO vs WEIGHTED_AVERAGE) governed by CA policy registry.
     """
     clean_target = str(material_name_or_id or "").strip().lower()
     if not clean_target:
@@ -133,7 +137,8 @@ def calculate_batch_actual_cost(
     other_production_costs: float = 0.0,
 ) -> Dict[str, Any]:
     """
-    Calculate actual production batch cost from issued materials and recorded expenses.
+    [CALC-019] Calculate actual production batch cost from issued materials and recorded expenses.
+    Overhead and labour capitalization policy status is read from get_ca_policies() (PENDING_CA_APPROVAL until signed off).
     """
     total_ingredient_cost = Decimal("0")
     has_missing_rates = False
@@ -194,6 +199,10 @@ def calculate_batch_actual_cost(
         if not has_missing_rates:
             cost_per_kg = round_money(total_production_cost / saleable_dec)
 
+    ca_policies = get_ca_policies()
+    overhead_policy = ca_policies.get("overhead_and_labour_allocation_basis", {})
+    valuation_policy = ca_policies.get("inventory_valuation_method", {})
+
     return {
         "status": "COMPLETE" if not has_missing_rates else "PENDING_RATES",
         "total_ingredient_cost": round_money(total_ingredient_cost) if not has_missing_rates else None,
@@ -207,6 +216,10 @@ def calculate_batch_actual_cost(
         "has_missing_rates": has_missing_rates,
         "missing_rate_materials": missing_rate_materials,
         "materials_breakdown": line_breakdown,
+        "overhead_allocation_policy_status": overhead_policy.get("status", "PENDING_CA_APPROVAL"),
+        "overhead_allocation_policy_value": overhead_policy.get("value"),
+        "inventory_valuation_policy_status": valuation_policy.get("status", "PENDING_CA_APPROVAL"),
+        "inventory_valuation_policy_value": valuation_policy.get("value"),
     }
 
 
@@ -218,7 +231,7 @@ def calculate_finished_sku_cost(
     other_packing_per_packet: float = 0.0,
 ) -> Dict[str, Any]:
     """
-    Calculate finished packet cost for a given SKU:
+    [CALC-020] Calculate finished packet cost for a given SKU:
     finished_packet_cost = (packet_net_weight_kg * cost_per_kg) + packing_costs
     """
     if production_cost_per_saleable_kg is None or production_cost_per_saleable_kg <= 0:
@@ -257,11 +270,11 @@ def get_sku_packing_costs(
     raw_materials_master: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Decimal, Decimal]:
     """
-    Determine packing material and packing labour costs for a specific product SKU.
+    [CALC-021] Determine packing material and packing labour costs for a specific product SKU.
     Rules:
     - Never silently invent or assume fixed ₹1.50 or ₹0.50 fallback costs.
     - Inspects product_record configuration (packaging_material_cost_per_packet, packing_labour_per_packet).
-    - If not explicitly set on SKU, checks RawMaterialsMaster for matching pouch rate.
+    - If not explicitly set on SKU, checks RawMaterials master for matching pouch rate.
     - If no cost is defined in master data, returns Decimal('0.00') rather than a fictional value.
     """
     if not product_record:
@@ -319,8 +332,8 @@ def get_authoritative_bulk_cost_per_kg(
     raw_materials_master: Optional[List[Dict[str, Any]]] = None,
 ) -> Decimal:
     """
-    Authoritative resolution of bulk papad unit cost per kg.
-    Follows established inventory valuation hierarchy:
+    [CALC-022] Authoritative resolution of bulk papad unit cost per kg.
+    Follows established inventory valuation hierarchy (subject to CA policy `inventory_valuation_method`):
     1. Checks approved ProductionBatches for this product with actual_cost_per_kg > 0.
        Uses latest approved batch actual cost or batch weighted average.
     2. Checks ProductionStockLedger BULK_PRODUCED entries with unit_cost_per_kg > 0.
@@ -446,7 +459,7 @@ def get_sku_finished_cost(
     raw_materials_master: Optional[List[Dict[str, Any]]] = None,
 ) -> Decimal:
     """
-    Calculate the authoritative finished packet cost for a given product SKU.
+    [CALC-023] Calculate the authoritative finished packet cost for a given product SKU.
     Combines:
     - Net weight proportion of authoritative bulk papad cost
     - Direct packaging material cost for this SKU

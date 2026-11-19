@@ -38,8 +38,14 @@ import {
   createSupplierReturn,
   getPurchasingSummary,
   createSubmissionNonce,
+  extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
 } from '../services/api';
+import { useStore } from '../context/StoreContext';
+import { resolveCanonical12Role } from '../utils/permissions';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import type {
   Supplier,
   PurchaseOrder,
@@ -80,14 +86,16 @@ export const RAW_MATERIAL_CATALOG = [
 
 type PurchasingTab = 'suppliers' | 'orders' | 'receipts' | 'bills' | 'payments' | 'returns';
 
-const UNKNOWN_OUTCOME_MSG =
-  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+const UNKNOWN_OUTCOME_MSG = UNKNOWN_OUTCOME_STANDARD_MSG;
 
 export const PurchasingView: React.FC = () => {
+  const { currentUser } = useStore();
+  const isAuditor = resolveCanonical12Role(currentUser?.role) === 'AUDITOR';
   const [activeTab, setActiveTab] = useState<PurchasingTab>('orders');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   // Summary Metrics
   const [summary, setSummary] = useState({
@@ -278,7 +286,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreateSupplier = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingSupplier) return;
+    if (isAuditor || isSubmittingSupplier) return;
     const activeNonce = supplierNonce || createSubmissionNonce('PUR-SUP');
     if (!supplierNonce) setSupplierNonce(activeNonce);
     setIsSubmittingSupplier(true);
@@ -286,6 +294,7 @@ export const PurchasingView: React.FC = () => {
     try {
       await createSupplier(newSupplier, activeNonce);
       setSupplierNonce('');
+      setUnknownOutcome(null);
       setSuccessMsg(`Supplier '${newSupplier.supplier_name}' registered successfully.`);
       setShowSupplierModal(false);
       setNewSupplier({
@@ -300,6 +309,8 @@ export const PurchasingView: React.FC = () => {
       });
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Register Supplier');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingSupplier(false);
@@ -308,7 +319,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingOrder) return;
+    if (isAuditor || isSubmittingOrder) return;
     const activeNonce = orderNonce || createSubmissionNonce('PUR-PO');
     if (!orderNonce) setOrderNonce(activeNonce);
     setIsSubmittingOrder(true);
@@ -316,10 +327,13 @@ export const PurchasingView: React.FC = () => {
     try {
       await createPurchaseOrder(newOrder, activeNonce);
       setOrderNonce('');
+      setUnknownOutcome(null);
       setSuccessMsg('Purchase Order generated successfully.');
       setShowOrderModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Create Purchase Order');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingOrder(false);
@@ -328,7 +342,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleCancelOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!cancelOrderTarget || cancellingOrderId) return;
+    if (isAuditor || !cancelOrderTarget || cancellingOrderId) return;
     const orderId = cancelOrderTarget.po_id;
     const reason = cancelOrderReason.trim();
     if (!reason) {
@@ -348,11 +362,14 @@ export const PurchasingView: React.FC = () => {
         delete next[orderId];
         return next;
       });
+      setUnknownOutcome(null);
       setCancelOrderTarget(null);
       setCancelOrderReason('');
       setSuccessMsg(`Purchase Order ${cancelOrderTarget.po_number || orderId} cancelled.`);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Cancel PO ${cancelOrderTarget.po_number || orderId}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setCancellingOrderId(null);
@@ -361,7 +378,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreateReceipt = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingReceipt) return;
+    if (isAuditor || isSubmittingReceipt) return;
     const activeNonce = receiptNonce || createSubmissionNonce('PUR-GRN');
     if (!receiptNonce) setReceiptNonce(activeNonce);
     setIsSubmittingReceipt(true);
@@ -369,10 +386,13 @@ export const PurchasingView: React.FC = () => {
     try {
       await createGoodsReceipt(newReceipt, activeNonce);
       setReceiptNonce('');
+      setUnknownOutcome(null);
       setSuccessMsg('Goods Receipt Note (GRN) created. Stock ledger & accounting posted.');
       setShowReceiptModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Create Goods Receipt (GRN)');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingReceipt(false);
@@ -381,7 +401,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreateBill = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingBill) return;
+    if (isAuditor || isSubmittingBill) return;
     const activeNonce = billNonce || createSubmissionNonce('PUR-BILL');
     if (!billNonce) setBillNonce(activeNonce);
     setIsSubmittingBill(true);
@@ -389,10 +409,13 @@ export const PurchasingView: React.FC = () => {
     try {
       await createSupplierBill(newBill, activeNonce);
       setBillNonce('');
+      setUnknownOutcome(null);
       setSuccessMsg(`Supplier Bill ${newBill.bill_number} booked in accounts payable.`);
       setShowBillModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Book Supplier Bill ${newBill.bill_number}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingBill(false);
@@ -400,10 +423,8 @@ export const PurchasingView: React.FC = () => {
   };
 
   const openPaymentModal = () => {
-    const idemp =
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? `spay-${crypto.randomUUID()}`
-        : `spay-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    if (isAuditor) return;
+    const idemp = createSubmissionNonce('SPAY');
     setNewPayment({
       supplier_id: '',
       bill_id: '',
@@ -422,7 +443,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreatePayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingPayment) return;
+    if (isAuditor || isSubmittingPayment) return;
     setError(null);
     if (newPayment.payment_mode !== 'CASH' && newPayment.reference_no.trim().length < 2) {
       setError(`External Bank/UPI/Cheque reference number is required for ${newPayment.payment_mode} payments.`);
@@ -431,6 +452,7 @@ export const PurchasingView: React.FC = () => {
     setIsSubmittingPayment(true);
     try {
       await recordSupplierPayment(newPayment);
+      setUnknownOutcome(null);
       setSuccessMsg(
         `Payment of ₹${newPayment.amount.toLocaleString()} recorded${
           newPayment.bill_id ? '' : ' as On-Account Advance'
@@ -439,6 +461,8 @@ export const PurchasingView: React.FC = () => {
       setShowPaymentModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, newPayment.idempotency_key, 'Record Supplier Payment');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingPayment(false);
@@ -447,7 +471,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleApplyAdvance = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!applyAdvanceModal || isApplyingAdvance) return;
+    if (isAuditor || !applyAdvanceModal || isApplyingAdvance) return;
     setError(null);
     setIsApplyingAdvance(true);
     try {
@@ -457,12 +481,15 @@ export const PurchasingView: React.FC = () => {
         idempotency_key: applyAdvanceModal.idempotency_key,
         notes: applyAdvanceModal.notes,
       });
+      setUnknownOutcome(null);
       setSuccessMsg(
         `Reconciled ₹${Number(res.applied_amount || applyAdvanceModal.amount).toLocaleString()} advance from ${applyAdvanceModal.payment.payment_id} against bill.`
       );
       setApplyAdvanceModal(null);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, applyAdvanceModal.idempotency_key, 'Apply Supplier Advance');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsApplyingAdvance(false);
@@ -471,7 +498,7 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreateReturn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingReturn) return;
+    if (isAuditor || isSubmittingReturn) return;
     const activeNonce = returnNonce || createSubmissionNonce('PUR-RET');
     if (!returnNonce) setReturnNonce(activeNonce);
     setIsSubmittingReturn(true);
@@ -479,10 +506,13 @@ export const PurchasingView: React.FC = () => {
     try {
       await createSupplierReturn(newReturn, activeNonce);
       setReturnNonce('');
+      setUnknownOutcome(null);
       setSuccessMsg('Supplier Return (Debit Note) issued. Raw material stock deducted.');
       setShowReturnModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Create Supplier Return');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingReturn(false);
@@ -511,7 +541,7 @@ export const PurchasingView: React.FC = () => {
             <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
             Refresh
           </button>
-          {activeTab === 'suppliers' && (
+          {!isAuditor && activeTab === 'suppliers' && (
             <button
               onClick={() => setShowSupplierModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
@@ -519,7 +549,7 @@ export const PurchasingView: React.FC = () => {
               <Plus size={14} /> New Supplier
             </button>
           )}
-          {activeTab === 'orders' && (
+          {!isAuditor && activeTab === 'orders' && (
             <button
               onClick={() => setShowOrderModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
@@ -527,7 +557,7 @@ export const PurchasingView: React.FC = () => {
               <Plus size={14} /> New Material Order
             </button>
           )}
-          {activeTab === 'receipts' && (
+          {!isAuditor && activeTab === 'receipts' && (
             <button
               onClick={() => setShowReceiptModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
@@ -535,7 +565,7 @@ export const PurchasingView: React.FC = () => {
               <Plus size={14} /> Material Received (GRN)
             </button>
           )}
-          {activeTab === 'bills' && (
+          {!isAuditor && activeTab === 'bills' && (
             <button
               onClick={() => setShowBillModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
@@ -543,7 +573,7 @@ export const PurchasingView: React.FC = () => {
               <Plus size={14} /> Book Bill
             </button>
           )}
-          {activeTab === 'payments' && (
+          {!isAuditor && activeTab === 'payments' && (
             <button
               onClick={openPaymentModal}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
@@ -551,7 +581,7 @@ export const PurchasingView: React.FC = () => {
               <Plus size={14} /> Record Payment
             </button>
           )}
-          {activeTab === 'returns' && (
+          {!isAuditor && activeTab === 'returns' && (
             <button
               onClick={() => setShowReturnModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 shadow-xs transition-colors"
@@ -563,6 +593,10 @@ export const PurchasingView: React.FC = () => {
       </div>
 
       {/* Notifications */}
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
+      />
       {error && (
         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -709,7 +743,7 @@ export const PurchasingView: React.FC = () => {
                         ₹{Number(o.total_amount || 0).toLocaleString('en-IN')}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        {o.status !== 'CANCELLED' && o.status !== 'FULFILLED' && (
+                        {!isAuditor && o.status !== 'CANCELLED' && o.status !== 'FULFILLED' && (
                           <button
                             type="button"
                             onClick={() => {
@@ -910,7 +944,7 @@ export const PurchasingView: React.FC = () => {
                         ₹{Number(p.amount || 0).toLocaleString()}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        {unalloc > 0.01 && suppOpenBills.length > 0 && (
+                        {!isAuditor && unalloc > 0.01 && suppOpenBills.length > 0 && (
                           <button
                             type="button"
                             onClick={() => {
@@ -919,10 +953,7 @@ export const PurchasingView: React.FC = () => {
                                 firstBill.balance_amount ?? Number(firstBill.total_amount || 0) - Number(firstBill.paid_amount || 0)
                               );
                               const allocAmt = Math.min(unalloc, billBal);
-                              const idemp =
-                                typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-                                  ? `alloc-${crypto.randomUUID()}`
-                                  : `alloc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                              const idemp = createSubmissionNonce('ALLOC');
                               setApplyAdvanceModal({
                                 payment: p,
                                 bill_id: firstBill.bill_id,

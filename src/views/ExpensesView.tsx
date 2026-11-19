@@ -1,8 +1,15 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { resolveCanonical12Role } from '../utils/permissions';
-import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import {
+  createSubmissionNonce,
+  extractUnknownOutcomeInfo,
+  isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
+} from '../services/api';
 import { Expense } from '../types';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { EmptyState } from '../components/common/EmptyState';
@@ -76,6 +83,7 @@ export const ExpensesView: React.FC = () => {
   const [rejectionReason, setRejectionReason] = useState('');
   const [expenseNonce, setExpenseNonce] = useState<string | null>(null);
   const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   const clearActionNonce = (key: string) => {
     setActionNonces((prev) => {
@@ -113,12 +121,15 @@ export const ExpensesView: React.FC = () => {
       }, activeNonce);
       setNotice({ msg: `Expense of ₹${amount} submitted for approval.` });
       setExpenseNonce(null);
+      setUnknownOutcome(null);
       setDescription('');
       setReceiptRef('');
       setAmount(100);
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Submit Expense Claim');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit a new transaction. Your expense details and retry key are preserved—tap Submit Expense Claim to retry safely.'
+        ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
         ? err.message
         : 'Failed to submit expense';
@@ -135,10 +146,13 @@ export const ExpensesView: React.FC = () => {
     try {
       await approveExpense(e.expense_id, 'Approved by manager', activeNonce);
       clearActionNonce(key);
+      setUnknownOutcome(null);
       setNotice({ msg: `Expense ${e.expense_id} approved. Marked as cash-reducing.` });
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve Expense ${e.expense_id}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       const msg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for ${e.expense_id}; do not create a duplicate action. Retry Approve safely.`
+        ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
         ? err.message
         : 'Failed to approve';
@@ -158,12 +172,15 @@ export const ExpensesView: React.FC = () => {
     try {
       await rejectExpense(rejectingExpense.expense_id, rejectionReason.trim(), activeNonce);
       clearActionNonce(key);
+      setUnknownOutcome(null);
       setNotice({ msg: `Expense ${rejectingExpense.expense_id} rejected.` });
       setRejectingExpense(null);
       setRejectionReason('');
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reject Expense ${rejectingExpense.expense_id}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       const msg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; retry rejection safely with preserved inputs and key.'
+        ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
         ? err.message
         : 'Failed to reject';
@@ -191,6 +208,11 @@ export const ExpensesView: React.FC = () => {
         title="Daily Expenses"
         subtitle="Submit travel fuel, tea, delivery cartage, and record daily operational expense claims"
         icon={<Receipt size={22} />}
+      />
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
       />
 
       {notice && (

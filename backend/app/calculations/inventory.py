@@ -1,6 +1,6 @@
 """
-Authoritative Inventory Engine
-Implements Part 2 and Part 7 of the specification.
+Authoritative Inventory Engine (REG-03: CALC-024 to CALC-032).
+See: docs/CALCULATION_REGISTER_REG03.md
 """
 
 from decimal import Decimal
@@ -14,7 +14,7 @@ from .units import (
 
 def calculate_bulk_stock_balance(*args, **kwargs) -> Any:
     """
-    Calculate bulk stock balances:
+    [CALC-024] Calculate bulk stock balances:
     Dual-signature supported:
     1. calculate_bulk_stock_balance(ledger_records, bulk_key_or_product_id=None) -> Dict[str, float]
     2. calculate_bulk_stock_balance(production_batches, packaging_batches, recipe_or_product_id) -> float
@@ -84,7 +84,7 @@ def calculate_batch_bulk_balances(
     bulk_key_or_product_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Calculate unpackaged bulk stock balance independently for every approved production batch.
+    [CALC-025] Calculate unpackaged bulk stock balance independently for every approved production batch.
     Follows Phase 1 multi-batch inventory rules:
     - Maintains batch-level inventory balances.
     - Tracks produced vs packaged kg per batch.
@@ -286,12 +286,13 @@ def resolve_packaging_batch_allocations(
     batch_allocations_requested: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Resolve and validate batch allocations for a packaging operation.
+    [CALC-026] Resolve and validate batch allocations for a packaging operation.
     Enforces Phase 1 requirements:
     1. Multi-batch allocation in one packaging operation.
     2. Per-batch inventory availability validation (prevent negative inventory).
     3. Consumed cost calculation using each batch's actual cost.
-    4. Deterministic FIFO auto-allocation if allocations are omitted.
+    4. Deterministic chronological FIFO auto-allocation if allocations are omitted
+       (authoritative financial valuation policy subject to CA approval: inventory_valuation_method).
     5. Rejection of unconfirmed/missing batch costs.
     """
     req_kg = to_decimal(bulk_kg_required)
@@ -431,7 +432,7 @@ def resolve_packaging_batch_allocations(
 
 def calculate_finished_stock_balance(*args, **kwargs) -> Any:
     """
-    Calculate factory finished packet balances from ProductionStockLedger:
+    [CALC-027] Calculate factory finished packet balances from ProductionStockLedger:
     Dual-signature supported:
     1. calculate_finished_stock_balance(ledger_records, product_id=None, packaging_batches=None) -> Dict[str, int]
     2. calculate_finished_stock_balance(packaging_batches, sales, product_id) -> int
@@ -515,7 +516,7 @@ def calculate_finished_stock_balance(*args, **kwargs) -> Any:
 
 def calculate_warehouse_stock_balance(*args, **kwargs) -> Any:
     """
-    Calculate Central Warehouse (Company) packet balances:
+    [CALC-028] Calculate Central Warehouse (Company) packet balances:
     Dual-signature supported:
     1. calculate_warehouse_stock_balance(salesman_stock_ledger, product_id=None) -> Dict[str, int]
     2. calculate_warehouse_stock_balance(packaging_batches, stock_movements, product_id) -> int
@@ -571,7 +572,7 @@ def calculate_warehouse_stock_balance(*args, **kwargs) -> Any:
 
 def calculate_salesman_stock_balance(*args, **kwargs) -> Any:
     """
-    Calculate Salesman assigned packet balances:
+    [CALC-029] Calculate Salesman assigned packet balances:
     Dual-signature supported:
     1. calculate_salesman_stock_balance(salesman_stock_ledger, salesman_user_id=None, product_id=None) -> Any
     2. calculate_salesman_stock_balance(stock_movements, sales, salesman_user_id, product_id) -> int
@@ -649,7 +650,7 @@ def calculate_physical_count_variance(
     physical_count: int,
 ) -> Dict[str, Any]:
     """
-    Calculates physical stock reconciliation variance:
+    [CALC-030] Calculates physical stock reconciliation variance:
     variance = physical_count - expected_count
     """
     expected = int(expected_count or 0)
@@ -666,7 +667,7 @@ def calculate_physical_count_variance(
 
 def calculate_raw_material_balance(*args, **kwargs) -> Any:
     """
-    Calculate available stock for a raw material:
+    [CALC-031] Calculate available stock for a raw material (separating unverified opening stock from confirmed_available):
     Dual-signature supported:
     1. calculate_raw_material_balance(raw_material_id_or_name, raw_materials_master, raw_material_ledger, exclude_production_id=None) -> Dict[str, Any]
     2. calculate_raw_material_balance(raw_material_ledger, raw_material_id) -> float
@@ -873,7 +874,7 @@ def calculate_consolidated_finished_goods_register(
     packaging_batches: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Consolidated Finished Goods Stock Register.
+    [CALC-032] Consolidated Finished Goods Stock Register.
     Calculates stock across all active packet SKUs and locations:
     Factory, Warehouse, Salesmen, Channels.
     Guarantees every active packet SKU is present (including 0 stock).

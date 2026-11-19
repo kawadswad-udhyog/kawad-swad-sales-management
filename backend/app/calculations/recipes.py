@@ -1,6 +1,6 @@
 """
-Authoritative Recipe Engine: Scaling, Formulation Protection, and Validation
-Implements Part 3 of the specification.
+Authoritative Recipe Engine: Scaling, Formulation Protection, and Validation (REG-03: CALC-006 to CALC-008).
+See: docs/CALCULATION_REGISTER_REG03.md
 """
 
 from decimal import Decimal
@@ -26,9 +26,10 @@ def validate_recipe_formulation(
     expected_yield_kg: float,
 ) -> None:
     """
-    Validate that recipe formulation satisfies business rules:
+    [CALC-006] Validate that recipe formulation satisfies business rules:
     - Expected yield must be strictly positive
     - All ingredient quantities must be positive
+    - Whole dal/grain is never consumed directly by papad recipes (milled flour only)
     - Moong Master Papad must not contain sabudana or urad flour
     """
     if expected_yield_kg <= 0:
@@ -76,7 +77,7 @@ def scale_recipe(
     reference_flour_base_kg: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Scale a recipe for a given planned finished output.
+    [CALC-007] Scale a recipe for a given planned finished output.
     Formula:
       batch_multiplier = planned_finished_output / expected_yield_kg
       required_ingredient_quantity = recipe_ingredient_quantity * batch_multiplier
@@ -139,7 +140,7 @@ def calculate_recipe_cost_estimate(
     expected_yield_kg: float,
 ) -> Dict[str, Any]:
     """
-    Compute standard recipe cost estimate.
+    [CALC-008] Compute standard recipe cost estimate.
     If any ingredient rate is missing or pending, returns status "PENDING_RATES"
     and does not present a false complete total.
     """

@@ -1295,6 +1295,39 @@ async def create_v2_journal_voucher(req: GovernedJournalVoucherRequest, current_
 
 
 # ---------------------------------------------------------------------------
+# Transaction Status Recovery (504 / PENDING_UNKNOWN Safe Nonce Check)
+# ---------------------------------------------------------------------------
+@router.get("/transactions/status/{nonce}")
+async def get_v2_transaction_status(
+    nonce: str,
+    correlation_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Read-only transaction outcome lookup against IdAllocations and AuditLog (`fresh=True`).
+    Enables clients recovering from HTTP 504 / PENDING_UNKNOWN timeouts to verify commit status
+    before safely retrying with the SAME preserved nonce. Never mutates sheets or leaks
+    confidential payroll/bank metadata to non-OWNER_ADMIN roles.
+    """
+    clean_nonce = str(nonce or "").strip()
+    if len(clean_nonce) < 4 or len(clean_nonce) > 128:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "status": "REJECTED",
+                "error_code": "INVALID_TRANSACTION_NONCE",
+                "message": "Transaction nonce must be between 4 and 128 characters.",
+                "retryable": False,
+            },
+        )
+    return apps_script_bridge.check_transaction_status(
+        nonce=clean_nonce,
+        correlation_id=correlation_id,
+        actor_is_owner=is_owner(current_user),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Governance Audit & Exception Logs (Group 00 / 12)
 # ---------------------------------------------------------------------------
 @router.get("/control/audit-logs")
@@ -1316,26 +1349,27 @@ async def list_v2_exceptions(
     current_user: dict = Depends(get_current_user),
 ):
     require_module_action(current_user, "control", "view")
-    conflict = TAB_RECONCILIATION_CONFLICTS["EXC"]
-    # Fail closed cleanly with explicit CONFLICT_RECONCILIATION_REQUIRED metadata while allowing read if snapshot tab exists
-    for candidate_tab in (conflict["snapshot_tab"], conflict["draft_tab"]):
-        try:
-            res = db.query_records(candidate_tab, fresh=True, search=search, page=page, page_size=page_size)
-            return {
-                **res,
-                "source_tab": candidate_tab,
-                "status": conflict["status"],
-                "reconciliation_conflict": conflict,
-            }
-        except Exception:
-            continue
-    return {
-        "status": conflict["status"],
-        "error_code": "CONFLICT_RECONCILIATION_REQUIRED",
-        "reconciliation_conflict": conflict,
-        "items": [],
-        "total": 0,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": 0,
-    }
+    reconciliation = TAB_RECONCILIATION_CONFLICTS["EXC"]
+    canonical_tab = str(reconciliation.get("canonical_tab") or "ExceptionRegister")
+    try:
+        res = db.query_records(canonical_tab, fresh=True, search=search, page=page, page_size=page_size)
+        return {
+            **res,
+            "source_tab": canonical_tab,
+            "status": reconciliation["status"],
+            "header_status": reconciliation.get("header_status", "PENDING_OWNER_MAPPING"),
+            "reconciliation_info": reconciliation,
+        }
+    except Exception:
+        return {
+            "status": reconciliation.get("header_status", "PENDING_OWNER_MAPPING"),
+            "error_code": "PENDING_OWNER_MAPPING",
+            "source_tab": canonical_tab,
+            "reconciliation_info": reconciliation,
+            "items": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": 0,
+        }
+

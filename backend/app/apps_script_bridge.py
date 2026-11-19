@@ -44,6 +44,7 @@ from app.config import (
     SALES_ENV,
 )
 from app.schema_registry import (
+    CONFIDENTIAL_TABS_NO_CACHE,
     PENDING_OWNER_MAPPING_TABS,
     TAB_RECONCILIATION_CONFLICTS,
     is_forbidden_scratch_tab,
@@ -956,6 +957,134 @@ class AppsScriptBridge:
                 "allocated_id": res.allocated_id,
             },
         )
+
+    def check_transaction_status(
+        self,
+        *,
+        nonce: str,
+        correlation_id: Optional[str] = None,
+        actor_is_owner: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Read-only transaction status lookup against IdAllocations and AuditLog (`fresh=True`).
+        Allows clients recovering from HTTP 504 / PENDING_UNKNOWN timeouts to verify whether a
+        prior governed write committed before deciding to retry safely with the SAME nonce.
+        Never mutates Google Sheets and redacts confidential table details for non-OWNER_ADMIN roles.
+        """
+        clean_nonce = str(nonce or "").strip()
+        clean_corr = str(correlation_id or "").strip()
+        if not clean_nonce:
+            raise ValueError("Transaction nonce is required for status lookup.")
+
+        checked_at = now_iso()
+        alloc_match: Optional[Dict[str, Any]] = None
+        audit_match: Optional[Dict[str, Any]] = None
+        alloc_error: Optional[str] = None
+        audit_error: Optional[str] = None
+
+        try:
+            db.invalidate_tab_cache("IdAllocations")
+            alloc_rows = db.get_records("IdAllocations", fresh=True) or []
+            alloc_match = next(
+                (r for r in alloc_rows if str(r.get("nonce", "")).strip() == clean_nonce),
+                None,
+            )
+        except Exception as exc:
+            alloc_error = str(exc)
+
+        try:
+            db.invalidate_tab_cache("AuditLog")
+            audit_rows = db.get_records("AuditLog", fresh=True) or []
+            alloc_id_hint = str((alloc_match or {}).get("allocated_id", "")).strip()
+            for row in reversed(audit_rows):
+                row_related = str(row.get("related_record_id", "")).strip()
+                row_entity = str(row.get("entity_id", "")).strip()
+                row_reason = str(row.get("reason", "")).strip()
+                row_new = str(row.get("new_value", "")).strip()
+                if (
+                    clean_nonce in {row_related, row_entity}
+                    or (clean_nonce and (clean_nonce in row_reason or clean_nonce in row_new))
+                    or (clean_corr and (clean_corr in row_related or clean_corr in row_reason))
+                    or (alloc_id_hint and row_entity == alloc_id_hint)
+                ):
+                    audit_match = row
+                    break
+        except Exception as exc:
+            audit_error = str(exc)
+
+        if alloc_match or audit_match:
+            tab_name = str(
+                (alloc_match or {}).get("tab_name")
+                or (audit_match or {}).get("entity_type")
+                or ""
+            ).strip()
+            allocated_id = str(
+                (alloc_match or {}).get("allocated_id")
+                or (audit_match or {}).get("entity_id")
+                or ""
+            ).strip() or None
+            is_confidential_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE
+            safe_audit: Optional[Dict[str, Any]] = None
+            if audit_match:
+                safe_audit = {
+                    "audit_id": str(audit_match.get("audit_id", "")).strip(),
+                    "event_datetime": str(audit_match.get("event_datetime", "")).strip(),
+                    "action": str(audit_match.get("action", "")).strip(),
+                    "entity_type": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else str(audit_match.get("entity_type", "")).strip(),
+                    "entity_id": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else str(audit_match.get("entity_id", "")).strip(),
+                }
+            return {
+                "status": "CONFIRMED_RECORDED",
+                "nonce": clean_nonce,
+                "correlation_id": clean_corr or None,
+                "allocated_id": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else allocated_id,
+                "tab_name": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else (tab_name or None),
+                "recorded_at": str(
+                    (alloc_match or {}).get("created_at")
+                    or (audit_match or {}).get("event_datetime")
+                    or ""
+                ).strip() or None,
+                "audit_entry": safe_audit,
+                "safe_to_retry_same_nonce": False,
+                "checked_at": checked_at,
+                "message": (
+                    "Transaction was already recorded in Google Sheets. Do NOT submit a duplicate transaction; "
+                    "refresh the view to see the saved record."
+                ),
+            }
+
+        if alloc_error and audit_error:
+            return {
+                "status": "UNKNOWN_STORAGE_UNAVAILABLE",
+                "nonce": clean_nonce,
+                "correlation_id": clean_corr or None,
+                "allocated_id": None,
+                "tab_name": None,
+                "recorded_at": None,
+                "audit_entry": None,
+                "safe_to_retry_same_nonce": False,
+                "checked_at": checked_at,
+                "message": (
+                    "Outcome still unknown: Google Sheets status tables (IdAllocations/AuditLog) are currently unreachable. "
+                    "Keep your form inputs and retry status check before submitting again."
+                ),
+            }
+
+        return {
+            "status": "NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE",
+            "nonce": clean_nonce,
+            "correlation_id": clean_corr or None,
+            "allocated_id": None,
+            "tab_name": None,
+            "recorded_at": None,
+            "audit_entry": None,
+            "safe_to_retry_same_nonce": True,
+            "checked_at": checked_at,
+            "message": (
+                "No committed entry was found for this nonce in IdAllocations or AuditLog. "
+                "You may safely retry the submission using the SAME preserved nonce."
+            ),
+        }
 
 
 class _ReadBackFailure(RuntimeError):

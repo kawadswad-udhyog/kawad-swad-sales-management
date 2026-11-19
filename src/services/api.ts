@@ -284,7 +284,7 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     clearTimeout(timeoutId);
     if (err instanceof Error && err.name === 'AbortError') {
       throw new ApiOutcomeUnknownError(
-        'Status not confirmed; request timed out. Do not submit a new transaction—your inputs and retry key are preserved.',
+        UNKNOWN_OUTCOME_STANDARD_MSG,
         resolvedIdempotencyKey || undefined
       );
     }
@@ -293,21 +293,25 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
   clearTimeout(timeoutId);
 
   if (res.status === 504) {
-    let msg = 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+    let msg = UNKNOWN_OUTCOME_STANDARD_MSG;
     let corrId: string | undefined;
+    let respNonce: string | undefined;
     try {
       const payload = await res.clone().json();
       const detail = payload?.detail;
       if (detail && typeof detail === 'object') {
-        if (typeof detail.message === 'string' && detail.message.trim()) msg = detail.message;
+        if (typeof detail.message === 'string' && detail.message.trim()) {
+          msg = `Outcome unknown / checking transaction status — ${detail.message}`;
+        }
         if (typeof detail.correlation_id === 'string') corrId = detail.correlation_id;
+        if (typeof detail.nonce === 'string') respNonce = detail.nonce;
       } else if (typeof payload?.message === 'string' && payload.message.trim()) {
-        msg = payload.message;
+        msg = `Outcome unknown / checking transaction status — ${payload.message}`;
       }
     } catch {
       // Ignore parse failure on 504
     }
-    throw new ApiOutcomeUnknownError(msg, resolvedIdempotencyKey || undefined, corrId);
+    throw new ApiOutcomeUnknownError(msg, respNonce || resolvedIdempotencyKey || undefined, corrId);
   }
 
   return res;
@@ -349,6 +353,35 @@ export class ApiHttpError extends Error {
   }
 }
 
+export const UNKNOWN_OUTCOME_STANDARD_MSG =
+  'Outcome unknown / checking transaction status — do not submit a new transaction. Form inputs are NOT SAVED and your retry nonce is preserved.';
+
+export interface UnknownOutcomeState {
+  nonce: string;
+  correlationId?: string;
+  message: string;
+  actionLabel?: string;
+}
+
+export interface TransactionStatusResponse {
+  status: 'CONFIRMED_RECORDED' | 'NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE' | 'UNKNOWN_STORAGE_UNAVAILABLE';
+  nonce: string;
+  correlation_id?: string | null;
+  allocated_id?: string | null;
+  tab_name?: string | null;
+  recorded_at?: string | null;
+  audit_entry?: {
+    audit_id?: string;
+    event_datetime?: string;
+    action?: string;
+    entity_type?: string;
+    entity_id?: string;
+  } | null;
+  safe_to_retry_same_nonce: boolean;
+  checked_at: string;
+  message: string;
+}
+
 export class ApiOutcomeUnknownError extends Error {
   nonce?: string;
   correlationId?: string;
@@ -378,9 +411,40 @@ export function isUnknownOutcomeError(err: unknown): boolean {
   }
   if (err instanceof Error) {
     const m = err.message.toLowerCase();
-    return m.includes('status not confirmed') || m.includes('timed out') || m.includes('timeout');
+    return (
+      m.includes('outcome unknown') ||
+      m.includes('status not confirmed') ||
+      m.includes('timed out') ||
+      m.includes('timeout')
+    );
   }
   return false;
+}
+
+export function extractUnknownOutcomeInfo(
+  err: unknown,
+  fallbackNonce?: string,
+  actionLabel?: string
+): UnknownOutcomeState | null {
+  if (!isUnknownOutcomeError(err)) return null;
+  const nonce =
+    (err instanceof ApiOutcomeUnknownError && err.nonce) ||
+    fallbackNonce ||
+    '';
+  const correlationId =
+    (err instanceof ApiOutcomeUnknownError && err.correlationId) ||
+    (err instanceof ApiHttpError && err.correlationId) ||
+    undefined;
+  const rawMsg = err instanceof Error && err.message ? err.message : UNKNOWN_OUTCOME_STANDARD_MSG;
+  const message = rawMsg.toLowerCase().includes('outcome unknown')
+    ? rawMsg
+    : UNKNOWN_OUTCOME_STANDARD_MSG;
+  return {
+    nonce,
+    correlationId,
+    message,
+    actionLabel,
+  };
 }
 
 export interface BackendHealthResponse {
@@ -693,7 +757,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           resolvedIdempotencyKey ||
           undefined;
         throw new ApiOutcomeUnknownError(
-          'Status not confirmed; do not submit a new transaction.',
+          UNKNOWN_OUTCOME_STANDARD_MSG,
           outcomeNonce,
           correlationId
         );
@@ -807,7 +871,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       if (err.name === 'AbortError') {
         if (method !== 'GET') {
           throw new ApiOutcomeUnknownError(
-            'Status not confirmed; do not submit a new transaction.',
+            UNKNOWN_OUTCOME_STANDARD_MSG,
             resolvedIdempotencyKey || undefined
           );
         }
@@ -2116,13 +2180,25 @@ export async function updateV2Policy(
   } catch (err: unknown) {
     if (err instanceof ApiOutcomeUnknownError) {
       throw new ApiOutcomeUnknownError(
-        'Status not confirmed; do not submit a new transaction. Your policy selection and nonce are preserved for safe retry.',
+        UNKNOWN_OUTCOME_STANDARD_MSG,
         payload.nonce,
         err.correlationId
       );
     }
     throw err;
   }
+}
+
+export async function checkV2TransactionStatus(
+  nonce: string,
+  correlationId?: string
+): Promise<TransactionStatusResponse> {
+  const q = new URLSearchParams();
+  if (correlationId) q.set('correlation_id', correlationId);
+  const qs = q.toString();
+  return apiRequest<TransactionStatusResponse>(
+    `/api/v2/transactions/status/${encodeURIComponent(nonce)}${qs ? `?${qs}` : ''}`
+  );
 }
 
 export async function fetchV2OfficialReport(
@@ -2165,7 +2241,7 @@ export async function postV2GovernedAction<T = Record<string, any>>(
   } catch (err: unknown) {
     if (err instanceof ApiOutcomeUnknownError) {
       throw new ApiOutcomeUnknownError(
-        'Status not confirmed; do not submit a new transaction. Your inputs are preserved for safe retry with the same nonce.',
+        UNKNOWN_OUTCOME_STANDARD_MSG,
         payload.nonce,
         err.correlationId
       );

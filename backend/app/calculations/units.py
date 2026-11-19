@@ -1,6 +1,7 @@
 """
-Authoritative Canonical Units & Precision Engine
-Guarantees consistent unit normalization and precise arithmetic across all modules.
+Authoritative Canonical Units & Precision Engine (REG-03: CALC-001 to CALC-005).
+Guarantees consistent unit normalization (1 kg = 1000 g, 1 L = 1000 ml) and exact Decimal arithmetic.
+See: docs/CALCULATION_REGISTER_REG03.md
 """
 
 import re
@@ -29,7 +30,7 @@ COUNT_UNITS = {"packet", "packets", "pkt", "pkts", "piece", "pieces", "box", "bo
 
 
 def clean_currency_string(val: Any) -> str:
-    """Normalize currency and numeric strings by removing currency symbols and thousand separators."""
+    """[CALC-001] Normalize currency and numeric strings by removing currency symbols and thousand separators."""
     if val is None:
         return "0"
     s = str(val).strip()
@@ -45,7 +46,7 @@ def clean_currency_string(val: Any) -> str:
 
 
 def to_decimal(val: Union[float, int, str, Decimal]) -> Decimal:
-    """Safely convert any numeric value or formatted currency string to Decimal without float representation noise."""
+    """[CALC-002] Safely convert any numeric value or formatted currency string to Decimal without float representation noise."""
     if isinstance(val, Decimal):
         return val
     if val is None or str(val).strip() == "":
@@ -58,26 +59,26 @@ def to_decimal(val: Union[float, int, str, Decimal]) -> Decimal:
 
 
 def round_stock(val: Union[float, int, str, Decimal]) -> float:
-    """Round to 3 decimal places for stock quantities."""
+    """[CALC-003a] Round to 3 decimal places (1 g precision for kg) using ROUND_HALF_UP."""
     dec = to_decimal(val)
     return float(dec.quantize(STOCK_PRECISION, rounding=ROUND_HALF_UP))
 
 
 def round_money(val: Union[float, int, str, Decimal]) -> float:
-    """Round to 2 decimal places for financial amounts."""
+    """[CALC-003b] Round to 2 decimal places (paise precision) using ROUND_HALF_UP."""
     dec = to_decimal(val)
     return float(dec.quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP))
 
 
 def round_ratio(val: Union[float, int, str, Decimal]) -> float:
-    """Round to 4 decimal places for yield ratios."""
+    """[CALC-003c] Round to 4 decimal places for formulation ratios and yields using ROUND_HALF_UP."""
     dec = to_decimal(val)
     return float(dec.quantize(RATIO_PRECISION, rounding=ROUND_HALF_UP))
 
 
 def parse_currency_amount(val: Any) -> float:
     """
-    Safely parse financial amounts from Google Sheets or API payloads into float.
+    [CALC-003d] Safely parse financial amounts from Google Sheets or API payloads into float.
     Handles numbers, currency symbols ('₹100.00', '₹ 1,200.50', 'Rs. 500', 'INR 250'),
     empty values, and thousand separators.
     """
@@ -97,7 +98,7 @@ def normalize_to_canonical_unit(
     density_kg_per_l: Optional[float] = None,
 ) -> Tuple[float, str]:
     """
-    Convert supported units into their canonical stock unit (kg for mass, L for volume).
+    [CALC-004] Convert supported units into their canonical stock unit (1 kg = 1000 g; 1 L = 1000 ml).
     Rejects incompatible dimensional conversions.
     """
     qty_dec = to_decimal(quantity)
@@ -149,7 +150,7 @@ def convert_unit(
     density_kg_per_l: Optional[float] = None,
 ) -> float:
     """
-    Convert a quantity between compatible units.
+    [CALC-005] Convert a quantity between compatible units (with explicit density for mass <-> volume).
     Raises ValueError if conversion is dimensionally incompatible or unsupported.
     """
     fu = str(from_unit or "").strip().lower()

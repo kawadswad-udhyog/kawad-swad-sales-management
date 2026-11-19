@@ -1,8 +1,15 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { SalaryIncentive } from '../types';
-import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import {
+  createSubmissionNonce,
+  extractUnknownOutcomeInfo,
+  isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
+} from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 
 export const SalaryView: React.FC = () => {
   const {
@@ -40,11 +47,12 @@ export const SalaryView: React.FC = () => {
   const [payrollNonce, setPayrollNonce] = useState<string | null>(null);
   const [payNonce, setPayNonce] = useState<string | null>(null);
   const [approveNonces, setApproveNonces] = useState<Record<string, string>>({});
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
-  if (!isOwnerAdmin && !isAuditor) {
+  if (!isOwnerAdmin) {
     return (
       <div className="card notice-error">
-        Access restricted: Confidential payroll &amp; salary records are restricted to Owner Admin (read-only audit permitted for Auditor).
+        Access restricted: Confidential payroll &amp; salary records are strictly restricted to Owner Admin.
       </div>
     );
   }
@@ -79,6 +87,7 @@ export const SalaryView: React.FC = () => {
       }, activeNonce);
 
       setPayrollNonce(null);
+      setUnknownOutcome(null);
       if (!generated || generated.length === 0) {
         setNotice({
           msg: 'No new calculations were needed, or records for this period already exist.',
@@ -89,12 +98,14 @@ export const SalaryView: React.FC = () => {
         });
       }
     } catch (err: unknown) {
-      const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry Calculate payroll safely.'
-        : err instanceof Error
-        ? err.message
-        : 'Calculation failed';
-      setNotice({ msg: errorMsg, error: true });
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Calculate Payroll');
+      if (unknownInfo) {
+        setUnknownOutcome(unknownInfo);
+        setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
+      } else {
+        const errorMsg = err instanceof Error ? err.message : 'Calculation failed';
+        setNotice({ msg: errorMsg, error: true });
+      }
     }
   };
 
@@ -111,14 +122,21 @@ export const SalaryView: React.FC = () => {
         delete next[item.record_id];
         return next;
       });
+      setUnknownOutcome(null);
       setNotice({ msg: `Approved ${item.record_type} for ₹${item.calculated_amount}. Persisted to records.` });
     } catch (err: unknown) {
-      const errorMsg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for ${item.record_id}; retry Approve safely with preserved key.`
-        : err instanceof Error
-        ? err.message
-        : 'Approval failed';
-      setNotice({ msg: errorMsg, error: true });
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve ${item.record_id}`);
+      if (unknownInfo) {
+        setUnknownOutcome(unknownInfo);
+        setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
+      } else {
+        const errorMsg = isUnknownOutcomeError(err)
+          ? UNKNOWN_OUTCOME_STANDARD_MSG
+          : err instanceof Error
+          ? err.message
+          : 'Approval failed';
+        setNotice({ msg: errorMsg, error: true });
+      }
     }
   };
 
@@ -142,21 +160,33 @@ export const SalaryView: React.FC = () => {
       await markSalaryIncentivePaid(payingRecord.record_id, cleanRef, activeNonce);
       setNotice({ msg: `Marked paid with reference: ${cleanRef}. Persisted to records.` });
       setPayNonce(null);
+      setUnknownOutcome(null);
       setPayingRecord(null);
       setPaymentRefInput('');
     } catch (err: unknown) {
-      const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not resubmit new payment. Retry Confirm Payment safely with preserved key.'
-        : err instanceof Error
-        ? err.message
-        : 'Payment update failed';
-      setNotice({ msg: errorMsg, error: true });
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Mark Paid ${payingRecord.record_id}`);
+      if (unknownInfo) {
+        setUnknownOutcome(unknownInfo);
+        setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
+      } else {
+        const errorMsg = isUnknownOutcomeError(err)
+          ? UNKNOWN_OUTCOME_STANDARD_MSG
+          : err instanceof Error
+          ? err.message
+          : 'Payment update failed';
+        setNotice({ msg: errorMsg, error: true });
+      }
     }
   };
 
   return (
     <div>
       <h1>Salary &amp; Sales Incentives Management</h1>
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
+      />
 
       {notice && (
         <div className={notice.error ? 'notice-error' : 'notice-success'}>

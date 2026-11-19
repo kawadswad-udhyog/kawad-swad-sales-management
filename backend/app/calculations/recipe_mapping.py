@@ -1,9 +1,10 @@
 """
-Deterministic Product-to-Recipe Mapping Engine for Kawad Swad ERP.
+Deterministic Product-to-Recipe Mapping Engine for Kawad Swad ERP (REG-03: CALC-009 to CALC-011).
 
 Resolves finished SKU / product master rows (including PRD-0001 sequential IDs,
-pack-size SKU variants like 200g/250g/400g/500g/1000g, and bulk names) to the
-authoritative recipe record without naive substring collisions.
+pack-size SKU variants like 200g/500g/1000g and legacy 250g/400g historical SKUs, and bulk names)
+to the authoritative recipe record without naive substring collisions.
+See: docs/CALCULATION_REGISTER_REG03.md
 """
 
 from __future__ import annotations
@@ -196,7 +197,7 @@ def _recipe_version(recipe: Dict[str, Any]) -> float:
 
 
 def normalize_product_base_name(name: str) -> str:
-    """Strip pack sizes, weight tokens, and normalize spacing/punctuation."""
+    """[CALC-009a] Strip pack sizes, weight tokens, and normalize spacing/punctuation."""
     raw = str(name or "").strip().lower()
     if not raw:
         return ""
@@ -207,6 +208,7 @@ def normalize_product_base_name(name: str) -> str:
 
 
 def strip_sku_pack_suffix(code: str) -> str:
+    """[CALC-009b] Strip trailing pack-weight suffix (e.g., -200G, -500G, -1000G) from SKU/product code."""
     raw = str(code or "").strip().upper()
     if not raw:
         return ""
@@ -291,7 +293,7 @@ def resolve_product_recipe(
     require_approved: bool = True,
 ) -> Dict[str, Any]:
     """
-    Deterministically resolve the single authoritative recipe for a product.
+    [CALC-010] Deterministically resolve the single authoritative recipe for a product.
 
     Precedence:
       1. Explicit `requested_recipe_id` parameter.
@@ -436,7 +438,7 @@ def audit_product_recipe_mappings(
     master_recipes: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Read-only diagnostic audit of every product in Products against Recipes & Master Recipes.
+    [CALC-011] Read-only diagnostic audit of every product in Products against Recipes & Master Recipes.
     Returns per-product mapping status and summary counts. Never mutates sheets.
     """
     # Static template formulas are not production records.

@@ -4,7 +4,15 @@ import { CustomerType, Sale, SaleItem, Product } from '../types';
 import { generateInvoicePdf } from '../utils/generateInvoicePdf';
 import { InvoiceModal } from '../components/InvoiceModal';
 import { PageHeader } from '../components/common/PageHeader';
-import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import {
+  createSubmissionNonce,
+  extractUnknownOutcomeInfo,
+  isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
+} from '../services/api';
+import { resolveCanonical12Role } from '../utils/permissions';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import {
   CalculationPreview,
   MoneyInput,
@@ -141,7 +149,10 @@ export const SalesView: React.FC = () => {
   const [cancelSaleReason, setCancelSaleReason] = useState('');
   const [cancelSaleNonces, setCancelSaleNonces] = useState<Record<string, string>>({});
   const [isCancellingSale, setIsCancellingSale] = useState(false);
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isAuditor = canonicalRole === 'AUDITOR';
   const userRoleUpper = String(currentUser?.role || '').toUpperCase();
 
   const getAvailableStock = (productId: string) => {
@@ -340,6 +351,12 @@ export const SalesView: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
+    setUnknownOutcome(null);
+
+    if (isAuditor) {
+      setNotice({ msg: 'Auditor role is read-only. Bill creation is disabled.', error: true });
+      return;
+    }
 
     if (cart.length === 0 || !cart.some((l) => l.product_id)) {
       setNotice({ msg: 'Add at least one valid product line.', error: true });
@@ -412,9 +429,16 @@ export const SalesView: React.FC = () => {
       setWalkInMobile('');
       setProductSearch('');
     } catch (err: unknown) {
-      if (isUnknownOutcomeError(err)) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, idempotencyKey, 'Issue Sales Bill');
+      if (unknownInfo) {
+        setUnknownOutcome(unknownInfo);
         setNotice({
-          msg: `Status not confirmed; do not submit a new transaction. Your cart and bill details are preserved — retry with the same nonce (${idempotencyKey}) once connectivity stabilizes.`,
+          msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${idempotencyKey})`,
+          error: true,
+        });
+      } else if (isUnknownOutcomeError(err)) {
+        setNotice({
+          msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${idempotencyKey})`,
           error: true,
         });
       } else {
@@ -482,6 +506,11 @@ export const SalesView: React.FC = () => {
             <span>Start Fresh Bill</span>
           </button>
         }
+      />
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
       />
 
       {notice && (
@@ -1236,21 +1265,21 @@ export const SalesView: React.FC = () => {
           <div style={{ display: 'flex', gap: '8px', flexDirection: 'column' }}>
             <button
               type="submit"
-              disabled={isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled}
+              disabled={isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled}
               style={{
                 width: '100%',
                 padding: '16px 24px',
                 fontSize: '1.15rem',
                 fontWeight: 700,
-                background: (!isGoogleSheetsConnected || !persistentWritesEnabled)
+                background: (isAuditor || !isGoogleSheetsConnected || !persistentWritesEnabled)
                   ? '#64748b'
                   : submissionIdempotencyKey
                   ? '#b45309'
                   : '#047857',
                 color: '#fff',
                 borderRadius: '8px',
-                cursor: (isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
-                opacity: (isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 0.75 : 1,
+                cursor: (isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                opacity: (isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 0.75 : 1,
                 boxShadow: submissionIdempotencyKey
                   ? '0 4px 12px rgba(180, 83, 9, 0.25)'
                   : '0 4px 12px rgba(4, 120, 87, 0.25)',
@@ -1260,7 +1289,9 @@ export const SalesView: React.FC = () => {
                 gap: '10px',
               }}
             >
-              {(!isGoogleSheetsConnected || !persistentWritesEnabled) ? (
+              {isAuditor ? (
+                <span>🔒 Auditor Read-Only Mode — Bill Creation Disabled</span>
+              ) : (!isGoogleSheetsConnected || !persistentWritesEnabled) ? (
                 <span>🔒 Google Sheets Disconnected — Bill Creation Locked</span>
               ) : isSubmitting ? (
                 <span>⏳ Processing &amp; Saving Bill...</span>
@@ -1394,7 +1425,7 @@ export const SalesView: React.FC = () => {
                         >
                           👁️ Inspect
                         </button>
-                        {(['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT'].includes(userRoleUpper) || s.salesman_user_id === currentUser?.user_id) && (
+                        {!isAuditor && (['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT'].includes(userRoleUpper) || s.salesman_user_id === currentUser?.user_id) && (
                           <button
                             type="button"
                             className="secondary"
@@ -1465,16 +1496,23 @@ export const SalesView: React.FC = () => {
                     delete next[saleId];
                     return next;
                   });
+                  setUnknownOutcome(null);
                   setNotice({
                     msg: `Bill #${cancelSaleTarget.bill_number} has been cancelled and stock/payment reversed.`,
                   });
                   setCancelSaleTarget(null);
                   setCancelSaleReason('');
                 } catch (err: unknown) {
-                  const errMsg = isUnknownOutcomeError(err)
-                    ? 'Status not confirmed; do not cancel again with a new key. Retry safely with preserved reason and key.'
-                    : `Cancellation failed: ${err instanceof Error ? err.message : String(err)}`;
-                  setNotice({ msg: errMsg, error: true });
+                  const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Cancel Bill #${cancelSaleTarget.bill_number}`);
+                  if (unknownInfo) {
+                    setUnknownOutcome(unknownInfo);
+                    setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
+                  } else {
+                    const errMsg = isUnknownOutcomeError(err)
+                      ? UNKNOWN_OUTCOME_STANDARD_MSG
+                      : `Cancellation failed: ${err instanceof Error ? err.message : String(err)}`;
+                    setNotice({ msg: errMsg, error: true });
+                  }
                 } finally {
                   setIsCancellingSale(false);
                 }

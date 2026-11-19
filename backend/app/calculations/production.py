@@ -1,6 +1,6 @@
 """
-Authoritative Production Engine: Requirements & Output Reconciliation
-Implements Part 2 and Part 4 of the specification.
+Authoritative Production Engine: Requirements & Output Reconciliation (REG-03: CALC-012 to CALC-013).
+See: docs/CALCULATION_REGISTER_REG03.md
 """
 
 from decimal import Decimal
@@ -18,7 +18,7 @@ def calculate_production_requirements(
     planned_output_kg: float,
 ) -> Dict[str, Any]:
     """
-    Calculate ingredient requirements for a planned finished dried papad output.
+    [CALC-012] Calculate ingredient requirements for a planned finished dried papad output.
     """
     items = recipe.get("items") or []
     expected_yield_value = recipe.get("expected_yield_kg")
@@ -46,7 +46,7 @@ def reconcile_production_output(
     benchmark_yield_ratio: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Reconcile actual production output:
+    [CALC-013] Reconcile actual production output:
     - saleable_output_kg: finished, dried, saleable papad.
     - rejected_output_kg: broken, misshapen, or non-saleable papad.
     - process_loss_kg: recorded wastage / drying shrinkage.

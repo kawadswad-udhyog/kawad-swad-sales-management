@@ -21,8 +21,12 @@ import {
   ReconcileResult,
   OpeningBalanceProposal,
   createSubmissionNonce,
+  extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
 } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import type {
   DebtorItem,
   CreditorItem,
@@ -72,14 +76,14 @@ type AccountingTab =
   | 'gst-summary'
   | 'reconciliation';
 
-const UNKNOWN_OUTCOME_MSG =
-  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+const UNKNOWN_OUTCOME_MSG = UNKNOWN_OUTCOME_STANDARD_MSG;
 
 export const AccountingView: React.FC = () => {
   const { currentUser, isBackendConnected, isGoogleSheetsConnected, persistentWritesEnabled } = useStore();
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwnerOrAdmin = canonicalRole === 'OWNER_ADMIN';
-  const writesLocked = !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
+  const isAuditor = canonicalRole === 'AUDITOR';
+  const writesLocked = isAuditor || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
 
   const [activeTab, setActiveTab] = useState<AccountingTab>('trial-balance');
   const [asOfDate, setAsOfDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -121,6 +125,7 @@ export const AccountingView: React.FC = () => {
   const [actionNotice, setActionNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [reversalNonce, setReversalNonce] = useState('');
   const [reconcileNonce, setReconcileNonce] = useState('');
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -181,6 +186,7 @@ export const AccountingView: React.FC = () => {
     try {
       await reverseJournalVoucherApi(reversalTarget.journal_id, reversalReason.trim(), activeNonce);
       setReversalNonce('');
+      setUnknownOutcome(null);
       setActionNotice({
         text: `Journal voucher ${reversalTarget.journal_id} reversed successfully with compensating voucher.`,
         ok: true,
@@ -189,6 +195,8 @@ export const AccountingView: React.FC = () => {
       setReversalReason('');
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reverse Voucher ${reversalTarget.journal_id}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       const msg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : err instanceof Error
@@ -238,6 +246,11 @@ export const AccountingView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
+      />
 
       {actionNotice && (
         <div
@@ -1154,11 +1167,14 @@ export const AccountingView: React.FC = () => {
                       setReconcileSuccess(null);
                       const res = await executeReconciliation(false, true, activeNonce);
                       setReconcileNonce('');
+                      setUnknownOutcome(null);
                       setReconcileReport(res);
                       setConfirmLiveExecution(false);
                       setReconcileSuccess(`Live reconciliation complete: ${res.reconciled_count} journal vouchers posted successfully.`);
                       loadData();
                     } catch (err: unknown) {
+                      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Execute Live Reconciliation');
+                      if (unknownInfo) setUnknownOutcome(unknownInfo);
                       setError(
                         isUnknownOutcomeError(err)
                           ? UNKNOWN_OUTCOME_MSG

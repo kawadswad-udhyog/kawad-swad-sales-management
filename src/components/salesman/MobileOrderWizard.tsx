@@ -3,6 +3,12 @@ import { Customer, Product, CustomerType, Sale, SaleItem, SalesmanStockItem } fr
 import { getDefaultPriceForProduct, PAYMENT_METHODS } from '../../utils/salesmanUtils';
 import { generateInvoicePdf } from '../../utils/generateInvoicePdf';
 import {
+  createSubmissionNonce,
+  extractUnknownOutcomeInfo,
+  UnknownOutcomeState,
+} from '../../services/api';
+import { UnknownOutcomeBanner } from '../common/UnknownOutcomeBanner';
+import {
   X,
   ChevronRight,
   ChevronLeft,
@@ -71,6 +77,7 @@ export const MobileOrderWizard: React.FC<MobileOrderWizardProps> = ({
   const [step, setStep] = useState<1 | 2 | 3>(initialCustomer ? 2 : 1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   // Step 1: Customer State
   const [customerMode, setCustomerMode] = useState<'registered' | 'walkin'>('registered');
@@ -225,6 +232,7 @@ export const MobileOrderWizard: React.FC<MobileOrderWizardProps> = ({
   // Submission handler
   const handleFinalSubmit = async () => {
     setErrorMsg('');
+    setUnknownOutcome(null);
 
     if (cartLines.length === 0) {
       setErrorMsg('Please add at least one product to the order.');
@@ -237,9 +245,7 @@ export const MobileOrderWizard: React.FC<MobileOrderWizardProps> = ({
     }
 
     // Reuse idempotency key on retry to guarantee duplicate prevention
-    const safeKey =
-      idempotencyKey ||
-      `ORD-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+    const safeKey = idempotencyKey || createSubmissionNonce('ORD');
     if (!idempotencyKey) {
       setIdempotencyKey(safeKey);
     }
@@ -274,8 +280,15 @@ export const MobileOrderWizard: React.FC<MobileOrderWizardProps> = ({
 
       setIssuedSale(res.sale);
       setIdempotencyKey(null);
+      setUnknownOutcome(null);
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to issue sales bill.');
+      const unknownInfo = extractUnknownOutcomeInfo(err, safeKey, 'Submit Sales Order');
+      if (unknownInfo) {
+        setUnknownOutcome(unknownInfo);
+        setErrorMsg('');
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : 'Failed to issue sales bill.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -451,6 +464,11 @@ export const MobileOrderWizard: React.FC<MobileOrderWizardProps> = ({
 
         {/* Wizard Body (Scrollable) */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+          <UnknownOutcomeBanner
+            outcome={unknownOutcome}
+            onRetry={handleFinalSubmit}
+            onDismiss={() => setUnknownOutcome(null)}
+          />
           {errorMsg && (
             <div className="p-3 bg-red-50 border border-red-200 text-red-800 rounded-xl text-xs flex items-center gap-2">
               <AlertCircle size={15} className="shrink-0 text-red-600" />

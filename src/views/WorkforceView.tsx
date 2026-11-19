@@ -1,7 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../context/StoreContext';
-import { getAuthToken, apiFetch, createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import {
+  getAuthToken,
+  apiFetch,
+  createSubmissionNonce,
+  extractUnknownOutcomeInfo,
+  isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+  UnknownOutcomeState,
+} from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import {
   Users,
   UserPlus,
@@ -61,8 +70,7 @@ interface WorkforceViewProps {
   onPreviewEmployeePortal?: () => void;
 }
 
-const UNKNOWN_OUTCOME_MSG =
-  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+const UNKNOWN_OUTCOME_MSG = UNKNOWN_OUTCOME_STANDARD_MSG;
 
 async function parseApiFetchJson(res: Response): Promise<{ is504: boolean; data: any }> {
   if (res.status === 504) return { is504: true, data: {} };
@@ -122,6 +130,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [approvingRunId, setApprovingRunId] = useState<string | null>(null);
   const [approveRunTargetId, setApproveRunTargetId] = useState<string | null>(null);
   const [disburseNonce, setDisburseNonce] = useState('');
+  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwner = canonicalRole === 'OWNER_ADMIN';
@@ -216,12 +225,13 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   }, [labourList]);
 
   const handleSaveBulkAttendance = async () => {
-    if (isLoading) return;
+    if (isAuditor || isLoading) return;
     const activeNonce = bulkAttNonce || createSubmissionNonce('WF-ATT');
     if (!bulkAttNonce) setBulkAttNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
+    setUnknownOutcome(null);
     try {
       const records = Object.entries(attendanceDraft).map(([lid, d]) => ({
         labour_id: lid,
@@ -242,17 +252,25 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       });
       const { is504, data } = await parseApiFetchJson(res);
       if (is504) {
+        setUnknownOutcome({
+          nonce: activeNonce,
+          message: UNKNOWN_OUTCOME_MSG,
+          actionLabel: 'Save Daily Labour Attendance',
+        });
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setBulkAttNonce('');
+        setUnknownOutcome(null);
         setActionSuccess(data.message || 'Labour attendance saved successfully!');
         loadMetrics();
       } else {
         setActionError(data.detail || 'Failed to save labour attendance.');
       }
     } catch (err) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Save Daily Labour Attendance');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -274,12 +292,13 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
 
   const handleSaveWorkEntry = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isLoading) return;
+    if (isAuditor || isLoading) return;
     const activeNonce = workEntryNonce || createSubmissionNonce('WF-WRK');
     if (!workEntryNonce) setWorkEntryNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
+    setUnknownOutcome(null);
     try {
       const res = await apiFetch('/api/workforce/labour/work-entries', {
         method: 'POST',
@@ -296,11 +315,17 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       });
       const { is504, data } = await parseApiFetchJson(res);
       if (is504) {
+        setUnknownOutcome({
+          nonce: activeNonce,
+          message: UNKNOWN_OUTCOME_MSG,
+          actionLabel: 'Log Labour Work Entry',
+        });
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setWorkEntryNonce('');
+        setUnknownOutcome(null);
         setActionSuccess(data.message || 'Work entry logged successfully!');
         setShowLogWorkModal(false);
         setWorkActivity('');
@@ -310,6 +335,8 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         setActionError(data.detail || 'Failed to log work entry.');
       }
     } catch (err) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Log Labour Work Entry');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -324,12 +351,13 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [calcMonth, setCalcMonth] = useState(new Date().toISOString().slice(0, 7));
 
   const handleCalculatePayroll = async () => {
-    if (isLoading) return;
+    if (!isOwner || isAuditor || isLoading) return;
     const activeNonce = calcPayrollNonce || createSubmissionNonce('WF-PAYCALC');
     if (!calcPayrollNonce) setCalcPayrollNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
+    setUnknownOutcome(null);
     try {
       const res = await apiFetch('/api/workforce/payroll/calculate', {
         method: 'POST',
@@ -340,11 +368,17 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       });
       const { is504, data } = await parseApiFetchJson(res);
       if (is504) {
+        setUnknownOutcome({
+          nonce: activeNonce,
+          message: UNKNOWN_OUTCOME_MSG,
+          actionLabel: `Calculate Payroll (${calcMonth})`,
+        });
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setCalcPayrollNonce('');
+        setUnknownOutcome(null);
         setActionSuccess(data.message || 'Draft payroll calculated!');
         setShowCalcPayrollModal(false);
         loadPayroll();
@@ -354,6 +388,8 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         setActionError(data.detail || 'Failed to calculate payroll.');
       }
     } catch (err) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Calculate Payroll (${calcMonth})`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -365,7 +401,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   };
 
   const handleApprovePayroll = async (runId: string) => {
-    if (isLoading || approvingRunId) return;
+    if (!isOwner || isAuditor || isLoading || approvingRunId) return;
     const activeNonce = approvePayrollNonces[runId] || createSubmissionNonce('WF-PAYAPP');
     if (!approvePayrollNonces[runId]) {
       setApprovePayrollNonces((prev) => ({ ...prev, [runId]: activeNonce }));
@@ -374,6 +410,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
+    setUnknownOutcome(null);
     try {
       const res = await apiFetch(`/api/workforce/payroll/${runId}/approve`, {
         method: 'POST',
@@ -381,6 +418,11 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       });
       const { is504, data } = await parseApiFetchJson(res);
       if (is504) {
+        setUnknownOutcome({
+          nonce: activeNonce,
+          message: UNKNOWN_OUTCOME_MSG,
+          actionLabel: `Approve Payroll Run ${runId}`,
+        });
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
@@ -390,6 +432,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           delete next[runId];
           return next;
         });
+        setUnknownOutcome(null);
         setApproveRunTargetId(null);
         setActionSuccess(data.message || 'Payroll approved successfully!');
         loadPayroll();
@@ -397,6 +440,8 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         setActionError(data.detail || 'Failed to approve payroll.');
       }
     } catch (err) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve Payroll Run ${runId}`);
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -425,12 +470,13 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
 
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedDisburseItem || isLoading) return;
+    if (!isOwner || isAuditor || !selectedDisburseItem || isLoading) return;
     const activeNonce = disburseNonce || createSubmissionNonce('WF-PAYDISB');
     if (!disburseNonce) setDisburseNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
+    setUnknownOutcome(null);
     try {
       const res = await apiFetch('/api/workforce/payments', {
         method: 'POST',
@@ -448,11 +494,17 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       });
       const { is504, data } = await parseApiFetchJson(res);
       if (is504) {
+        setUnknownOutcome({
+          nonce: activeNonce,
+          message: UNKNOWN_OUTCOME_MSG,
+          actionLabel: 'Disburse Payroll Payment',
+        });
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setDisburseNonce('');
+        setUnknownOutcome(null);
         setActionSuccess(data.message || 'Payment recorded and official receipt generated!');
         setShowDisburseModal(false);
         loadReceipts();
@@ -462,6 +514,8 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         setActionError(data.detail || 'Failed to record payment.');
       }
     } catch (err) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Disburse Payroll Payment');
+      if (unknownInfo) setUnknownOutcome(unknownInfo);
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -512,6 +566,11 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       </div>
 
       {/* Notifications */}
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onDismiss={() => setUnknownOutcome(null)}
+      />
+
       {actionSuccess && (
         <div className="p-3.5 rounded-xl bg-emerald-50 text-emerald-800 text-xs border border-emerald-200 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">

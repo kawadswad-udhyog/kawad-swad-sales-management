@@ -29,7 +29,9 @@ import {
   updateV2Policy,
   isUnknownOutcomeError,
   ApiHttpError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
 } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
 import { resolveCanonical12Role } from '../utils/permissions';
 import type {
   PaginatedV2Response,
@@ -279,8 +281,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         state: 'PENDING_UNKNOWN',
         nonce,
         correlationId: err.correlationId,
-        message:
-          'Status not confirmed; do not submit a new transaction. Your inputs and nonce are preserved below — inspect history or retry with this same nonce.',
+        message: UNKNOWN_OUTCOME_STANDARD_MSG,
       });
       return;
     }
@@ -612,13 +613,31 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
       )}
 
       {/* Submission Outcome Banner */}
-      {banner && (
+      {banner?.state === 'PENDING_UNKNOWN' && (
+        <UnknownOutcomeBanner
+          outcome={{
+            nonce: banner.nonce || '',
+            correlationId: banner.correlationId,
+            message: banner.message,
+            actionLabel: meta.title,
+          }}
+          onConfirmedRecorded={(statusRes) => {
+            setBanner({
+              state: 'CONFIRMED',
+              nonce: banner.nonce,
+              correlationId: statusRes.correlation_id || banner.correlationId,
+              message: `Transaction confirmed recorded in Google Sheets (${statusRes.allocated_id || banner.nonce}).`,
+            });
+            loadCollection();
+          }}
+          onDismiss={() => setBanner(null)}
+        />
+      )}
+      {banner && banner.state !== 'PENDING_UNKNOWN' && (
         <div
           className={`rounded-xl p-4 border text-xs flex items-start justify-between gap-3 ${
             banner.state === 'CONFIRMED'
               ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
-              : banner.state === 'PENDING_UNKNOWN'
-              ? 'bg-amber-50 border-amber-400 text-amber-950'
               : 'bg-red-50 border-red-300 text-red-950'
           }`}
         >

@@ -1,6 +1,6 @@
 """
-Authoritative Packaging Calculation Engine
-Implements Part 2 and Part 5 of the specification.
+Authoritative Packaging Calculation Engine (REG-03: CALC-014 to CALC-017).
+See: docs/CALCULATION_REGISTER_REG03.md
 """
 
 from decimal import Decimal
@@ -18,11 +18,11 @@ def calculate_packed_weight(
     packet_entries: List[Dict[str, Any]],
 ) -> Tuple[float, int, List[Dict[str, Any]]]:
     """
-    Calculate total packed kilograms and total packet count from SKU packet quantities.
+    [CALC-014] Calculate total packed kilograms and total packet count from SKU packet quantities.
     Each packet_entry contains:
       - product_id: SKU product id
       - sku: SKU name / code
-      - pack_weight_g: configured net weight in grams
+      - pack_weight_g: configured net weight in grams (retail SKUs locked to {200, 500, 1000} g)
       - packet_quantity: non-negative integer
     """
     total_packed_dec = Decimal("0")
@@ -62,7 +62,7 @@ def calculate_packing_variance(
     tolerance_kg: float = DEFAULT_PACKING_TOLERANCE_KG,
 ) -> Dict[str, Any]:
     """
-    Calculate packing variance:
+    [CALC-015] Calculate packing variance:
     unexplained_variance_kg = bulk_quantity_consumed_kg - total_packed_kg - recorded_packing_loss_kg
     """
     if bulk_consumed_kg <= 0:
@@ -100,7 +100,7 @@ def validate_packing_discrepancy(
     approver: Optional[str] = None,
 ) -> None:
     """
-    Block packing completion if there is an unexplained discrepancy that has not been approved.
+    [CALC-016] Block packing completion if there is an unexplained discrepancy that has not been approved.
     Raises ValueError if discrepancy blocks finalization.
     """
     if variance_info.get("is_discrepancy"):
@@ -119,7 +119,7 @@ def validate_packing_discrepancy(
 
 def classify_packaging_discrepancy(row: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Classify a PackagingBatches row deterministically without altering historical data.
+    [CALC-017a] Classify a PackagingBatches row deterministically without altering historical data.
 
     Protects historical unresolved discrepancies (e.g. 55 kg unrecorded-sales variance
     where the 75 kg deduction has already been posted) from reversals, duplicate
@@ -214,7 +214,7 @@ def classify_packaging_discrepancy(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def summarize_packaging_discrepancies(packaging_records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Summarize historical unresolved, pending review, and approved packaging discrepancies."""
+    """[CALC-017b] Summarize historical unresolved, pending review, and approved packaging discrepancies."""
     historical_items = []
     pending_items = []
     approved_items = []

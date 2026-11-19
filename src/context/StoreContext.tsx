@@ -27,20 +27,6 @@ import {
   fetchBackendHealth,
   fetchV2Capabilities,
 } from '../services/api';
-import {
-  INITIAL_USERS,
-  INITIAL_PRODUCTS,
-  INITIAL_CUSTOMERS,
-  INITIAL_SALES,
-  INITIAL_PAYMENTS,
-  INITIAL_STOCK_TRANSACTIONS,
-  INITIAL_EXPENSES,
-  INITIAL_SHOP_VISITS,
-  INITIAL_DAILY_CLOSINGS,
-  INITIAL_SALARY_INCENTIVES,
-  INITIAL_AUDIT_LOGS,
-  INITIAL_DASHBOARD_METRICS,
-} from '../data/initialData';
 
 export interface CompanyStockItem {
   product_id: string;
@@ -263,23 +249,23 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [isBackendConnected, setIsBackendConnected] = useState<boolean>(false);
   const [backendUrl, setBackendUrlState] = useState<string>(getApiBaseUrl());
 
-  const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
-  const [customers, setCustomers] = useState<Customer[]>(INITIAL_CUSTOMERS);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
   const [activeCustomerIdForBilling, setActiveCustomerIdForBilling] = useState<string | null>(null);
-  const [sales, setSales] = useState<Sale[]>(INITIAL_SALES);
+  const [sales, setSales] = useState<Sale[]>([]);
   const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
-  const [payments, setPayments] = useState<Payment[]>(INITIAL_PAYMENTS);
-  const [stockTransactions, setStockTransactions] = useState<StockTransaction[]>(INITIAL_STOCK_TRANSACTIONS);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [stockTransactions, setStockTransactions] = useState<StockTransaction[]>([]);
   const [companyStockSummary, setCompanyStockSummary] = useState<CompanyStockItem[]>([]);
   const [salesmanStockSummary, setSalesmanStockSummary] = useState<SalesmanStockItem[]>([]);
-  const [expenses, setExpenses] = useState<Expense[]>(INITIAL_EXPENSES);
-  const [shopVisits, setShopVisits] = useState<ShopVisit[]>(INITIAL_SHOP_VISITS);
-  const [dailyClosings, setDailyClosings] = useState<DailyClosing[]>(INITIAL_DAILY_CLOSINGS);
-  const [salaryIncentives, setSalaryIncentives] = useState<SalaryIncentive[]>(INITIAL_SALARY_INCENTIVES);
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(INITIAL_AUDIT_LOGS);
-  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [shopVisits, setShopVisits] = useState<ShopVisit[]>([]);
+  const [dailyClosings, setDailyClosings] = useState<DailyClosing[]>([]);
+  const [salaryIncentives, setSalaryIncentives] = useState<SalaryIncentive[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [approvalRequests, setApprovalRequests] = useState<ApprovalRequest[]>([]);
-  const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(INITIAL_DASHBOARD_METRICS);
+  const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
   const [stockDiscrepancies, setStockDiscrepancies] = useState<any[]>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [storageStatus, setStorageStatus] = useState<StorageStatus>('UNKNOWN');
