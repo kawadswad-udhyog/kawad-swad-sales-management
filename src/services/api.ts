@@ -1494,7 +1494,18 @@ export async function createGoodsReceipt(payload: {
     notes?: string;
   }>;
 }, idempotencyKey?: string): Promise<GoodsReceipt> {
-  const invoiceRef = payload.invoice_reference || payload.vendor_delivery_challan || payload.delivery_challan || `CH-${Date.now().toString().slice(-6)}`;
+  const effectiveKey = (idempotencyKey || payload.idempotency_key || '').trim();
+  const deterministicSuffix = (
+    effectiveKey || `${payload.supplier_id || 'SUP'}-${payload.receipt_date || 'GRN'}`
+  )
+    .replace(/[^A-Za-z0-9]/g, '')
+    .slice(-8)
+    .toUpperCase();
+  const invoiceRef =
+    payload.invoice_reference ||
+    payload.vendor_delivery_challan ||
+    payload.delivery_challan ||
+    `CH-${deterministicSuffix || 'REF'}`;
   const normalized = {
     ...payload,
     invoice_reference: invoiceRef,

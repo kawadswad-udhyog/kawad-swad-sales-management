@@ -1418,16 +1418,18 @@ async def confirm_sales_order(sale_id: str, request: Request, current_user: dict
 async def sales_dispatch_summary(current_user: dict = Depends(get_current_user)):
     """Overview of sales orders, dispatches, and fulfillment status."""
     require_roles(current_user, SALES_READ_ROLES)
+    user_id = str(current_user.get("user_id", ""))
+    view_all = _can_view_all_sales(current_user)
     sales = db.get_records("Sales", fresh=True)
     items = db.get_records("SaleItems", fresh=True)
     items_by_sale = {}
     for itm in items:
         items_by_sale.setdefault(str(itm.get("sale_id")), []).append(itm)
 
-    dispatches = db.get_records("ProductionDispatches", fresh=True)
-
     summary_list = []
     for s in sales:
+        if not view_all and str(s.get("salesman_user_id", "")) != user_id and str(s.get("entered_by_user_id", "")) != user_id:
+            continue
         sid = str(s.get("sale_id"))
         st = str(s.get("bill_status", "")).upper()
         if st in {"CANCELLED"}:

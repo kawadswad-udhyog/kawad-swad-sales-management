@@ -306,6 +306,8 @@ async def list_roles(current_user: dict = Depends(get_current_user)):
     # Custom roles (exclude soft-deleted/inactive rows)
     custom_records = [cr for cr in (db.get_records("CustomRoles", fresh=True) or []) if _is_active_custom_role(cr)]
     for cr in custom_records:
+        if str(cr.get("deleted", "")).strip().lower() == "true" or str(cr.get("active", "true")).strip().lower() == "false":
+            continue
         raw_p = cr.get("permissions_json") or "{}"
         try:
             import json

@@ -47,6 +47,7 @@ from app.schema_registry import (
     VALID_RETAIL_PACK_WEIGHTS_G,
     assert_ca_policy_approved,
     get_ca_policies,
+    get_schema_coverage_summary,
     get_table_schema_registry,
     is_forbidden_scratch_tab,
     quantize_money,
@@ -400,8 +401,9 @@ async def get_schema_registry_metadata(current_user: dict = Depends(get_current_
         st = str(meta.get("status", "UNKNOWN"))
         status_counts[st] = status_counts.get(st, 0) + 1
 
+    coverage_summary = get_schema_coverage_summary()
     return {
-        "cleaned_tab_baseline": 255,
+        "cleaned_tab_baseline": coverage_summary["cleaned_tab_baseline"],
         "database_groups": DATABASE_GROUPS_15,
         "locked_32_id_prefixes": LOCKED_32_ID_PREFIXES,
         "forbidden_scratch_prefixes": list(FORBIDDEN_SCRATCH_PREFIXES),
@@ -410,6 +412,8 @@ async def get_schema_registry_metadata(current_user: dict = Depends(get_current_
         "tab_reconciliation_conflicts": TAB_RECONCILIATION_CONFLICTS,
         "table_registry_summary": {
             "total_catalogued_tabs": len(table_registry),
+            "unique_catalogued_workbook_tabs": coverage_summary["unique_catalogued_workbook_tabs"],
+            "unmapped_workbook_tabs_remaining": coverage_summary["unmapped_workbook_tabs_remaining"],
             "status_counts": status_counts,
         },
         "table_schema_registry": exposed_registry,

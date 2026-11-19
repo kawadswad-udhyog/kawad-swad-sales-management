@@ -9,6 +9,11 @@ interface ConfirmDialogProps {
   cancelLabel?: string;
   isDestructive?: boolean;
   isLoading?: boolean;
+  inputLabel?: string;
+  inputPlaceholder?: string;
+  inputValue?: string;
+  onInputChange?: (value: string) => void;
+  inputRequired?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -21,10 +26,18 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   cancelLabel = 'Cancel',
   isDestructive = false,
   isLoading = false,
+  inputLabel,
+  inputPlaceholder,
+  inputValue = '',
+  onInputChange,
+  inputRequired = false,
   onConfirm,
   onCancel,
 }) => {
   if (!isOpen) return null;
+
+  const isConfirmDisabled =
+    isLoading || (Boolean(onInputChange) && inputRequired && !inputValue.trim());
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
@@ -49,12 +62,33 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
               </p>
             </div>
             <button
+              type="button"
               onClick={onCancel}
-              className="text-slate-400 hover:text-slate-600 p-1 -mr-1 -mt-1 rounded-md"
+              disabled={isLoading}
+              className="text-slate-400 hover:text-slate-600 p-1 -mr-1 -mt-1 rounded-md disabled:opacity-50"
             >
               <X size={16} />
             </button>
           </div>
+
+          {onInputChange && (
+            <div className="mt-4">
+              {inputLabel && (
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  {inputLabel}
+                  {inputRequired ? ' *' : ''}
+                </label>
+              )}
+              <textarea
+                rows={3}
+                value={inputValue}
+                onChange={(e) => onInputChange(e.target.value)}
+                placeholder={inputPlaceholder || 'Enter reason...'}
+                disabled={isLoading}
+                className="w-full px-3 py-2 text-xs sm:text-sm text-slate-800 bg-slate-50 border border-slate-300 rounded-xl focus:bg-white focus:border-emerald-700 focus:outline-none disabled:opacity-60"
+              />
+            </div>
+          )}
 
           <div className="mt-6 flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
             <button
@@ -68,7 +102,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             <button
               type="button"
               onClick={onConfirm}
-              disabled={isLoading}
+              disabled={isConfirmDisabled}
               className={`px-4 py-2 text-xs font-semibold text-white rounded-lg transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-2 ${
                 isDestructive
                   ? 'bg-red-700 hover:bg-red-800'

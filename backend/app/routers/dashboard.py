@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from app.models import DashboardMetrics
 from app.sheets import db
 from app.auth import get_current_user
-from app.permissions import is_manager, is_salesman, ui_role
+from app.permissions import is_manager, is_salesman, role_v2_of, ui_role
 from app.timeutil import business_today, business_date_of
 from app.calculations.units import parse_currency_amount
 from app.stock_math import balances
@@ -14,7 +14,8 @@ router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id", ""))
     role_name = ui_role(str(current_user.get("role", "")))
-    manager_view = is_manager(current_user)
+    v2_role = role_v2_of(current_user)
+    manager_view = is_manager(current_user) or v2_role == "AUDITOR"
     today_str = business_today()
     current_month_str = today_str[:7]  # YYYY-MM
 
@@ -73,7 +74,19 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
             if str(c.get("txn_type", "")).upper() == "SALE_COLLECTION":
                 today_cash_total += parse_currency_amount(c.get("amount", 0.0))
 
+    visible_sale_ids = {
+        str(s.get("sale_id", ""))
+        for s in sales
+        if manager_view
+        or str(s.get("salesman_user_id", "")) == user_id
+        or str(s.get("entered_by_user_id", "")) == user_id
+    }
     for p in payments:
+        if not manager_view:
+            p_sale_id = str(p.get("sale_id", ""))
+            p_collector = str(p.get("collected_by_user_id") or p.get("salesman_user_id") or "")
+            if p_sale_id not in visible_sale_ids and p_collector != user_id:
+                continue
         if business_date_of(str(p.get("payment_datetime", ""))) == today_str:
             method = str(p.get("payment_method", "")).upper()
             if method in {"UPI", "BANK_TRANSFER"}:
@@ -88,7 +101,7 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
     active_salesmen = sum(
         1 for u in users
         if str(u.get("role", "")).upper() in {"SALESMAN", "FIELD_SALESMAN"} and str(u.get("active", "true")).lower() == "true"
-    )
+    ) if manager_view else 0
 
     # Incomplete transactions count
     incomplete_count = sum(
@@ -139,37 +152,44 @@ async def get_dashboard_metrics(current_user: dict = Depends(get_current_user)):
         if str(b.get("status", "")).upper() == "PENDING"
     ) if manager_view else 0.0
 
-    # Attendance metrics across modern LabourMaster and legacy Workers
-    workers = db.get_records("Workers", fresh=False) or []
-    worker_attendance = db.get_records("WorkerAttendance", fresh=False) or []
-    labour_master = db.get_records("LabourMaster", fresh=False) or []
-    labour_attendance = db.get_records("LabourAttendance", fresh=False) or []
+    # Attendance & factory stock metrics restricted to managers/auditors (and HR/PRODUCTION_SUPERVISOR for workforce)
+    can_view_workforce_counts = manager_view or v2_role in {"HR", "PRODUCTION_SUPERVISOR"}
+    if can_view_workforce_counts:
+        workers = db.get_records("Workers", fresh=False) or []
+        worker_attendance = db.get_records("WorkerAttendance", fresh=False) or []
+        labour_master = db.get_records("LabourMaster", fresh=False) or []
+        labour_attendance = db.get_records("LabourAttendance", fresh=False) or []
 
-    active_legacy = sum(1 for w in workers if str(w.get("active", "true")).lower() in {"true", "1"})
-    active_labour = sum(1 for l in labour_master if str(l.get("active", "true")).lower() in {"true", "1"})
-    active_workers_count = active_legacy + active_labour
+        active_legacy = sum(1 for w in workers if str(w.get("active", "true")).lower() in {"true", "1"})
+        active_labour = sum(1 for l in labour_master if str(l.get("active", "true")).lower() in {"true", "1"})
+        active_workers_count = active_legacy + active_labour
 
-    present_legacy = sum(
-        1 for a in worker_attendance
-        if str(a.get("attendance_date", "")).strip() == today_str and str(a.get("status", "")).upper() in {"PRESENT", "HALF_DAY"}
-    )
-    present_labour = sum(
-        1 for a in labour_attendance
-        if str(a.get("attendance_date", "")).strip() == today_str and str(a.get("status", "")).upper() in {"PRESENT", "HALF_DAY"}
-    )
-    workers_present_today = present_legacy + present_labour
+        present_legacy = sum(
+            1 for a in worker_attendance
+            if str(a.get("attendance_date", "")).strip() == today_str and str(a.get("status", "")).upper() in {"PRESENT", "HALF_DAY"}
+        )
+        present_labour = sum(
+            1 for a in labour_attendance
+            if str(a.get("attendance_date", "")).strip() == today_str and str(a.get("status", "")).upper() in {"PRESENT", "HALF_DAY"}
+        )
+        workers_present_today = present_legacy + present_labour
+    else:
+        active_workers_count = 0
+        workers_present_today = 0
 
     # Finished stock available across factory and warehouse
-    prod_stock_ledger = db.get_records("ProductionStockLedger", fresh=False)
+    can_view_factory_stock = manager_view or v2_role in {"STORE", "PRODUCTION_SUPERVISOR", "PACKAGING", "QUALITY", "LOGISTICS"}
     factory_pkts = 0
-    for p_txn in prod_stock_ledger:
-        m_type = str(p_txn.get("movement_type", "")).upper()
-        pkts = int(float(p_txn.get("quantity_packets", 0) or 0))
-        if m_type in {"PACKED", "POSITIVE_ADJUSTMENT", "PACKAGING_RECOVERY", "FACTORY_RECONCILIATION"}:
-            factory_pkts += pkts
-        elif m_type in {"DISPATCH", "NEGATIVE_ADJUSTMENT"}:
-            factory_pkts -= pkts
-    factory_pkts = max(0, factory_pkts)
+    if can_view_factory_stock:
+        prod_stock_ledger = db.get_records("ProductionStockLedger", fresh=False)
+        for p_txn in prod_stock_ledger:
+            m_type = str(p_txn.get("movement_type", "")).upper()
+            pkts = int(float(p_txn.get("quantity_packets", 0) or 0))
+            if m_type in {"PACKED", "POSITIVE_ADJUSTMENT", "PACKAGING_RECOVERY", "FACTORY_RECONCILIATION"}:
+                factory_pkts += pkts
+            elif m_type in {"DISPATCH", "NEGATIVE_ADJUSTMENT"}:
+                factory_pkts -= pkts
+        factory_pkts = max(0, factory_pkts)
     warehouse_pkts = sum(max(0, bal) for bal in company_stock.values()) if manager_view else sum(max(0, bal) for p_id, bal in company_stock.items())
     total_finished_pkts = factory_pkts + warehouse_pkts
 
