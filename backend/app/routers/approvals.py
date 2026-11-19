@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from app.apps_script_bridge import apps_script_bridge
 from app.models import ApprovalRequestModel, ApprovalDecisionRequest
 from app.sheets import db
-from app.auth import get_current_user, hash_password
+from app.auth import get_current_user, hash_password, require_sheets_connection
 from app.permissions import is_owner, is_manager, require_owner, require_manager, role_v2_of
 
 logger = logging.getLogger("kawad_swad.approvals")
@@ -174,12 +174,12 @@ def _build_approval_execution_payload(request_record: dict, initial_password: Op
     raise ValueError(f"Unknown request type: {req_type}")
 
 
-@router.post("/requests/{request_id}/decision", response_model=ApprovalRequestModel)
+@router.post("/requests/{request_id}/decision", response_model=ApprovalRequestModel, dependencies=[Depends(require_sheets_connection)])
 async def decide_approval_request(
     request_id: str,
     decision_req: ApprovalDecisionRequest,
-    request: Request,
     current_user: dict = Depends(get_current_user),
+    request: Request = None,
 ):
     require_owner(current_user)
     owner_id = str(current_user.get("user_id") or "")
@@ -263,7 +263,7 @@ async def decide_approval_request(
     return ApprovalRequestModel(**updated_dict)
 
 
-@router.post("/requests/{request_id}/retry", response_model=ApprovalRequestModel)
+@router.post("/requests/{request_id}/retry", response_model=ApprovalRequestModel, dependencies=[Depends(require_sheets_connection)])
 async def retry_failed_execution(
     request_id: str,
     current_user: dict = Depends(get_current_user),
@@ -279,11 +279,11 @@ async def retry_failed_execution(
     )
 
 
-@router.post("/requests/{request_id}/cancel", response_model=ApprovalRequestModel)
+@router.post("/requests/{request_id}/cancel", response_model=ApprovalRequestModel, dependencies=[Depends(require_sheets_connection)])
 async def cancel_approval_request(
     request_id: str,
-    request: Request,
     current_user: dict = Depends(get_current_user),
+    request: Request = None,
 ):
     require_manager(current_user)
     user_id = str(current_user.get("user_id") or "")

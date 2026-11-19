@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Request, status, Depends
 from app.apps_script_bridge import apps_script_bridge
 from app.models import Product, ProductCreate, ProductUpdate
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import require_module_action, role_v2_of
 from app.schema_registry import VALID_RETAIL_PACK_WEIGHTS_G, DISCONTINUED_RETAIL_PACK_WEIGHTS_G
 
@@ -30,6 +30,7 @@ def _get_val(r: dict, *keys, default=None):
 
 @router.get("", response_model=List[Product])
 async def list_products(current_user: dict = Depends(get_current_user)):
+    require_module_action(current_user, "catalogue", "view")
     records = db.get_records("Products")
     products = []
     for r in records:
@@ -51,7 +52,7 @@ async def list_products(current_user: dict = Depends(get_current_user)):
         ))
     return products
 
-@router.post("", response_model=Product)
+@router.post("", response_model=Product, dependencies=[Depends(require_sheets_connection)])
 async def create_product(req: ProductCreate, request: Request, current_user: dict = Depends(get_current_user)):
     actor_id, actor_role = require_module_action(current_user, "catalogue", "create")
 
@@ -62,6 +63,14 @@ async def create_product(req: ProductCreate, request: Request, current_user: dic
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Retail SKU pack weight must be 200g, 500g, or 1000g (received {req.pack_weight_g}g).",
+        )
+
+    clean_sku = req.sku.strip().upper()
+    existing_products = db.get_records("Products", fresh=True)
+    if any(str(_get_val(p, "sku", default="")).strip().upper() == clean_sku for p in existing_products):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Product with SKU '{req.sku.strip()}' already exists.",
         )
 
     record = {
@@ -112,8 +121,8 @@ async def create_product(req: ProductCreate, request: Request, current_user: dic
         notes=req.notes or "",
     )
 
-@router.patch("/{product_id}", response_model=Product)
-@router.put("/{product_id}", response_model=Product)
+@router.patch("/{product_id}", response_model=Product, dependencies=[Depends(require_sheets_connection)])
+@router.put("/{product_id}", response_model=Product, dependencies=[Depends(require_sheets_connection)])
 async def update_product(product_id: str, req: ProductUpdate, request: Request, current_user: dict = Depends(get_current_user)):
     actor_id, actor_role = require_module_action(current_user, "catalogue", "update")
 

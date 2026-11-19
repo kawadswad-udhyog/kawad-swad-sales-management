@@ -111,7 +111,50 @@ TAB_RECONCILIATION_CONFLICTS: Dict[str, Dict[str, Any]] = {
             "Snapshot documents 'ExceptionRegister' while earlier draft code referenced 'ExceptionLogs'. "
             "Exact live tab name and Row-1 headers require Owner verification before enabling writes."
         ),
-    }
+    },
+    "PKG_PREFIX_COLLISION": {
+        "canonical_prefix": "PKG",
+        "snapshot_tab": "PackagingMaterials",
+        "draft_tab": "PackagingBatches",
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "notes": (
+            "Legacy sheets.ID_PREFIXES uses 'PKG' for PackagingBatches while LOCKED_32_ID_PREFIXES assigns "
+            "'PKG' -> PackagingMaterials and 'PKB' -> PackagingBatches. Apps Script single-write-owner "
+            "allocates canonical v2 PKB-* / PKG-* prefixes while legacy reads accept existing historical IDs."
+        ),
+    },
+}
+
+LEGACY_TO_LOCKED_ID_PREFIX_ALIASES: Dict[str, Dict[str, str]] = {
+    "Customers": {"legacy_prefix": "CUS", "locked_prefix": "CUST"},
+    "JournalHeaders": {"legacy_prefix": "JRN", "locked_prefix": "JV"},
+    "JournalLines": {"legacy_prefix": "JLN", "locked_prefix": "JVL"},
+    "PackagingBatches": {"legacy_prefix": "PKG", "locked_prefix": "PKB"},
+    "Payments": {"legacy_prefix": "PAY", "locked_prefix": "RCPT"},
+    "ProductionBatches": {"legacy_prefix": "PRB", "locked_prefix": "PB"},
+    "ProductionStockLedger": {"legacy_prefix": "PST", "locked_prefix": "MOV"},
+    "RawMaterials": {"legacy_prefix": "RWM", "locked_prefix": "RM"},
+    "SaleItems": {"legacy_prefix": "ITEM", "locked_prefix": "INVI"},
+    "Sales": {"legacy_prefix": "SALE", "locked_prefix": "INV"},
+}
+
+SCHEMA_HEADER_VARIANCES: Dict[str, Dict[str, Any]] = {
+    "Settings": {
+        "status": "VERIFIED_CORE",
+        "source": "docs/SALES_MANAGEMENT_SCHEMA.md",
+        "headers": ["setting_key", "setting_value", "description"],
+    },
+    "Suppliers": {
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "required_tabs_columns": 12,
+        "physical_router_fields": 14,
+        "missing_from_required_tabs": ["payment_terms", "opening_balance"],
+        "notes": (
+            "purchasing.py create/update supplier writes 14 logical fields including payment_terms and "
+            "opening_balance whereas REQUIRED_TABS['Suppliers'] has 12 columns. Reconcile physical Row-1 "
+            "headers against workbook before strict header pruning."
+        ),
+    },
 }
 
 _ID_FORMAT_RE = re.compile(r"^([A-Z]{2,6})-[A-Z0-9_-]{3,}$")
@@ -398,13 +441,18 @@ def build_table_schema_registry(required_tabs: Dict[str, List[str]]) -> Dict[str
 
     registry: Dict[str, Dict[str, Any]] = {}
     for tab_name, headers in required_tabs.items():
+        alias_info = LEGACY_TO_LOCKED_ID_PREFIX_ALIASES.get(tab_name)
+        variance_info = SCHEMA_HEADER_VARIANCES.get(tab_name)
         registry[tab_name] = {
             "tab_name": tab_name,
             "group_code": group_lookup.get(tab_name, "00"),
-            "status": "VERIFIED_CORE",
+            "status": (variance_info or {}).get("status", "VERIFIED_CORE"),
             "headers": list(headers),
             "header_count": len(headers),
             "locked_id_prefix": _TAB_TO_LOCKED_PREFIX.get(tab_name),
+            "legacy_id_prefix": (alias_info or {}).get("legacy_prefix"),
+            "id_prefix_reconciled": alias_info is None,
+            "header_variance": variance_info,
             "confidential": tab_name in CONFIDENTIAL_TABS_NO_CACHE,
             "auto_create": False,
         }

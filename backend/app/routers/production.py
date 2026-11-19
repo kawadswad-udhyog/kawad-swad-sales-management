@@ -11,7 +11,7 @@ import threading
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from app.apps_script_bridge import apps_script_bridge
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import role_v2_of
 from app.sheets import db
 from app.config import SALES_GOOGLE_SPREADSHEET_ID
@@ -515,7 +515,7 @@ _RAW_MATERIAL_MUTEX = threading.RLock()
 # Endpoints
 # -------------------------------------------------------------
 
-@router.post("/raw-materials")
+@router.post("/raw-materials", dependencies=[Depends(require_sheets_connection)])
 async def create_raw_material_master(req: RawMaterialMasterCreate, request: Request, user: dict = Depends(get_current_user)):
     """Explicit Owner-only master creation via Apps Script. Never creates stock or imports default material records."""
     actor, actor_role = require_owner(user)
@@ -568,7 +568,7 @@ async def create_raw_material_master(req: RawMaterialMasterCreate, request: Requ
         return saved
 
 
-@router.patch("/raw-materials/{raw_material_id}/rate")
+@router.patch("/raw-materials/{raw_material_id}/rate", dependencies=[Depends(require_sheets_connection)])
 async def update_raw_material_rate(raw_material_id: str, req: RawMaterialRateUpdate, request: Request, user: dict = Depends(get_current_user)):
     """Owner-only explicit reference-rate update via Apps Script. Purchase receipt rates remain transaction ledger facts."""
     actor, actor_role = require_owner(user)
@@ -663,7 +663,7 @@ async def list_raw_materials(user: dict = Depends(get_current_user)):
 get_raw_material_balances = list_raw_materials
 
 
-@router.post("/raw-materials/verify-opening-stock")
+@router.post("/raw-materials/verify-opening-stock", dependencies=[Depends(require_sheets_connection)])
 async def verify_raw_material_opening_stock(
     req: RawMaterialOpeningVerificationRequest,
     request: Request,
@@ -914,7 +914,7 @@ async def verify_raw_material_opening_stock(
             }
 
 
-@router.post("/raw-materials/receive", response_model=RawMaterialReceiveResponse)
+@router.post("/raw-materials/receive", response_model=RawMaterialReceiveResponse, dependencies=[Depends(require_sheets_connection)])
 async def receive_raw_material(req: RawMaterialReceiveRequest, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_production_access(user)
     require_persistent_store()
@@ -1159,7 +1159,7 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, request: Request,
         )
 
 
-@router.post("/milling/record", response_model=DalMillingResponse)
+@router.post("/milling/record", response_model=DalMillingResponse, dependencies=[Depends(require_sheets_connection)])
 async def record_dal_milling_batch(req: DalMillingCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_production_access(user)
     require_persistent_store()
@@ -1664,7 +1664,7 @@ class StockAdjustmentRequest(BaseModel):
     reference_id: Optional[str] = ""
 
 
-@router.post("/raw-materials/adjustment")
+@router.post("/raw-materials/adjustment", dependencies=[Depends(require_sheets_connection)])
 async def adjust_raw_material_stock(req: StockAdjustmentRequest, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_owner(user)
     require_persistent_store()
@@ -1717,7 +1717,7 @@ async def adjust_raw_material_stock(req: StockAdjustmentRequest, request: Reques
         return {"status": "SUCCESS", "txn_id": txn_id, "material_id": clean_mat_id, "quantity_change": req.quantity_change}
 
 
-@router.post("/finished-goods/adjustment")
+@router.post("/finished-goods/adjustment", dependencies=[Depends(require_sheets_connection)])
 async def adjust_finished_goods_stock(req: StockAdjustmentRequest, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_owner(user)
     require_persistent_store()
@@ -1920,7 +1920,7 @@ async def workers(user: dict = Depends(get_current_user)):
     return db.get_records("Workers")
 
 
-@router.post("/workers")
+@router.post("/workers", dependencies=[Depends(require_sheets_connection)])
 async def add_worker(req: WorkerCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()
@@ -1972,7 +1972,7 @@ async def attendance(user: dict = Depends(get_current_user)):
     return annotated
 
 
-@router.post("/attendance")
+@router.post("/attendance", dependencies=[Depends(require_sheets_connection)])
 async def record_attendance(req: AttendanceCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()
@@ -2022,7 +2022,7 @@ async def record_attendance(req: AttendanceCreate, request: Request, user: dict 
         return saved
 
 
-@router.post("/attendance/bulk", response_model=BulkAttendanceResponse)
+@router.post("/attendance/bulk", response_model=BulkAttendanceResponse, dependencies=[Depends(require_sheets_connection)])
 async def record_bulk_attendance(req: BulkAttendanceCreate, request: Request, user: dict = Depends(get_current_user)):
     """
     Mark bulk attendance for multiple active workers on a single date.
@@ -2135,7 +2135,7 @@ async def record_bulk_attendance(req: BulkAttendanceCreate, request: Request, us
         )
 
 
-@router.put("/attendance/{attendance_id}")
+@router.put("/attendance/{attendance_id}", dependencies=[Depends(require_sheets_connection)])
 async def update_attendance(attendance_id: str, req: AttendanceUpdate, request: Request, user: dict = Depends(get_current_user)):
     """Audited correction workflow for existing attendance records."""
     actor, role = require_production_access(user)
@@ -2171,7 +2171,7 @@ async def update_attendance(attendance_id: str, req: AttendanceUpdate, request: 
     return {**existing, **updates}
 
 
-@router.delete("/attendance/{attendance_id}")
+@router.delete("/attendance/{attendance_id}", dependencies=[Depends(require_sheets_connection)])
 async def delete_duplicate_attendance(attendance_id: str, request: Request, user: dict = Depends(get_current_user)):
     """Owner audited cleanup workflow for duplicate attendance records."""
     actor, role = require_owner(user)
@@ -2207,7 +2207,7 @@ async def recipes(user: dict = Depends(get_current_user)):
     return db.get_records("Recipes")
 
 
-@router.post("/recipes")
+@router.post("/recipes", dependencies=[Depends(require_sheets_connection)])
 async def save_recipe(req: RecipeSave, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()
@@ -2347,7 +2347,7 @@ async def get_master_recipes(user: dict = Depends(get_current_user)):
     return output
 
 
-@router.post("/recipes/master/bootstrap")
+@router.post("/recipes/master/bootstrap", dependencies=[Depends(require_sheets_connection)])
 async def bootstrap_master_recipes(user: dict = Depends(get_current_user)):
     require_owner(user)
     raise HTTPException(
@@ -2356,7 +2356,7 @@ async def bootstrap_master_recipes(user: dict = Depends(get_current_user)):
     )
 
 
-@router.post("/recipes/master/{recipe_id}/confirm")
+@router.post("/recipes/master/{recipe_id}/confirm", dependencies=[Depends(require_sheets_connection)])
 async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_owner(user)
     require_persistent_store()
@@ -2441,7 +2441,7 @@ async def confirm_master_recipe(recipe_id: str, req: RecipeConfirmRequest, reque
         return saved
 
 
-@router.post("/recipes/calculate")
+@router.post("/recipes/calculate", dependencies=[Depends(require_sheets_connection)])
 async def calculate_custom_recipe_cost(req: RecipeCalculateRequest, user: dict = Depends(get_current_user)):
     require_production_read(user)
     return calculate_recipe_cost_estimate(req.items, req.expected_yield_kg)
@@ -2466,7 +2466,7 @@ async def batches(user: dict = Depends(get_current_user)):
     return db.get_records("ProductionBatches")
 
 
-@router.post("/batches")
+@router.post("/batches", dependencies=[Depends(require_sheets_connection)])
 async def create_batch(req: ProductionCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()
@@ -3180,7 +3180,7 @@ def execute_material_issue(
             }
 
 
-@router.post("/batches/{production_id}/issue-materials")
+@router.post("/batches/{production_id}/issue-materials", dependencies=[Depends(require_sheets_connection)])
 async def issue_materials(
     production_id: str,
     request: Request,
@@ -3203,7 +3203,7 @@ async def issue_materials(
     return execute_material_issue(production_id, actor, actor_role=role, notes=notes, request=request)
 
 
-@router.post("/batches/{production_id}/approval")
+@router.post("/batches/{production_id}/approval", dependencies=[Depends(require_sheets_connection)])
 async def approve_batch(production_id: str, req: ApprovalRequest, request: Request, user: dict = Depends(get_current_user)):
     """
     Approve or reject production batch atomically via Apps Script.
@@ -3463,7 +3463,7 @@ async def packaging_discrepancies_summary(user: dict = Depends(get_current_user)
     return summarize_packaging_discrepancies(db.get_records("PackagingBatches"))
 
 
-@router.post("/packaging")
+@router.post("/packaging", dependencies=[Depends(require_sheets_connection)])
 async def create_packaging(req: PackagingCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()
@@ -3833,7 +3833,7 @@ async def create_packaging(req: PackagingCreate, request: Request, user: dict = 
     effective_bulk_cost_per_kg = to_decimal(allocation_res["effective_bulk_cost_per_kg"])
     mat_cost = Decimal("0.00")
     lab_cost = Decimal("0.00")
-    rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+    rm_master = db.get_records("RawMaterials", fresh=True)
     sku_cost_updates = []
 
     for sm in sku_movements:
@@ -3940,7 +3940,7 @@ async def create_packaging(req: PackagingCreate, request: Request, user: dict = 
     return AttrDict(saved)
 
 
-@router.post("/batches/{production_id}/resolve-legacy-cost")
+@router.post("/batches/{production_id}/resolve-legacy-cost", dependencies=[Depends(require_sheets_connection)])
 async def resolve_legacy_cost(
     production_id: str,
     req: ResolveLegacyCostRequest,
@@ -4018,7 +4018,7 @@ async def resolve_legacy_cost(
         }
 
 
-@router.post("/packaging/{packaging_id}/recover")
+@router.post("/packaging/{packaging_id}/recover", dependencies=[Depends(require_sheets_connection)])
 async def recover_packaging(packaging_id: str, request: Request, user: dict = Depends(get_current_user)):
     """
     Recover an INCOMPLETE packaging batch by delegating idempotent recovery of missing stock movements and status via Apps Script.
@@ -4213,7 +4213,7 @@ async def recover_packaging(packaging_id: str, request: Request, user: dict = De
 _PACKAGING_DISCREPANCY_MUTEX = threading.RLock()
 
 
-@router.post("/packaging/{packaging_id}/approve-discrepancy")
+@router.post("/packaging/{packaging_id}/approve-discrepancy", dependencies=[Depends(require_sheets_connection)])
 async def approve_packaging_discrepancy(
     packaging_id: str,
     req: DiscrepancyApprovalRequest,
@@ -4454,7 +4454,7 @@ async def approve_packaging_discrepancy(
 # Stock Dispatches (Transfers)
 # -------------------------------------------------------------
 
-@router.post("/dispatch")
+@router.post("/dispatch", dependencies=[Depends(require_sheets_connection)])
 async def dispatch(req: DispatchCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, role = require_production_access(user)
     require_persistent_store()

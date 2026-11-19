@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.apps_script_bridge import apps_script_bridge
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_manager, is_owner, require_manager, require_owner, require_roles, role_v2_of
 from app.schema_registry import LOT_QUALITY_STATES
 from app.sheets import db
@@ -25,7 +25,7 @@ from app.accounting.postings import post_customer_return_journal
 
 router = APIRouter(prefix="/api/quality", tags=["Quality & Traceability"])
 
-QUALITY_ROLES = {"OWNER_ADMIN", "OWNER", "ADMIN", "PA", "QUALITY"}
+QUALITY_ROLES = {"OWNER_ADMIN", "OWNER", "ADMIN", "QUALITY"}
 
 
 def require_quality_read_access(user: dict):
@@ -39,8 +39,8 @@ def require_quality_read_access(user: dict):
 def require_quality_access(user: dict):
     return require_roles(
         user,
-        {"OWNER_ADMIN", "PA", "QUALITY"},
-        detail="Access denied. Quality & Traceability mutations require Quality, PA, or Owner permissions.",
+        {"OWNER_ADMIN", "QUALITY"},
+        detail="Access denied. Quality & Traceability mutations require Quality or Owner permissions.",
     )
 
 
@@ -139,7 +139,7 @@ async def list_quality_checks(user: dict = Depends(get_current_user)):
     return checks
 
 
-@router.post("/checks")
+@router.post("/checks", dependencies=[Depends(require_sheets_connection)])
 async def create_quality_check(
     req: QualityCheckCreate,
     request: Request,
@@ -147,8 +147,8 @@ async def create_quality_check(
 ):
     actor, actor_role = require_roles(
         user,
-        {"OWNER_ADMIN", "PA", "QUALITY", "PRODUCTION"},
-        detail="Access denied. Submitting quality checks requires Quality, Production, PA, or Owner permissions.",
+        {"OWNER_ADMIN", "QUALITY", "PRODUCTION"},
+        detail="Access denied. Submitting quality checks requires Quality, Production, or Owner permissions.",
     )
     now = now_iso()
     today = business_today()
@@ -210,7 +210,7 @@ async def list_product_lots(user: dict = Depends(get_current_user)):
     return lots
 
 
-@router.post("/lots")
+@router.post("/lots", dependencies=[Depends(require_sheets_connection)])
 async def create_product_lot(
     req: ProductLotCreate,
     request: Request,
@@ -265,7 +265,7 @@ async def create_product_lot(
     return {**lot_payload, "lot_id": lot_id, "lot_number": lot_num, **res}
 
 
-@router.post("/lots/{lot_id}/status")
+@router.post("/lots/{lot_id}/status", dependencies=[Depends(require_sheets_connection)])
 async def update_lot_status(
     lot_id: str,
     req: LotStatusUpdate,
@@ -355,7 +355,7 @@ async def list_customer_returns(user: dict = Depends(get_current_user)):
     return res
 
 
-@router.post("/customer-returns")
+@router.post("/customer-returns", dependencies=[Depends(require_sheets_connection)])
 async def create_customer_return(
     req: CustomerReturnCreate,
     request: Request,
@@ -476,7 +476,7 @@ async def list_complaints_recalls(user: dict = Depends(get_current_user)):
     return records
 
 
-@router.post("/complaints")
+@router.post("/complaints", dependencies=[Depends(require_sheets_connection)])
 async def create_complaint_or_recall(
     req: ComplaintRecallCreate,
     request: Request,
@@ -531,7 +531,7 @@ async def create_complaint_or_recall(
     return {**record, "complaint_id": cmp_id, **res}
 
 
-@router.post("/complaints/{complaint_id}/close")
+@router.post("/complaints/{complaint_id}/close", dependencies=[Depends(require_sheets_connection)])
 async def close_complaint(
     complaint_id: str,
     request: Request,

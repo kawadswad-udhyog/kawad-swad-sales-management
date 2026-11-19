@@ -20,6 +20,8 @@ import {
   JournalVoucherItem,
   ReconcileResult,
   OpeningBalanceProposal,
+  createSubmissionNonce,
+  isUnknownOutcomeError,
 } from '../services/api';
 import type {
   DebtorItem,
@@ -70,6 +72,9 @@ type AccountingTab =
   | 'gst-summary'
   | 'reconciliation';
 
+const UNKNOWN_OUTCOME_MSG =
+  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+
 export const AccountingView: React.FC = () => {
   const { currentUser, isBackendConnected, isGoogleSheetsConnected, persistentWritesEnabled } = useStore();
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
@@ -114,6 +119,8 @@ export const AccountingView: React.FC = () => {
   const [reversalReason, setReversalReason] = useState('');
   const [reversing, setReversing] = useState(false);
   const [actionNotice, setActionNotice] = useState<{ text: string; ok: boolean } | null>(null);
+  const [reversalNonce, setReversalNonce] = useState('');
+  const [reconcileNonce, setReconcileNonce] = useState('');
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -167,10 +174,13 @@ export const AccountingView: React.FC = () => {
   }, [loadData]);
 
   const handleReverseVoucher = async () => {
-    if (!reversalTarget || !reversalReason.trim()) return;
+    if (reversing || !reversalTarget || !reversalReason.trim()) return;
+    const activeNonce = reversalNonce || createSubmissionNonce('ACC-REV');
+    if (!reversalNonce) setReversalNonce(activeNonce);
     setReversing(true);
     try {
-      await reverseJournalVoucherApi(reversalTarget.journal_id, reversalReason.trim());
+      await reverseJournalVoucherApi(reversalTarget.journal_id, reversalReason.trim(), activeNonce);
+      setReversalNonce('');
       setActionNotice({
         text: `Journal voucher ${reversalTarget.journal_id} reversed successfully with compensating voucher.`,
         ok: true,
@@ -179,7 +189,11 @@ export const AccountingView: React.FC = () => {
       setReversalReason('');
       loadData();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Reversal failed';
+      const msg = isUnknownOutcomeError(err)
+        ? UNKNOWN_OUTCOME_MSG
+        : err instanceof Error
+        ? err.message
+        : 'Reversal failed';
       setActionNotice({ text: msg, ok: false });
     } finally {
       setReversing(false);
@@ -931,6 +945,7 @@ export const AccountingView: React.FC = () => {
                             disabled={writesLocked}
                             onClick={(e) => {
                               e.stopPropagation();
+                              setReversalNonce('');
                               setReversalTarget(v);
                             }}
                             className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors flex items-center gap-1 border border-rose-200 disabled:opacity-50"
@@ -1130,18 +1145,27 @@ export const AccountingView: React.FC = () => {
 
                 <button
                   onClick={async () => {
-                    if (!confirmLiveExecution || !isOwnerOrAdmin || writesLocked) return;
+                    if (reconciling || !confirmLiveExecution || !isOwnerOrAdmin || writesLocked) return;
+                    const activeNonce = reconcileNonce || createSubmissionNonce('ACC-REC');
+                    if (!reconcileNonce) setReconcileNonce(activeNonce);
                     try {
                       setReconciling(true);
                       setError(null);
                       setReconcileSuccess(null);
-                      const res = await executeReconciliation(false, true);
+                      const res = await executeReconciliation(false, true, activeNonce);
+                      setReconcileNonce('');
                       setReconcileReport(res);
                       setConfirmLiveExecution(false);
                       setReconcileSuccess(`Live reconciliation complete: ${res.reconciled_count} journal vouchers posted successfully.`);
                       loadData();
                     } catch (err: unknown) {
-                      setError(err instanceof Error ? err.message : 'Reconciliation posting failed.');
+                      setError(
+                        isUnknownOutcomeError(err)
+                          ? UNKNOWN_OUTCOME_MSG
+                          : err instanceof Error
+                          ? err.message
+                          : 'Reconciliation posting failed.'
+                      );
                     } finally {
                       setReconciling(false);
                     }
@@ -1634,10 +1658,10 @@ export const AccountingView: React.FC = () => {
               e.preventDefault();
               handleReverseVoucher();
             }}
-            onCancel={() => setReversalTarget(null)}
+            onCancel={() => { setReversalTarget(null); setReversalNonce(''); }}
             actions={
               <FormActions
-                onCancel={() => setReversalTarget(null)}
+                onCancel={() => { setReversalTarget(null); setReversalNonce(''); }}
                 cancelLabel="Cancel"
                 saveLabel="Confirm Reversal"
                 isLoading={reversing}

@@ -4,13 +4,18 @@ from fastapi import APIRouter, HTTPException, Request, status, Depends
 from app.apps_script_bridge import apps_script_bridge
 from app.models import Customer, CustomerCreate
 from app.sheets import db
-from app.auth import get_current_user
-from app.permissions import require_module_action
+from app.auth import get_current_user, require_sheets_connection
+from app.permissions import require_module_action, require_roles
 
 router = APIRouter(prefix="/api/customers", tags=["Customers"])
 
 @router.get("", response_model=List[Customer])
 async def list_customers(current_user: dict = Depends(get_current_user)):
+    require_roles(
+        current_user,
+        {"OWNER_ADMIN", "PA", "ACCOUNTS", "SALES", "FIELD_SALESMAN", "STORE", "AUDITOR"},
+        detail="Access denied. Viewing customer records requires Sales, Store, Accounts, or Management permissions.",
+    )
     records = db.get_records("Customers")
     customers = []
     for r in records:
@@ -26,7 +31,7 @@ async def list_customers(current_user: dict = Depends(get_current_user)):
             alternate_mobile="" if str(r.get("alternate_mobile", "")).lower() in ["none", "null", "undefined"] else str(r.get("alternate_mobile", "")),
             address="" if str(r.get("address", "")).lower() in ["none", "null", "undefined"] else str(r.get("address", "")),
             locality_area="" if str(r.get("locality_area", "")).lower() in ["none", "null", "undefined"] else str(r.get("locality_area", "")),
-            city=str(r.get("city", "Bhilwara") or "Bhilwara"),
+            city="" if str(r.get("city", "")).lower() in ["none", "null", "undefined"] else str(r.get("city", "")),
             gstin="" if str(r.get("gstin", "")).lower() in ["none", "null", "undefined"] else str(r.get("gstin", "")),
             map_location="" if str(r.get("map_location", "")).lower() in ["none", "null", "undefined"] else str(r.get("map_location", "")),
             active=str(r.get("active", "true")).lower() == "true",
@@ -35,7 +40,7 @@ async def list_customers(current_user: dict = Depends(get_current_user)):
         ))
     return customers
 
-@router.post("", response_model=Customer)
+@router.post("", response_model=Customer, dependencies=[Depends(require_sheets_connection)])
 async def create_customer(req: CustomerCreate, request: Request, current_user: dict = Depends(get_current_user)):
     actor_id, actor_role = require_module_action(current_user, "sales", "create")
     clean_shop_name = (req.shop_name or "").strip()
@@ -54,7 +59,7 @@ async def create_customer(req: CustomerCreate, request: Request, current_user: d
         "alternate_mobile": (req.alternate_mobile or "").strip(),
         "address": (req.address or "").strip(),
         "locality_area": (req.locality_area or "").strip(),
-        "city": (req.city or "Bhilwara").strip(),
+        "city": (req.city or "").strip(),
         "gstin": (req.gstin or "").strip(),
         "map_location": (req.map_location or "").strip(),
         "active": "true",
@@ -98,7 +103,7 @@ async def create_customer(req: CustomerCreate, request: Request, current_user: d
         notes=record["notes"],
     )
 
-@router.put("/{customer_id}", response_model=Customer)
+@router.put("/{customer_id}", response_model=Customer, dependencies=[Depends(require_sheets_connection)])
 async def update_customer(customer_id: str, req: CustomerCreate, request: Request, current_user: dict = Depends(get_current_user)):
     actor_id, actor_role = require_module_action(current_user, "sales", "create")
     clean_shop_name = (req.shop_name or "").strip()
@@ -116,7 +121,7 @@ async def update_customer(customer_id: str, req: CustomerCreate, request: Reques
         "alternate_mobile": (req.alternate_mobile or "").strip(),
         "address": (req.address or "").strip(),
         "locality_area": (req.locality_area or "").strip(),
-        "city": (req.city or "Bhilwara").strip(),
+        "city": (req.city or "").strip(),
         "gstin": (req.gstin or "").strip(),
         "map_location": (req.map_location or "").strip(),
         "notes": (req.notes or "").strip(),

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from app.apps_script_bridge import apps_script_bridge
 from app.models import UserProfile, UserCreate, UserUpdate, UserStatusUpdate, CustomRoleCreate, CustomRoleResponse
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_manager, is_owner, require_manager, require_owner, role_v2_of
 from app.user_service import (
     get_all_users_with_auth,
@@ -61,8 +61,8 @@ async def list_users(current_user: dict = Depends(get_current_user)):
     return [UserProfile(**u) for u in users]
 
 
-@router.post("")
-async def create_user(req: UserCreate, current_user: dict = Depends(get_current_user)):
+@router.post("", dependencies=[Depends(require_sheets_connection)])
+async def create_user(req: UserCreate, current_user: dict = Depends(get_current_user), request: Request = None):
     """Owner creates employee directly. PA creates a PENDING approval request."""
     require_manager(current_user)
     requested_role = str(req.role or "SALESMAN").upper()
@@ -86,11 +86,13 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
     actor_id = str(current_user.get("user_id") or "")
     actor_name = str(current_user.get("full_name") or actor_id)
 
+    req_nonce = apps_script_bridge.extract_request_nonce(request=request)
+
     if is_owner(current_user):
         # Owner executes directly
         if not req.password or len(req.password) < 8:
             raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
-        created = execute_create_user(req.dict(), actor_id)
+        created = execute_create_user(req.dict(), actor_id, nonce=req_nonce)
         return UserProfile(**created)
     else:
         # PA submits approval request WITHOUT PASSWORD
@@ -118,6 +120,7 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
             payload=creation_payload,
             requested_by=actor_id,
             requested_by_name=actor_name,
+            nonce=req_nonce,
         )
         return {
             "ok": True,
@@ -127,8 +130,8 @@ async def create_user(req: UserCreate, current_user: dict = Depends(get_current_
         }
 
 
-@router.put("/{user_id}")
-async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depends(get_current_user)):
+@router.put("/{user_id}", dependencies=[Depends(require_sheets_connection)])
+async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depends(get_current_user), request: Request = None):
     """Owner updates employee details directly. PA submits an approval request."""
     require_manager(current_user)
     target_role = _get_target_user_role(user_id)
@@ -149,9 +152,11 @@ async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depend
     except TypeError:
         update_data = {k: v for k, v in req.dict().items() if v is not None}
 
+    req_nonce = apps_script_bridge.extract_request_nonce(request=request)
+
     if is_owner(current_user):
         # Owner executes directly
-        updated = execute_update_user(user_id, update_data, actor_id)
+        updated = execute_update_user(user_id, update_data, actor_id, nonce=req_nonce)
         return {"ok": True, "user": updated}
     else:
         # PA may request operational updates, but not private employee, contact,
@@ -171,6 +176,7 @@ async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depend
             payload=update_data,
             requested_by=actor_id,
             requested_by_name=actor_name,
+            nonce=req_nonce,
         )
         return {
             "ok": True,
@@ -180,8 +186,8 @@ async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depend
         }
 
 
-@router.post("/{user_id}/status")
-async def set_user_status(user_id: str, req: UserStatusUpdate, current_user: dict = Depends(get_current_user)):
+@router.post("/{user_id}/status", dependencies=[Depends(require_sheets_connection)])
+async def set_user_status(user_id: str, req: UserStatusUpdate, current_user: dict = Depends(get_current_user), request: Request = None):
     """Owner activates/deactivates directly. PA submits an approval request."""
     require_manager(current_user)
     target_role = _get_target_user_role(user_id)
@@ -195,9 +201,11 @@ async def set_user_status(user_id: str, req: UserStatusUpdate, current_user: dic
 
     action_type = "REACTIVATE_USER" if req.active else "DEACTIVATE_USER"
 
+    req_nonce = apps_script_bridge.extract_request_nonce(request=request)
+
     if is_owner(current_user):
         # Owner executes directly
-        res = execute_set_user_status(user_id, req.active, actor_id, reason=req.reason or "")
+        res = execute_set_user_status(user_id, req.active, actor_id, reason=req.reason or "", nonce=req_nonce)
         return res
     else:
         # PA submits approval request
@@ -207,6 +215,7 @@ async def set_user_status(user_id: str, req: UserStatusUpdate, current_user: dic
             payload={"active": req.active, "reason": req.reason or ""},
             requested_by=actor_id,
             requested_by_name=actor_name,
+            nonce=req_nonce,
         )
         return {
             "ok": True,
@@ -216,8 +225,8 @@ async def set_user_status(user_id: str, req: UserStatusUpdate, current_user: dic
         }
 
 
-@router.post("/{user_id}/reset-password")
-async def reset_password(user_id: str, req: PasswordResetRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/{user_id}/reset-password", dependencies=[Depends(require_sheets_connection)])
+async def reset_password(user_id: str, req: PasswordResetRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     """Owner resets password directly and revokes all active sessions. PA submits an approval request."""
     require_manager(current_user)
     target_role = _get_target_user_role(user_id)
@@ -229,11 +238,13 @@ async def reset_password(user_id: str, req: PasswordResetRequest, current_user: 
     actor_id = str(current_user.get("user_id") or "")
     actor_name = str(current_user.get("full_name") or actor_id)
 
+    req_nonce = apps_script_bridge.extract_request_nonce(request=request)
+
     if is_owner(current_user):
         # Owner executes directly
         if not req.new_password or len(req.new_password) < 8:
             raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
-        res = execute_reset_password(user_id, req.new_password, actor_id, reason="Owner reset user password")
+        res = execute_reset_password(user_id, req.new_password, actor_id, reason="Owner reset user password", nonce=req_nonce)
         return res
     else:
         # PA submits approval request WITHOUT PASSWORD
@@ -243,6 +254,7 @@ async def reset_password(user_id: str, req: PasswordResetRequest, current_user: 
             payload={"reason": "PA requested password reset for employee"},
             requested_by=actor_id,
             requested_by_name=actor_name,
+            nonce=req_nonce,
         )
         return {
             "ok": True,
@@ -303,7 +315,7 @@ async def list_roles(current_user: dict = Depends(get_current_user)):
     return roles
 
 
-@router.post("/roles")
+@router.post("/roles", dependencies=[Depends(require_sheets_connection)])
 async def create_or_update_custom_role(req: CustomRoleCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Owner creates or updates custom role with module-based permissions via Apps Script."""
     require_owner(current_user)
@@ -367,7 +379,7 @@ async def create_or_update_custom_role(req: CustomRoleCreate, request: Request, 
         return {"ok": True, "role_id": role_id, "role_name": clean_name, "message": f"Created custom role {clean_name}", **res}
 
 
-@router.delete("/roles/{role_name}")
+@router.delete("/roles/{role_name}", dependencies=[Depends(require_sheets_connection)])
 async def delete_custom_role(role_name: str, request: Request, current_user: dict = Depends(get_current_user)):
     """Owner deletes a custom role if no active users are assigned to it via Apps Script."""
     require_owner(current_user)
@@ -399,7 +411,7 @@ async def delete_custom_role(role_name: str, request: Request, current_user: dic
     return {"ok": True, "message": f"Custom role {clean_name} deleted.", **res}
 
 
-@router.post("/reconcile-role-alias")
+@router.post("/reconcile-role-alias", dependencies=[Depends(require_sheets_connection)])
 async def reconcile_role_alias(user_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     """
     Owner synchronizes canonical role mapping across Users and AuthUsers via Apps Script.

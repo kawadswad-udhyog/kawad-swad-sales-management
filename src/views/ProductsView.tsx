@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
+import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import { Package } from 'lucide-react';
 import {
   FormLayout,
@@ -54,9 +55,12 @@ export const ProductsView: React.FC = () => {
   const [retailPackOnly, setRetailPackOnly] = useState(true);
   const [active, setActive] = useState(true);
   const [notes, setNotes] = useState('');
+  const [productNonce, setProductNonce] = useState<string | null>(null);
+  const [toggleNonces, setToggleNonces] = useState<Record<string, string>>({});
 
   const resetForm = () => {
     setEditingId(null);
+    setProductNonce(null);
     setSku('');
     setProductName('');
     setCategory('Papad');
@@ -70,6 +74,7 @@ export const ProductsView: React.FC = () => {
   };
 
   const handleEditClick = (p: Product) => {
+    setProductNonce(null);
     setEditingId(p.product_id);
     setSku(p.sku);
     setProductName(p.product_name);
@@ -97,6 +102,9 @@ export const ProductsView: React.FC = () => {
       return;
     }
 
+    const activeNonce = productNonce || createSubmissionNonce('PRD');
+    if (!productNonce) setProductNonce(activeNonce);
+
     try {
       if (editingId) {
         // Update product (SKU is immutable)
@@ -110,7 +118,7 @@ export const ProductsView: React.FC = () => {
           retail_pack_only: retailPackOnly,
           active,
           notes: notes.trim(),
-        });
+        }, activeNonce);
         setNotice({ msg: `✅ Product "${productName.trim()}" updated successfully.` });
         resetForm();
       } else {
@@ -130,12 +138,16 @@ export const ProductsView: React.FC = () => {
           retail_pack_only: retailPackOnly,
           active,
           notes: notes.trim(),
-        });
+        }, activeNonce);
         setNotice({ msg: `✅ Product "${productName.trim()}" added to catalogue successfully.` });
         resetForm();
       }
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to save product';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to save product';
       setNotice({ msg: errorMsg, error: true });
     }
   };
@@ -143,15 +155,28 @@ export const ProductsView: React.FC = () => {
   const handleToggleActive = async (p: Product) => {
     setUpdatingId(p.product_id);
     setNotice(null);
+    const activeNonce = toggleNonces[p.product_id] || createSubmissionNonce('PRDTGL');
+    if (!toggleNonces[p.product_id]) {
+      setToggleNonces((prev) => ({ ...prev, [p.product_id]: activeNonce }));
+    }
     try {
       const nextState = !p.active;
-      await toggleProductActive(p.product_id);
+      await toggleProductActive(p.product_id, activeNonce);
+      setToggleNonces((prev) => {
+        const next = { ...prev };
+        delete next[p.product_id];
+        return next;
+      });
       setNotice({
         msg: `✅ "${p.product_name}" is now ${nextState ? 'ACTIVE (visible in Sales & Billing)' : 'INACTIVE (hidden from Sales)'}.`,
         error: false,
       });
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to toggle product status';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; retry toggle with preserved idempotency key.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to toggle product status';
       setNotice({ msg: errorMsg, error: true });
     } finally {
       setUpdatingId(null);

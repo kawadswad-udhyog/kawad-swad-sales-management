@@ -145,12 +145,19 @@ def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_fail
         return False
 
 
-def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation", raise_on_failure: bool = False) -> bool:
+def revoke_all_user_sessions(
+    user_id: str,
+    reason: str = "Security revocation",
+    raise_on_failure: bool = False,
+    nonce: Optional[str] = None,
+) -> bool:
     """Invalidate all active sessions across all devices via Apps Script governed write."""
     clean_id = str(user_id or "").strip().lower()
     now_epoch = time.time()
     now_iso_str = datetime.now(timezone.utc).isoformat()
     _USER_REVOKED_AT[clean_id] = now_epoch
+    reason_hash = hashlib.sha256(str(reason or "").encode("utf-8")).hexdigest()[:8].upper()
+    stable_nonce = str(nonce or "").strip() or f"REVOKE-SESS-{user_id}-{reason_hash}-{now_iso_str[:16]}"
 
     from app.apps_script_bridge import apps_script_bridge
 
@@ -163,7 +170,7 @@ def revoke_all_user_sessions(user_id: str, reason: str = "Security revocation", 
                 "sessions_revoked_at": now_iso_str,
                 "reason": reason,
             },
-            nonce=f"REVOKE-SESS-{user_id}-{int(now_epoch)}",
+            nonce=stable_nonce,
             actor_user_id=user_id,
             actor_role="AUTH",
             invalidate_tabs=["AuthUsers"],

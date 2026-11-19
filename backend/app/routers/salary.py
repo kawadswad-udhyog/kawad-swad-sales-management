@@ -58,6 +58,7 @@ async def propose_salary_records(
     users_records = db.get_records("Users")
     known_users = {str(u.get("user_id", "")).strip(): u for u in users_records}
 
+    base_nonce = apps_script_bridge.extract_request_nonce(request=request)
     created_records: List[SalaryRecord] = []
     for item in items:
         if item.period_start > item.period_end:
@@ -133,11 +134,17 @@ async def propose_salary_records(
             "payment_reference": "",
             "notes": item.notes or "",
         }
+        item_nonce = (
+            base_nonce
+            if (not base_nonce or len(items) == 1)
+            else f"{base_nonce}#{s_user}:{item.period_start}:{item.period_end}:{rec_type}"
+        )
         res = apps_script_bridge.delegate_governed_write(
             action="CREATE_SALARY_INCENTIVE",
             target_tab="SalaryIncentives",
             payload=rec_data,
-            request=request,
+            nonce=item_nonce,
+            request=None,
             actor_user_id=user_id,
             actor_role=actor_role,
             id_field="record_id",

@@ -9,6 +9,8 @@ import {
   acceptVanLoadingPass,
   reportVanLoadingDiscrepancy,
   cancelVanLoadingPass,
+  createSubmissionNonce,
+  isUnknownOutcomeError,
 } from '../services/api';
 import {
   Truck,
@@ -37,6 +39,9 @@ import {
   SaveButton,
   CancelButton,
 } from '../components/common/FormComponents';
+
+const UNKNOWN_OUTCOME_MSG =
+  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
 export const StockView: React.FC = () => {
   const {
@@ -147,6 +152,23 @@ export const StockView: React.FC = () => {
   // Accept Loading Action State
   const [acceptingPassId, setAcceptingPassId] = useState<string | null>(null);
 
+  // Submission guards & stable idempotency nonces (preserved across retries / HTTP 504)
+  const [createPassNonce, setCreatePassNonce] = useState('');
+  const [acceptPassNonces, setAcceptPassNonces] = useState<Record<string, string>>({});
+  const [discrepancyNonce, setDiscrepancyNonce] = useState('');
+  const [discrepancyError, setDiscrepancyError] = useState<string | null>(null);
+  const [cancelPassNonces, setCancelPassNonces] = useState<Record<string, string>>({});
+  const [cancellingPassId, setCancellingPassId] = useState<string | null>(null);
+  const [resolveCostNonces, setResolveCostNonces] = useState<Record<string, string>>({});
+  const [reconNonce, setReconNonce] = useState('');
+  const [reconFallbackRef, setReconFallbackRef] = useState('');
+  const [movementNonce, setMovementNonce] = useState('');
+  const [movementSubmitting, setMovementSubmitting] = useState(false);
+  const [discSubmitNonce, setDiscSubmitNonce] = useState('');
+  const [discSubmitting, setDiscSubmitting] = useState(false);
+  const [reviewNonces, setReviewNonces] = useState<Record<string, string>>({});
+  const [reviewingDiscId, setReviewingDiscId] = useState<string | null>(null);
+
   const loadLoadingPasses = async () => {
     try {
       setLoadingPassesLoading(true);
@@ -203,6 +225,7 @@ export const StockView: React.FC = () => {
 
   const handleCreateLoadingPass = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreatingPass) return;
     setLoadingPassNotice(null);
 
     if (passSummary.totalPackets <= 0) {
@@ -217,6 +240,9 @@ export const StockView: React.FC = () => {
       setLoadingPassNotice({ msg: 'Please select an assigned salesman.', error: true });
       return;
     }
+
+    const activeNonce = createPassNonce || createSubmissionNonce('STK-VLP');
+    if (!createPassNonce) setCreatePassNonce(activeNonce);
 
     try {
       setIsCreatingPass(true);
@@ -233,8 +259,9 @@ export const StockView: React.FC = () => {
         salesman_user_id: passSalesmanId,
         items: itemsToLoad,
         notes: passNotes,
-      });
+      }, activeNonce);
 
+      setCreatePassNonce('');
       setLoadingPassNotice({
         msg: `Loading Pass ${created.pass_number} created successfully! Waiting for salesman verification and acceptance.`,
       });
@@ -243,17 +270,30 @@ export const StockView: React.FC = () => {
       await loadLoadingPasses();
       await refreshData();
     } catch (err: any) {
-      setLoadingPassNotice({ msg: err?.message || 'Failed to create van loading pass', error: true });
+      setLoadingPassNotice({
+        msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to create van loading pass',
+        error: true,
+      });
     } finally {
       setIsCreatingPass(false);
     }
   };
 
   const handleAcceptPass = async (passIdOrNumber: string) => {
+    if (acceptingPassId) return;
+    const activeNonce = acceptPassNonces[passIdOrNumber] || createSubmissionNonce('STK-VLA');
+    if (!acceptPassNonces[passIdOrNumber]) {
+      setAcceptPassNonces((prev) => ({ ...prev, [passIdOrNumber]: activeNonce }));
+    }
     try {
       setAcceptingPassId(passIdOrNumber);
       setLoadingPassNotice(null);
-      const accepted = await acceptVanLoadingPass(passIdOrNumber);
+      const accepted = await acceptVanLoadingPass(passIdOrNumber, undefined, activeNonce);
+      setAcceptPassNonces((prev) => {
+        const next = { ...prev };
+        delete next[passIdOrNumber];
+        return next;
+      });
       setLoadingPassNotice({
         msg: `Stock loading pass ${accepted.pass_number} verified and accepted! Van inventory has been credited and warehouse inventory deducted.`,
       });
@@ -263,7 +303,10 @@ export const StockView: React.FC = () => {
         setViewingPass(accepted);
       }
     } catch (err: any) {
-      setLoadingPassNotice({ msg: err?.message || 'Failed to accept loading pass', error: true });
+      setLoadingPassNotice({
+        msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to accept loading pass',
+        error: true,
+      });
     } finally {
       setAcceptingPassId(null);
     }
@@ -271,15 +314,25 @@ export const StockView: React.FC = () => {
 
   const handleReportDiscrepancy = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!discrepancyModalPass) return;
+    if (!discrepancyModalPass || isSubmittingDiscrepancy) return;
+    setDiscrepancyError(null);
     if (!discrepancyNotes.trim()) {
-      alert('Please describe the physical count discrepancy.');
+      setDiscrepancyError('Please describe the physical count discrepancy.');
       return;
     }
 
+    const activeNonce = discrepancyNonce || createSubmissionNonce('STK-VLD');
+    if (!discrepancyNonce) setDiscrepancyNonce(activeNonce);
+
     try {
       setIsSubmittingDiscrepancy(true);
-      const updated = await reportVanLoadingDiscrepancy(discrepancyModalPass.pass_id, discrepancyNotes);
+      const updated = await reportVanLoadingDiscrepancy(
+        discrepancyModalPass.pass_id,
+        discrepancyNotes,
+        activeNonce
+      );
+      setDiscrepancyNonce('');
+      setDiscrepancyError(null);
       setLoadingPassNotice({
         msg: `Discrepancy on ${updated.pass_number} recorded. The warehouse manager has been notified for resolution.`,
       });
@@ -288,17 +341,36 @@ export const StockView: React.FC = () => {
       await loadLoadingPasses();
       await refreshData();
     } catch (err: any) {
-      alert(`Failed to report discrepancy: ${err?.message || err}`);
+      setDiscrepancyError(
+        isUnknownOutcomeError(err)
+          ? UNKNOWN_OUTCOME_MSG
+          : `Failed to report discrepancy: ${err?.message || err}`
+      );
     } finally {
       setIsSubmittingDiscrepancy(false);
     }
   };
 
   const handleCancelPass = async (passIdOrNumber: string) => {
+    if (cancellingPassId) return;
     if (!confirm('Are you sure you want to cancel this pending loading pass?')) return;
+    const activeNonce = cancelPassNonces[passIdOrNumber] || createSubmissionNonce('STK-VLC');
+    if (!cancelPassNonces[passIdOrNumber]) {
+      setCancelPassNonces((prev) => ({ ...prev, [passIdOrNumber]: activeNonce }));
+    }
     try {
+      setCancellingPassId(passIdOrNumber);
       setLoadingPassNotice(null);
-      const cancelled = await cancelVanLoadingPass(passIdOrNumber, 'Cancelled from management dashboard');
+      const cancelled = await cancelVanLoadingPass(
+        passIdOrNumber,
+        'Cancelled from management dashboard',
+        activeNonce
+      );
+      setCancelPassNonces((prev) => {
+        const next = { ...prev };
+        delete next[passIdOrNumber];
+        return next;
+      });
       setLoadingPassNotice({ msg: `Loading pass ${cancelled.pass_number} cancelled.` });
       await loadLoadingPasses();
       await refreshData();
@@ -306,7 +378,12 @@ export const StockView: React.FC = () => {
         setViewingPass(cancelled);
       }
     } catch (err: any) {
-      setLoadingPassNotice({ msg: err?.message || 'Failed to cancel loading pass', error: true });
+      setLoadingPassNotice({
+        msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to cancel loading pass',
+        error: true,
+      });
+    } finally {
+      setCancellingPassId(null);
     }
   };
 
@@ -328,11 +405,17 @@ export const StockView: React.FC = () => {
 
   const handleResolveLegacyCost = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!resolvingBatchId) return;
+    if (!resolvingBatchId || resolvingLoading) return;
+    const batchKey = resolvingBatchId;
+    const activeNonce = resolveCostNonces[batchKey] || createSubmissionNonce('STK-COST');
+    if (!resolveCostNonces[batchKey]) {
+      setResolveCostNonces((prev) => ({ ...prev, [batchKey]: activeNonce }));
+    }
     try {
       setResolvingLoading(true);
-      await apiRequest(`/api/production/batches/${resolvingBatchId}/resolve-legacy-cost`, {
+      await apiRequest(`/api/production/batches/${batchKey}/resolve-legacy-cost`, {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           cost_per_kg: Number(resolveRate),
           cost_status: resolveStatus,
@@ -340,13 +423,21 @@ export const StockView: React.FC = () => {
           notes: resolveNotes || 'Resolved from StockView Batch Tracking modal',
         }),
       });
-      setBatchNotice({ msg: `Successfully updated cost for batch ${resolvingBatchId} to ₹${resolveRate}/kg (${resolveStatus}).` });
+      setResolveCostNonces((prev) => {
+        const next = { ...prev };
+        delete next[batchKey];
+        return next;
+      });
+      setBatchNotice({ msg: `Successfully updated cost for batch ${batchKey} to ₹${resolveRate}/kg (${resolveStatus}).` });
       setResolvingBatchId(null);
       setResolveRate(0);
       setResolveNotes('');
       await loadBulkBatches();
     } catch (err: any) {
-      setBatchNotice({ msg: err?.message || 'Failed to resolve batch cost.', error: true });
+      setBatchNotice({
+        msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to resolve batch cost.',
+        error: true,
+      });
     } finally {
       setResolvingLoading(false);
     }
@@ -391,6 +482,7 @@ export const StockView: React.FC = () => {
 
   const handleReconcileOpening = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (reconLoading) return;
     setReconNotice(null);
     if (!reconProductId) {
       setReconNotice({ msg: 'Please select a product SKU.', error: true });
@@ -400,24 +492,36 @@ export const StockView: React.FC = () => {
       setReconNotice({ msg: 'Physical count cannot be negative.', error: true });
       return;
     }
+    const activeNonce = reconNonce || createSubmissionNonce('STK-RECON');
+    if (!reconNonce) setReconNonce(activeNonce);
+    const activeRef = reconReference.trim() || reconFallbackRef || `RECON-${Date.now()}`;
+    if (!reconReference.trim() && !reconFallbackRef) {
+      setReconFallbackRef(activeRef);
+    }
     try {
       setReconLoading(true);
       const res = await apiRequest<{ message: string; adjustment: any }>('/api/stock/reconcile-opening', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           product_id: reconProductId,
           location: reconLocation,
           physical_count: Number(reconPhysicalCount),
           reason: reconReason.trim() || 'Physical inventory audit reconciliation',
-          reference: reconReference.trim() || `RECON-${Date.now()}`,
+          reference: activeRef,
         }),
       });
+      setReconNonce('');
+      setReconFallbackRef('');
       setReconNotice({ msg: res.message || 'Physical stock reconciled and ledger balance updated successfully.' });
       setReconReason('');
       setReconReference('');
       await Promise.allSettled([loadRegister(), refreshData()]);
     } catch (err: any) {
-      setReconNotice({ msg: err.message || 'Reconciliation failed', error: true });
+      setReconNotice({
+        msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Reconciliation failed',
+        error: true,
+      });
     } finally {
       setReconLoading(false);
     }
@@ -427,6 +531,7 @@ export const StockView: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (movementSubmitting) return;
     setNotice(null);
 
     if (quantity <= 0) {
@@ -434,55 +539,96 @@ export const StockView: React.FC = () => {
       return;
     }
 
+    const activeNonce = movementNonce || createSubmissionNonce('STK-MOV');
+    if (!movementNonce) setMovementNonce(activeNonce);
+
     try {
+      setMovementSubmitting(true);
       await recordStockMovement({
         txn_type: txnType,
         product_id: productId,
         salesman_user_id: needsSalesman ? salesmanId : '',
         quantity: Number(quantity),
         notes: notes.trim(),
-      });
+      }, activeNonce);
 
+      setMovementNonce('');
       setNotice({ msg: `Stock movement "${txnType}" recorded successfully.` });
       setNotes('');
       loadRegister();
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to record stock movement';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? UNKNOWN_OUTCOME_MSG
+        : err instanceof Error
+        ? err.message
+        : 'Failed to record stock movement';
       setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setMovementSubmitting(false);
     }
   };
 
   const handleDiscrepancySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (discSubmitting) return;
     setNotice(null);
     if (!discProductId) {
       setNotice({ msg: 'Select a product for audit discrepancy check.', error: true });
       return;
     }
+    const activeNonce = discSubmitNonce || createSubmissionNonce('STK-DISC');
+    if (!discSubmitNonce) setDiscSubmitNonce(activeNonce);
     try {
+      setDiscSubmitting(true);
       await submitStockDiscrepancy({
         location: discLocation,
         product_id: discProductId,
         expected_stock: Number(discExpected),
         physical_count: Number(discPhysical),
         reason: discReason.trim() || 'Physical stock audit reconciliation',
-      });
+      }, activeNonce);
+      setDiscSubmitNonce('');
       setNotice({ msg: 'Stock physical count submitted for review. Unexplained differences are preserved for verification and not treated as automatic losses.' });
       setDiscReason('');
     } catch (err: unknown) {
-      const errStr = err instanceof Error ? err.message : String(err);
-      setNotice({ msg: `Failed to submit discrepancy: ${errStr}`, error: true });
+      const errStr = isUnknownOutcomeError(err)
+        ? UNKNOWN_OUTCOME_MSG
+        : `Failed to submit discrepancy: ${err instanceof Error ? err.message : String(err)}`;
+      setNotice({ msg: errStr, error: true });
+    } finally {
+      setDiscSubmitting(false);
     }
   };
 
   const handleReview = async (discrepancyId: string, action: 'APPROVE' | 'REJECT') => {
+    if (reviewingDiscId) return;
+    const key = `${discrepancyId}:${action}`;
+    const activeNonce = reviewNonces[key] || createSubmissionNonce('STK-REV');
+    if (!reviewNonces[key]) {
+      setReviewNonces((prev) => ({ ...prev, [key]: activeNonce }));
+    }
     try {
-      await reviewStockDiscrepancy(discrepancyId, action, action === 'APPROVE' ? 'Approved in physical audit' : 'Rejected');
+      setReviewingDiscId(discrepancyId);
+      await reviewStockDiscrepancy(
+        discrepancyId,
+        action,
+        action === 'APPROVE' ? 'Approved in physical audit' : 'Rejected',
+        activeNonce
+      );
+      setReviewNonces((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
       setNotice({ msg: `Discrepancy ${action === 'APPROVE' ? 'approved and stock adjusted' : 'rejected'}.` });
       loadRegister();
     } catch (err: unknown) {
-      const errStr = err instanceof Error ? err.message : String(err);
-      setNotice({ msg: `Review failed: ${errStr}`, error: true });
+      const errStr = isUnknownOutcomeError(err)
+        ? UNKNOWN_OUTCOME_MSG
+        : `Review failed: ${err instanceof Error ? err.message : String(err)}`;
+      setNotice({ msg: errStr, error: true });
+    } finally {
+      setReviewingDiscId(null);
     }
   };
 
@@ -1084,7 +1230,7 @@ export const StockView: React.FC = () => {
                   )}
 
                   <div className="flex justify-end pt-2">
-                    <SaveButton label="Record Stock Movement" />
+                    <SaveButton label="Record Stock Movement" isLoading={movementSubmitting} />
                   </div>
                 </form>
           </>
@@ -1245,7 +1391,7 @@ export const StockView: React.FC = () => {
           </div>
 
           <div className="flex justify-end pt-2">
-            <SaveButton label="Record Physical Audit Count" />
+            <SaveButton label="Record Physical Audit Count" isLoading={discSubmitting} />
           </div>
         </form>
 
@@ -1319,14 +1465,16 @@ export const StockView: React.FC = () => {
                             <div className="actions" style={{ gap: '4px' }}>
                               <button
                                 type="button"
+                                disabled={Boolean(reviewingDiscId)}
                                 style={{ padding: '3px 8px', fontSize: '0.75rem', background: '#16a34a', color: '#fff' }}
                                 onClick={() => handleReview(d.discrepancy_id, 'APPROVE')}
                               >
-                                Approve
+                                {reviewingDiscId === d.discrepancy_id ? 'Saving...' : 'Approve'}
                               </button>
                               <button
                                 type="button"
                                 className="secondary"
+                                disabled={Boolean(reviewingDiscId)}
                                 style={{ padding: '3px 8px', fontSize: '0.75rem', color: '#dc2626' }}
                                 onClick={() => handleReview(d.discrepancy_id, 'REJECT')}
                               >
@@ -1451,6 +1599,7 @@ export const StockView: React.FC = () => {
                 onClick={() => {
                   setShowBatchTracking(false);
                   setResolvingBatchId(null);
+                  setResolveCostNonces({});
                 }}
                 style={{ padding: '4px 12px', fontSize: '0.9rem' }}
               >
@@ -1528,10 +1677,30 @@ export const StockView: React.FC = () => {
                   subtitle="Authoritative costing setup for legacy production run"
                   maxWidth="2xl"
                   onSubmit={handleResolveLegacyCost}
-                  onCancel={() => setResolvingBatchId(null)}
+                  onCancel={() => {
+                    const key = resolvingBatchId;
+                    if (key) {
+                      setResolveCostNonces((prev) => {
+                        const next = { ...prev };
+                        delete next[key];
+                        return next;
+                      });
+                    }
+                    setResolvingBatchId(null);
+                  }}
                   actions={
                     <FormActions
-                      onCancel={() => setResolvingBatchId(null)}
+                      onCancel={() => {
+                        const key = resolvingBatchId;
+                        if (key) {
+                          setResolveCostNonces((prev) => {
+                            const next = { ...prev };
+                            delete next[key];
+                            return next;
+                          });
+                        }
+                        setResolvingBatchId(null);
+                      }}
                       cancelLabel="Cancel"
                       saveLabel="Save Batch Cost"
                       isLoading={resolvingLoading}
@@ -1649,6 +1818,11 @@ export const StockView: React.FC = () => {
                                   type="button"
                                   className="secondary"
                                   onClick={() => {
+                                    setResolveCostNonces((prev) => {
+                                      const next = { ...prev };
+                                      delete next[b.batch_id];
+                                      return next;
+                                    });
                                     setResolvingBatchId(b.batch_id);
                                     setResolveRate(cost || 0);
                                     setResolveStatus(isEstimated ? 'ESTIMATED' : 'ACTUAL');
@@ -1801,6 +1975,8 @@ export const StockView: React.FC = () => {
                         onClick={() => {
                           setDiscrepancyModalPass(pass);
                           setDiscrepancyNotes('');
+                          setDiscrepancyNonce('');
+                          setDiscrepancyError(null);
                         }}
                         className="w-full sm:w-auto px-4 py-2.5 text-xs font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
                       >
@@ -2208,11 +2384,12 @@ export const StockView: React.FC = () => {
                               {isPending && isManager && (
                                 <button
                                   type="button"
+                                  disabled={Boolean(cancellingPassId)}
                                   onClick={() => handleCancelPass(pass.pass_id)}
-                                  className="px-2 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                                  className="px-2 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer disabled:opacity-50"
                                   title="Cancel Pass"
                                 >
-                                  Cancel
+                                  {cancellingPassId === pass.pass_id ? 'Cancelling...' : 'Cancel'}
                                 </button>
                               )}
                             </div>
@@ -2366,12 +2543,22 @@ export const StockView: React.FC = () => {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setDiscrepancyModalPass(null)}
+                    onClick={() => {
+                      setDiscrepancyModalPass(null);
+                      setDiscrepancyNonce('');
+                      setDiscrepancyError(null);
+                    }}
                     className="text-slate-400 hover:text-slate-600 p-1"
                   >
                     <X className="w-5 h-5" />
                   </button>
                 </div>
+
+                {discrepancyError && (
+                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold">
+                    {discrepancyError}
+                  </div>
+                )}
 
                 <p className="text-xs text-slate-600 m-0">
                   Report any missing, leaking, or damaged packets found while verifying loading pass{' '}
@@ -2396,7 +2583,11 @@ export const StockView: React.FC = () => {
                 <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                   <button
                     type="button"
-                    onClick={() => setDiscrepancyModalPass(null)}
+                    onClick={() => {
+                      setDiscrepancyModalPass(null);
+                      setDiscrepancyNonce('');
+                      setDiscrepancyError(null);
+                    }}
                     className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
                   >
                     Cancel

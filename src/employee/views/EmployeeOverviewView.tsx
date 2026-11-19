@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../../context/StoreContext';
-import { apiFetch } from '../../services/api';
+import { apiFetch, createSubmissionNonce, isUnknownOutcomeError } from '../../services/api';
 import { EmployeeViewType, TaskItem } from '../types';
 import {
   Clock,
@@ -27,6 +27,11 @@ export const EmployeeOverviewView: React.FC<EmployeeOverviewViewProps> = ({ onNa
   const [isLoading, setIsLoading] = useState(true);
   const [clockActionLoading, setClockActionLoading] = useState(false);
   const [clockMessage, setClockMessage] = useState('');
+  const [checkInNonce, setCheckInNonce] = useState('');
+  const [checkOutNonce, setCheckOutNonce] = useState('');
+
+  const UNKNOWN_OUTCOME_MSG =
+    'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
   const fetchWorkspace = async () => {
     try {
@@ -47,44 +52,74 @@ export const EmployeeOverviewView: React.FC<EmployeeOverviewViewProps> = ({ onNa
   }, []);
 
   const handleCheckIn = async () => {
+    if (clockActionLoading) return;
+    const activeNonce = checkInNonce || createSubmissionNonce('EMP-IN');
+    if (!checkInNonce) setCheckInNonce(activeNonce);
     setClockActionLoading(true);
     setClockMessage('');
     try {
       const res = await apiFetch('/api/workforce/my-attendance/check-in', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({ notes: 'Self check-in from web portal' }),
       });
-      const data = await res.json();
+      if (res.status === 504) {
+        setClockMessage(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
+      const rawText = await res.text();
+      let data: any = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = {};
+      }
       if (res.ok) {
+        setCheckInNonce('');
         setClockMessage(data.message || 'Checked in successfully!');
         await fetchWorkspace();
       } else {
         setClockMessage(data.detail || 'Failed to check in.');
       }
     } catch (err) {
-      setClockMessage('Network error during check-in.');
+      setClockMessage(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : 'Network error during check-in.');
     } finally {
       setClockActionLoading(false);
     }
   };
 
   const handleCheckOut = async () => {
+    if (clockActionLoading) return;
+    const activeNonce = checkOutNonce || createSubmissionNonce('EMP-OUT');
+    if (!checkOutNonce) setCheckOutNonce(activeNonce);
     setClockActionLoading(true);
     setClockMessage('');
     try {
       const res = await apiFetch('/api/workforce/my-attendance/check-out', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({ notes: 'Clock-out from portal' }),
       });
-      const data = await res.json();
+      if (res.status === 504) {
+        setClockMessage(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
+      const rawText = await res.text();
+      let data: any = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = {};
+      }
       if (res.ok) {
+        setCheckOutNonce('');
         setClockMessage(data.message || 'Checked out successfully!');
         await fetchWorkspace();
       } else {
         setClockMessage(data.detail || 'Failed to check out.');
       }
     } catch (err) {
-      setClockMessage('Network error during check-out.');
+      setClockMessage(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : 'Network error during check-out.');
     } finally {
       setClockActionLoading(false);
     }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { apiRequest } from '../services/api';
+import { apiRequest, createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -58,6 +58,10 @@ export const AttendanceView: React.FC = () => {
   // Table search & filter
   const [searchQuery, setSearchQuery] = useState('');
   const [filterDate, setFilterDate] = useState(today);
+  const [singleNonce, setSingleNonce] = useState<string | null>(null);
+  const [bulkNonce, setBulkNonce] = useState<string | null>(null);
+  const [correctionNonce, setCorrectionNonce] = useState<string | null>(null);
+  const [deleteNonces, setDeleteNonces] = useState<Record<string, string>>({});
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwner = canonicalRole === 'OWNER_ADMIN';
@@ -131,6 +135,9 @@ export const AttendanceView: React.FC = () => {
       return;
     }
 
+    const activeNonce = singleNonce || createSubmissionNonce('ATT');
+    if (!singleNonce) setSingleNonce(activeNonce);
+
     setIsSubmitting(true);
     setFeedback(null);
     try {
@@ -142,7 +149,9 @@ export const AttendanceView: React.FC = () => {
           status: selectedStatus,
           notes,
         }),
+        idempotencyKey: activeNonce,
       });
+      setSingleNonce(null);
       setFeedback({
         type: 'success',
         message: `Recorded ${selectedStatus} for ${selectedWorker?.worker_name || selectedWorkerId} on ${selectedDate}.`,
@@ -151,7 +160,11 @@ export const AttendanceView: React.FC = () => {
       // Keep worker select open for fast next entry
       await refreshAttendanceOnly();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to save attendance.';
+      const msg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—tap Record Attendance to retry safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to save attendance.';
       setFeedback({ type: 'error', message: msg });
     } finally {
       setIsSubmitting(false);
@@ -200,6 +213,9 @@ export const AttendanceView: React.FC = () => {
       };
     });
 
+    const activeNonce = bulkNonce || createSubmissionNonce('ATTBLK');
+    if (!bulkNonce) setBulkNonce(activeNonce);
+
     setIsSubmitting(true);
     setFeedback(null);
     try {
@@ -209,14 +225,20 @@ export const AttendanceView: React.FC = () => {
           attendance_date: selectedDate,
           records,
         }),
+        idempotencyKey: activeNonce,
       });
+      setBulkNonce(null);
       setFeedback({
         type: 'success',
         message: res?.message || `Successfully marked bulk attendance for ${records.length} workers on ${selectedDate}.`,
       });
       await refreshAttendanceOnly();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to save bulk attendance.';
+      const msg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit new bulk attendance. Your entries and retry key are preserved—retry safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to save bulk attendance.';
       setFeedback({ type: 'error', message: msg });
     } finally {
       setIsSubmitting(false);
@@ -226,6 +248,8 @@ export const AttendanceView: React.FC = () => {
   // Handle Owner Correction
   const handleSaveCorrection = async () => {
     if (!editingAttendance) return;
+    const activeNonce = correctionNonce || createSubmissionNonce('ATTCOR');
+    if (!correctionNonce) setCorrectionNonce(activeNonce);
     setIsSubmitting(true);
     try {
       await apiRequest(`/api/production/attendance/${encodeURIComponent(editingAttendance.attendance_id)}`, {
@@ -234,7 +258,9 @@ export const AttendanceView: React.FC = () => {
           status: editStatus,
           notes: editNotes,
         }),
+        idempotencyKey: activeNonce,
       });
+      setCorrectionNonce(null);
       setFeedback({
         type: 'success',
         message: `Attendance updated to ${editStatus} for ${editingAttendance.worker_name_snapshot || editingAttendance.worker_id}.`,
@@ -242,7 +268,11 @@ export const AttendanceView: React.FC = () => {
       setEditingAttendance(null);
       await refreshAttendanceOnly();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Correction failed.';
+      const msg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; retry Save Correction safely with preserved inputs and key.'
+        : err instanceof Error
+        ? err.message
+        : 'Correction failed.';
       setFeedback({ type: 'error', message: msg });
     } finally {
       setIsSubmitting(false);
@@ -254,15 +284,27 @@ export const AttendanceView: React.FC = () => {
     if (!window.confirm(`Are you sure you want to remove duplicate attendance row ${attendanceId} for ${workerName}?`)) {
       return;
     }
+    const activeNonce = deleteNonces[attendanceId] || createSubmissionNonce('ATTDEL');
+    if (!deleteNonces[attendanceId]) setDeleteNonces((prev) => ({ ...prev, [attendanceId]: activeNonce }));
     setIsSubmitting(true);
     try {
       await apiRequest(`/api/production/attendance/${encodeURIComponent(attendanceId)}`, {
         method: 'DELETE',
+        idempotencyKey: activeNonce,
+      });
+      setDeleteNonces((prev) => {
+        const next = { ...prev };
+        delete next[attendanceId];
+        return next;
       });
       setFeedback({ type: 'success', message: `Duplicate attendance entry removed.` });
       await refreshAttendanceOnly();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to remove duplicate.';
+      const msg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; retry removal safely with preserved key.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to remove duplicate.';
       setFeedback({ type: 'error', message: msg });
     } finally {
       setIsSubmitting(false);
@@ -913,7 +955,10 @@ export const AttendanceView: React.FC = () => {
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
               <button
                 type="button"
-                onClick={() => setEditingAttendance(null)}
+                onClick={() => {
+                  setCorrectionNonce(null);
+                  setEditingAttendance(null);
+                }}
                 style={{ padding: '8px 14px', borderRadius: '7px', border: '1px solid #cbd5e1', background: '#f8fafc', color: '#475569', cursor: 'pointer', fontWeight: 600 }}
               >
                 Cancel

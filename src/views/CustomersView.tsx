@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { CustomerType } from '../types';
+import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import { ViewType } from '../components/Navigation';
 import { PageHeader } from '../components/common/PageHeader';
 import { SearchFilter } from '../components/common/SearchFilter';
@@ -59,8 +60,10 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
   const [address, setAddress] = useState('');
   const [mapLocation, setMapLocation] = useState('');
   const [notes, setNotes] = useState('');
+  const [customerNonce, setCustomerNonce] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
@@ -69,8 +72,12 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
       return;
     }
 
+    const activeNonce = customerNonce || createSubmissionNonce('CUS');
+    if (!customerNonce) setCustomerNonce(activeNonce);
+    setIsSubmitting(true);
+
     try {
-      addCustomer({
+      await addCustomer({
         customer_type: customerType,
         shop_name: shopName.trim(),
         shopkeeper_name: shopkeeperName.trim(),
@@ -82,9 +89,10 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
         map_location: mapLocation.trim(),
         active: true,
         notes: notes.trim(),
-      });
+      }, activeNonce);
 
       setNotice({ msg: `Customer "${shopName}" registered successfully.` });
+      setCustomerNonce(null);
       setShopName('');
       setShopkeeperName('');
       setMobile('');
@@ -96,8 +104,14 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
       setNotes('');
       setIsFormOpen(false);
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to add customer';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—tap Save Customer to retry safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to add customer';
       setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -171,12 +185,19 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
             icon={<Users size={18} />}
             maxWidth="3xl"
             onSubmit={handleSubmit}
-            onCancel={() => setIsFormOpen(false)}
+            onCancel={() => {
+              setIsFormOpen(false);
+              setCustomerNonce(null);
+            }}
             actions={
               <FormActions
-                onCancel={() => setIsFormOpen(false)}
+                onCancel={() => {
+                  setIsFormOpen(false);
+                  setCustomerNonce(null);
+                }}
                 cancelLabel="Cancel"
-                saveLabel="Save Customer"
+                saveLabel={isSubmitting ? 'Saving...' : 'Save Customer'}
+                isSubmitting={isSubmitting}
               />
             }
           >

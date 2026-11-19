@@ -194,14 +194,66 @@ export function constructApiUrl(
   }
 }
 
+export interface ApiRequestOptions extends RequestInit {
+  timeoutMs?: number;
+  silent?: boolean;
+  idempotencyKey?: string;
+}
+
+function extractBodyIdempotencyKey(body: BodyInit | null | undefined): string {
+  if (typeof body !== 'string') return '';
+  const trimmed = body.trim();
+  if (!trimmed.startsWith('{')) return '';
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const candidate = parsed.nonce || parsed.idempotency_key;
+      return typeof candidate === 'string' ? candidate.trim() : '';
+    }
+  } catch {
+    // Ignore non-JSON body payloads
+  }
+  return '';
+}
+
+function resolveRequestIdempotencyKey(
+  path: string,
+  method: string,
+  options: ApiRequestOptions,
+  headers: Record<string, string>
+): string {
+  const upperMethod = (method || 'GET').toUpperCase();
+  const explicit = (
+    options.idempotencyKey ||
+    headers['X-KS-Idempotency-Key'] ||
+    headers['x-ks-idempotency-key'] ||
+    headers['X-Idempotency-Key'] ||
+    headers['x-idempotency-key'] ||
+    extractBodyIdempotencyKey(options.body) ||
+    ''
+  ).trim();
+  if (explicit) return explicit;
+  if (
+    upperMethod !== 'GET' &&
+    upperMethod !== 'HEAD' &&
+    upperMethod !== 'OPTIONS' &&
+    !path.includes('/auth/') &&
+    !path.includes('/health')
+  ) {
+    return createSubmissionNonce('REQ');
+  }
+  return '';
+}
+
 /**
  * Shared fetch helper ensuring all API calls respect the configured API Base URL
- * and inject standard authentication headers.
+ * and inject standard authentication and idempotency headers.
  */
-export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+export async function apiFetch(path: string, options: ApiRequestOptions = {}): Promise<Response> {
   const baseUrl = getApiBaseUrl();
   const token = getAuthToken();
   const { targetUrl } = constructApiUrl(baseUrl, path);
+  const method = (options.method || 'GET').toUpperCase();
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -210,6 +262,11 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
 
   if (token && !headers['Authorization']) {
     headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const resolvedIdempotencyKey = resolveRequestIdempotencyKey(path, method, options, headers);
+  if (resolvedIdempotencyKey && !headers['X-KS-Idempotency-Key']) {
+    headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
   return fetch(targetUrl, {
@@ -275,7 +332,10 @@ export function createSubmissionNonce(prefix = 'NONCE'): string {
 
 export function isUnknownOutcomeError(err: unknown): boolean {
   if (err instanceof ApiOutcomeUnknownError) return true;
-  if (err instanceof ApiHttpError && (err.status === 504 || err.workflowStatus === 'PENDING_UNKNOWN')) {
+  if (
+    err instanceof ApiHttpError &&
+    (err.status === 504 || err.workflowStatus === 'PENDING_UNKNOWN' || err.errorCode === 'PENDING_UNKNOWN')
+  ) {
     return true;
   }
   if (err instanceof Error) {
@@ -283,11 +343,6 @@ export function isUnknownOutcomeError(err: unknown): boolean {
     return m.includes('status not confirmed') || m.includes('timed out') || m.includes('timeout');
   }
   return false;
-}
-
-export interface ApiRequestOptions extends RequestInit {
-  timeoutMs?: number;
-  silent?: boolean;
 }
 
 export interface BackendHealthResponse {
@@ -335,6 +390,11 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
 
   if (token && !token.startsWith('ks-local-jwt-')) {
     headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const resolvedIdempotencyKey = resolveRequestIdempotencyKey(path, method, options, headers);
+  if (resolvedIdempotencyKey && !headers['X-KS-Idempotency-Key']) {
+    headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
   const controller = new AbortController();
@@ -587,9 +647,16 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       }
       console.groupEnd();
       if (res.status === 504 && method !== 'GET') {
+        const outcomeNonce =
+          (parsedJson?.detail && typeof parsedJson.detail === 'object'
+            ? (parsedJson.detail.nonce || parsedJson.detail.idempotency_key)
+            : undefined) ||
+          parsedJson?.nonce ||
+          resolvedIdempotencyKey ||
+          undefined;
         throw new ApiOutcomeUnknownError(
           'Status not confirmed; do not submit a new transaction.',
-          undefined,
+          outcomeNonce,
           correlationId
         );
       }
@@ -632,8 +699,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   } catch (err: unknown) {
     clearTimeout(timeoutId);
 
-    // If an ApiHttpError was already thrown above, do not log a second critical network error
-    if (err instanceof ApiHttpError) {
+    // If an ApiHttpError or ApiOutcomeUnknownError was already thrown above, do not log a second critical network error
+    if (err instanceof ApiHttpError || err instanceof ApiOutcomeUnknownError) {
       throw err;
     }
 
@@ -702,7 +769,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       if (err.name === 'AbortError') {
         if (method !== 'GET') {
           throw new ApiOutcomeUnknownError(
-            'Status not confirmed; do not submit a new transaction.'
+            'Status not confirmed; do not submit a new transaction.',
+            resolvedIdempotencyKey || undefined
           );
         }
         throw new Error(
@@ -884,6 +952,7 @@ export interface RawMaterialReceiveInput {
   other_expenses?: number;
   gst_amount?: number;
   gst_treatment?: 'RECOVERABLE_ITC' | 'CAPITALIZED_TO_COST' | 'EXEMPT_NIL_RATED';
+  idempotency_key?: string;
   notes?: string;
 }
 
@@ -911,11 +980,13 @@ export async function getRawMaterials(): Promise<RawMaterialSummary[]> {
 }
 
 export async function verifyRawMaterialOpeningStock(
-  data: RawMaterialOpeningVerificationInput
+  data: RawMaterialOpeningVerificationInput,
+  idempotencyKey?: string
 ): Promise<RawMaterialOpeningVerificationResult> {
   return apiRequest<RawMaterialOpeningVerificationResult>('/api/production/raw-materials/verify-opening-stock', {
     method: 'POST',
     body: JSON.stringify(data),
+    idempotencyKey: idempotencyKey || data.idempotency_key,
   });
 }
 
@@ -929,21 +1000,27 @@ export async function getPackagingDiscrepanciesSummary(): Promise<PackagingDiscr
 
 export async function approvePackagingDiscrepancy(
   packagingId: string,
-  explanation: string
+  explanation: string,
+  idempotencyKey?: string
 ): Promise<Record<string, any>> {
   return apiRequest<Record<string, any>>(
     `/api/production/packaging/${encodeURIComponent(packagingId)}/approve-discrepancy`,
     {
       method: 'POST',
       body: JSON.stringify({ explanation }),
+      idempotencyKey,
     }
   );
 }
 
-export async function receiveRawMaterial(data: RawMaterialReceiveInput): Promise<RawMaterialReceiveResult> {
+export async function receiveRawMaterial(
+  data: RawMaterialReceiveInput,
+  idempotencyKey?: string
+): Promise<RawMaterialReceiveResult> {
   return apiRequest<RawMaterialReceiveResult>('/api/production/raw-materials/receive', {
     method: 'POST',
     body: JSON.stringify(data),
+    idempotencyKey: idempotencyKey || data.idempotency_key,
   });
 }
 
@@ -1002,10 +1079,14 @@ export interface DalMillingHistoryItem {
   notes: string;
 }
 
-export async function recordMillingBatch(data: DalMillingInput): Promise<DalMillingResult> {
+export async function recordMillingBatch(
+  data: DalMillingInput,
+  idempotencyKey?: string
+): Promise<DalMillingResult> {
   return apiRequest<DalMillingResult>('/api/production/milling/record', {
     method: 'POST',
     body: JSON.stringify(data),
+    idempotencyKey: idempotencyKey || data.idempotency_key,
   });
 }
 
@@ -1135,10 +1216,15 @@ export async function fetchJournalVouchers(voucherType?: string, limit = 50): Pr
   return apiRequest<JournalVoucherItem[]>(`/api/accounting/vouchers${qs}`);
 }
 
-export async function reverseJournalVoucherApi(journalId: string, reason: string): Promise<JournalVoucherItem> {
+export async function reverseJournalVoucherApi(
+  journalId: string,
+  reason: string,
+  idempotencyKey?: string
+): Promise<JournalVoucherItem> {
   return apiRequest<JournalVoucherItem>(`/api/accounting/vouchers/${encodeURIComponent(journalId)}/reverse`, {
     method: 'POST',
     body: JSON.stringify({ reason }),
+    idempotencyKey,
   });
 }
 
@@ -1222,9 +1308,14 @@ export async function fetchReconciliationReport(): Promise<ReconcileResult> {
   return apiRequest<ReconcileResult>('/api/accounting/reconcile');
 }
 
-export async function executeReconciliation(dryRun = false, confirmLiveBackfill = true): Promise<ReconcileResult> {
+export async function executeReconciliation(
+  dryRun = false,
+  confirmLiveBackfill = true,
+  idempotencyKey?: string
+): Promise<ReconcileResult> {
   return apiRequest<ReconcileResult>(`/api/accounting/reconcile?dry_run=${dryRun}&confirm_live_backfill=${confirmLiveBackfill}`, {
     method: 'POST',
+    idempotencyKey,
   });
 }
 
@@ -1234,11 +1325,13 @@ export async function fetchOpeningBalanceProposal(): Promise<OpeningBalancePropo
 
 export async function recordSalePaymentApi(
   saleId: string,
-  payment: { amount: number; payment_method: string; reference_number?: string; notes?: string }
+  payment: { amount: number; payment_method: string; reference_number?: string; notes?: string; idempotency_key?: string },
+  idempotencyKey?: string
 ): Promise<{ ok: boolean; payment_id: string; sale_id: string; amount_paid: number; remaining_balance: number; payment_status: string }> {
   return apiRequest(`/api/sales/${encodeURIComponent(saleId)}/payments`, {
     method: 'POST',
     body: JSON.stringify(payment),
+    idempotencyKey: idempotencyKey || payment.idempotency_key,
   });
 }
 
@@ -1250,17 +1343,26 @@ export async function getSuppliers(): Promise<Supplier[]> {
   return apiRequest<Supplier[]>('/api/purchasing/suppliers');
 }
 
-export async function createSupplier(supplier: Partial<Supplier>): Promise<Supplier> {
+export async function createSupplier(
+  supplier: Partial<Supplier>,
+  idempotencyKey?: string
+): Promise<Supplier> {
   return apiRequest<Supplier>('/api/purchasing/suppliers', {
     method: 'POST',
     body: JSON.stringify(supplier),
+    idempotencyKey,
   });
 }
 
-export async function updateSupplier(supplierId: string, supplier: Partial<Supplier>): Promise<Supplier> {
+export async function updateSupplier(
+  supplierId: string,
+  supplier: Partial<Supplier>,
+  idempotencyKey?: string
+): Promise<Supplier> {
   return apiRequest<Supplier>(`/api/purchasing/suppliers/${encodeURIComponent(supplierId)}`, {
     method: 'PUT',
     body: JSON.stringify(supplier),
+    idempotencyKey,
   });
 }
 
@@ -1274,6 +1376,7 @@ export async function createPurchaseOrder(payload: {
   order_date: string;
   expected_delivery_date?: string;
   notes?: string;
+  idempotency_key?: string;
   items: Array<{
     material_id?: string;
     raw_material_id?: string;
@@ -1285,7 +1388,7 @@ export async function createPurchaseOrder(payload: {
     tax_rate?: number;
     notes?: string;
   }>;
-}): Promise<PurchaseOrder> {
+}, idempotencyKey?: string): Promise<PurchaseOrder> {
   const normalized = {
     ...payload,
     items: payload.items.map((item) => ({
@@ -1301,13 +1404,19 @@ export async function createPurchaseOrder(payload: {
   return apiRequest<PurchaseOrder>('/api/purchasing/orders', {
     method: 'POST',
     body: JSON.stringify(normalized),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
-export async function cancelPurchaseOrder(orderId: string, reason?: string): Promise<{ ok: boolean; status: string; order_id: string }> {
+export async function cancelPurchaseOrder(
+  orderId: string,
+  reason?: string,
+  idempotencyKey?: string
+): Promise<{ ok: boolean; status: string; order_id: string }> {
   return apiRequest(`/api/purchasing/orders/${encodeURIComponent(orderId)}/cancel`, {
     method: 'POST',
     body: JSON.stringify({ reason }),
+    idempotencyKey,
   });
 }
 
@@ -1325,6 +1434,7 @@ export async function createGoodsReceipt(payload: {
   vehicle_number?: string;
   quality_status?: string;
   notes?: string;
+  idempotency_key?: string;
   items: Array<{
     po_item_id?: string;
     material_id?: string;
@@ -1345,7 +1455,7 @@ export async function createGoodsReceipt(payload: {
     qc_status?: string;
     notes?: string;
   }>;
-}): Promise<GoodsReceipt> {
+}, idempotencyKey?: string): Promise<GoodsReceipt> {
   const invoiceRef = payload.invoice_reference || payload.vendor_delivery_challan || payload.delivery_challan || `CH-${Date.now().toString().slice(-6)}`;
   const normalized = {
     ...payload,
@@ -1375,6 +1485,7 @@ export async function createGoodsReceipt(payload: {
   return apiRequest<GoodsReceipt>('/api/purchasing/receipts', {
     method: 'POST',
     body: JSON.stringify(normalized),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1401,7 +1512,8 @@ export async function createSupplierBill(payload: {
   other_expenses?: number;
   total_amount: number;
   notes?: string;
-}): Promise<SupplierBill> {
+  idempotency_key?: string;
+}, idempotencyKey?: string): Promise<SupplierBill> {
   const normalized = {
     ...payload,
     receipt_id: payload.receipt_id || payload.grn_id || '',
@@ -1414,6 +1526,7 @@ export async function createSupplierBill(payload: {
   return apiRequest<SupplierBill>('/api/purchasing/bills', {
     method: 'POST',
     body: JSON.stringify(normalized),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1491,6 +1604,7 @@ export async function createSupplierReturn(payload: {
   return_date: string;
   reason: string;
   notes?: string;
+  idempotency_key?: string;
   items: Array<{
     material_id: string;
     raw_material_id?: string;
@@ -1503,7 +1617,7 @@ export async function createSupplierReturn(payload: {
     reason?: string;
     notes?: string;
   }>;
-}): Promise<SupplierReturn> {
+}, idempotencyKey?: string): Promise<SupplierReturn> {
   const normalized = {
     ...payload,
     receipt_id: payload.receipt_id || payload.grn_id || '',
@@ -1521,6 +1635,7 @@ export async function createSupplierReturn(payload: {
   return apiRequest<SupplierReturn>('/api/purchasing/returns', {
     method: 'POST',
     body: JSON.stringify(normalized),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1556,7 +1671,8 @@ export async function createQualityCheck(payload: {
   defect_details?: string;
   corrective_action?: string;
   notes?: string;
-}): Promise<QualityCheck> {
+  idempotency_key?: string;
+}, idempotencyKey?: string): Promise<QualityCheck> {
   const normalized = {
     ...payload,
     reference_type: payload.reference_type || payload.entity_type || 'PRODUCT_LOT',
@@ -1566,6 +1682,7 @@ export async function createQualityCheck(payload: {
   return apiRequest<QualityCheck>('/api/quality/checks', {
     method: 'POST',
     body: JSON.stringify(normalized),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1583,21 +1700,25 @@ export async function createProductLot(payload: {
   production_id?: string;
   packaging_id?: string;
   notes?: string;
-}): Promise<ProductLot> {
+  idempotency_key?: string;
+}, idempotencyKey?: string): Promise<ProductLot> {
   return apiRequest<ProductLot>('/api/quality/lots', {
     method: 'POST',
     body: JSON.stringify(payload),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
 export async function updateLotStatus(
   lotId: string,
   qualityStatus: 'RELEASED' | 'QUARANTINE' | 'REJECTED' | 'RECALLED',
-  holdReason?: string
+  holdReason?: string,
+  idempotencyKey?: string
 ): Promise<ProductLot> {
   return apiRequest<ProductLot>(`/api/quality/lots/${encodeURIComponent(lotId)}/status`, {
     method: 'POST',
     body: JSON.stringify({ quality_status: qualityStatus, hold_reason: holdReason }),
+    idempotencyKey,
   });
 }
 
@@ -1617,6 +1738,7 @@ export async function createCustomerReturn(payload: {
   return_date: string;
   disposition: 'SCRAP' | 'RESTOCK' | 'PENDING_INSPECTION';
   notes?: string;
+  idempotency_key?: string;
   items: Array<{
     product_id: string;
     sku: string;
@@ -1628,7 +1750,7 @@ export async function createCustomerReturn(payload: {
     reason: string;
     notes?: string;
   }>;
-}): Promise<CustomerReturn> {
+}, idempotencyKey?: string): Promise<CustomerReturn> {
   const normalized = {
     ...payload,
     items: payload.items.map((item) => ({
@@ -1639,6 +1761,7 @@ export async function createCustomerReturn(payload: {
   return apiRequest<CustomerReturn>('/api/quality/customer-returns', {
     method: 'POST',
     body: JSON.stringify(normalized),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1657,16 +1780,19 @@ export async function createComplaintOrRecall(payload: {
   severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
   description: string;
   notes?: string;
-}): Promise<ComplaintRecall> {
+  idempotency_key?: string;
+}, idempotencyKey?: string): Promise<ComplaintRecall> {
   return apiRequest<ComplaintRecall>('/api/quality/complaints', {
     method: 'POST',
     body: JSON.stringify(payload),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
 export async function closeComplaint(
   complaintId: string,
-  data: { investigation?: string; corrective_action?: string; notes?: string }
+  data: { investigation?: string; corrective_action?: string; notes?: string },
+  idempotencyKey?: string
 ): Promise<ComplaintRecall> {
   const rawAction = (data.corrective_action || data.investigation || data.notes || 'Resolved and closed').trim();
   const action = rawAction.length >= 5 ? rawAction : `${rawAction} (Closed)`;
@@ -1674,6 +1800,7 @@ export async function closeComplaint(
     `/api/quality/complaints/${encodeURIComponent(complaintId)}/close?corrective_action=${encodeURIComponent(action)}`,
     {
       method: 'POST',
+      idempotencyKey,
     }
   );
 }
@@ -1703,10 +1830,11 @@ export async function executeDalMilling(payload: {
   batch_reference?: string;
   idempotency_key?: string;
   notes?: string;
-}): Promise<DalMillingResult> {
+}, idempotencyKey?: string): Promise<DalMillingResult> {
   return apiRequest<DalMillingResult>('/api/production/milling/record', {
     method: 'POST',
     body: JSON.stringify(payload),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1715,10 +1843,12 @@ export async function adjustRawMaterialStock(payload: {
   adjusted_quantity: number;
   reason: string;
   authorized_by?: string;
-}): Promise<{ ok: boolean; status: string; balance: number }> {
+  idempotency_key?: string;
+}, idempotencyKey?: string): Promise<{ ok: boolean; status: string; balance: number }> {
   return apiRequest('/api/production/raw-materials/adjustment', {
     method: 'POST',
     body: JSON.stringify(payload),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1728,10 +1858,12 @@ export async function adjustFinishedGoodsStock(payload: {
   reason: string;
   location?: string;
   authorized_by?: string;
-}): Promise<{ ok: boolean; status: string; balance: number }> {
+  idempotency_key?: string;
+}, idempotencyKey?: string): Promise<{ ok: boolean; status: string; balance: number }> {
   return apiRequest('/api/production/finished-goods/adjustment', {
     method: 'POST',
     body: JSON.stringify(payload),
+    idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
@@ -1760,16 +1892,18 @@ export async function getSalesOrders(): Promise<any[]> {
   return apiRequest('/api/sales/orders');
 }
 
-export async function createSalesOrder(payload: any): Promise<any> {
+export async function createSalesOrder(payload: any, idempotencyKey?: string): Promise<any> {
   return apiRequest('/api/sales/orders', {
     method: 'POST',
     body: JSON.stringify(payload),
+    idempotencyKey: idempotencyKey || payload?.idempotency_key || payload?.nonce,
   });
 }
 
-export async function confirmSalesOrder(saleId: string): Promise<any> {
+export async function confirmSalesOrder(saleId: string, idempotencyKey?: string): Promise<any> {
   return apiRequest(`/api/sales/orders/${encodeURIComponent(saleId)}/confirm`, {
     method: 'POST',
+    idempotencyKey,
   });
 }
 
@@ -1823,9 +1957,13 @@ export async function getAccountingPeriods(): Promise<AccountingPeriod[]> {
   return apiRequest<AccountingPeriod[]>('/api/accounting/periods');
 }
 
-export async function closeAccountingPeriod(periodId: string): Promise<{ ok: boolean; status: string; period: AccountingPeriod }> {
+export async function closeAccountingPeriod(
+  periodId: string,
+  idempotencyKey?: string
+): Promise<{ ok: boolean; status: string; period: AccountingPeriod }> {
   return apiRequest(`/api/accounting/periods/${encodeURIComponent(periodId)}/close`, {
     method: 'POST',
+    idempotencyKey,
   });
 }
 
@@ -1850,31 +1988,50 @@ export async function getVanLoadingPass(passIdOrNumber: string): Promise<VanLoad
   return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}`);
 }
 
-export async function createVanLoadingPass(payload: VanLoadingPassCreate): Promise<VanLoadingPass> {
+export async function createVanLoadingPass(
+  payload: VanLoadingPassCreate,
+  idempotencyKey?: string
+): Promise<VanLoadingPass> {
   return apiRequest<VanLoadingPass>('/api/stock/loading-passes', {
     method: 'POST',
     body: JSON.stringify(payload),
+    idempotencyKey,
   });
 }
 
-export async function acceptVanLoadingPass(passIdOrNumber: string, notes?: string): Promise<VanLoadingPass> {
+export async function acceptVanLoadingPass(
+  passIdOrNumber: string,
+  notes?: string,
+  idempotencyKey?: string
+): Promise<VanLoadingPass> {
   return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}/accept`, {
     method: 'POST',
     body: JSON.stringify({ notes }),
+    idempotencyKey,
   });
 }
 
-export async function reportVanLoadingDiscrepancy(passIdOrNumber: string, discrepancyNotes: string): Promise<VanLoadingPass> {
+export async function reportVanLoadingDiscrepancy(
+  passIdOrNumber: string,
+  discrepancyNotes: string,
+  idempotencyKey?: string
+): Promise<VanLoadingPass> {
   return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}/discrepancy`, {
     method: 'POST',
     body: JSON.stringify({ discrepancy_notes: discrepancyNotes }),
+    idempotencyKey,
   });
 }
 
-export async function cancelVanLoadingPass(passIdOrNumber: string, notes?: string): Promise<VanLoadingPass> {
+export async function cancelVanLoadingPass(
+  passIdOrNumber: string,
+  notes?: string,
+  idempotencyKey?: string
+): Promise<VanLoadingPass> {
   return apiRequest<VanLoadingPass>(`/api/stock/loading-passes/${encodeURIComponent(passIdOrNumber)}/cancel`, {
     method: 'POST',
     body: JSON.stringify({ notes }),
+    idempotencyKey,
   });
 }
 

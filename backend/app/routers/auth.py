@@ -158,7 +158,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     }
 
 
-@router.post("/api/auth/change-password")
+@router.post("/api/auth/change-password", dependencies=[Depends(require_sheets_connection)])
 async def change_password(req: ChangePasswordRequest, request: Request, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id") or "")
     rows = db.get_records("AuthUsers", fresh=True)

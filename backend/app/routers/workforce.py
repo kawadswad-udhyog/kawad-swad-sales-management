@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.apps_script_bridge import apps_script_bridge
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import (
     is_owner, is_manager, require_manager, require_owner, require_roles,
     role_of, role_v2_of, is_employee, EMPLOYEE_ROLES,
@@ -138,7 +138,7 @@ async def get_my_tasks(current_user: dict = Depends(get_current_user)):
     return my_tasks
 
 
-@router.post("/my-tasks/{task_id}/submit")
+@router.post("/my-tasks/{task_id}/submit", dependencies=[Depends(require_sheets_connection)])
 async def submit_my_task(task_id: str, req: WorkAssignmentSubmit, request: Request, current_user: dict = Depends(get_current_user)):
     """Employee submits completed task with notes and proof."""
     _reject_auditor(current_user)
@@ -184,7 +184,7 @@ async def get_my_attendance(current_user: dict = Depends(get_current_user)):
     return my_records
 
 
-@router.post("/my-attendance/check-in")
+@router.post("/my-attendance/check-in", dependencies=[Depends(require_sheets_connection)])
 async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, request: Request, current_user: dict = Depends(get_current_user)):
     """Clock in for today. Prevents duplicate check-in."""
     _reject_auditor(current_user)
@@ -234,7 +234,7 @@ async def check_in_my_attendance(req: EmployeeAttendanceCheckIn, request: Reques
     return {"ok": True, "message": f"Checked in successfully at {now_time}.", "attendance_id": att_id, "status": "PRESENT", "record": saved}
 
 
-@router.post("/my-attendance/check-out")
+@router.post("/my-attendance/check-out", dependencies=[Depends(require_sheets_connection)])
 async def check_out_my_attendance(req: EmployeeAttendanceCheckOut, request: Request, current_user: dict = Depends(get_current_user)):
     """Clock out for today and calculate total hours."""
     _reject_auditor(current_user)
@@ -333,7 +333,7 @@ class EmployeeSelfProfileUpdate(BaseModel):
     bank_details: Optional[str] = None
 
 
-@router.put("/my-profile")
+@router.put("/my-profile", dependencies=[Depends(require_sheets_connection)])
 async def update_my_profile(req: EmployeeSelfProfileUpdate, request: Request, current_user: dict = Depends(get_current_user)):
     """Employee updates own personal details (mobile, email, address, bank details)."""
     _reject_auditor(current_user)
@@ -382,7 +382,7 @@ async def get_my_projects(current_user: dict = Depends(get_current_user)):
     return my_projects
 
 
-@router.post("/my-projects/milestones/{milestone_id}/submit")
+@router.post("/my-projects/milestones/{milestone_id}/submit", dependencies=[Depends(require_sheets_connection)])
 async def submit_my_milestone(milestone_id: str, req: FreelancerMilestoneSubmit, request: Request, current_user: dict = Depends(get_current_user)):
     """Freelancer submits deliverable for a milestone."""
     _reject_auditor(current_user)
@@ -582,7 +582,7 @@ async def list_labour(current_user: dict = Depends(get_current_user)):
     return filter_confidential_records(records, current_user, tab_name="LabourMaster")
 
 
-@router.post("/labour")
+@router.post("/labour", dependencies=[Depends(require_sheets_connection)])
 async def create_labour(req: LabourCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Create a new labour master profile via Apps Script bridge. Strips confidential bank fields for non-owners."""
     _reject_auditor(current_user)
@@ -622,7 +622,7 @@ async def create_labour(req: LabourCreate, request: Request, current_user: dict 
     return {"ok": True, "message": f"Labour worker {req.full_name} registered successfully.", "labour": safe_labour, "labour_id": labour_id}
 
 
-@router.put("/labour/{labour_id}")
+@router.put("/labour/{labour_id}", dependencies=[Depends(require_sheets_connection)])
 async def update_labour(labour_id: str, req: LabourUpdate, request: Request, current_user: dict = Depends(get_current_user)):
     """Update labour worker master details. Non-owners cannot modify confidential bank/personal fields."""
     _reject_auditor(current_user)
@@ -705,7 +705,7 @@ async def list_labour_attendance(
     return records
 
 
-@router.post("/labour/attendance/bulk")
+@router.post("/labour/attendance/bulk", dependencies=[Depends(require_sheets_connection)])
 async def save_labour_attendance_bulk(req: LabourAttendanceBulk, request: Request, current_user: dict = Depends(get_current_user)):
     """Save bulk daily attendance for labour workers atomically via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -796,7 +796,7 @@ async def list_labour_work_entries(current_user: dict = Depends(get_current_user
     return entries
 
 
-@router.post("/labour/work-entries")
+@router.post("/labour/work-entries", dependencies=[Depends(require_sheets_connection)])
 async def create_labour_work_entry(req: LabourWorkEntryCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Record piece-rate or task-based work entry for a labour worker via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -872,7 +872,7 @@ async def list_tasks(status: Optional[str] = None, user_id: Optional[str] = None
     return tasks
 
 
-@router.post("/tasks")
+@router.post("/tasks", dependencies=[Depends(require_sheets_connection)])
 async def create_task(req: WorkAssignmentCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Assign a work task to an employee via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -915,7 +915,7 @@ async def create_task(req: WorkAssignmentCreate, request: Request, current_user:
     return {"ok": True, "message": f"Task '{req.title}' assigned successfully.", "task": saved}
 
 
-@router.put("/tasks/{task_id}")
+@router.put("/tasks/{task_id}", dependencies=[Depends(require_sheets_connection)])
 async def update_task(task_id: str, req: WorkAssignmentUpdate, request: Request, current_user: dict = Depends(get_current_user)):
     """Update a task assignment via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -942,7 +942,7 @@ async def update_task(task_id: str, req: WorkAssignmentUpdate, request: Request,
     return {"ok": True, "message": f"Task {task_id} updated."}
 
 
-@router.post("/tasks/{task_id}/review")
+@router.post("/tasks/{task_id}/review", dependencies=[Depends(require_sheets_connection)])
 async def review_task(task_id: str, req: WorkAssignmentReview, request: Request, current_user: dict = Depends(get_current_user)):
     """Review submitted task: approve or reject via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -1004,7 +1004,7 @@ async def list_projects(current_user: dict = Depends(get_current_user)):
     return projects
 
 
-@router.post("/projects")
+@router.post("/projects", dependencies=[Depends(require_sheets_connection)])
 async def create_project(req: FreelancerProjectCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Create a new freelancer project via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -1059,7 +1059,7 @@ async def list_project_milestones(project_id: str, current_user: dict = Depends(
     return proj_ms
 
 
-@router.post("/projects/{project_id}/milestones")
+@router.post("/projects/{project_id}/milestones", dependencies=[Depends(require_sheets_connection)])
 async def create_project_milestone(project_id: str, req: FreelancerMilestoneCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Add a milestone to a freelancer project via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -1094,7 +1094,7 @@ async def create_project_milestone(project_id: str, req: FreelancerMilestoneCrea
     return {"ok": True, "message": f"Milestone '{req.title}' created.", "milestone": saved}
 
 
-@router.post("/milestones/{milestone_id}/review")
+@router.post("/milestones/{milestone_id}/review", dependencies=[Depends(require_sheets_connection)])
 async def review_project_milestone(milestone_id: str, req: FreelancerMilestoneReview, request: Request, current_user: dict = Depends(get_current_user)):
     """Owner/PA reviews freelancer milestone via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -1147,7 +1147,7 @@ async def list_salary_structures(current_user: dict = Depends(get_current_user))
     return structures
 
 
-@router.post("/salary-structures")
+@router.post("/salary-structures", dependencies=[Depends(require_sheets_connection)])
 async def create_or_update_salary_structure(req: SalaryStructureCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Owner creates/updates salary structure atomically via Apps Script bridge (Owner only)."""
     _reject_auditor(current_user)
@@ -1217,7 +1217,7 @@ async def list_payroll_runs(current_user: dict = Depends(get_current_user)):
     return runs
 
 
-@router.post("/payroll/calculate")
+@router.post("/payroll/calculate", dependencies=[Depends(require_sheets_connection)])
 async def calculate_payroll_run(req: PayrollRunCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """
     Calculate and generate a draft payroll run for a month (e.g. '2026-10') atomically via Apps Script bridge (Owner only).
@@ -1405,7 +1405,7 @@ async def get_payroll_run_items(payroll_run_id: str, current_user: dict = Depend
     return run_items
 
 
-@router.put("/payroll/items/{item_id}")
+@router.put("/payroll/items/{item_id}", dependencies=[Depends(require_sheets_connection)])
 async def update_payroll_item(item_id: str, req: PayrollItemUpdate, request: Request, current_user: dict = Depends(get_current_user)):
     """Adjust deductions, incentives, bonus, or adjustments on a draft payroll item atomically via bridge (Owner only)."""
     _reject_auditor(current_user)
@@ -1473,7 +1473,7 @@ async def update_payroll_item(item_id: str, req: PayrollItemUpdate, request: Req
     return {"ok": True, "message": f"Payroll item {item_id} updated.", "net_amount": net}
 
 
-@router.post("/payroll/{payroll_run_id}/approve")
+@router.post("/payroll/{payroll_run_id}/approve", dependencies=[Depends(require_sheets_connection)])
 async def approve_payroll_run(payroll_run_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     """Owner approves a draft payroll run via Apps Script bridge."""
     _reject_auditor(current_user)
@@ -1518,7 +1518,7 @@ async def approve_payroll_run(payroll_run_id: str, request: Request, current_use
 
 # --- Payments & Salary Receipts ---
 
-@router.post("/payments")
+@router.post("/payments", dependencies=[Depends(require_sheets_connection)])
 async def record_workforce_payment(req: WorkforcePaymentCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """
     Record workforce disbursement atomically via Apps Script bridge (Owner only),

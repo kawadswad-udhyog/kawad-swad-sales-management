@@ -37,6 +37,8 @@ import {
   getSupplierReturns,
   createSupplierReturn,
   getPurchasingSummary,
+  createSubmissionNonce,
+  isUnknownOutcomeError,
 } from '../services/api';
 import type {
   Supplier,
@@ -77,6 +79,9 @@ export const RAW_MATERIAL_CATALOG = [
 ];
 
 type PurchasingTab = 'suppliers' | 'orders' | 'receipts' | 'bills' | 'payments' | 'returns';
+
+const UNKNOWN_OUTCOME_MSG =
+  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
 export const PurchasingView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<PurchasingTab>('orders');
@@ -196,6 +201,20 @@ export const PurchasingView: React.FC = () => {
   } | null>(null);
   const [isApplyingAdvance, setIsApplyingAdvance] = useState(false);
 
+  // Submission guards & stable idempotency nonces
+  const [supplierNonce, setSupplierNonce] = useState('');
+  const [isSubmittingSupplier, setIsSubmittingSupplier] = useState(false);
+  const [orderNonce, setOrderNonce] = useState('');
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
+  const [cancelOrderNonces, setCancelOrderNonces] = useState<Record<string, string>>({});
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
+  const [receiptNonce, setReceiptNonce] = useState('');
+  const [isSubmittingReceipt, setIsSubmittingReceipt] = useState(false);
+  const [billNonce, setBillNonce] = useState('');
+  const [isSubmittingBill, setIsSubmittingBill] = useState(false);
+  const [returnNonce, setReturnNonce] = useState('');
+  const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
+
   const [newReturn, setNewReturn] = useState({
     supplier_id: '',
     return_date: new Date().toISOString().split('T')[0],
@@ -257,8 +276,14 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreateSupplier = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingSupplier) return;
+    const activeNonce = supplierNonce || createSubmissionNonce('PUR-SUP');
+    if (!supplierNonce) setSupplierNonce(activeNonce);
+    setIsSubmittingSupplier(true);
+    setError(null);
     try {
-      await createSupplier(newSupplier);
+      await createSupplier(newSupplier, activeNonce);
+      setSupplierNonce('');
       setSuccessMsg(`Supplier '${newSupplier.supplier_name}' registered successfully.`);
       setShowSupplierModal(false);
       setNewSupplier({
@@ -273,55 +298,95 @@ export const PurchasingView: React.FC = () => {
       });
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmittingSupplier(false);
     }
   };
 
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingOrder) return;
+    const activeNonce = orderNonce || createSubmissionNonce('PUR-PO');
+    if (!orderNonce) setOrderNonce(activeNonce);
+    setIsSubmittingOrder(true);
+    setError(null);
     try {
-      await createPurchaseOrder(newOrder);
+      await createPurchaseOrder(newOrder, activeNonce);
+      setOrderNonce('');
       setSuccessMsg('Purchase Order generated successfully.');
       setShowOrderModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmittingOrder(false);
     }
   };
 
   const handleCancelOrder = async (orderId: string) => {
+    if (cancellingOrderId) return;
     const reason = prompt('Reason for cancelling Purchase Order:');
     if (!reason) return;
+    const activeNonce = cancelOrderNonces[orderId] || createSubmissionNonce('PUR-CPO');
+    if (!cancelOrderNonces[orderId]) {
+      setCancelOrderNonces((prev) => ({ ...prev, [orderId]: activeNonce }));
+    }
+    setCancellingOrderId(orderId);
+    setError(null);
     try {
-      await cancelPurchaseOrder(orderId, reason);
+      await cancelPurchaseOrder(orderId, reason, activeNonce);
+      setCancelOrderNonces((prev) => {
+        const next = { ...prev };
+        delete next[orderId];
+        return next;
+      });
       setSuccessMsg(`Purchase Order ${orderId} cancelled.`);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setCancellingOrderId(null);
     }
   };
 
   const handleCreateReceipt = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingReceipt) return;
+    const activeNonce = receiptNonce || createSubmissionNonce('PUR-GRN');
+    if (!receiptNonce) setReceiptNonce(activeNonce);
+    setIsSubmittingReceipt(true);
+    setError(null);
     try {
-      await createGoodsReceipt(newReceipt);
+      await createGoodsReceipt(newReceipt, activeNonce);
+      setReceiptNonce('');
       setSuccessMsg('Goods Receipt Note (GRN) created. Stock ledger & accounting posted.');
       setShowReceiptModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmittingReceipt(false);
     }
   };
 
   const handleCreateBill = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingBill) return;
+    const activeNonce = billNonce || createSubmissionNonce('PUR-BILL');
+    if (!billNonce) setBillNonce(activeNonce);
+    setIsSubmittingBill(true);
+    setError(null);
     try {
-      await createSupplierBill(newBill);
+      await createSupplierBill(newBill, activeNonce);
+      setBillNonce('');
       setSuccessMsg(`Supplier Bill ${newBill.bill_number} booked in accounts payable.`);
       setShowBillModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmittingBill(false);
     }
   };
 
@@ -365,7 +430,7 @@ export const PurchasingView: React.FC = () => {
       setShowPaymentModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingPayment(false);
     }
@@ -389,7 +454,7 @@ export const PurchasingView: React.FC = () => {
       setApplyAdvanceModal(null);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsApplyingAdvance(false);
     }
@@ -397,13 +462,21 @@ export const PurchasingView: React.FC = () => {
 
   const handleCreateReturn = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingReturn) return;
+    const activeNonce = returnNonce || createSubmissionNonce('PUR-RET');
+    if (!returnNonce) setReturnNonce(activeNonce);
+    setIsSubmittingReturn(true);
+    setError(null);
     try {
-      await createSupplierReturn(newReturn);
+      await createSupplierReturn(newReturn, activeNonce);
+      setReturnNonce('');
       setSuccessMsg('Supplier Return (Debit Note) issued. Raw material stock deducted.');
       setShowReturnModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmittingReturn(false);
     }
   };
 
@@ -630,9 +703,10 @@ export const PurchasingView: React.FC = () => {
                         {o.status !== 'CANCELLED' && o.status !== 'FULFILLED' && (
                           <button
                             onClick={() => handleCancelOrder(o.po_id)}
-                            className="text-2xs font-semibold text-red-600 hover:text-red-800 hover:underline"
+                            disabled={Boolean(cancellingOrderId)}
+                            className="text-2xs font-semibold text-red-600 hover:text-red-800 hover:underline disabled:opacity-50"
                           >
-                            Cancel
+                            {cancellingOrderId === o.po_id ? 'Cancelling...' : 'Cancel'}
                           </button>
                         )}
                       </td>
@@ -969,12 +1043,12 @@ export const PurchasingView: React.FC = () => {
             subtitle="Add a certified grain mandi trader, spice merchant, or packaging vendor"
             icon={<Building2 size={20} />}
             onSubmit={handleCreateSupplier}
-            onCancel={() => setShowSupplierModal(false)}
+            onCancel={() => { setShowSupplierModal(false); setSupplierNonce(''); }}
             maxWidth="lg"
             actions={
               <FormActions>
-                <CancelButton onClick={() => setShowSupplierModal(false)} />
-                <SaveButton label="Save Supplier" icon={<Building2 size={15} />} />
+                <CancelButton onClick={() => { setShowSupplierModal(false); setSupplierNonce(''); }} />
+                <SaveButton label="Save Supplier" icon={<Building2 size={15} />} isLoading={isSubmittingSupplier} />
               </FormActions>
             }
           >
@@ -1079,12 +1153,12 @@ export const PurchasingView: React.FC = () => {
               subtitle="Generate a binding procurement order with agreed mandi rates and GST terms"
               icon={<Truck size={20} />}
               onSubmit={handleCreateOrder}
-              onCancel={() => setShowOrderModal(false)}
+              onCancel={() => { setShowOrderModal(false); setOrderNonce(''); }}
               maxWidth="3xl"
               actions={
                 <FormActions>
-                  <CancelButton onClick={() => setShowOrderModal(false)} />
-                  <SaveButton label="Issue Purchase Order" icon={<Truck size={15} />} />
+                  <CancelButton onClick={() => { setShowOrderModal(false); setOrderNonce(''); }} />
+                  <SaveButton label="Issue Purchase Order" icon={<Truck size={15} />} isLoading={isSubmittingOrder} />
                 </FormActions>
               }
             >
@@ -1352,12 +1426,12 @@ export const PurchasingView: React.FC = () => {
               subtitle="Inspect incoming grain & materials, record accepted stock, and update raw material inventory"
               icon={<PackageCheck size={20} />}
               onSubmit={handleCreateReceipt}
-              onCancel={() => setShowReceiptModal(false)}
+              onCancel={() => { setShowReceiptModal(false); setReceiptNonce(''); }}
               maxWidth="3xl"
               actions={
                 <FormActions>
-                  <CancelButton onClick={() => setShowReceiptModal(false)} />
-                  <SaveButton label="Confirm Inward GRN" icon={<PackageCheck size={15} />} />
+                  <CancelButton onClick={() => { setShowReceiptModal(false); setReceiptNonce(''); }} />
+                  <SaveButton label="Confirm Inward GRN" icon={<PackageCheck size={15} />} isLoading={isSubmittingReceipt} />
                 </FormActions>
               }
             >
@@ -1570,12 +1644,12 @@ export const PurchasingView: React.FC = () => {
             subtitle="Record vendor bill in accounts payable with automated GST calculation and freight capitalization"
             icon={<Receipt size={20} />}
             onSubmit={handleCreateBill}
-            onCancel={() => setShowBillModal(false)}
+            onCancel={() => { setShowBillModal(false); setBillNonce(''); }}
             maxWidth="xl"
             actions={
               <FormActions>
-                <CancelButton onClick={() => setShowBillModal(false)} />
-                <SaveButton label="Book Supplier Bill" icon={<Receipt size={15} />} />
+                <CancelButton onClick={() => { setShowBillModal(false); setBillNonce(''); }} />
+                <SaveButton label="Book Supplier Bill" icon={<Receipt size={15} />} isLoading={isSubmittingBill} />
               </FormActions>
             }
           >
@@ -1987,12 +2061,12 @@ export const PurchasingView: React.FC = () => {
               subtitle="Return defective raw materials to vendor, generate a debit note, and deduct stock"
               icon={<ArrowRightLeft size={20} />}
               onSubmit={handleCreateReturn}
-              onCancel={() => setShowReturnModal(false)}
+              onCancel={() => { setShowReturnModal(false); setReturnNonce(''); }}
               maxWidth="lg"
               actions={
                 <FormActions>
-                  <CancelButton onClick={() => setShowReturnModal(false)} />
-                  <SaveButton label="Issue Debit Note & Return" icon={<ArrowRightLeft size={15} />} variant="danger" />
+                  <CancelButton onClick={() => { setShowReturnModal(false); setReturnNonce(''); }} />
+                  <SaveButton label="Issue Debit Note & Return" icon={<ArrowRightLeft size={15} />} variant="danger" isLoading={isSubmittingReturn} />
                 </FormActions>
               }
             >

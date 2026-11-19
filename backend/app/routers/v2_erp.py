@@ -12,6 +12,7 @@ Enforces:
 - CA/Owner pending policy governance (PENDING_CA_APPROVAL)
 """
 
+import json
 from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional
 import uuid
@@ -21,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.accounting.journal_engine import validate_journal_lines
 from app.apps_script_bridge import AppsScriptBridge, BridgeResult, apps_script_bridge
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import (
     TWELVE_ROLES,
     V2_ROLE_PERMISSIONS,
@@ -373,7 +374,7 @@ async def get_erp_capabilities(current_user: dict = Depends(get_current_user)):
         "gig_worker_statuses": list(GIG_WORKER_STATUSES),
         "apps_script_bridge_configured": apps_script_bridge.is_configured(),
         "google_sheets_connected": bool(db.is_connected),
-        "persistent_writes_enabled": bool(db.is_connected and db.spreadsheet is not None),
+        "persistent_writes_enabled": bool(db.is_connected and db.spreadsheet is not None and apps_script_bridge.is_configured()),
         "pending_ca_policies": get_ca_policies(),
     }
 
@@ -424,7 +425,7 @@ async def list_ca_policies(current_user: dict = Depends(get_current_user)):
     }
 
 
-@router.put("/meta/policies/{policy_key}")
+@router.put("/meta/policies/{policy_key}", dependencies=[Depends(require_sheets_connection)])
 async def update_ca_policy(
     policy_key: str,
     req: PolicyUpdateRequest,
@@ -439,17 +440,36 @@ async def update_ca_policy(
     if req.status == "APPROVED" and req.value not in allowed:
         raise HTTPException(status_code=422, detail=f"Approved value for {policy_key} must be one of {allowed}")
 
-    client_nonce = (
-        req.nonce
-        or request.headers.get("X-KS-Idempotency-Key")
-        or request.headers.get("X-Idempotency-Key")
-        or f"POL-{policy_key}-{req.status}-{req.value or 'NONE'}"
+    client_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
+    if not client_nonce:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "status": "REJECTED",
+                "error_code": "MISSING_IDEMPOTENCY_NONCE",
+                "message": "Client idempotency nonce (body nonce or X-KS-Idempotency-Key header) is required.",
+                "retryable": False,
+            },
+        )
+    setting_key = f"CA_POLICY_{policy_key.upper()}"
+    setting_value = json.dumps(
+        {
+            "policy_key": policy_key,
+            "status": req.status,
+            "value": req.value,
+            "approved_by": actor_id,
+            "notes": req.notes or "",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
     )
     res = apps_script_bridge.execute_governed_write(
         action="UPDATE_CA_POLICY",
         target_tab="Settings",
         payload={
-            "setting_key": f"CA_POLICY_{policy_key.upper()}",
+            "setting_key": setting_key,
+            "setting_value": setting_value,
+            "description": (req.notes or policies[policy_key].get("label") or policy_key).strip(),
             "policy_key": policy_key,
             "status": req.status,
             "value": req.value,
@@ -574,9 +594,10 @@ async def list_v2_packaging_batches(
     )
 
 
-@router.post("/packaging/batches")
-async def create_v2_packaging_batch(req: GovernedPackagingCreateRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/packaging/batches", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_packaging_batch(req: GovernedPackagingCreateRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "packaging", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
 
     if (req.packets_200g + req.packets_500g + req.packets_1000g) <= 0:
         raise HTTPException(status_code=422, detail="At least one retail SKU quantity (200g, 500g, or 1000g) must be > 0.")
@@ -617,7 +638,7 @@ async def create_v2_packaging_batch(req: GovernedPackagingCreateRequest, current
             "loss_reason": (req.loss_reason or "").strip(),
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="packaging_id",
@@ -656,9 +677,10 @@ async def list_v2_dispatches(
     )
 
 
-@router.post("/logistics/dispatches")
-async def create_v2_dispatch(req: GovernedDispatchCreateRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/logistics/dispatches", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_dispatch(req: GovernedDispatchCreateRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "logistics", "dispatch")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
 
     # Enforce strict lot quality gate: block dispatch unless lot quality_status == "RELEASED"
     try:
@@ -689,7 +711,7 @@ async def create_v2_dispatch(req: GovernedDispatchCreateRequest, current_user: d
             "quantity_packets": req.quantity_packets,
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="dispatch_id",
@@ -720,9 +742,10 @@ async def list_marketplace_settlements(
     )
 
 
-@router.post("/channels/settlements")
-async def create_marketplace_settlement(req: GovernedMarketplaceSettlementRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/channels/settlements", dependencies=[Depends(require_sheets_connection)])
+async def create_marketplace_settlement(req: GovernedMarketplaceSettlementRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "channels", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
 
     if req.apply_automated_gst_posting:
         try:
@@ -743,7 +766,7 @@ async def create_marketplace_settlement(req: GovernedMarketplaceSettlementReques
             "apply_automated_gst_posting": req.apply_automated_gst_posting,
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="settlement_id",
@@ -774,9 +797,10 @@ async def list_compliance_records(
     )
 
 
-@router.post("/compliance/records")
-async def create_compliance_record(req: GovernedComplianceRecordRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/compliance/records", dependencies=[Depends(require_sheets_connection)])
+async def create_compliance_record(req: GovernedComplianceRecordRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "compliance_assets", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="RECORD_COMPLIANCE_ITEM",
         target_tab="ComplianceRecords",
@@ -787,7 +811,7 @@ async def create_compliance_record(req: GovernedComplianceRecordRequest, current
             "status": req.status,
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="compliance_id",
@@ -807,9 +831,10 @@ async def list_asset_maintenance(
     return _safe_query_tab("AssetsMaintenance", fresh=True, search=search, page=page, page_size=page_size)
 
 
-@router.post("/assets/maintenance")
-async def create_asset_maintenance(req: GovernedAssetMaintenanceRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/assets/maintenance", dependencies=[Depends(require_sheets_connection)])
+async def create_asset_maintenance(req: GovernedAssetMaintenanceRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "compliance_assets", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="RECORD_ASSET_MAINTENANCE",
         target_tab="AssetsMaintenance",
@@ -821,7 +846,7 @@ async def create_asset_maintenance(req: GovernedAssetMaintenanceRequest, current
             "scheduled_date": req.scheduled_date or now_iso()[:10],
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="maintenance_id",
@@ -879,11 +904,12 @@ async def list_employee_advances(
     return raw_page
 
 
-@router.post("/workforce/advances/{advance_id}/disburse")
+@router.post("/workforce/advances/{advance_id}/disburse", dependencies=[Depends(require_sheets_connection)])
 async def disburse_approved_employee_advance(
     advance_id: str,
     req: AdvanceDisburseRequest,
     current_user: dict = Depends(get_current_user),
+    request: Request = None,
 ):
     """OWNER_ADMIN or ACCOUNTS may disburse ONLY pre-approved advances; delegates to Apps Script."""
     actor_id, v2_role = require_roles(
@@ -891,6 +917,7 @@ async def disburse_approved_employee_advance(
         {"OWNER_ADMIN", "ACCOUNTS"},
         detail="Only OWNER_ADMIN or ACCOUNTS may disburse approved advances.",
     )
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="DISBURSE_APPROVED_ADVANCE",
         target_tab="EmployeeAdvances",
@@ -900,7 +927,7 @@ async def disburse_approved_employee_advance(
             "payment_reference": req.payment_reference.strip(),
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="advance_id",
@@ -928,10 +955,11 @@ async def list_gig_worker_entries(
     )
 
 
-@router.post("/workforce/gig-entries")
-async def submit_gig_worker_entry(req: GigWorkSubmitRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/workforce/gig-entries", dependencies=[Depends(require_sheets_connection)])
+async def submit_gig_worker_entry(req: GigWorkSubmitRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     """Gig worker production work entry submission -> SUBMITTED state via Apps Script."""
     actor_id, v2_role = require_roles(current_user, {"OWNER_ADMIN", "PA", "HR", "PRODUCTION"})
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="SUBMIT_GIG_WORK_ENTRY",
         target_tab="LabourWorkEntries",
@@ -946,7 +974,7 @@ async def submit_gig_worker_entry(req: GigWorkSubmitRequest, current_user: dict 
             "status": "SUBMITTED",
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="entry_id",
@@ -955,10 +983,11 @@ async def submit_gig_worker_entry(req: GigWorkSubmitRequest, current_user: dict 
     return _handle_bridge_result(res)
 
 
-@router.post("/workforce/gig-entries/{entry_id}/verify")
-async def verify_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/workforce/gig-entries/{entry_id}/verify", dependencies=[Depends(require_sheets_connection)])
+async def verify_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     """Verify submitted gig work entry -> VERIFIED state via Apps Script."""
     actor_id, v2_role = require_roles(current_user, {"OWNER_ADMIN", "HR"})
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="VERIFY_GIG_WORK_ENTRY",
         target_tab="LabourWorkEntries",
@@ -967,7 +996,7 @@ async def verify_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, 
             "target_status": "VERIFIED",
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="entry_id",
@@ -976,10 +1005,11 @@ async def verify_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, 
     return _handle_bridge_result(res)
 
 
-@router.post("/workforce/gig-entries/{entry_id}/pay")
-async def pay_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/workforce/gig-entries/{entry_id}/pay", dependencies=[Depends(require_sheets_connection)])
+async def pay_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     """Pay verified gig work entry -> PAID state (OWNER_ADMIN only) via Apps Script."""
     actor_id, v2_role = require_owner(current_user)
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="PAY_GIG_WORK_ENTRY",
         target_tab="LabourWorkEntries",
@@ -990,7 +1020,7 @@ async def pay_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, cur
             "payment_reference": (req.payment_reference or "").strip(),
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="entry_id",
@@ -1002,9 +1032,10 @@ async def pay_gig_worker_entry(entry_id: str, req: GigWorkTransitionRequest, cur
 # ---------------------------------------------------------------------------
 # Procurement, Store, Milling, Production, Sales & Accounting Governed Routes
 # ---------------------------------------------------------------------------
-@router.post("/procurement/purchase-orders")
-async def create_v2_purchase_order(req: GovernedPurchaseOrderRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/procurement/purchase-orders", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_purchase_order(req: GovernedPurchaseOrderRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "procurement", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="CREATE_PURCHASE_ORDER",
         target_tab="PurchaseOrders",
@@ -1018,7 +1049,7 @@ async def create_v2_purchase_order(req: GovernedPurchaseOrderRequest, current_us
             "status": "OPEN",
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="po_id",
@@ -1027,9 +1058,10 @@ async def create_v2_purchase_order(req: GovernedPurchaseOrderRequest, current_us
     return _handle_bridge_result(res)
 
 
-@router.post("/procurement/goods-receipts")
-async def create_v2_goods_receipt(req: GovernedGoodsReceiptRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/procurement/goods-receipts", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_goods_receipt(req: GovernedGoodsReceiptRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "procurement", "receive")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="CREATE_GOODS_RECEIPT",
         target_tab="GoodsReceipts",
@@ -1044,10 +1076,10 @@ async def create_v2_goods_receipt(req: GovernedGoodsReceiptRequest, current_user
             "gst_amount": str(quantize_money(req.gst_amount)),
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
-        id_field="grn_id",
+        id_field="receipt_id",
         invalidate_tabs=["GoodsReceipts", "GoodsReceiptItems", "RawMaterialLedger", "PurchaseOrders", "JournalHeaders", "JournalLines"],
     )
     return _handle_bridge_result(res)
@@ -1070,9 +1102,10 @@ async def list_v2_store_ledger(
     return _safe_query_tab(tab_map[ledger_type], fresh=True, search=search, page=page, page_size=page_size)
 
 
-@router.post("/store/stock-adjustments")
-async def create_v2_stock_adjustment(req: GovernedStockAdjustmentRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/store/stock-adjustments", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_stock_adjustment(req: GovernedStockAdjustmentRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "store", "adjust_request")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     if req.adjustment_qty == Decimal("0"):
         raise HTTPException(status_code=422, detail="adjustment_qty must be non-zero.")
     res = apps_script_bridge.execute_governed_write(
@@ -1086,7 +1119,7 @@ async def create_v2_stock_adjustment(req: GovernedStockAdjustmentRequest, curren
             "status": "PENDING_OWNER_APPROVAL",
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="discrepancy_id",
@@ -1095,9 +1128,10 @@ async def create_v2_stock_adjustment(req: GovernedStockAdjustmentRequest, curren
     return _handle_bridge_result(res)
 
 
-@router.post("/milling/batches")
-async def create_v2_milling_batch(req: GovernedMillingBatchRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/milling/batches", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_milling_batch(req: GovernedMillingBatchRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "production", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     if req.flour_output_kg > req.input_quantity_kg:
         raise HTTPException(status_code=422, detail="flour_output_kg cannot exceed input_quantity_kg.")
     res = apps_script_bridge.execute_governed_write(
@@ -1113,7 +1147,7 @@ async def create_v2_milling_batch(req: GovernedMillingBatchRequest, current_user
             "milling_expenses": str(quantize_money(req.milling_expenses)),
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="milling_batch_id",
@@ -1122,9 +1156,10 @@ async def create_v2_milling_batch(req: GovernedMillingBatchRequest, current_user
     return _handle_bridge_result(res)
 
 
-@router.post("/production/batches")
-async def create_v2_production_batch(req: GovernedProductionBatchRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/production/batches", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_production_batch(req: GovernedProductionBatchRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "production", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="CREATE_PRODUCTION_BATCH",
         target_tab="ProductionBatches",
@@ -1137,7 +1172,7 @@ async def create_v2_production_batch(req: GovernedProductionBatchRequest, curren
             "shift": (req.shift or "MORNING").strip(),
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="production_id",
@@ -1146,9 +1181,10 @@ async def create_v2_production_batch(req: GovernedProductionBatchRequest, curren
     return _handle_bridge_result(res)
 
 
-@router.post("/sales/orders")
-async def create_v2_sales_order(req: GovernedSalesOrderRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/sales/orders", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_sales_order(req: GovernedSalesOrderRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "sales", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     res = apps_script_bridge.execute_governed_write(
         action="CREATE_SALES_ORDER",
         target_tab="SalesOrders",
@@ -1160,7 +1196,7 @@ async def create_v2_sales_order(req: GovernedSalesOrderRequest, current_user: di
             "items": req.items,
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="so_id",
@@ -1169,9 +1205,10 @@ async def create_v2_sales_order(req: GovernedSalesOrderRequest, current_user: di
     return _handle_bridge_result(res)
 
 
-@router.post("/sales/invoices")
-async def create_v2_sales_invoice(req: GovernedSalesInvoiceRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/sales/invoices", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_sales_invoice(req: GovernedSalesInvoiceRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "sales", "create")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
 
     # Enforce strict lot quality gate for any lot-referenced sale line
     lot_refs = {str(it.get("lot_id", "")).strip() for it in req.items if str(it.get("lot_id", "")).strip()}
@@ -1202,7 +1239,7 @@ async def create_v2_sales_invoice(req: GovernedSalesInvoiceRequest, current_user
             "cash_collected": str(quantize_money(req.cash_collected)),
             "notes": (req.notes or "").strip(),
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="sale_id",
@@ -1211,9 +1248,10 @@ async def create_v2_sales_invoice(req: GovernedSalesInvoiceRequest, current_user
     return _handle_bridge_result(res)
 
 
-@router.post("/accounting/journals")
-async def create_v2_journal_voucher(req: GovernedJournalVoucherRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/accounting/journals", dependencies=[Depends(require_sheets_connection)])
+async def create_v2_journal_voucher(req: GovernedJournalVoucherRequest, current_user: dict = Depends(get_current_user), request: Request = None):
     actor_id, v2_role = require_module_action(current_user, "accounting", "create_vouchers")
+    active_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.nonce)
     lines_payload = [
         {
             "account_code": l.account_code.strip(),
@@ -1243,7 +1281,7 @@ async def create_v2_journal_voucher(req: GovernedJournalVoucherRequest, current_
             "total_credit": str(quantize_money(total_credit)),
             "lines": lines_payload,
         },
-        nonce=req.nonce,
+        nonce=active_nonce,
         actor_user_id=actor_id,
         actor_role=v2_role,
         id_field="journal_id",

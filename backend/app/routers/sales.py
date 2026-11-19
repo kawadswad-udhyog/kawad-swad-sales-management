@@ -209,7 +209,7 @@ def _compute_authoritative_cogs(validated: list):
     batches = db.get_records("ProductionBatches", fresh=True)
     recipes = db.get_records("Recipes", fresh=True)
     stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
-    rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+    rm_master = db.get_records("RawMaterials", fresh=True)
 
     cogs_total = Decimal("0")
     for item in validated:
@@ -480,8 +480,8 @@ async def create_sale(req: SaleCreate, request: Request, current_user: dict = De
                                 payload={"sale_id": sale_id, "txn_status": "COMPLETE"},
                                 actor_user_id=user_id,
                                 actor_role=actor_role,
-                                nonce=clean_key or None,
-                                request=request,
+                                nonce=f"{clean_key}#complete" if clean_key else None,
+                                request=None if clean_key else request,
                                 id_field="sale_id",
                                 invalidate_tabs=["Sales"],
                             )
@@ -617,8 +617,8 @@ async def _resume_sale(
         },
         actor_user_id=user_id,
         actor_role=actor_role,
-        nonce=clean_key or None,
-        request=request,
+        nonce=f"{clean_key}#resume" if clean_key else None,
+        request=None if clean_key else request,
         id_field="sale_id",
         invalidate_tabs=["Sales", "SaleItems", "SalesmanStockLedger", "Payments", "CashLedger"],
     )
@@ -1333,7 +1333,7 @@ async def create_sales_order(req: SaleCreate, request: Request, current_user: di
     }
 
     bridge_res = apps_script_bridge.delegate_governed_write(
-        action="CREATE_SALES_ORDER",
+        action="CREATE_LEGACY_SALES_ORDER",
         target_tab="Sales",
         payload={"order": order_record, "items": line_items},
         actor_user_id=user_id,

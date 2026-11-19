@@ -28,6 +28,8 @@ import {
   createComplaintOrRecall,
   closeComplaint,
   getQualitySummary,
+  createSubmissionNonce,
+  isUnknownOutcomeError,
 } from '../services/api';
 import type {
   QualityCheck,
@@ -49,6 +51,9 @@ import {
 } from '../components/common/FormComponents';
 
 type QualityTab = 'checks' | 'lots' | 'returns' | 'complaints';
+
+const UNKNOWN_OUTCOME_MSG =
+  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
 export const QualityView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<QualityTab>('lots');
@@ -83,6 +88,20 @@ export const QualityView: React.FC = () => {
     targetStatus: 'RELEASED' | 'ON_HOLD' | 'REJECTED';
     reason: string;
   } | null>(null);
+
+  // Submission guards & stable idempotency nonces (preserved across retries / HTTP 504)
+  const [lotTransitionSubmitting, setLotTransitionSubmitting] = useState(false);
+  const [checkSubmitting, setCheckSubmitting] = useState(false);
+  const [lotSubmitting, setLotSubmitting] = useState(false);
+  const [returnSubmitting, setReturnSubmitting] = useState(false);
+  const [complaintSubmitting, setComplaintSubmitting] = useState(false);
+  const [resolveSubmitting, setResolveSubmitting] = useState(false);
+  const [lotActionNonces, setLotActionNonces] = useState<Record<string, string>>({});
+  const [checkNonce, setCheckNonce] = useState('');
+  const [lotNonce, setLotNonce] = useState('');
+  const [returnNonce, setReturnNonce] = useState('');
+  const [complaintNonce, setComplaintNonce] = useState('');
+  const [resolveNonce, setResolveNonce] = useState('');
 
   // Form states
   const [newCheck, setNewCheck] = useState({
@@ -172,27 +191,43 @@ export const QualityView: React.FC = () => {
   }, [loadData]);
 
   const handleOpenLotTransition = (lotId: string, targetStatus: 'RELEASED' | 'ON_HOLD' | 'REJECTED') => {
+    setError(null);
     setLotActionModal({ lotId, targetStatus, reason: '' });
   };
 
   const handleConfirmLotTransition = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!lotActionModal) return;
+    if (!lotActionModal || lotTransitionSubmitting) return;
     if (lotActionModal.targetStatus !== 'RELEASED' && !lotActionModal.reason.trim()) {
       setError(`Reason is required before marking a lot as ${lotActionModal.targetStatus}.`);
       return;
     }
+    const key = `${lotActionModal.lotId}:${lotActionModal.targetStatus}`;
+    const activeNonce = lotActionNonces[key] || createSubmissionNonce('QC-LOTST');
+    if (!lotActionNonces[key]) {
+      setLotActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
+    }
+    setLotTransitionSubmitting(true);
+    setError(null);
     try {
       await updateLotStatus(
         lotActionModal.lotId,
         lotActionModal.targetStatus as any,
-        lotActionModal.reason.trim() || undefined
+        lotActionModal.reason.trim() || undefined,
+        activeNonce
       );
+      setLotActionNonces((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
       setSuccessMsg(`Lot ${lotActionModal.lotId} quality_status updated to ${lotActionModal.targetStatus}.`);
       setLotActionModal(null);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setLotTransitionSubmitting(false);
     }
   };
 
@@ -208,62 +243,101 @@ export const QualityView: React.FC = () => {
 
   const handleCreateCheck = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (checkSubmitting) return;
+    const activeNonce = checkNonce || createSubmissionNonce('QC-CHK');
+    if (!checkNonce) setCheckNonce(activeNonce);
+    setCheckSubmitting(true);
+    setError(null);
     try {
-      await createQualityCheck(newCheck);
+      await createQualityCheck(newCheck, activeNonce);
+      setCheckNonce('');
       setSuccessMsg('Quality inspection record submitted.');
       setShowCheckModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckSubmitting(false);
     }
   };
 
   const handleCreateLot = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (lotSubmitting) return;
+    const activeNonce = lotNonce || createSubmissionNonce('QC-LOT');
+    if (!lotNonce) setLotNonce(activeNonce);
+    setLotSubmitting(true);
+    setError(null);
     try {
-      await createProductLot(newLot);
+      await createProductLot(newLot, activeNonce);
+      setLotNonce('');
       setSuccessMsg(`Product Lot created for ${newLot.product_name}.`);
       setShowLotModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setLotSubmitting(false);
     }
   };
 
   const handleCreateReturn = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (returnSubmitting) return;
+    const activeNonce = returnNonce || createSubmissionNonce('QC-RET');
+    if (!returnNonce) setReturnNonce(activeNonce);
+    setReturnSubmitting(true);
+    setError(null);
     try {
-      await createCustomerReturn(newReturn);
+      await createCustomerReturn(newReturn, activeNonce);
+      setReturnNonce('');
       setSuccessMsg('Customer return registered. Goods placed under quarantine disposition.');
       setShowReturnModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setReturnSubmitting(false);
     }
   };
 
   const handleCreateComplaint = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (complaintSubmitting) return;
+    const activeNonce = complaintNonce || createSubmissionNonce('QC-CMP');
+    if (!complaintNonce) setComplaintNonce(activeNonce);
+    setComplaintSubmitting(true);
+    setError(null);
     try {
-      await createComplaintOrRecall(newComplaint);
+      await createComplaintOrRecall(newComplaint, activeNonce);
+      setComplaintNonce('');
       setSuccessMsg(`${newComplaint.report_type} ticket registered for quality audit.`);
       setShowComplaintModal(false);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setComplaintSubmitting(false);
     }
   };
 
   const handleResolveComplaint = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!showResolveModal) return;
+    if (!showResolveModal || resolveSubmitting) return;
+    const activeNonce = resolveNonce || createSubmissionNonce('QC-CAPA');
+    if (!resolveNonce) setResolveNonce(activeNonce);
+    setResolveSubmitting(true);
+    setError(null);
     try {
-      await closeComplaint(showResolveModal.complaint_id, resolveForm);
+      await closeComplaint(showResolveModal.complaint_id, resolveForm, activeNonce);
+      setResolveNonce('');
       setSuccessMsg(`Complaint ${showResolveModal.complaint_id} marked CLOSED with CAPA.`);
       setShowResolveModal(null);
       loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
+    } finally {
+      setResolveSubmitting(false);
     }
   };
 
@@ -741,7 +815,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Record Quality Control Inspection"
           subtitle="Mandatory quality check for raw materials, in-process dough/rolling, or finished lots"
-          onClose={() => setShowCheckModal(false)}
+          onClose={() => { setShowCheckModal(false); setCheckNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateCheck} className="space-y-4">
@@ -788,8 +862,8 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => setShowCheckModal(false)} />
-              <SaveButton label="Submit Inspection" variant="primary" />
+              <CancelButton onClick={() => { setShowCheckModal(false); setCheckNonce(''); }} />
+              <SaveButton label="Submit Inspection" variant="primary" isLoading={checkSubmitting} />
             </FormActions>
           </form>
         </FormLayout>
@@ -801,7 +875,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Create Traceable Product Lot"
           subtitle="Generate batch identifier and expiry tracker for finished goods inventory"
-          onClose={() => setShowLotModal(false)}
+          onClose={() => { setShowLotModal(false); setLotNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateLot} className="space-y-4">
@@ -845,8 +919,8 @@ export const QualityView: React.FC = () => {
             </div>
 
             <FormActions>
-              <CancelButton onClick={() => setShowLotModal(false)} />
-              <SaveButton label="Generate Lot" variant="primary" />
+              <CancelButton onClick={() => { setShowLotModal(false); setLotNonce(''); }} />
+              <SaveButton label="Generate Lot" variant="primary" isLoading={lotSubmitting} />
             </FormActions>
           </form>
         </FormLayout>
@@ -858,7 +932,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Intake Customer Return (Quarantine)"
           subtitle="Record goods received back from distributors or retail partners"
-          onClose={() => setShowReturnModal(false)}
+          onClose={() => { setShowReturnModal(false); setReturnNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateReturn} className="space-y-4">
@@ -910,8 +984,8 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => setShowReturnModal(false)} />
-              <SaveButton label="Accept Return to Quarantine" variant="primary" />
+              <CancelButton onClick={() => { setShowReturnModal(false); setReturnNonce(''); }} />
+              <SaveButton label="Accept Return to Quarantine" variant="primary" isLoading={returnSubmitting} />
             </FormActions>
           </form>
         </FormLayout>
@@ -923,7 +997,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Log Quality Complaint / Recall"
           subtitle="Register customer defect escalation or initiate batch recall protocol"
-          onClose={() => setShowComplaintModal(false)}
+          onClose={() => { setShowComplaintModal(false); setComplaintNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateComplaint} className="space-y-4">
@@ -973,8 +1047,8 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => setShowComplaintModal(false)} />
-              <SaveButton label="Submit Ticket" variant="danger" />
+              <CancelButton onClick={() => { setShowComplaintModal(false); setComplaintNonce(''); }} />
+              <SaveButton label="Submit Ticket" variant="danger" isLoading={complaintSubmitting} />
             </FormActions>
           </form>
         </FormLayout>
@@ -986,7 +1060,7 @@ export const QualityView: React.FC = () => {
           asModal
           title={`Resolve Complaint ${showResolveModal.complaint_id}`}
           subtitle="Document root cause and preventive actions (CAPA) before formal closure"
-          onClose={() => setShowResolveModal(null)}
+          onClose={() => { setShowResolveModal(null); setResolveNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleResolveComplaint} className="space-y-4">
@@ -1011,8 +1085,8 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => setShowResolveModal(null)} />
-              <SaveButton label="Close Ticket with CAPA" variant="primary" />
+              <CancelButton onClick={() => { setShowResolveModal(null); setResolveNonce(''); }} />
+              <SaveButton label="Close Ticket with CAPA" variant="primary" isLoading={resolveSubmitting} />
             </FormActions>
           </form>
         </FormLayout>
@@ -1024,7 +1098,15 @@ export const QualityView: React.FC = () => {
           asModal
           title={`Update Lot ${lotActionModal.lotId} → ${lotActionModal.targetStatus}`}
           subtitle="Lot Quality State Machine: PENDING_QC → RELEASED / ON_HOLD / REJECTED"
-          onClose={() => setLotActionModal(null)}
+          onClose={() => {
+            const key = `${lotActionModal.lotId}:${lotActionModal.targetStatus}`;
+            setLotActionNonces((prev) => {
+              const next = { ...prev };
+              delete next[key];
+              return next;
+            });
+            setLotActionModal(null);
+          }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleConfirmLotTransition} className="space-y-4">
@@ -1044,10 +1126,21 @@ export const QualityView: React.FC = () => {
               />
             </FormField>
             <FormActions>
-              <CancelButton onClick={() => setLotActionModal(null)} />
+              <CancelButton
+                onClick={() => {
+                  const key = `${lotActionModal.lotId}:${lotActionModal.targetStatus}`;
+                  setLotActionNonces((prev) => {
+                    const next = { ...prev };
+                    delete next[key];
+                    return next;
+                  });
+                  setLotActionModal(null);
+                }}
+              />
               <SaveButton
                 label={`Confirm ${lotActionModal.targetStatus}`}
                 variant={lotActionModal.targetStatus === 'REJECTED' ? 'danger' : 'primary'}
+                isLoading={lotTransitionSubmitting}
               />
             </FormActions>
           </form>

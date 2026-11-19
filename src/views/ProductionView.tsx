@@ -16,6 +16,8 @@ import {
   DalMillingInput,
   DalMillingResult,
   DalMillingHistoryItem,
+  createSubmissionNonce,
+  isUnknownOutcomeError,
 } from '../services/api';
 import { useStore } from '../context/StoreContext';
 import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
@@ -35,6 +37,9 @@ const card: React.CSSProperties = { background: '#fff', border: '1px solid #e2e8
 const input: React.CSSProperties = { padding: '9px 10px', border: '1px solid #cbd5e1', borderRadius: 7, width: '100%', boxSizing: 'border-box' };
 const btn: React.CSSProperties = { padding: '9px 13px', border: 0, borderRadius: 7, background: '#166534', color: 'white', fontWeight: 600, cursor: 'pointer' };
 const today = new Date().toISOString().slice(0, 10);
+
+const UNKNOWN_OUTCOME_MSG =
+  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
 export interface ProductionViewProps {
   initialTab?: string;
@@ -118,6 +123,24 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [verifyIdempKey, setVerifyIdempKey] = useState<string>('');
   const [reviewingPackagingId, setReviewingPackagingId] = useState<string | null>(null);
   const [reviewExplanation, setReviewExplanation] = useState<string>('');
+
+  // Stable idempotency nonces & retry-preserved references across all Production workflows
+  const [recoverPkgNonces, setRecoverPkgNonces] = useState<Record<string, string>>({});
+  const [confirmRecipeNonces, setConfirmRecipeNonces] = useState<Record<string, string>>({});
+  const [rawMasterNonce, setRawMasterNonce] = useState('');
+  const [receiveNonce, setReceiveNonce] = useState('');
+  const [millingNonce, setMillingNonce] = useState('');
+  const [workerNonce, setWorkerNonce] = useState('');
+  const [attNonce, setAttNonce] = useState('');
+  const [editAttNonce, setEditAttNonce] = useState('');
+  const [delAttNonces, setDelAttNonces] = useState<Record<string, string>>({});
+  const [recipeNonce, setRecipeNonce] = useState('');
+  const [batchNonce, setBatchNonce] = useState('');
+  const [batchApprovalNonces, setBatchApprovalNonces] = useState<Record<string, string>>({});
+  const [pkgNonce, setPkgNonce] = useState('');
+  const [pkgRef, setPkgRef] = useState('');
+  const [reviewPkgNonces, setReviewPkgNonces] = useState<Record<string, string>>({});
+  const [dispatchNonce, setDispatchNonce] = useState('');
   const [rmCategoryFilter, setRmCategoryFilter] = useState<string>('ALL');
   const [rmSearch, setRmSearch] = useState<string>('');
   const [receiveForm, setReceiveForm] = useState<{
@@ -388,15 +411,30 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
   const handleRecoverPackaging = async (packagingId: string) => {
     if (busy || !packagingId) return;
+    const activeNonce = recoverPkgNonces[packagingId] || createSubmissionNonce('PRD-PKGRCV');
+    if (!recoverPkgNonces[packagingId]) {
+      setRecoverPkgNonces((prev) => ({ ...prev, [packagingId]: activeNonce }));
+    }
     setRecoveringBatchId(packagingId);
-    await runAction(
-      () => apiRequest(`/api/production/packaging/${encodeURIComponent(packagingId)}/recover`, { method: 'POST' }),
+    const ok = await runAction(
+      () =>
+        apiRequest(`/api/production/packaging/${encodeURIComponent(packagingId)}/recover`, {
+          method: 'POST',
+          idempotencyKey: activeNonce,
+        }),
       `Packaging batch ${packagingId} recovered successfully. Stock ledger movements posted.`,
       async () => {
         await refreshPackaging();
         await refreshRegister();
       }
     );
+    if (ok) {
+      setRecoverPkgNonces((prev) => {
+        const next = { ...prev };
+        delete next[packagingId];
+        return next;
+      });
+    }
     setRecoveringBatchId(null);
   };
 
@@ -467,7 +505,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       }
       return true;
     } catch (e: any) {
-      showError(e?.message || 'Action failed.');
+      showError(isUnknownOutcomeError(e) ? UNKNOWN_OUTCOME_MSG : e?.message || 'Action failed.');
       return false;
     } finally {
       setBusy(false);
@@ -931,17 +969,30 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         type="button"
                         style={{ ...btn, flex: 1, padding: '7px 10px', fontSize: 12, background: '#d97706' }}
                         disabled={busy}
-                        onClick={() =>
-                          runAction(
+                        onClick={async () => {
+                          const rId = String(r.recipe_id);
+                          const activeNonce = confirmRecipeNonces[rId] || createSubmissionNonce('PRD-RCPOK');
+                          if (!confirmRecipeNonces[rId]) {
+                            setConfirmRecipeNonces((prev) => ({ ...prev, [rId]: activeNonce }));
+                          }
+                          const ok = await runAction(
                             () =>
                               apiRequest(`/api/production/recipes/master/${encodeURIComponent(r.recipe_id)}/confirm`, {
                                 method: 'POST',
                                 body: JSON.stringify({ approved: true }),
+                                idempotencyKey: activeNonce,
                               }),
                             `A new immutable approved version was created from ${r.product_name_snapshot}.`,
                             refreshMasterRecipes
-                          )
-                        }
+                          );
+                          if (ok) {
+                            setConfirmRecipeNonces((prev) => {
+                              const next = { ...prev };
+                              delete next[rId];
+                              return next;
+                            });
+                          }
+                        }}
                       >
                         ✅ Approve New Version
                       </button>
@@ -996,9 +1047,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     showError('Leave the rate blank when status is PENDING.');
                     return;
                   }
+                  const activeNonce = rawMasterNonce || createSubmissionNonce('PRD-RMMST');
+                  if (!rawMasterNonce) setRawMasterNonce(activeNonce);
                   const ok = await runAction(
                     () => apiRequest('/api/production/raw-materials', {
                       method: 'POST',
+                      idempotencyKey: activeNonce,
                       body: JSON.stringify({
                         material_name: rawMasterForm.material_name.trim(),
                         unit: rawMasterForm.unit,
@@ -1011,6 +1065,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     refreshRawMaterials
                   );
                   if (ok) {
+                    setRawMasterNonce('');
                     setRawMasterForm({ material_name: '', unit: 'kg', category: 'RAW_MATERIAL', rate_per_unit: '', rate_status: 'PENDING' });
                   }
                 }}
@@ -1082,6 +1137,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 onSubmit={async e => {
                   e.preventDefault();
                   const matKey = verifyingMaterial.raw_material_id || verifyingMaterial.material_id;
+                  const activeNonce = verifyIdempKey || createSubmissionNonce('PRD-RMVRF');
+                  if (!verifyIdempKey) setVerifyIdempKey(activeNonce);
                   const ok = await runAction(
                     () =>
                       verifyRawMaterialOpeningStock({
@@ -1089,8 +1146,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         physical_count: Number(verifyPhysicalCount),
                         confirm_physical_count: verifyConfirmChecked,
                         reason: verifyReason.trim(),
-                        idempotency_key: verifyIdempKey || undefined,
-                      }),
+                        idempotency_key: activeNonce,
+                      }, activeNonce),
                     `Physical stock verified for ${verifyingMaterial.material_name}.`,
                     refreshRawMaterials
                   );
@@ -1247,8 +1304,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
                     const selectedMat = rawMaterials.find(m => m.material_id === receiveForm.material_id);
                     const matName = selectedMat ? selectedMat.material_name : undefined;
+                    const activeNonce = receiveNonce || createSubmissionNonce('PRD-RMRCV');
+                    if (!receiveNonce) setReceiveNonce(activeNonce);
 
-                    await runAction(
+                    const ok = await runAction(
                       async () => {
                         const payload: RawMaterialReceiveInput = {
                           material_id: receiveForm.material_id,
@@ -1266,7 +1325,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                           gst_treatment: receiveForm.gst_treatment,
                           notes: receiveForm.notes.trim() || undefined,
                         };
-                        const res = await receiveRawMaterial(payload);
+                        const res = await receiveRawMaterial(payload, activeNonce);
                         const txnId = res.transaction_id || (res as any).raw_material_txn_id || '';
                         if (res.is_replay || (res as any).status === 'ALREADY_RECORDED') {
                           const replayMsg = `[Idempotent Replay] Receipt already recorded (${txnId}). Stock balance intact.`;
@@ -1280,6 +1339,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       'Raw material receipt recorded successfully.',
                       refreshRawMaterials
                     );
+                    if (ok) {
+                      setReceiveNonce('');
+                    }
                   }}
                 >
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14, marginBottom: 14 }}>
@@ -1915,7 +1977,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       return;
                     }
 
-                    await runAction(
+                    const activeNonce = millingNonce || createSubmissionNonce('PRD-MILL');
+                    if (!millingNonce) setMillingNonce(activeNonce);
+
+                    const ok = await runAction(
                       async () => {
                         const payload: DalMillingInput = {
                           source_material_id: millingForm.source_material_id,
@@ -1927,7 +1992,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                           notes: millingForm.notes.trim() || undefined,
                         };
 
-                        const res = await recordMillingBatch(payload);
+                        const res = await recordMillingBatch(payload, activeNonce);
                         if (res.is_replay || (res as any).status === 'ALREADY_RECORDED') {
                           const msg = `[Idempotent Replay] Milling batch ${res.milling_batch_id} already recorded. Stock balance intact.`;
                           showSuccess(msg);
@@ -1954,6 +2019,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         await Promise.all([refreshRawMaterials(), refreshMillingHistory()]);
                       }
                     );
+                    if (ok) {
+                      setMillingNonce('');
+                    }
                   }}
                 >
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14, marginBottom: 14 }}>
@@ -2296,12 +2364,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           <div style={card}>
             <h3>Add factory worker</h3>
             <form
-              onSubmit={e => {
+              onSubmit={async e => {
                 e.preventDefault();
-                runAction(
+                const activeNonce = workerNonce || createSubmissionNonce('PRD-WRK');
+                if (!workerNonce) setWorkerNonce(activeNonce);
+                const ok = await runAction(
                   () =>
                     apiRequest('/api/production/workers', {
                       method: 'POST',
+                      idempotencyKey: activeNonce,
                       body: JSON.stringify({
                         worker_name: worker.worker_name,
                         mobile: worker.mobile,
@@ -2313,7 +2384,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   'Worker added.',
                   refreshWorkers
                 );
-                setWorker({ worker_name: '', mobile: '', daily_wage: '', notes: '' });
+                if (ok) {
+                  setWorkerNonce('');
+                  setWorker({ worker_name: '', mobile: '', daily_wage: '', notes: '' });
+                }
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10 }}
             >
@@ -2364,18 +2438,28 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           <div style={card}>
             <h3>Record daily attendance & wage accrual</h3>
             <form
-              onSubmit={e => {
+              onSubmit={async e => {
                 e.preventDefault();
                 if (isDuplicateAttendance) {
                   showError('Attendance is already recorded for this worker on this date.');
                   return;
                 }
-                runAction(
-                  () => apiRequest('/api/production/attendance', { method: 'POST', body: JSON.stringify(attendanceForm) }),
+                const activeNonce = attNonce || createSubmissionNonce('PRD-ATT');
+                if (!attNonce) setAttNonce(activeNonce);
+                const ok = await runAction(
+                  () =>
+                    apiRequest('/api/production/attendance', {
+                      method: 'POST',
+                      idempotencyKey: activeNonce,
+                      body: JSON.stringify(attendanceForm),
+                    }),
                   'Attendance recorded and wage accrued.',
                   refreshAttendance
                 );
-                setAttendanceForm({ ...attendanceForm, notes: '' });
+                if (ok) {
+                  setAttNonce('');
+                  setAttendanceForm({ ...attendanceForm, notes: '' });
+                }
               }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))', gap: 10 }}
             >
@@ -2459,7 +2543,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 <button
                   type="button"
                   style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 16 }}
-                  onClick={() => setEditingAttendance(null)}
+                  onClick={() => {
+                    setEditingAttendance(null);
+                    setEditAttNonce('');
+                  }}
                 >
                   ✕
                 </button>
@@ -2486,17 +2573,23 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 <button
                   style={{ ...btn, background: '#b45309' }}
                   disabled={busy || !editAttendanceNotes.trim()}
-                  onClick={() => {
-                    runAction(
+                  onClick={async () => {
+                    const activeNonce = editAttNonce || createSubmissionNonce('PRD-ATTED');
+                    if (!editAttNonce) setEditAttNonce(activeNonce);
+                    const ok = await runAction(
                       () =>
                         apiRequest(`/api/production/attendance/${encodeURIComponent(editingAttendance.attendance_id)}`, {
                           method: 'PUT',
+                          idempotencyKey: activeNonce,
                           body: JSON.stringify({ status: editAttendanceStatus, notes: editAttendanceNotes }),
                         }),
                       'Attendance corrected successfully.',
                       refreshAttendance
                     );
-                    setEditingAttendance(null);
+                    if (ok) {
+                      setEditAttNonce('');
+                      setEditingAttendance(null);
+                    }
                   }}
                 >
                   Save correction
@@ -2504,7 +2597,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                 <button
                   type="button"
                   style={{ ...btn, background: '#64748b' }}
-                  onClick={() => setEditingAttendance(null)}
+                  onClick={() => {
+                    setEditingAttendance(null);
+                    setEditAttNonce('');
+                  }}
                 >
                   Cancel
                 </button>
@@ -2578,6 +2674,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                                 type="button"
                                 style={{ ...btn, padding: '4px 8px', fontSize: 11, background: '#0284c7' }}
                                 onClick={() => {
+                                  setEditAttNonce('');
                                   setEditingAttendance(a);
                                   setEditAttendanceStatus(String(a.status || 'PRESENT'));
                                   setEditAttendanceNotes('');
@@ -2590,12 +2687,28 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                                   type="button"
                                   style={{ ...btn, padding: '4px 8px', fontSize: 11, background: '#dc2626' }}
                                   disabled={busy}
-                                  onClick={() => {
-                                    runAction(
-                                      () => apiRequest(`/api/production/attendance/${encodeURIComponent(a.attendance_id)}`, { method: 'DELETE' }),
+                                  onClick={async () => {
+                                    const aId = String(a.attendance_id);
+                                    const activeNonce = delAttNonces[aId] || createSubmissionNonce('PRD-ATTDEL');
+                                    if (!delAttNonces[aId]) {
+                                      setDelAttNonces((prev) => ({ ...prev, [aId]: activeNonce }));
+                                    }
+                                    const ok = await runAction(
+                                      () =>
+                                        apiRequest(`/api/production/attendance/${encodeURIComponent(a.attendance_id)}`, {
+                                          method: 'DELETE',
+                                          idempotencyKey: activeNonce,
+                                        }),
                                       'Duplicate attendance record removed.',
                                       refreshAttendance
                                     );
+                                    if (ok) {
+                                      setDelAttNonces((prev) => {
+                                        const next = { ...prev };
+                                        delete next[aId];
+                                        return next;
+                                      });
+                                    }
                                   }}
                                 >
                                   🗑️ Remove Duplicate
@@ -2624,7 +2737,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               Enter one ingredient per line: <code>Material name | quantity per 1 kg papad | unit</code>. Enter the expected dry yield (kg) from 1.0 kg of the recipe's main flour base, and use exact active RawMaterials master names.
             </p>
             <form
-              onSubmit={e => {
+              onSubmit={async e => {
                 e.preventDefault();
                 const items = recipe.ingredients
                   .split('\n')
@@ -2635,10 +2748,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   showError('Enter at least one valid ingredient line.');
                   return;
                 }
-                runAction(
+                const activeNonce = recipeNonce || createSubmissionNonce('PRD-RCP');
+                if (!recipeNonce) setRecipeNonce(activeNonce);
+                const ok = await runAction(
                   () =>
                     apiRequest('/api/production/recipes', {
                       method: 'POST',
+                      idempotencyKey: activeNonce,
                       body: JSON.stringify({
                         product_id: recipe.product_id,
                         items,
@@ -2650,7 +2766,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   'Draft recipe saved for Owner review.',
                   refreshMasterRecipes
                 );
-                setRecipe({ product_id: '', ingredients: '', expected_yield_kg: '', notes: '' });
+                if (ok) {
+                  setRecipeNonce('');
+                  setRecipe({ product_id: '', ingredients: '', expected_yield_kg: '', notes: '' });
+                }
               }}
             >
               <div style={{ display: 'grid', gap: 10 }}>
@@ -2709,10 +2828,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             <form
               onSubmit={async e => {
                 e.preventDefault();
+                const activeNonce = batchNonce || createSubmissionNonce('PRD-BAT');
+                if (!batchNonce) setBatchNonce(activeNonce);
                 const ok = await runAction(
                   () =>
                     apiRequest('/api/production/batches', {
                       method: 'POST',
+                      idempotencyKey: activeNonce,
                       body: JSON.stringify({
                         ...production,
                         quantity_kg: Number(production.quantity_kg),
@@ -2726,6 +2848,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   refreshBatches
                 );
                 if (ok) {
+                  setBatchNonce('');
                   setProduction({ product_id: '', production_date: today, quantity_kg: '', wastage_kg: '0', process_loss_kg: '0', loss_reason: '', flour_base_used_kg: '', recipe_id: '', notes: '' });
                 }
               }}
@@ -2854,17 +2977,30 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         }}
                         disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                         title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch approval locked.' : ''}
-                        onClick={() =>
-                          runAction(
+                        onClick={async () => {
+                          const key = `${bId}:APPROVE`;
+                          const activeNonce = batchApprovalNonces[key] || createSubmissionNonce('PRD-BATAP');
+                          if (!batchApprovalNonces[key]) {
+                            setBatchApprovalNonces((prev) => ({ ...prev, [key]: activeNonce }));
+                          }
+                          const ok = await runAction(
                             () =>
                               apiRequest(`/api/production/batches/${encodeURIComponent(bId)}/approval`, {
                                 method: 'POST',
+                                idempotencyKey: activeNonce,
                                 body: JSON.stringify({ approved: true, notes: 'Approved by Owner' }),
                               }),
                             'Production approved; recipe consumption and bulk stock recorded.',
                             refreshBatches
-                          )
-                        }
+                          );
+                          if (ok) {
+                            setBatchApprovalNonces((prev) => {
+                              const next = { ...prev };
+                              delete next[key];
+                              return next;
+                            });
+                          }
+                        }}
                       >
                         Approve & deduct recipe
                       </button>
@@ -2876,17 +3012,30 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         }}
                         disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                         title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch rejection locked.' : ''}
-                        onClick={() =>
-                          runAction(
+                        onClick={async () => {
+                          const key = `${bId}:REJECT`;
+                          const activeNonce = batchApprovalNonces[key] || createSubmissionNonce('PRD-BATRJ');
+                          if (!batchApprovalNonces[key]) {
+                            setBatchApprovalNonces((prev) => ({ ...prev, [key]: activeNonce }));
+                          }
+                          const ok = await runAction(
                             () =>
                               apiRequest(`/api/production/batches/${encodeURIComponent(bId)}/approval`, {
                                 method: 'POST',
+                                idempotencyKey: activeNonce,
                                 body: JSON.stringify({ approved: false, notes: 'Rejected by Owner' }),
                               }),
                             'Production rejected.',
                             refreshBatches
-                          )
-                        }
+                          );
+                          if (ok) {
+                            setBatchApprovalNonces((prev) => {
+                              const next = { ...prev };
+                              delete next[key];
+                              return next;
+                            });
+                          }
+                        }}
                       >
                         Reject
                       </button>
@@ -2997,7 +3146,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             <form
               onSubmit={async e => {
                 e.preventDefault();
-                const ref = 'PKG-' + Date.now();
+                const activeNonce = pkgNonce || createSubmissionNonce('PRD-PKG');
+                if (!pkgNonce) setPkgNonce(activeNonce);
+                const activeRef = pkgRef || 'PKG-' + Date.now();
+                if (!pkgRef) setPkgRef(activeRef);
                 const manualList = allocationMode === 'MANUAL'
                   ? Object.entries(batchAllocations)
                       .filter(([_, q]) => Number(q) > 0)
@@ -3008,6 +3160,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   () =>
                     apiRequest('/api/production/packaging', {
                       method: 'POST',
+                      idempotencyKey: activeNonce,
                       body: JSON.stringify({
                         ...pack,
                         bulk_kg_used: Number(pack.bulk_kg_used),
@@ -3015,7 +3168,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         packets_500g: Number(pack.packets_500g),
                         packets_1000g: Number(pack.packets_1000g),
                         batch_allocations: manualList && manualList.length > 0 ? manualList : undefined,
-                        reference: ref,
+                        reference: activeRef,
                       }),
                     }),
                   'Packaging recorded. Finished packets credited to factory stock ledger.',
@@ -3029,6 +3182,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   }
                 );
                 if (ok) {
+                  setPkgNonce('');
+                  setPkgRef('');
                   setPack({
                     product_id: '',
                     packaging_date: today,
@@ -3153,15 +3308,25 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               <form
                 onSubmit={async e => {
                   e.preventDefault();
+                  const pkgId = reviewingPackagingId;
+                  const activeNonce = reviewPkgNonces[pkgId] || createSubmissionNonce('PRD-PKGAP');
+                  if (!reviewPkgNonces[pkgId]) {
+                    setReviewPkgNonces((prev) => ({ ...prev, [pkgId]: activeNonce }));
+                  }
                   const ok = await runAction(
-                    () => approvePackagingDiscrepancy(reviewingPackagingId, reviewExplanation.trim()),
-                    `Discrepancy reviewed and approved for packaging batch ${reviewingPackagingId}.`,
+                    () => approvePackagingDiscrepancy(pkgId, reviewExplanation.trim(), activeNonce),
+                    `Discrepancy reviewed and approved for packaging batch ${pkgId}.`,
                     async () => {
                       await refreshPackaging();
                       await refreshRegister();
                     }
                   );
                   if (ok) {
+                    setReviewPkgNonces((prev) => {
+                      const next = { ...prev };
+                      delete next[pkgId];
+                      return next;
+                    });
                     setReviewingPackagingId(null);
                     setReviewExplanation('');
                   }
@@ -3182,6 +3347,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   type="button"
                   style={{ ...btn, background: '#64748b' }}
                   onClick={() => {
+                    const pkgId = reviewingPackagingId;
+                    setReviewPkgNonces((prev) => {
+                      const next = { ...prev };
+                      delete next[pkgId];
+                      return next;
+                    });
                     setReviewingPackagingId(null);
                     setReviewExplanation('');
                   }}
@@ -3335,10 +3506,13 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             <form
               onSubmit={async e => {
                 e.preventDefault();
+                const activeNonce = dispatchNonce || createSubmissionNonce('PRD-DSP');
+                if (!dispatchNonce) setDispatchNonce(activeNonce);
                 const ok = await runAction(
                   () =>
                     apiRequest('/api/production/dispatch', {
                       method: 'POST',
+                      idempotencyKey: activeNonce,
                       body: JSON.stringify({
                         ...dispatch,
                         quantity_packets: Number(dispatch.quantity_packets),
@@ -3353,6 +3527,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   }
                 );
                 if (ok) {
+                  setDispatchNonce('');
                   setDispatch({ ...dispatch, quantity_packets: '', destination: '', reference: '', notes: '' });
                 }
               }}

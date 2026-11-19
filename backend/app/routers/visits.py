@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.apps_script_bridge import apps_script_bridge
 from app.models import ShopVisit, ShopVisitCreate
 from app.sheets import db
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_manager, require_module_action
 
 router = APIRouter(prefix="/api/visits", tags=["Shop Visits"])
@@ -36,7 +36,7 @@ async def list_shop_visits(current_user: dict = Depends(get_current_user)):
     visits.reverse()
     return visits
 
-@router.post("", response_model=ShopVisit)
+@router.post("", response_model=ShopVisit, dependencies=[Depends(require_sheets_connection)])
 async def log_shop_visit(req: ShopVisitCreate, request: Request, current_user: dict = Depends(get_current_user)):
     user_id, actor_role = require_module_action(current_user, "sales", "create")
     now_iso_str = datetime.now(timezone.utc).isoformat()

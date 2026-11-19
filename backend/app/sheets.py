@@ -357,6 +357,9 @@ REQUIRED_TABS = {
         "created_at", "accepted_at", "accepted_by_user_id", "discrepancy_notes",
         "idempotency_key", "notes",
     ],
+    "Settings": [
+        "setting_key", "setting_value", "description",
+    ],
 }
 
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../../context/StoreContext';
-import { apiFetch } from '../../services/api';
+import { apiFetch, createSubmissionNonce, isUnknownOutcomeError } from '../../services/api';
 import { ProjectItem, ProjectMilestoneItem } from '../types';
 import {
   Briefcase,
@@ -23,6 +23,10 @@ export const MyProjectsView: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [submitNonce, setSubmitNonce] = useState('');
+
+  const UNKNOWN_OUTCOME_MSG =
+    'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
   const fetchProjects = async () => {
     setIsLoading(true);
@@ -45,11 +49,14 @@ export const MyProjectsView: React.FC = () => {
 
   const handleSubmitMilestone = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeMilestone) return;
+    if (!activeMilestone || isSubmitting) return;
     if (!notes.trim()) {
       setErrorMessage('Please describe the deliverable details.');
       return;
     }
+
+    const activeNonce = submitNonce || createSubmissionNonce('EMP-MS');
+    if (!submitNonce) setSubmitNonce(activeNonce);
 
     setIsSubmitting(true);
     setErrorMessage('');
@@ -58,13 +65,25 @@ export const MyProjectsView: React.FC = () => {
     try {
       const res = await apiFetch(`/api/workforce/my-projects/milestones/${activeMilestone.milestone_id}/submit`, {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           submission_notes: notes.trim(),
           submission_link: link.trim(),
         }),
       });
-      const data = await res.json();
+      if (res.status === 504) {
+        setErrorMessage(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
+      const rawText = await res.text();
+      let data: any = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = {};
+      }
       if (res.ok) {
+        setSubmitNonce('');
         setStatusMessage('Milestone submitted successfully for Owner review!');
         await fetchProjects();
         setTimeout(() => {
@@ -75,7 +94,9 @@ export const MyProjectsView: React.FC = () => {
         setErrorMessage(data.detail || 'Failed to submit milestone.');
       }
     } catch (err) {
-      setErrorMessage('Network error while submitting deliverable.');
+      setErrorMessage(
+        isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : 'Network error while submitting deliverable.'
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -193,6 +214,7 @@ export const MyProjectsView: React.FC = () => {
                                 setLink(ms.submission_link || '');
                                 setErrorMessage('');
                                 setStatusMessage('');
+                                setSubmitNonce('');
                               }}
                               className="w-full py-2 px-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs shadow-2xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                             >
@@ -228,7 +250,10 @@ export const MyProjectsView: React.FC = () => {
                 <p className="text-xs text-slate-300 mt-0.5">{activeMilestone.title}</p>
               </div>
               <button
-                onClick={() => setActiveMilestone(null)}
+                onClick={() => {
+                  setActiveMilestone(null);
+                  setSubmitNonce('');
+                }}
                 className="text-slate-400 hover:text-white p-1 rounded-md"
               >
                 <X size={18} />
@@ -280,7 +305,10 @@ export const MyProjectsView: React.FC = () => {
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setActiveMilestone(null)}
+                  onClick={() => {
+                    setActiveMilestone(null);
+                    setSubmitNonce('');
+                  }}
                   className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
                 >
                   Cancel

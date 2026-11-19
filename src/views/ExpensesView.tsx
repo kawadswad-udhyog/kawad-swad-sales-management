@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { resolveCanonical12Role } from '../utils/permissions';
+import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import { Expense } from '../types';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -73,6 +74,17 @@ export const ExpensesView: React.FC = () => {
   // Reject dialog state (avoiding window.prompt)
   const [rejectingExpense, setRejectingExpense] = useState<Expense | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
+  const [expenseNonce, setExpenseNonce] = useState<string | null>(null);
+  const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
+
+  const clearActionNonce = (key: string) => {
+    setActionNonces((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -87,6 +99,9 @@ export const ExpensesView: React.FC = () => {
       return;
     }
 
+    const activeNonce = expenseNonce || createSubmissionNonce('EXP');
+    if (!expenseNonce) setExpenseNonce(activeNonce);
+
     try {
       setIsSubmitting(true);
       await submitExpense({
@@ -94,13 +109,19 @@ export const ExpensesView: React.FC = () => {
         amount: Number(amount),
         description: description.trim(),
         receipt_link_or_file_ref: receiptRef.trim(),
-      });
+        idempotency_key: activeNonce,
+      }, activeNonce);
       setNotice({ msg: `Expense of ₹${amount} submitted for approval.` });
+      setExpenseNonce(null);
       setDescription('');
       setReceiptRef('');
       setAmount(100);
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to submit expense';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit a new transaction. Your expense details and retry key are preserved—tap Submit Expense Claim to retry safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to submit expense';
       setNotice({ msg: errorMsg, error: true });
     } finally {
       setIsSubmitting(false);
@@ -108,11 +129,20 @@ export const ExpensesView: React.FC = () => {
   };
 
   const handleApprove = async (e: Expense) => {
+    const key = `approve:${e.expense_id}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('EXPAPP');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
-      await approveExpense(e.expense_id, 'Approved by manager');
+      await approveExpense(e.expense_id, 'Approved by manager', activeNonce);
+      clearActionNonce(key);
       setNotice({ msg: `Expense ${e.expense_id} approved. Marked as cash-reducing.` });
     } catch (err: unknown) {
-      setNotice({ msg: err instanceof Error ? err.message : 'Failed to approve', error: true });
+      const msg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for ${e.expense_id}; do not create a duplicate action. Retry Approve safely.`
+        : err instanceof Error
+        ? err.message
+        : 'Failed to approve';
+      setNotice({ msg, error: true });
     }
   };
 
@@ -122,13 +152,22 @@ export const ExpensesView: React.FC = () => {
       setNotice({ msg: 'A reason is required to reject an expense.', error: true });
       return;
     }
+    const key = `reject:${rejectingExpense.expense_id}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('EXPREJ');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
-      await rejectExpense(rejectingExpense.expense_id, rejectionReason.trim());
+      await rejectExpense(rejectingExpense.expense_id, rejectionReason.trim(), activeNonce);
+      clearActionNonce(key);
       setNotice({ msg: `Expense ${rejectingExpense.expense_id} rejected.` });
       setRejectingExpense(null);
       setRejectionReason('');
     } catch (err: unknown) {
-      setNotice({ msg: err instanceof Error ? err.message : 'Failed to reject', error: true });
+      const msg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; retry rejection safely with preserved inputs and key.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to reject';
+      setNotice({ msg, error: true });
     }
   };
 
@@ -411,12 +450,14 @@ export const ExpensesView: React.FC = () => {
               handleConfirmReject();
             }}
             onCancel={() => {
+              if (rejectingExpense) clearActionNonce(`reject:${rejectingExpense.expense_id}`);
               setRejectingExpense(null);
               setRejectionReason('');
             }}
             actions={
               <FormActions
                 onCancel={() => {
+                  if (rejectingExpense) clearActionNonce(`reject:${rejectingExpense.expense_id}`);
                   setRejectingExpense(null);
                   setRejectionReason('');
                 }}

@@ -121,33 +121,34 @@ export interface StoreContextType {
     email?: string;
     active?: boolean;
     notes?: string;
-  }) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
-  updateUser: (user_id: string, updates: Partial<User>) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string; user?: User }>;
-  setUserStatus: (user_id: string, active: boolean, reason?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
-  resetUserPassword: (user_id: string, newPassword?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
+  updateUser: (user_id: string, updates: Partial<User>, idempotencyKey?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string; user?: User }>;
+  setUserStatus: (user_id: string, active: boolean, reason?: string, idempotencyKey?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
+  resetUserPassword: (user_id: string, newPassword?: string, idempotencyKey?: string) => Promise<{ ok?: boolean; pending_approval?: boolean; message?: string }>;
 
   approvalRequests: ApprovalRequest[];
   loadApprovalRequests: () => Promise<void>;
-  decideApprovalRequest: (requestId: string, decision: 'APPROVED' | 'REJECTED', notes?: string, initialPassword?: string) => Promise<ApprovalRequest>;
-  retryApprovalRequest: (requestId: string) => Promise<void>;
-  cancelApprovalRequest: (requestId: string) => Promise<void>;
+  decideApprovalRequest: (requestId: string, decision: 'APPROVED' | 'REJECTED', notes?: string, initialPassword?: string, idempotencyKey?: string) => Promise<ApprovalRequest>;
+  retryApprovalRequest: (requestId: string, idempotencyKey?: string) => Promise<void>;
+  cancelApprovalRequest: (requestId: string, idempotencyKey?: string) => Promise<void>;
 
   products: Product[];
-  addProduct: (product: Omit<Product, 'product_id'>) => Promise<Product>;
-  updateProduct: (product_id: string, updates: Partial<Product>) => Promise<void>;
-  toggleProductActive: (product_id: string) => Promise<void>;
+  addProduct: (product: Omit<Product, 'product_id'>, idempotencyKey?: string) => Promise<Product>;
+  updateProduct: (product_id: string, updates: Partial<Product>, idempotencyKey?: string) => Promise<void>;
+  toggleProductActive: (product_id: string, idempotencyKey?: string) => Promise<void>;
 
   customers: Customer[];
-  addCustomer: (customer: Omit<Customer, 'customer_id' | 'created_at'>) => Promise<Customer>;
-  updateCustomer: (customer_id: string, updates: Partial<Customer>) => Promise<void>;
+  addCustomer: (customer: Omit<Customer, 'customer_id' | 'created_at'>, idempotencyKey?: string) => Promise<Customer>;
+  updateCustomer: (customer_id: string, updates: Partial<Customer>, idempotencyKey?: string) => Promise<void>;
   activeCustomerIdForBilling: string | null;
   setActiveCustomerIdForBilling: (id: string | null) => void;
 
   sales: Sale[];
   payments: Payment[];
-  createSale: (input: CreateSaleInput) => Promise<{ sale: Sale; paymentId?: string }>;
+  createSale: (input: CreateSaleInput, idempotencyKey?: string) => Promise<{ sale: Sale; paymentId?: string }>;
   getSaleWithItems: (sale_id: string) => { sale: Sale; items: SaleItem[] } | null;
-  cancelSale: (sale_id: string, reason: string) => Promise<void>;
+  cancelSale: (sale_id: string, reason: string, idempotencyKey?: string) => Promise<void>;
 
   stockTransactions: StockTransaction[];
   recordStockMovement: (input: {
@@ -156,7 +157,8 @@ export interface StoreContextType {
     salesman_user_id?: string;
     quantity: number;
     notes?: string;
-  }) => Promise<void>;
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => Promise<void>;
   companyStockSummary: CompanyStockItem[];
   salesmanStockSummary: SalesmanStockItem[];
   stockDiscrepancies: any[];
@@ -166,8 +168,9 @@ export interface StoreContextType {
     expected_stock: number;
     physical_count: number;
     reason: string;
-  }) => Promise<void>;
-  reviewStockDiscrepancy: (discrepancy_id: string, action: 'APPROVE' | 'REJECT', notes?: string) => Promise<void>;
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => Promise<void>;
+  reviewStockDiscrepancy: (discrepancy_id: string, action: 'APPROVE' | 'REJECT', notes?: string, idempotencyKey?: string) => Promise<void>;
 
   expenses: Expense[];
   submitExpense: (input: {
@@ -175,9 +178,10 @@ export interface StoreContextType {
     amount: number;
     description: string;
     receipt_link_or_file_ref?: string;
-  }) => Promise<void>;
-  approveExpense: (expense_id: string, reason?: string) => Promise<void>;
-  rejectExpense: (expense_id: string, reason: string) => Promise<void>;
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => Promise<void>;
+  approveExpense: (expense_id: string, reason?: string, idempotencyKey?: string) => Promise<void>;
+  rejectExpense: (expense_id: string, reason: string, idempotencyKey?: string) => Promise<void>;
 
   shopVisits: ShopVisit[];
   addShopVisit: (input: {
@@ -187,7 +191,8 @@ export interface StoreContextType {
     follow_up_date: string;
     next_action: string;
     notes?: string;
-  }) => Promise<void>;
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => Promise<void>;
 
   dailyClosings: DailyClosing[];
   getTodayClosingMetrics: (salesmanId: string, customOpeningCash?: number) => {
@@ -202,11 +207,12 @@ export interface StoreContextType {
     physical_cash_returned: number;
     notes?: string;
     idempotency_key?: string;
-  }) => Promise<DailyClosing>;
+  }, idempotencyKey?: string) => Promise<DailyClosing>;
   reviewDailyClosing: (
     closing_id: string,
     decision: 'CONFIRMED' | 'CORRECTION_REQUIRED',
-    notes?: string
+    notes?: string,
+    idempotencyKey?: string
   ) => Promise<void>;
 
   salaryIncentives: SalaryIncentive[];
@@ -218,9 +224,10 @@ export interface StoreContextType {
     trial_rate_per_kg: number;
     monthly_rate_per_100kg: number;
     base_salary: number;
-  }) => Promise<SalaryIncentive[]> | SalaryIncentive[];
-  approveSalaryIncentive: (record_id: string, approved_amount?: number) => Promise<void>;
-  markSalaryIncentivePaid: (record_id: string, reference: string) => Promise<void>;
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => Promise<SalaryIncentive[]> | SalaryIncentive[];
+  approveSalaryIncentive: (record_id: string, approved_amount?: number, idempotencyKey?: string) => Promise<void>;
+  markSalaryIncentivePaid: (record_id: string, reference: string, idempotencyKey?: string) => Promise<void>;
 
   dashboardMetrics: DashboardMetrics | null;
   auditLogs: AuditLog[];
@@ -791,7 +798,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   // Products CRUD with backend
-  const addProduct = async (prodData: Omit<Product, 'product_id'>): Promise<Product> => {
+  const addProduct = async (
+    prodData: Omit<Product, 'product_id'>,
+    idempotencyKey?: string
+  ): Promise<Product> => {
     const payload = {
       ...prodData,
       active: Boolean(prodData.active),
@@ -800,6 +810,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const saved = await apiRequest<Product>('/api/products', {
       method: 'POST',
       body: JSON.stringify(payload),
+      idempotencyKey,
     });
     const cleanSaved: Product = {
       ...saved,
@@ -811,7 +822,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return cleanSaved;
   };
 
-  const updateProduct = async (product_id: string, updates: Partial<Product>) => {
+  const updateProduct = async (
+    product_id: string,
+    updates: Partial<Product>,
+    idempotencyKey?: string
+  ) => {
     const payload = {
       ...updates,
       active: updates.active !== undefined ? Boolean(updates.active) : undefined,
@@ -820,6 +835,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const updated = await apiRequest<Product>(`/api/products/${encodeURIComponent(product_id)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
+      idempotencyKey,
     });
     const cleanUpdated: Product = {
       ...updated,
@@ -830,7 +846,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     addAuditLog('UPDATE', 'Product', product_id, 'Updated product details');
   };
 
-  const toggleProductActive = async (product_id: string) => {
+  const toggleProductActive = async (product_id: string, idempotencyKey?: string) => {
     const p = products.find((x) => x.product_id === product_id);
     if (!p) return;
     const nextState = !p.active;
@@ -839,7 +855,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       prev.map((item) => (item.product_id === product_id ? { ...item, active: nextState } : item))
     );
     try {
-      await updateProduct(product_id, { active: nextState });
+      await updateProduct(product_id, { active: nextState }, idempotencyKey);
     } catch (err) {
       // Revert if API fails
       setProducts((prev) =>
@@ -850,30 +866,42 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   // Customers CRUD with backend
-  const addCustomer = async (custData: Omit<Customer, 'customer_id' | 'created_at'>): Promise<Customer> => {
+  const addCustomer = async (
+    custData: Omit<Customer, 'customer_id' | 'created_at'>,
+    idempotencyKey?: string
+  ): Promise<Customer> => {
     const saved = await apiRequest<Customer>('/api/customers', {
       method: 'POST',
       body: JSON.stringify(custData),
+      idempotencyKey,
     });
     setCustomers((prev) => [saved, ...prev]);
     addAuditLog('CREATE', 'Customer', saved.customer_id, `Added customer ${saved.shop_name}`);
     return saved;
   };
 
-  const updateCustomer = async (customer_id: string, updates: Partial<Customer>) => {
+  const updateCustomer = async (
+    customer_id: string,
+    updates: Partial<Customer>,
+    idempotencyKey?: string
+  ) => {
     const existing = customers.find((c) => c.customer_id === customer_id);
     if (!existing) throw new Error('Customer not found. Refresh the customer list and try again.');
     const payload = { ...existing, ...updates };
     const saved = await apiRequest<Customer>(`/api/customers/${encodeURIComponent(customer_id)}`, {
       method: 'PUT',
       body: JSON.stringify(payload),
+      idempotencyKey,
     });
     setCustomers((prev) => prev.map((c) => (c.customer_id === customer_id ? saved : c)));
     addAuditLog('UPDATE', 'Customer', customer_id, 'Updated customer details');
   };
 
   // Sales creation connected to FastAPI backend
-  const createSale = async (input: CreateSaleInput): Promise<{ sale: Sale; paymentId?: string }> => {
+  const createSale = async (
+    input: CreateSaleInput,
+    idempotencyKey?: string
+  ): Promise<{ sale: Sale; paymentId?: string }> => {
     const payload = {
       ...input,
       customer_id: input.customer_id || 'CUS-WALKIN',
@@ -896,6 +924,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } & Sale>('/api/sales', {
       method: 'POST',
       body: JSON.stringify(payload),
+      idempotencyKey: idempotencyKey || input.idempotency_key,
     });
 
     const newSale: Sale = res.sale || res;
@@ -966,12 +995,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return { sale, items: items.length > 0 ? items : (sale.lines || sale.items || []) };
   };
 
-  const cancelSale = async (sale_id: string, reason: string): Promise<void> => {
+  const cancelSale = async (sale_id: string, reason: string, idempotencyKey?: string): Promise<void> => {
     setIsLoading(true);
     try {
       await apiRequest(`/api/sales/${encodeURIComponent(sale_id)}/cancel`, {
         method: 'POST',
         body: JSON.stringify({ reason }),
+        idempotencyKey,
       });
       await refreshData();
     } finally {
@@ -986,7 +1016,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     salesman_user_id?: string;
     quantity: number;
     notes?: string;
-  }) => {
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => {
     if (input.txn_type === 'SOLD' || input.txn_type === 'COMPANY_SOLD') {
       throw new Error(
         'Manual recording of sale deductions (SOLD / COMPANY_SOLD) is restricted. Stock is automatically deducted when bills are issued in the Sales screen.'
@@ -1002,6 +1033,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         quantity: input.quantity,
         notes: input.notes || '',
       }),
+      idempotencyKey: idempotencyKey || input.idempotency_key,
     });
 
     setStockTransactions((prev) => [saved, ...prev]);
@@ -1024,12 +1056,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     expected_stock: number;
     physical_count: number;
     reason: string;
-  }): Promise<void> => {
+    idempotency_key?: string;
+  }, idempotencyKey?: string): Promise<void> => {
     setIsLoading(true);
     try {
       await apiRequest('/api/stock/discrepancies', {
         method: 'POST',
         body: JSON.stringify(input),
+        idempotencyKey: idempotencyKey || input.idempotency_key,
       });
       await refreshData();
     } finally {
@@ -1040,13 +1074,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const reviewStockDiscrepancy = async (
     discrepancy_id: string,
     action: 'APPROVE' | 'REJECT',
-    notes?: string
+    notes?: string,
+    idempotencyKey?: string
   ): Promise<void> => {
     setIsLoading(true);
     try {
       await apiRequest(`/api/stock/discrepancies/${encodeURIComponent(discrepancy_id)}/review`, {
         method: 'POST',
         body: JSON.stringify({ action, notes: notes || '' }),
+        idempotencyKey,
       });
       await refreshData();
     } finally {
@@ -1060,28 +1096,36 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     amount: number;
     description: string;
     receipt_link_or_file_ref?: string;
-  }) => {
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => {
     const saved = await apiRequest<Expense>('/api/expenses', {
       method: 'POST',
       body: JSON.stringify(input),
+      idempotencyKey: idempotencyKey || input.idempotency_key,
     });
     setExpenses((prev) => [saved, ...prev]);
     addAuditLog('CREATE', 'Expense', saved.expense_id, `Submitted ₹${input.amount} expense`);
   };
 
-  const approveExpense = async (expense_id: string, reason: string = 'Approved by manager') => {
+  const approveExpense = async (
+    expense_id: string,
+    reason: string = 'Approved by manager',
+    idempotencyKey?: string
+  ) => {
     const updated = await apiRequest<Expense>(`/api/expenses/${encodeURIComponent(expense_id)}/approve`, {
       method: 'POST',
       body: JSON.stringify({ approved: true, notes: reason }),
+      idempotencyKey,
     });
     setExpenses((prev) => prev.map((e) => (e.expense_id === expense_id ? { ...e, ...updated } : e)));
     addAuditLog('APPROVE', 'Expense', expense_id, reason);
   };
 
-  const rejectExpense = async (expense_id: string, reason: string) => {
+  const rejectExpense = async (expense_id: string, reason: string, idempotencyKey?: string) => {
     const updated = await apiRequest<Expense>(`/api/expenses/${encodeURIComponent(expense_id)}/approve`, {
       method: 'POST',
       body: JSON.stringify({ approved: false, notes: reason }),
+      idempotencyKey,
     });
     setExpenses((prev) => prev.map((e) => (e.expense_id === expense_id ? { ...e, ...updated } : e)));
     addAuditLog('REJECT', 'Expense', expense_id, reason);
@@ -1095,10 +1139,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     follow_up_date: string;
     next_action: string;
     notes?: string;
-  }) => {
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => {
     const saved = await apiRequest<ShopVisit>('/api/visits', {
       method: 'POST',
       body: JSON.stringify(input),
+      idempotencyKey: idempotencyKey || input.idempotency_key,
     });
     setShopVisits((prev) => [saved, ...prev]);
     addAuditLog('CREATE', 'ShopVisit', saved.visit_id, `Recorded shop visit`);
@@ -1147,10 +1193,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     physical_cash_returned: number;
     notes?: string;
     idempotency_key?: string;
-  }): Promise<DailyClosing> => {
+  }, idempotencyKey?: string): Promise<DailyClosing> => {
     const saved = await apiRequest<DailyClosing>('/api/closing', {
       method: 'POST',
       body: JSON.stringify(input),
+      idempotencyKey: idempotencyKey || input.idempotency_key,
     });
     setDailyClosings((prev) => [saved, ...prev]);
     refreshDashboardMetrics().catch(() => undefined);
@@ -1161,11 +1208,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const reviewDailyClosing = async (
     closing_id: string,
     decision: 'CONFIRMED' | 'CORRECTION_REQUIRED',
-    notes: string = ''
+    notes: string = '',
+    idempotencyKey?: string
   ) => {
     const updated = await apiRequest<DailyClosing>(`/api/closing/${encodeURIComponent(closing_id)}/review`, {
       method: 'POST',
       body: JSON.stringify({ confirmed: decision === 'CONFIRMED', notes }),
+      idempotencyKey,
     });
     setDailyClosings((prev) =>
       prev.map((c) => (c.closing_id === closing_id ? { ...c, ...updated } : c))
@@ -1183,7 +1232,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     trial_rate_per_kg: number;
     monthly_rate_per_100kg: number;
     base_salary: number;
-  }): Promise<SalaryIncentive[]> => {
+    idempotency_key?: string;
+  }, idempotencyKey?: string): Promise<SalaryIncentive[]> => {
     const salesman = users.find((u) => u.user_id === params.salesman_user_id);
     const joinDate = salesman ? new Date(salesman.created_at) : new Date(params.period_start);
     const trialEndDate = new Date(joinDate.getTime() + params.trial_days * 24 * 60 * 60 * 1000);
@@ -1300,6 +1350,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const persisted = await apiRequest<SalaryIncentive[]>('/api/salary', {
       method: 'POST',
       body: JSON.stringify(payload),
+      idempotencyKey: idempotencyKey || params.idempotency_key,
     });
 
     if (!persisted || persisted.length === 0) {
@@ -1316,10 +1367,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return persisted;
   };
 
-  const approveSalaryIncentive = async (record_id: string, approved_amount?: number) => {
+  const approveSalaryIncentive = async (
+    record_id: string,
+    approved_amount?: number,
+    idempotencyKey?: string
+  ) => {
     const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/approve`, {
       method: 'POST',
       body: JSON.stringify({ approved_amount, notes: 'Approved in management portal' }),
+      idempotencyKey,
     });
     setSalaryIncentives((prev) =>
       prev.map((r) => (r.record_id === record_id ? { ...r, ...updated, approval_status: 'APPROVED' } : r))
@@ -1328,10 +1384,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     addAuditLog('APPROVE', 'SalaryIncentive', record_id, 'Approved salary/incentive payment');
   };
 
-  const markSalaryIncentivePaid = async (record_id: string, reference: string) => {
+  const markSalaryIncentivePaid = async (
+    record_id: string,
+    reference: string,
+    idempotencyKey?: string
+  ) => {
     const updated = await apiRequest<SalaryIncentive>(`/api/salary/${encodeURIComponent(record_id)}/pay`, {
       method: 'POST',
       body: JSON.stringify({ payment_reference: reference }),
+      idempotencyKey,
     });
     setSalaryIncentives((prev) =>
       prev.map((r) => (r.record_id === record_id ? { ...r, ...updated } : r))
@@ -1362,10 +1423,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     email?: string;
     active?: boolean;
     notes?: string;
-  }) => {
+    idempotency_key?: string;
+  }, idempotencyKey?: string) => {
     const res = await apiRequest<any>('/api/users', {
       method: 'POST',
       body: JSON.stringify(userData),
+      idempotencyKey: idempotencyKey || userData.idempotency_key,
     });
     if (res.user_id) {
       // Direct creation (Owner)
@@ -1379,10 +1442,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return res;
   };
 
-  const updateUser = async (userId: string, data: Partial<User>) => {
+  const updateUser = async (userId: string, data: Partial<User>, idempotencyKey?: string) => {
     const res = await apiRequest<{ ok?: boolean; pending_approval?: boolean; message?: string; user?: User }>(`/api/users/${encodeURIComponent(userId)}`, {
       method: 'PUT',
       body: JSON.stringify(data),
+      idempotencyKey,
     });
     if (res.user) {
       setUsers((prev) => prev.map((u) => (u.user_id === userId ? { ...u, ...res.user } : u)));
@@ -1394,10 +1458,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return res;
   };
 
-  const setUserStatus = async (userId: string, active: boolean, reason: string = '') => {
+  const setUserStatus = async (
+    userId: string,
+    active: boolean,
+    reason: string = '',
+    idempotencyKey?: string
+  ) => {
     const res = await apiRequest<{ ok?: boolean; pending_approval?: boolean; message?: string; active?: boolean }>(`/api/users/${encodeURIComponent(userId)}/status`, {
       method: 'POST',
       body: JSON.stringify({ active, reason }),
+      idempotencyKey,
     });
     if (typeof res.active === 'boolean') {
       setUsers((prev) => prev.map((u) => (u.user_id === userId ? { ...u, active: res.active! } : u)));
@@ -1409,10 +1479,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return res;
   };
 
-  const resetUserPassword = async (userId: string, newPassword?: string) => {
+  const resetUserPassword = async (
+    userId: string,
+    newPassword?: string,
+    idempotencyKey?: string
+  ) => {
     const res = await apiRequest<{ ok?: boolean; pending_approval?: boolean; message?: string }>(`/api/users/${encodeURIComponent(userId)}/reset-password`, {
       method: 'POST',
       body: JSON.stringify({ new_password: newPassword || '' }),
+      idempotencyKey,
     });
     if (res.pending_approval) {
       await loadApprovalRequests();
@@ -1422,10 +1497,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return res;
   };
 
-  const decideApprovalRequest = async (requestId: string, decision: 'APPROVED' | 'REJECTED', notes: string = '', initialPassword?: string): Promise<ApprovalRequest> => {
+  const decideApprovalRequest = async (
+    requestId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    notes: string = '',
+    initialPassword?: string,
+    idempotencyKey?: string
+  ): Promise<ApprovalRequest> => {
     const updated = await apiRequest<ApprovalRequest>(`/api/approvals/requests/${encodeURIComponent(requestId)}/decision`, {
       method: 'POST',
       body: JSON.stringify({ decision, notes, initial_password: initialPassword }),
+      idempotencyKey,
     });
     setApprovalRequests((prev) => prev.map((r) => (r.request_id === requestId ? updated : r)));
     // Synchronize users if approved
@@ -1437,9 +1519,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return updated;
   };
 
-  const retryApprovalRequest = async (requestId: string) => {
+  const retryApprovalRequest = async (requestId: string, idempotencyKey?: string) => {
     const updated = await apiRequest<ApprovalRequest>(`/api/approvals/requests/${encodeURIComponent(requestId)}/retry`, {
       method: 'POST',
+      idempotencyKey,
     });
     setApprovalRequests((prev) => prev.map((r) => (r.request_id === requestId ? updated : r)));
     try {
@@ -1448,9 +1531,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch {}
   };
 
-  const cancelApprovalRequest = async (requestId: string) => {
+  const cancelApprovalRequest = async (requestId: string, idempotencyKey?: string) => {
     const updated = await apiRequest<ApprovalRequest>(`/api/approvals/requests/${encodeURIComponent(requestId)}/cancel`, {
       method: 'POST',
+      idempotencyKey,
     });
     setApprovalRequests((prev) => prev.map((r) => (r.request_id === requestId ? updated : r)));
   };

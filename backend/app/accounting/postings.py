@@ -353,7 +353,7 @@ def post_packaging_batch_journal(
             batches = db.get_records("ProductionBatches", fresh=True)
             recipes = db.get_records("Recipes", fresh=True)
             stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
-            rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+            rm_master = db.get_records("RawMaterials", fresh=True)
             bulk_cost_per_kg = get_authoritative_bulk_cost_per_kg(p_name, batches, recipes, stock_ledger, rm_master)
             bulk_cost = bulk_kg * to_decimal(bulk_cost_per_kg)
             is_estimated = True

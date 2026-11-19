@@ -3,12 +3,14 @@ Kawad Swad ERP - Double-Entry General Ledger Accounting API Router
 Provides endpoints for Chart of Accounts, Trial Balance, P&L, Balance Sheet, and Journal Vouchers.
 """
 
+import hashlib
+import json
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.apps_script_bridge import apps_script_bridge
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.sheets import db
 from app.permissions import is_manager, is_owner, role_v2_of
 from app.timeutil import now_iso
@@ -114,23 +116,30 @@ async def list_journal_vouchers(
     return result
 
 
-@router.post("/vouchers")
+@router.post("/vouchers", dependencies=[Depends(require_sheets_connection)])
 async def create_manual_journal_voucher(
     req: ManualJournalVoucherCreate,
     request: Request,
     user: dict = Depends(get_current_user),
 ):
     actor, _ = require_accounting_access(user, write=True)
+    actor_v2_role = role_v2_of(user)
+    lines_data = [l.model_dump() if hasattr(l, "model_dump") else l.dict() for l in req.lines]
+    req_nonce = apps_script_bridge.extract_request_nonce(request=request)
+    deterministic_ref = req.reference_id.strip() if (req.reference_id or "").strip() else (
+        f"MAN-{hashlib.sha256(json.dumps({'voucher_type': req.voucher_type, 'reference_type': req.reference_type, 'journal_date': req.journal_date or '', 'narration': req.narration, 'lines': lines_data, 'nonce': req_nonce}, sort_keys=True, separators=(',', ':'), default=str).encode('utf-8')).hexdigest()[:12].upper()}"
+    )
     try:
         voucher = post_journal_voucher(
             voucher_type=req.voucher_type,
             reference_type=req.reference_type,
-            reference_id=req.reference_id or f"MAN-{int(id(req))}",
+            reference_id=deterministic_ref,
             narration=req.narration,
-            lines=[l.model_dump() if hasattr(l, 'model_dump') else l.dict() for l in req.lines],
+            lines=lines_data,
             posted_by=actor,
             journal_date=req.journal_date,
-            idempotency_key=apps_script_bridge.extract_request_nonce(request=request),
+            idempotency_key=req_nonce or None,
+            actor_role=actor_v2_role,
         )
         return voucher
     except HTTPException:
@@ -141,7 +150,7 @@ async def create_manual_journal_voucher(
         raise HTTPException(500, detail=f"Failed to post journal voucher: {exc}")
 
 
-@router.post("/vouchers/{journal_id}/reverse")
+@router.post("/vouchers/{journal_id}/reverse", dependencies=[Depends(require_sheets_connection)])
 async def reverse_voucher(
     journal_id: str,
     req: ReversalRequest,
@@ -155,6 +164,7 @@ async def reverse_voucher(
             reason=req.reason,
             actor=actor,
             idempotency_key=apps_script_bridge.extract_request_nonce(request=request),
+            actor_role=role_v2_of(user),
         )
         return rev
     except HTTPException:
@@ -174,7 +184,7 @@ async def audit_reconcile_get(
     return audit_and_reconcile_operational_events(dry_run=True)
 
 
-@router.post("/reconcile")
+@router.post("/reconcile", dependencies=[Depends(require_sheets_connection)])
 async def audit_reconcile_post(
     dry_run: bool = Query(True),
     confirm_live_backfill: bool = Query(False),
@@ -396,7 +406,7 @@ async def list_accounting_periods(user: dict = Depends(get_current_user)):
     return periods
 
 
-@router.post("/periods/{period_id}/close")
+@router.post("/periods/{period_id}/close", dependencies=[Depends(require_sheets_connection)])
 async def close_accounting_period(
     period_id: str,
     request: Request,

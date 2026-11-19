@@ -41,6 +41,7 @@ def _closing_from(record: dict) -> DailyClosing:
 @router.get("", response_model=List[DailyClosing])
 async def list_daily_closings(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
+    require_module_action(current_user, "sales", "view")
 
     records = db.get_records("DailyClosing")
     closings = []

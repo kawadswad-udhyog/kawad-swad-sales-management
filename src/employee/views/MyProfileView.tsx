@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../../context/StoreContext';
-import { apiFetch } from '../../services/api';
+import { apiFetch, createSubmissionNonce, isUnknownOutcomeError } from '../../services/api';
 import {
   User,
   Phone,
@@ -28,6 +28,10 @@ export const MyProfileView: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [saveNonce, setSaveNonce] = useState('');
+
+  const UNKNOWN_OUTCOME_MSG =
+    'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
   const fetchProfile = async () => {
     setIsLoading(true);
@@ -55,6 +59,9 @@ export const MyProfileView: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving) return;
+    const activeNonce = saveNonce || createSubmissionNonce('EMP-PROF');
+    if (!saveNonce) setSaveNonce(activeNonce);
     setIsSaving(true);
     setStatusMessage('');
     setErrorMessage('');
@@ -62,6 +69,7 @@ export const MyProfileView: React.FC = () => {
     try {
       const res = await apiFetch('/api/workforce/my-profile', {
         method: 'PUT',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           mobile: mobile.trim(),
           email: email.trim(),
@@ -70,15 +78,28 @@ export const MyProfileView: React.FC = () => {
           bank_details: bankDetails.trim(),
         }),
       });
-      const data = await res.json();
+      if (res.status === 504) {
+        setErrorMessage(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
+      const rawText = await res.text();
+      let data: any = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = {};
+      }
       if (res.ok) {
+        setSaveNonce('');
         setStatusMessage('Personal contact and banking details updated successfully!');
         await fetchProfile();
       } else {
         setErrorMessage(data.detail || 'Failed to update profile.');
       }
     } catch (err) {
-      setErrorMessage('Network error while saving profile.');
+      setErrorMessage(
+        isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : 'Network error while saving profile.'
+      );
     } finally {
       setIsSaving(false);
     }

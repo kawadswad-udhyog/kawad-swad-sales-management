@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { SalaryIncentive } from '../types';
+import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 
 export const SalaryView: React.FC = () => {
@@ -36,6 +37,9 @@ export const SalaryView: React.FC = () => {
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
   const [payingRecord, setPayingRecord] = useState<SalaryIncentive | null>(null);
   const [paymentRefInput, setPaymentRefInput] = useState('');
+  const [payrollNonce, setPayrollNonce] = useState<string | null>(null);
+  const [payNonce, setPayNonce] = useState<string | null>(null);
+  const [approveNonces, setApproveNonces] = useState<Record<string, string>>({});
 
   if (!isOwnerAdmin && !isAuditor) {
     return (
@@ -59,6 +63,9 @@ export const SalaryView: React.FC = () => {
       return;
     }
 
+    const activeNonce = payrollNonce || createSubmissionNonce('PAYCALC');
+    if (!payrollNonce) setPayrollNonce(activeNonce);
+
     try {
       const generated = await calculatePayroll({
         period_start: periodStart,
@@ -68,8 +75,10 @@ export const SalaryView: React.FC = () => {
         trial_rate_per_kg: Number(trialRate),
         monthly_rate_per_100kg: Number(blockRate),
         base_salary: Number(baseSalary),
-      });
+        idempotency_key: activeNonce,
+      }, activeNonce);
 
+      setPayrollNonce(null);
       if (!generated || generated.length === 0) {
         setNotice({
           msg: 'No new calculations were needed, or records for this period already exist.',
@@ -80,22 +89,41 @@ export const SalaryView: React.FC = () => {
         });
       }
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Calculation failed';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry Calculate payroll safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Calculation failed';
       setNotice({ msg: errorMsg, error: true });
     }
   };
 
   const handleApprove = async (item: SalaryIncentive) => {
     if (writesLocked) return;
+    const activeNonce = approveNonces[item.record_id] || createSubmissionNonce('SALAPP');
+    if (!approveNonces[item.record_id]) {
+      setApproveNonces((prev) => ({ ...prev, [item.record_id]: activeNonce }));
+    }
     try {
-      await approveSalaryIncentive(item.record_id);
+      await approveSalaryIncentive(item.record_id, undefined, activeNonce);
+      setApproveNonces((prev) => {
+        const next = { ...prev };
+        delete next[item.record_id];
+        return next;
+      });
       setNotice({ msg: `Approved ${item.record_type} for ₹${item.calculated_amount}. Persisted to records.` });
     } catch (err: unknown) {
-      setNotice({ msg: err instanceof Error ? err.message : 'Approval failed', error: true });
+      const errorMsg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for ${item.record_id}; retry Approve safely with preserved key.`
+        : err instanceof Error
+        ? err.message
+        : 'Approval failed';
+      setNotice({ msg: errorMsg, error: true });
     }
   };
 
   const openPayDialog = (item: SalaryIncentive) => {
+    setPayNonce(null);
     setPayingRecord(item);
     setPaymentRefInput(`NEFT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-01`);
   };
@@ -108,13 +136,21 @@ export const SalaryView: React.FC = () => {
       setNotice({ msg: 'Payment reference number is required.', error: true });
       return;
     }
+    const activeNonce = payNonce || createSubmissionNonce('SALPAY');
+    if (!payNonce) setPayNonce(activeNonce);
     try {
-      await markSalaryIncentivePaid(payingRecord.record_id, cleanRef);
+      await markSalaryIncentivePaid(payingRecord.record_id, cleanRef, activeNonce);
       setNotice({ msg: `Marked paid with reference: ${cleanRef}. Persisted to records.` });
+      setPayNonce(null);
       setPayingRecord(null);
       setPaymentRefInput('');
     } catch (err: unknown) {
-      setNotice({ msg: err instanceof Error ? err.message : 'Payment update failed', error: true });
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not resubmit new payment. Retry Confirm Payment safely with preserved key.'
+        : err instanceof Error
+        ? err.message
+        : 'Payment update failed';
+      setNotice({ msg: errorMsg, error: true });
     }
   };
 
@@ -247,6 +283,7 @@ export const SalaryView: React.FC = () => {
               type="button"
               className="secondary"
               onClick={() => {
+                setPayNonce(null);
                 setPayingRecord(null);
                 setPaymentRefInput('');
               }}

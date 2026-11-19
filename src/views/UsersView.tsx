@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { User, UserRole, ApprovalRequest, ReconciliationReport } from '../types';
-import { apiRequest } from '../services/api';
+import { apiRequest, createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 
 export const UsersView: React.FC = () => {
   const {
@@ -61,6 +61,19 @@ export const UsersView: React.FC = () => {
 
   const [rejectingRequest, setRejectingRequest] = useState<ApprovalRequest | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [createUserNonce, setCreateUserNonce] = useState<string | null>(null);
+  const [editUserNonce, setEditUserNonce] = useState<string | null>(null);
+  const [pwResetNonce, setPwResetNonce] = useState<string | null>(null);
+  const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
+
+  const clearActionNonce = (key: string) => {
+    setActionNonces((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   if (!isOwner && !isPA) {
     return (
@@ -94,6 +107,9 @@ export const UsersView: React.FC = () => {
       return;
     }
 
+    const activeNonce = createUserNonce || createSubmissionNonce('USRADD');
+    if (!createUserNonce) setCreateUserNonce(activeNonce);
+
     setIsSubmitting(true);
     try {
       const res = await createUser({
@@ -105,7 +121,8 @@ export const UsersView: React.FC = () => {
         email: email.trim(),
         active: true,
         notes: notes.trim(),
-      });
+        idempotency_key: activeNonce,
+      }, activeNonce);
 
       if (res && res.pending_approval) {
         setNotice({ msg: `Request to create '${cleanUsername}' submitted. Awaiting Owner approval.` });
@@ -113,6 +130,7 @@ export const UsersView: React.FC = () => {
         setNotice({ msg: `Employee account '${fullName}' (${cleanUsername}) created successfully.` });
       }
 
+      setCreateUserNonce(null);
       setFullName('');
       setUsername('');
       setPassword('');
@@ -120,7 +138,11 @@ export const UsersView: React.FC = () => {
       setEmail('');
       setNotes('');
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to process user creation.';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to process user creation.';
       setNotice({ msg: errorMsg, error: true });
     } finally {
       setIsSubmitting(false);
@@ -128,6 +150,7 @@ export const UsersView: React.FC = () => {
   };
 
   const handleOpenEdit = (u: User) => {
+    setEditUserNonce(null);
     setEditingUser(u);
     setEditFullName(u.full_name);
     setEditRole(u.role);
@@ -140,6 +163,8 @@ export const UsersView: React.FC = () => {
     e.preventDefault();
     if (!editingUser) return;
     setNotice(null);
+    const activeNonce = editUserNonce || createSubmissionNonce('USREDIT');
+    if (!editUserNonce) setEditUserNonce(activeNonce);
     setIsSubmitting(true);
 
     try {
@@ -149,16 +174,21 @@ export const UsersView: React.FC = () => {
         mobile: editMobile.trim(),
         email: editEmail.trim(),
         notes: editNotes.trim(),
-      });
+      }, activeNonce);
 
       if (res.pending_approval) {
         setNotice({ msg: `Update request for '${editingUser.full_name}' submitted for Owner approval.` });
       } else {
         setNotice({ msg: `Employee '${editFullName}' updated successfully.` });
       }
+      setEditUserNonce(null);
       setEditingUser(null);
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to update employee.';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; retry saving employee changes safely with preserved inputs and key.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to update employee.';
       setNotice({ msg: errorMsg, error: true });
     } finally {
       setIsSubmitting(false);
@@ -175,15 +205,23 @@ export const UsersView: React.FC = () => {
     if (!window.confirm(confirmMsg)) return;
 
     setNotice(null);
+    const key = `status:${u.user_id}:${nextState}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('USRSTAT');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
-      const res = await setUserStatus(u.user_id, nextState, `Requested by ${currentUser?.full_name}`);
+      const res = await setUserStatus(u.user_id, nextState, `Requested by ${currentUser?.full_name}`, activeNonce);
+      clearActionNonce(key);
       if (res.pending_approval) {
         setNotice({ msg: `Status change request for '${u.full_name}' submitted for Owner approval.` });
       } else {
         setNotice({ msg: `Account for '${u.full_name}' ${nextState ? 'reactivated' : 'deactivated and all sessions revoked'}.` });
       }
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : `Failed to ${actionWord} employee.`;
+      const errorMsg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for '${u.full_name}'; retry safely with preserved key.`
+        : err instanceof Error
+        ? err.message
+        : `Failed to ${actionWord} employee.`;
       setNotice({ msg: errorMsg, error: true });
     }
   };
@@ -198,18 +236,25 @@ export const UsersView: React.FC = () => {
       return;
     }
 
+    const activeNonce = pwResetNonce || createSubmissionNonce('USRPW');
+    if (!pwResetNonce) setPwResetNonce(activeNonce);
     setIsSubmitting(true);
     try {
-      const res = await resetUserPassword(pwResetUser.user_id, isOwner ? newPassword : '');
+      const res = await resetUserPassword(pwResetUser.user_id, isOwner ? newPassword : '', activeNonce);
       if (res.pending_approval) {
         setNotice({ msg: `Password reset request for '${pwResetUser.full_name}' submitted for Owner approval.` });
       } else {
         setNotice({ msg: `Password reset for '${pwResetUser.full_name}'. Existing sessions revoked. User must set new password on login.` });
       }
+      setPwResetNonce(null);
       setPwResetUser(null);
       setNewPassword('');
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to reset password.';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; retry password reset safely with preserved key.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to reset password.';
       setNotice({ msg: errorMsg, error: true });
     } finally {
       setIsSubmitting(false);
@@ -218,14 +263,22 @@ export const UsersView: React.FC = () => {
 
   const handleApprove = async (req: ApprovalRequest) => {
     setNotice(null);
+    const key = `approve:${req.request_id}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('USRAPR');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
-      const res = await decideApprovalRequest(req.request_id, 'APPROVED');
+      const res = await decideApprovalRequest(req.request_id, 'APPROVED', '', undefined, activeNonce);
+      clearActionNonce(key);
       const credNotice = (res as { temporary_credentials?: string })?.temporary_credentials;
       setNotice({
         msg: `Request ${req.request_id} (${req.request_type}) approved and executed! ${credNotice ? ` [${credNotice}]` : ''}`,
       });
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to approve request.';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for request ${req.request_id}; retry Approve safely with preserved key.`
+        : err instanceof Error
+        ? err.message
+        : 'Failed to approve request.';
       setNotice({ msg: errorMsg, error: true });
     }
   };
@@ -235,13 +288,22 @@ export const UsersView: React.FC = () => {
     if (!rejectingRequest) return;
     setNotice(null);
 
+    const key = `reject:${rejectingRequest.request_id}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('USRREJ');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
+
     try {
-      await decideApprovalRequest(rejectingRequest.request_id, 'REJECTED', rejectReason.trim());
+      await decideApprovalRequest(rejectingRequest.request_id, 'REJECTED', rejectReason.trim(), undefined, activeNonce);
+      clearActionNonce(key);
       setNotice({ msg: `Request ${rejectingRequest.request_id} rejected.` });
       setRejectingRequest(null);
       setRejectReason('');
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to reject request.';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; retry rejection safely with preserved key.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to reject request.';
       setNotice({ msg: errorMsg, error: true });
     }
   };
@@ -249,11 +311,19 @@ export const UsersView: React.FC = () => {
   const handleCancelRequest = async (reqId: string) => {
     if (!window.confirm(`Cancel your pending request ${reqId}?`)) return;
     setNotice(null);
+    const key = `cancel:${reqId}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('USRCAN');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
-      await cancelApprovalRequest(reqId);
+      await cancelApprovalRequest(reqId, activeNonce);
+      clearActionNonce(key);
       setNotice({ msg: `Request ${reqId} cancelled.` });
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to cancel request.';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for cancelling ${reqId}; retry safely.`
+        : err instanceof Error
+        ? err.message
+        : 'Failed to cancel request.';
       setNotice({ msg: errorMsg, error: true });
     }
   };

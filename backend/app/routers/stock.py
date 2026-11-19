@@ -12,7 +12,7 @@ from app.models import (
 )
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
-from app.permissions import is_manager, is_owner, role_of, role_v2_of
+from app.permissions import is_manager, is_owner, require_roles, role_of, role_v2_of
 from app.stock_math import balances, salesman_available
 from app.timeutil import business_today, now_iso
 from app.accounting.customer_ledger import CrossProcessLock
@@ -190,7 +190,7 @@ async def record_stock_movement(req: StockIssueCreate, request: Request, current
             actor_user_id=user_id,
             actor_role=v2_role,
             id_field="stock_txn_id",
-            invalidate_tabs=["SalesmanStockLedger", "StockMovements"],
+            invalidate_tabs=["SalesmanStockLedger", "ProductionStockLedger"],
         )
         stock_txn_id = str(res.get("allocated_id") or "")
 
@@ -719,6 +719,11 @@ async def get_bulk_batch_tracking(product_id: str = None, current_user: dict = D
     Get detailed breakdown of available bulk stock by production batch ID,
     including original production date, remaining quantity, unit cost, and cost status.
     """
+    require_roles(
+        current_user,
+        {"OWNER_ADMIN", "PA", "PRODUCTION", "PACKAGING", "STORE", "ACCOUNTS", "AUDITOR"},
+        detail="Access denied. Viewing bulk batch tracking requires Production, Packaging, Store, or Management privileges.",
+    )
     from app.calculations.inventory import calculate_batch_bulk_balances
     ledger = db.get_records("ProductionStockLedger", fresh=True)
     batches_data = db.get_records("ProductionBatches", fresh=True)

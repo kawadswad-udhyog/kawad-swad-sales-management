@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { apiRequest, getApiBaseUrl } from '../services/api';
+import { apiRequest, createSubmissionNonce, getApiBaseUrl, isUnknownOutcomeError } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -77,6 +77,16 @@ export const ApprovalsView: React.FC = () => {
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [expandedPayloadIds, setExpandedPayloadIds] = useState<Set<string>>(new Set());
+  const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
+
+  const clearActionNonce = (key: string) => {
+    setActionNonces((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   // Diagnostics State
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -225,15 +235,24 @@ export const ApprovalsView: React.FC = () => {
   const handleApproveBatch = async (batchId: string) => {
     setBusyActionId(batchId);
     setFeedback(null);
+    const key = `batch-approve:${batchId}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('BAP');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
       await apiRequest(`/api/production/batches/${encodeURIComponent(batchId)}/approval`, {
         method: 'POST',
         body: JSON.stringify({ approved: true, notes: `Approved by ${currentUser?.full_name || 'Owner'}` }),
+        idempotencyKey: activeNonce,
       });
+      clearActionNonce(key);
       setFeedback({ type: 'success', message: `Batch ${batchId} approved. Raw materials consumed and bulk inventory credited.` });
       await fetchBatches();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Batch approval failed.';
+      const msg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for batch ${batchId}; do not submit a new transaction. Retry Approve safely with preserved key.`
+        : err instanceof Error
+        ? err.message
+        : 'Batch approval failed.';
       setFeedback({ type: 'error', message: msg });
     } finally {
       setBusyActionId(null);
@@ -243,15 +262,24 @@ export const ApprovalsView: React.FC = () => {
   const handleRejectBatch = async (batchId: string) => {
     setBusyActionId(batchId);
     setFeedback(null);
+    const key = `batch-reject:${batchId}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('BRJ');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
       await apiRequest(`/api/production/batches/${encodeURIComponent(batchId)}/approval`, {
         method: 'POST',
         body: JSON.stringify({ approved: false, notes: `Rejected by ${currentUser?.full_name || 'Owner'}` }),
+        idempotencyKey: activeNonce,
       });
+      clearActionNonce(key);
       setFeedback({ type: 'success', message: `Batch ${batchId} rejected.` });
       await fetchBatches();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Batch rejection failed.';
+      const msg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for batch ${batchId}; retry rejection safely with preserved key.`
+        : err instanceof Error
+        ? err.message
+        : 'Batch rejection failed.';
       setFeedback({ type: 'error', message: msg });
     } finally {
       setBusyActionId(null);
@@ -261,12 +289,20 @@ export const ApprovalsView: React.FC = () => {
   const handleDecideUserRequest = async (requestId: string, decision: 'APPROVED' | 'REJECTED') => {
     setBusyActionId(requestId);
     setFeedback(null);
+    const key = `req-${decision}:${requestId}`;
+    const activeNonce = actionNonces[key] || createSubmissionNonce('APRDEC');
+    if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
-      await decideApprovalRequest(requestId, decision, `${decision} by ${currentUser?.full_name || 'Owner'}`);
+      await decideApprovalRequest(requestId, decision, `${decision} by ${currentUser?.full_name || 'Owner'}`, undefined, activeNonce);
+      clearActionNonce(key);
       setFeedback({ type: 'success', message: `Request ${requestId} ${decision.toLowerCase()} successfully.` });
       await fetchRequests();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Decision execution failed.';
+      const msg = isUnknownOutcomeError(err)
+        ? `Status not confirmed for request ${requestId}; retry decision safely with preserved key.`
+        : err instanceof Error
+        ? err.message
+        : 'Decision execution failed.';
       setFeedback({ type: 'error', message: msg });
     } finally {
       setBusyActionId(null);

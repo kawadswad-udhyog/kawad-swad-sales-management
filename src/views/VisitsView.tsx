@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
+import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 
 const COMMON_OUTCOMES = [
@@ -40,6 +41,8 @@ export const VisitsView: React.FC = () => {
   const [nextAction, setNextAction] = useState('');
   const [notes, setNotes] = useState('');
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
+  const [visitNonce, setVisitNonce] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const filteredCustomers = useMemo(() => {
     if (!customerFilter.trim()) return activeCustomers;
@@ -52,7 +55,7 @@ export const VisitsView: React.FC = () => {
     );
   }, [activeCustomers, customerFilter]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
 
@@ -65,25 +68,37 @@ export const VisitsView: React.FC = () => {
       return;
     }
 
+    const activeNonce = visitNonce || createSubmissionNonce('VST');
+    if (!visitNonce) setVisitNonce(activeNonce);
+    setIsSubmitting(true);
+
     try {
-      addShopVisit({
+      await addShopVisit({
         customer_id: customerId,
         visit_outcome: outcome.trim(),
         order_taken: orderTaken,
         follow_up_date: followUpDate,
         next_action: nextAction.trim(),
         notes: notes.trim(),
-      });
+        idempotency_key: activeNonce,
+      }, activeNonce);
 
       setNotice({ msg: 'Shop visit recorded successfully.' });
+      setVisitNonce(null);
       setOutcome('');
       setNextAction('');
       setFollowUpDate('');
       setOrderTaken(false);
       setNotes('');
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to record visit';
+      const errorMsg = isUnknownOutcomeError(err)
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—tap Save Visit Record to retry safely.'
+        : err instanceof Error
+        ? err.message
+        : 'Failed to record visit';
       setNotice({ msg: errorMsg, error: true });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -239,8 +254,8 @@ export const VisitsView: React.FC = () => {
             </label>
           </div>
 
-          <button type="submit" disabled={writesLocked} style={{ padding: '10px 20px', fontSize: '0.95rem' }}>
-            {writesLocked ? '🔒 Writes Locked' : '💾 Save Visit Record'}
+          <button type="submit" disabled={writesLocked || isSubmitting} style={{ padding: '10px 20px', fontSize: '0.95rem' }}>
+            {writesLocked ? '🔒 Writes Locked' : isSubmitting ? 'Saving Visit…' : '💾 Save Visit Record'}
           </button>
         </form>
       </div>

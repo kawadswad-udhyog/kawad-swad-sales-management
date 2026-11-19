@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.apps_script_bridge import apps_script_bridge
-from app.auth import get_current_user
+from app.auth import get_current_user, require_sheets_connection
 from app.permissions import is_owner, require_roles, role_v2_of
 from app.sheets import db
 from app.timeutil import now_iso, business_today
@@ -197,7 +197,7 @@ async def list_suppliers(user: dict = Depends(get_current_user)):
     return db.get_records("Suppliers", fresh=True)
 
 
-@router.post("/suppliers")
+@router.post("/suppliers", dependencies=[Depends(require_sheets_connection)])
 async def create_supplier(req: SupplierCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_purchasing_access(user)
     now = now_iso()
@@ -236,7 +236,7 @@ async def create_supplier(req: SupplierCreate, request: Request, user: dict = De
     return saved
 
 
-@router.put("/suppliers/{supplier_id}")
+@router.put("/suppliers/{supplier_id}", dependencies=[Depends(require_sheets_connection)])
 async def update_supplier(supplier_id: str, req: SupplierCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_purchasing_access(user)
     supp = next((s for s in db.get_records("Suppliers", fresh=True) if str(s.get("supplier_id")) == supplier_id), None)
@@ -294,7 +294,7 @@ async def list_purchase_orders(user: dict = Depends(get_current_user)):
     return res
 
 
-@router.post("/orders")
+@router.post("/orders", dependencies=[Depends(require_sheets_connection)])
 async def create_purchase_order(req: PurchaseOrderCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_purchasing_access(user)
     suppliers = db.get_records("Suppliers", fresh=True)
@@ -357,7 +357,7 @@ async def create_purchase_order(req: PurchaseOrderCreate, request: Request, user
     return {**saved_po, "items": line_rows}
 
 
-@router.post("/orders/{po_id}/cancel")
+@router.post("/orders/{po_id}/cancel", dependencies=[Depends(require_sheets_connection)])
 async def cancel_purchase_order(po_id: str, request: Request, reason: str = Query(...), user: dict = Depends(get_current_user)):
     actor, actor_role = require_owner_access(user)
     orders = db.get_records("PurchaseOrders", fresh=True)
@@ -414,7 +414,7 @@ async def list_goods_receipts(user: dict = Depends(get_current_user)):
     return res
 
 
-@router.post("/receipts")
+@router.post("/receipts", dependencies=[Depends(require_sheets_connection)])
 async def create_goods_receipt(req: GoodsReceiptCreate, request: Request, user: dict = Depends(get_current_user)):
     """
     Records an authorized Goods Receipt Note (GRN) atomically via Apps Script bridge:
@@ -565,7 +565,7 @@ async def list_supplier_bills(user: dict = Depends(get_current_user)):
     return bills
 
 
-@router.post("/bills")
+@router.post("/bills", dependencies=[Depends(require_sheets_connection)])
 async def create_supplier_bill(req: SupplierBillCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_purchasing_bill(user)
     suppliers = db.get_records("Suppliers", fresh=True)
@@ -785,7 +785,7 @@ async def list_supplier_payments(user: dict = Depends(get_current_user)):
     return payments
 
 
-@router.post("/payments")
+@router.post("/payments", dependencies=[Depends(require_sheets_connection)])
 async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, user: dict = Depends(get_current_user)):
     actor, actor_role = require_purchasing_payment(user)
 
@@ -1009,7 +1009,7 @@ async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, 
         }
 
 
-@router.post("/payments/{payment_id}/apply")
+@router.post("/payments/{payment_id}/apply", dependencies=[Depends(require_sheets_connection)])
 async def apply_supplier_advance_to_bill(
     payment_id: str,
     req: SupplierAdvanceApplyRequest,
@@ -1206,7 +1206,7 @@ async def list_supplier_returns(user: dict = Depends(get_current_user)):
     return res
 
 
-@router.post("/returns")
+@router.post("/returns", dependencies=[Depends(require_sheets_connection)])
 async def create_supplier_return(req: SupplierReturnCreate, request: Request, user: dict = Depends(get_current_user)):
     """
     Supplier Return (Debit Note) atomically delegated via Apps Script bridge:

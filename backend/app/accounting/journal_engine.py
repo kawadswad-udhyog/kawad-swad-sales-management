@@ -73,6 +73,7 @@ def post_journal_voucher(
     journal_date: Optional[str] = None,
     idempotency_key: Optional[str] = None,
     extra_metadata: Optional[Dict[str, Any]] = None,
+    actor_role: str = "ACCOUNTS",
 ) -> Dict[str, Any]:
     """
     Idempotent, fail-closed journal voucher posting delegated to Apps Script Single Write Owner.
@@ -152,7 +153,7 @@ def post_journal_voucher(
         payload=header_payload,
         nonce=idempotency_key or f"JV-{clean_ref_type}-{clean_ref_id}",
         actor_user_id=posted_by,
-        actor_role="ACCOUNTS",
+        actor_role=str(actor_role or "ACCOUNTS").strip().upper(),
         id_field="journal_id",
         invalidate_tabs=invalidate_tabs,
     )
@@ -209,6 +210,7 @@ def append_journal_voucher(
         posted_by=posted_by or created_by,
         journal_date=journal_date,
         idempotency_key=kwargs.get("idempotency_key"),
+        actor_role=kwargs.get("actor_role", "ACCOUNTS"),
     )
     res["voucher_no"] = res.get("journal_id", "")
     res["total_amount"] = res.get("total_debit", 0)
@@ -221,6 +223,7 @@ def reverse_journal_voucher(
     actor: str = "SYSTEM",
     reversed_by: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    actor_role: str = "ACCOUNTS",
 ) -> Dict[str, Any]:
     """
     Creates a compensating reversal voucher and marks the original header REVERSED atomically via Apps Script.
@@ -268,7 +271,7 @@ def reverse_journal_voucher(
         },
         nonce=idempotency_key or f"REV-{clean_jid}",
         actor_user_id=operator,
-        actor_role="ACCOUNTS",
+        actor_role=str(actor_role or "ACCOUNTS").strip().upper(),
         id_field="journal_id",
         invalidate_tabs=["JournalHeaders", "JournalLines"],
     )

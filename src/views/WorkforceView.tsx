@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../context/StoreContext';
-import { getAuthToken, apiFetch } from '../services/api';
+import { getAuthToken, apiFetch, createSubmissionNonce } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 import {
   Users,
@@ -61,6 +61,21 @@ interface WorkforceViewProps {
   onPreviewEmployeePortal?: () => void;
 }
 
+const UNKNOWN_OUTCOME_MSG =
+  'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
+
+async function parseApiFetchJson(res: Response): Promise<{ is504: boolean; data: any }> {
+  if (res.status === 504) return { is504: true, data: {} };
+  const rawText = await res.text();
+  let data: any = {};
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    data = {};
+  }
+  return { is504: false, data };
+}
+
 export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeePortal }) => {
   const { currentUser, users, createUser } = useStore();
   const token = getAuthToken();
@@ -98,6 +113,14 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   // Feedback notifications
   const [actionSuccess, setActionSuccess] = useState('');
   const [actionError, setActionError] = useState('');
+
+  // Stable idempotency nonces & per-action guards
+  const [bulkAttNonce, setBulkAttNonce] = useState('');
+  const [workEntryNonce, setWorkEntryNonce] = useState('');
+  const [calcPayrollNonce, setCalcPayrollNonce] = useState('');
+  const [approvePayrollNonces, setApprovePayrollNonces] = useState<Record<string, string>>({});
+  const [approvingRunId, setApprovingRunId] = useState<string | null>(null);
+  const [disburseNonce, setDisburseNonce] = useState('');
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwner = canonicalRole === 'OWNER_ADMIN';
@@ -192,6 +215,9 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   }, [labourList]);
 
   const handleSaveBulkAttendance = async () => {
+    if (isLoading) return;
+    const activeNonce = bulkAttNonce || createSubmissionNonce('WF-ATT');
+    if (!bulkAttNonce) setBulkAttNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
@@ -207,20 +233,30 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
 
       const res = await apiFetch('/api/workforce/labour/attendance/bulk', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           attendance_date: attDate,
           records,
         }),
       });
-      const data = await res.json();
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setActionError(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
       if (res.ok) {
+        setBulkAttNonce('');
         setActionSuccess(data.message || 'Labour attendance saved successfully!');
         loadMetrics();
       } else {
         setActionError(data.detail || 'Failed to save labour attendance.');
       }
     } catch (err) {
-      setActionError('Network error while saving attendance.');
+      setActionError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error while saving attendance.'
+      );
     } finally {
       setIsLoading(false);
     }
@@ -237,12 +273,16 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
 
   const handleSaveWorkEntry = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading) return;
+    const activeNonce = workEntryNonce || createSubmissionNonce('WF-WRK');
+    if (!workEntryNonce) setWorkEntryNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
     try {
       const res = await apiFetch('/api/workforce/labour/work-entries', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           labour_id: workLabourId,
           entry_date: attDate,
@@ -253,8 +293,13 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           notes: workNotes,
         }),
       });
-      const data = await res.json();
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setActionError(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
       if (res.ok) {
+        setWorkEntryNonce('');
         setActionSuccess(data.message || 'Work entry logged successfully!');
         setShowLogWorkModal(false);
         setWorkActivity('');
@@ -264,7 +309,11 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         setActionError(data.detail || 'Failed to log work entry.');
       }
     } catch (err) {
-      setActionError('Network error logging work entry.');
+      setActionError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error logging work entry.'
+      );
     } finally {
       setIsLoading(false);
     }
@@ -274,18 +323,27 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [calcMonth, setCalcMonth] = useState(new Date().toISOString().slice(0, 7));
 
   const handleCalculatePayroll = async () => {
+    if (isLoading) return;
+    const activeNonce = calcPayrollNonce || createSubmissionNonce('WF-PAYCALC');
+    if (!calcPayrollNonce) setCalcPayrollNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
     try {
       const res = await apiFetch('/api/workforce/payroll/calculate', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           month: calcMonth,
         }),
       });
-      const data = await res.json();
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setActionError(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
       if (res.ok) {
+        setCalcPayrollNonce('');
         setActionSuccess(data.message || 'Draft payroll calculated!');
         setShowCalcPayrollModal(false);
         loadPayroll();
@@ -295,31 +353,56 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         setActionError(data.detail || 'Failed to calculate payroll.');
       }
     } catch (err) {
-      setActionError('Network error calculating payroll.');
+      setActionError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error calculating payroll.'
+      );
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleApprovePayroll = async (runId: string) => {
+    if (isLoading || approvingRunId) return;
     if (!window.confirm(`Approve payroll run ${runId}? This freezes calculations for payment.`)) return;
+    const activeNonce = approvePayrollNonces[runId] || createSubmissionNonce('WF-PAYAPP');
+    if (!approvePayrollNonces[runId]) {
+      setApprovePayrollNonces((prev) => ({ ...prev, [runId]: activeNonce }));
+    }
+    setApprovingRunId(runId);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
     try {
       const res = await apiFetch(`/api/workforce/payroll/${runId}/approve`, {
         method: 'POST',
+        idempotencyKey: activeNonce,
       });
-      const data = await res.json();
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setActionError(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
       if (res.ok) {
+        setApprovePayrollNonces((prev) => {
+          const next = { ...prev };
+          delete next[runId];
+          return next;
+        });
         setActionSuccess(data.message || 'Payroll approved successfully!');
         loadPayroll();
       } else {
         setActionError(data.detail || 'Failed to approve payroll.');
       }
     } catch (err) {
-      setActionError('Network error approving payroll.');
+      setActionError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error approving payroll.'
+      );
     } finally {
+      setApprovingRunId(null);
       setIsLoading(false);
     }
   };
@@ -341,13 +424,16 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
 
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedDisburseItem) return;
+    if (!selectedDisburseItem || isLoading) return;
+    const activeNonce = disburseNonce || createSubmissionNonce('WF-PAYDISB');
+    if (!disburseNonce) setDisburseNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
     try {
       const res = await apiFetch('/api/workforce/payments', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           reference_id: selectedDisburseItem.id,
           payment_type: selectedDisburseItem.type,
@@ -359,8 +445,13 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           notes: disburseNotes,
         }),
       });
-      const data = await res.json();
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setActionError(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
       if (res.ok) {
+        setDisburseNonce('');
         setActionSuccess(data.message || 'Payment recorded and official receipt generated!');
         setShowDisburseModal(false);
         loadReceipts();
@@ -370,7 +461,11 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         setActionError(data.detail || 'Failed to record payment.');
       }
     } catch (err) {
-      setActionError('Network error recording payment.');
+      setActionError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error recording payment.'
+      );
     } finally {
       setIsLoading(false);
     }
@@ -964,6 +1059,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                         ) : ms.status === 'APPROVED' ? (
                           <button
                             onClick={() => {
+                              setDisburseNonce('');
                               setSelectedDisburseItem({
                                 id: ms.milestone_id,
                                 type: 'FREELANCER_MILESTONE',
@@ -1048,9 +1144,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                       {run.status !== 'APPROVED' && isOwner && (
                         <button
                           onClick={() => handleApprovePayroll(run.payroll_run_id)}
-                          className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs cursor-pointer"
+                          disabled={isLoading || Boolean(approvingRunId)}
+                          className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs cursor-pointer"
                         >
-                          Approve
+                          {approvingRunId === run.payroll_run_id ? 'Approving...' : 'Approve'}
                         </button>
                       )}
                     </td>
@@ -1118,6 +1215,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                           {item.payment_status !== 'PAID' ? (
                             <button
                               onClick={() => {
+                                setDisburseNonce('');
                                 setSelectedDisburseItem({
                                   id: item.item_id,
                                   type: 'SALARY',
@@ -1332,10 +1430,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
               e.preventDefault();
               handleCalculatePayroll();
             }}
-            onCancel={() => setShowCalcPayrollModal(false)}
+            onCancel={() => { setShowCalcPayrollModal(false); setCalcPayrollNonce(''); }}
             actions={
               <FormActions
-                onCancel={() => setShowCalcPayrollModal(false)}
+                onCancel={() => { setShowCalcPayrollModal(false); setCalcPayrollNonce(''); }}
                 cancelLabel="Cancel"
                 saveLabel="Calculate Draft Payroll"
                 isLoading={isLoading}
@@ -1368,10 +1466,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
             icon={<CreditCard size={18} />}
             maxWidth="md"
             onSubmit={handleRecordPayment}
-            onCancel={() => setShowDisburseModal(false)}
+            onCancel={() => { setShowDisburseModal(false); setDisburseNonce(''); }}
             actions={
               <FormActions
-                onCancel={() => setShowDisburseModal(false)}
+                onCancel={() => { setShowDisburseModal(false); setDisburseNonce(''); }}
                 cancelLabel="Cancel"
                 saveLabel="Confirm & Generate Slip"
                 isLoading={isLoading}
@@ -1451,16 +1549,21 @@ const AddLabourModal: React.FC<{ onClose: () => void; onSuccess: (msg: string) =
   const [mobile, setMobile] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [submitNonce, setSubmitNonce] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (!fullName.trim()) return setError('Worker full name is required.');
+    const activeNonce = submitNonce || createSubmissionNonce('WF-LAB');
+    if (!submitNonce) setSubmitNonce(activeNonce);
     setIsSubmitting(true);
     setError('');
 
     try {
       const res = await apiFetch('/api/workforce/labour', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           full_name: fullName.trim(),
           category,
@@ -1469,14 +1572,23 @@ const AddLabourModal: React.FC<{ onClose: () => void; onSuccess: (msg: string) =
           mobile: mobile.trim(),
         }),
       });
-      const data = await res.json();
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setError(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
       if (res.ok) {
+        setSubmitNonce('');
         onSuccess(data.message || 'Worker registered.');
       } else {
         setError(data.detail || 'Failed to register worker.');
       }
     } catch (err) {
-      setError('Network error registering labour worker.');
+      setError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error registering labour worker.'
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -1584,16 +1696,21 @@ const AssignTaskModal: React.FC<{
   const [dueDate, setDueDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [submitNonce, setSubmitNonce] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (!title.trim()) return setError('Task title is required.');
+    const activeNonce = submitNonce || createSubmissionNonce('WF-TASK');
+    if (!submitNonce) setSubmitNonce(activeNonce);
     setIsSubmitting(true);
     setError('');
 
     try {
       const res = await apiFetch('/api/workforce/tasks', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           assigned_to_user_id: assigneeId,
           title: title.trim(),
@@ -1602,14 +1719,23 @@ const AssignTaskModal: React.FC<{
           due_date: dueDate,
         }),
       });
-      const data = await res.json();
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setError(UNKNOWN_OUTCOME_MSG);
+        return;
+      }
       if (res.ok) {
+        setSubmitNonce('');
         onSuccess(data.message || 'Task assigned.');
       } else {
         setError(data.detail || 'Failed to assign task.');
       }
     } catch (err) {
-      setError('Network error assigning task.');
+      setError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error assigning task.'
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -1700,24 +1826,45 @@ const ReviewTaskModal: React.FC<{
   const [status, setStatus] = useState('APPROVED');
   const [reviewNotes, setReviewNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [submitNonce, setSubmitNonce] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    const activeNonce = submitNonce || createSubmissionNonce('WF-REV');
+    if (!submitNonce) setSubmitNonce(activeNonce);
     setIsSubmitting(true);
+    setError('');
     try {
       const res = await apiFetch(`/api/workforce/tasks/${task.task_id}/review`, {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           status,
           review_notes: reviewNotes,
         }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        onSuccess(data.message || 'Task reviewed.');
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setError(UNKNOWN_OUTCOME_MSG);
+        return;
       }
-    } catch (err) {}
-    setIsSubmitting(false);
+      if (res.ok) {
+        setSubmitNonce('');
+        onSuccess(data.message || 'Task reviewed.');
+      } else {
+        setError(data.detail || 'Failed to submit review decision.');
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error submitting review decision.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -1728,6 +1875,11 @@ const ReviewTaskModal: React.FC<{
       onClose={onClose}
       maxWidth="max-w-md"
     >
+      {error && (
+        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold mb-4">
+          {error}
+        </div>
+      )}
       <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs space-y-1.5 mb-4">
         <div>Task: <strong className="text-slate-800">{task.title}</strong></div>
         <div>Submitted by: <strong className="text-slate-800">{task.assigned_to_name}</strong></div>
@@ -1785,13 +1937,20 @@ const CreateProjectModal: React.FC<{
   const [budget, setBudget] = useState('');
   const [targetDate, setTargetDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [submitNonce, setSubmitNonce] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    const activeNonce = submitNonce || createSubmissionNonce('WF-PROJ');
+    if (!submitNonce) setSubmitNonce(activeNonce);
     setIsSubmitting(true);
+    setError('');
     try {
       const res = await apiFetch('/api/workforce/projects', {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           freelancer_user_id: freelancerId,
           title: title.trim(),
@@ -1800,12 +1959,26 @@ const CreateProjectModal: React.FC<{
           target_completion_date: targetDate,
         }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        onSuccess(data.message || 'Project created.');
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setError(UNKNOWN_OUTCOME_MSG);
+        return;
       }
-    } catch (err) {}
-    setIsSubmitting(false);
+      if (res.ok) {
+        setSubmitNonce('');
+        onSuccess(data.message || 'Project created.');
+      } else {
+        setError(data.detail || 'Failed to create project.');
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error creating project.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -1816,6 +1989,11 @@ const CreateProjectModal: React.FC<{
       onClose={onClose}
       maxWidth="max-w-md"
     >
+      {error && (
+        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold mb-4">
+          {error}
+        </div>
+      )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <FormField label="Contractor / Freelancer" required helpText="Select assigned freelance partner">
           <SelectInput
@@ -1878,13 +2056,20 @@ const AddMilestoneModal: React.FC<{
   const [amount, setAmount] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [submitNonce, setSubmitNonce] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    const activeNonce = submitNonce || createSubmissionNonce('WF-MS');
+    if (!submitNonce) setSubmitNonce(activeNonce);
     setIsSubmitting(true);
+    setError('');
     try {
       const res = await apiFetch(`/api/workforce/projects/${projectId}/milestones`, {
         method: 'POST',
+        idempotencyKey: activeNonce,
         body: JSON.stringify({
           project_id: projectId,
           title: title.trim(),
@@ -1892,12 +2077,26 @@ const AddMilestoneModal: React.FC<{
           due_date: dueDate,
         }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        onSuccess(data.message || 'Milestone added.');
+      const { is504, data } = await parseApiFetchJson(res);
+      if (is504) {
+        setError(UNKNOWN_OUTCOME_MSG);
+        return;
       }
-    } catch (err) {}
-    setIsSubmitting(false);
+      if (res.ok) {
+        setSubmitNonce('');
+        onSuccess(data.message || 'Milestone added.');
+      } else {
+        setError(data.detail || 'Failed to add milestone.');
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error && err.name === 'AbortError'
+          ? UNKNOWN_OUTCOME_MSG
+          : 'Network error adding milestone.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -1908,6 +2107,11 @@ const AddMilestoneModal: React.FC<{
       onClose={onClose}
       maxWidth="max-w-md"
     >
+      {error && (
+        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold mb-4">
+          {error}
+        </div>
+      )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <FormField label="Milestone Title" required helpText="Specific deliverable for this stage">
           <TextInput

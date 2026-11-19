@@ -5,7 +5,7 @@ from app.apps_script_bridge import apps_script_bridge
 from app.models import Expense, ExpenseCreate, ExpenseApproveRequest
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
-from app.permissions import is_manager, is_salesman, require_module_action, require_manager
+from app.permissions import has_permission, is_manager, is_salesman, require_module_action, require_manager
 from app.calculations.units import parse_currency_amount
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
@@ -13,6 +13,8 @@ router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
 @router.get("", response_model=List[Expense])
 async def list_expenses(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id")
+    if not has_permission(current_user, "expenses", "view") and not has_permission(current_user, "expenses", "view_own"):
+        raise HTTPException(status_code=403, detail="Permission denied for 'expenses:view'.")
 
     records = db.get_records("Expenses")
     expenses = []

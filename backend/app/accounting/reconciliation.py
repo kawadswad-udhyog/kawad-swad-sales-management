@@ -153,7 +153,7 @@ def audit_and_reconcile_operational_events(
         batches = db.get_records("ProductionBatches", fresh=True)
         recipes = db.get_records("Recipes", fresh=True)
         stock_ledger = db.get_records("ProductionStockLedger", fresh=True)
-        rm_master = db.get_records("RawMaterials", fresh=True) or db.get_records("RawMaterialsMaster", fresh=True)
+        rm_master = db.get_records("RawMaterials", fresh=True)
 
         cogs_tot = Decimal("0")
         for itm in items:

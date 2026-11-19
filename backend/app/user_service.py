@@ -834,10 +834,9 @@ def validate_unique_username(username: str, exclude_user_id: Optional[str] = Non
             )
 
 
-def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str, Any]:
+def execute_create_user(payload: Dict[str, Any], actor_user_id: str, nonce: str = "") -> Dict[str, Any]:
     """
-    Two-phase creation of profile (Users) and credentials (AuthUsers) with safe failure rollback
-    and idempotent replay support.
+    Validate and delegate profile (Users) + credentials (AuthUsers) creation to Apps Script.
     """
     username = str(payload.get("username") or "").strip()
     full_name = str(payload.get("full_name") or "").strip()
@@ -905,7 +904,7 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
             "must_change_password": must_change,
             "sessions_revoked_at": "",
         },
-        nonce=str(payload.get("nonce") or payload.get("idempotency_key") or ""),
+        nonce=str(nonce or payload.get("nonce") or payload.get("idempotency_key") or ""),
         actor_user_id=actor_user_id,
         actor_role="OWNER_ADMIN",
         id_field="user_id",
@@ -939,7 +938,7 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str) -> Dict[str
     return resp
 
 
-def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: str) -> Dict[str, Any]:
+def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: str, nonce: str = "") -> Dict[str, Any]:
     """
     Validate and delegate profile + credential synchronization through Apps Script Single Write Owner.
     """
@@ -1008,7 +1007,7 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
             "auth_updates": auth_updates,
             "role_changed": role_changed,
         },
-        nonce=str(payload.get("nonce") or payload.get("idempotency_key") or ""),
+        nonce=str(nonce or payload.get("nonce") or payload.get("idempotency_key") or ""),
         actor_user_id=actor_user_id,
         actor_role="OWNER_ADMIN",
         id_field="user_id",
