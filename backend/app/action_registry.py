@@ -22,10 +22,19 @@ class ChildTabCheck:
 
 
 @dataclass(frozen=True)
+class BulkRowsCheck:
+    payload_list_keys: Tuple[str, ...]
+    item_key_field: str
+    item_state_field: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ReadBackSpec:
     primary_match_fields: Tuple[str, ...] = ()
     state_assertions: Tuple[Tuple[str, str], ...] = ()
+    clear_assertions: Tuple[str, ...] = ()
     child_checks: Tuple[ChildTabCheck, ...] = ()
+    bulk_rows_check: Optional[BulkRowsCheck] = None
     expect_absent: bool = False
     expect_absent_or_soft_deleted: bool = False
 
@@ -51,7 +60,9 @@ def _spec(
     locked_prefix: Optional[str] = None,
     primary_match_fields: Tuple[str, ...] = (),
     state_assertions: Tuple[Tuple[str, str], ...] = (),
+    clear_assertions: Tuple[str, ...] = (),
     child_checks: Tuple[ChildTabCheck, ...] = (),
+    bulk_rows_check: Optional[BulkRowsCheck] = None,
     expect_absent: bool = False,
     expect_absent_or_soft_deleted: bool = False,
 ) -> GovernedActionSpec:
@@ -66,7 +77,9 @@ def _spec(
         readback=ReadBackSpec(
             primary_match_fields=primary_match_fields,
             state_assertions=state_assertions,
+            clear_assertions=clear_assertions,
             child_checks=child_checks,
+            bulk_rows_check=bulk_rows_check,
             expect_absent=expect_absent,
             expect_absent_or_soft_deleted=expect_absent_or_soft_deleted,
         ),
@@ -245,7 +258,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("ApprovalRequests",),
         requires_allocated_id=False,
         primary_match_fields=("request_id",),
-        state_assertions=(("status", "status"),),
+        state_assertions=(("reserved_by_sale_id", "reserved_by_sale_id"),),
     ),
     _spec(
         "CONSUME_CREDIT_APPROVAL",
@@ -254,7 +267,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("ApprovalRequests",),
         requires_allocated_id=False,
         primary_match_fields=("request_id",),
-        state_assertions=(("status", "status"),),
+        state_assertions=(("is_consumed", "is_consumed"), ("consumed_by_sale_id", "consumed_by_sale_id")),
     ),
     _spec(
         "RELEASE_CREDIT_APPROVAL",
@@ -263,7 +276,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("ApprovalRequests",),
         requires_allocated_id=False,
         primary_match_fields=("request_id",),
-        state_assertions=(("status", "status"),),
+        clear_assertions=("reserved_by_sale_id",),
     ),
 
     # -----------------------------------------------------------------------
@@ -333,9 +346,8 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "Recipes",
         "recipe_id",
         ("Recipes",),
-        requires_allocated_id=False,
-        primary_match_fields=("recipe_id",),
-        state_assertions=(("approved", "approved"),),
+        requires_allocated_id=True,
+        state_assertions=(("approved", "approved"), ("version", "version")),
     ),
 
     # -----------------------------------------------------------------------
@@ -494,7 +506,8 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         None,
         ("RawMaterialLedger", "RawMaterials", "ProductionBatches", "IncompleteTransactions"),
         requires_allocated_id=False,
-        primary_match_fields=("production_id",),
+        primary_match_fields=("production_id", "issue_txn_id"),
+        bulk_rows_check=BulkRowsCheck(("deductions",), "material_name"),
         child_checks=(ChildTabCheck("ProductionBatches", "production_id", "production_id"),),
     ),
     _spec(
@@ -998,6 +1011,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("WorkerAttendance",),
         requires_allocated_id=False,
         primary_match_fields=("attendance_date",),
+        bulk_rows_check=BulkRowsCheck(("records",), "worker_id", "status"),
     ),
     _spec(
         "CORRECT_WORKER_ATTENDANCE",
@@ -1121,6 +1135,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         ("LabourAttendance",),
         requires_allocated_id=False,
         primary_match_fields=("attendance_date",),
+        bulk_rows_check=BulkRowsCheck(("inserts", "updates"), "labour_id", "status"),
     ),
     _spec(
         "CREATE_WORK_ENTRY",

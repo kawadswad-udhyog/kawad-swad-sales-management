@@ -1639,6 +1639,8 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, request: Request
         "created_at": now,
     }
 
+    req_nonce = apps_script_bridge.extract_request_nonce(request=request)
+    resolved_nonce = req_nonce or (f"WF-{pay_type}-{clean_ref}" if clean_ref else None)
     bridge_res = apps_script_bridge.delegate_governed_write(
         action="RECORD_WORKFORCE_PAYMENT",
         target_tab="WorkforcePayments",
@@ -1649,8 +1651,8 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, request: Request
         },
         actor_user_id=actor_id,
         actor_role=actor_role,
-        nonce=f"WF-{pay_type}-{clean_ref}" if clean_ref else None,
-        request=request,
+        nonce=resolved_nonce,
+        request=None,
         id_field="payment_id",
         invalidate_tabs=["WorkforcePayments", "PayrollItems", "FreelancerMilestones", "LabourWageRecords", "SalaryReceipts"],
     )

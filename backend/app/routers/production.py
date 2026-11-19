@@ -929,7 +929,8 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, request: Request,
     clean_invoice = inv_raw.upper()
 
     line_no = int(req.line_number or 1)
-    clean_idemp_key = (req.idempotency_key or f"IDEMP:{clean_invoice}:L:{line_no}").strip()
+    client_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.idempotency_key)
+    clean_idemp_key = (client_nonce or f"IDEMP:{clean_invoice}:L:{line_no}").strip()
     treatment = (req.gst_treatment or "RECOVERABLE_ITC").strip().upper()
 
     if treatment not in {"RECOVERABLE_ITC", "CAPITALIZED_TO_COST", "EXEMPT_NIL_RATED"}:
@@ -1097,7 +1098,7 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, request: Request,
             actor_user_id=actor,
             actor_role=actor_role,
             nonce=clean_idemp_key,
-            request=request,
+            request=None,
             id_field="raw_material_txn_id",
             invalidate_tabs=["RawMaterialLedger", "RawMaterials"],
         )
@@ -1189,7 +1190,8 @@ async def record_dal_milling_batch(req: DalMillingCreate, request: Request, user
     milling_exp = round_money(max(0.0, float(req.milling_expenses or exp_from_charge or 0.0)))
     clean_batch_ref = (req.batch_reference or "").strip()
     milling_date = (req.milling_date or now()[:10]).strip()
-    clean_idemp_key = (req.idempotency_key or f"MIL:{clean_batch_ref or milling_date}:{dal_id}:{round_stock(req.input_quantity_kg)}:{round_stock(req.flour_output_kg)}").strip()
+    client_nonce = apps_script_bridge.extract_request_nonce(request=request, explicit_nonce=req.idempotency_key)
+    clean_idemp_key = (client_nonce or f"MIL:{clean_batch_ref or milling_date}:{dal_id}:{round_stock(req.input_quantity_kg)}:{round_stock(req.flour_output_kg)}").strip()
 
     payload_dict = {
         "source_material_id": dal_id,
@@ -1362,7 +1364,7 @@ async def record_dal_milling_batch(req: DalMillingCreate, request: Request, user
                 actor_user_id=actor,
                 actor_role=actor_role,
                 nonce=clean_idemp_key,
-                request=request,
+                request=None,
                 id_field="raw_material_txn_id",
                 invalidate_tabs=["RawMaterialLedger", "MillingBatches", "RawMaterials"],
             )
@@ -1543,7 +1545,7 @@ async def record_dal_milling_batch(req: DalMillingCreate, request: Request, user
             actor_user_id=actor,
             actor_role=actor_role,
             nonce=clean_idemp_key,
-            request=request,
+            request=None,
             id_field="milling_batch_id",
             invalidate_tabs=["MillingBatches", "RawMaterialLedger", "RawMaterials"],
         )

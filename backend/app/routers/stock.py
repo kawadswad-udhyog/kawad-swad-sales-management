@@ -23,8 +23,15 @@ from app.calculations import (
 
 router = APIRouter(prefix="/api/stock", tags=["Stock"])
 
+STOCK_READ_ROLES = {
+    "OWNER_ADMIN", "PA", "STORE", "SALES", "FIELD_SALESMAN",
+    "PACKAGING", "PRODUCTION", "QUALITY", "ACCOUNTS", "PROCUREMENT", "AUDITOR",
+}
+
+
 @router.get("/summary", response_model=StockSummaryResponse)
 async def get_stock_summary(current_user: dict = Depends(get_current_user)):
+    require_roles(current_user, STOCK_READ_ROLES, detail="Access denied. Viewing stock summary requires authorized inventory or audit permissions.")
     user_id = current_user.get("user_id")
 
     products = db.get_records("Products", fresh=True)
@@ -75,6 +82,7 @@ async def get_stock_summary(current_user: dict = Depends(get_current_user)):
 
 @router.get("/transactions", response_model=List[StockTransaction])
 async def list_stock_transactions(limit: int = 250, current_user: dict = Depends(get_current_user)):
+    require_roles(current_user, STOCK_READ_ROLES, detail="Access denied. Viewing stock transactions requires authorized inventory or audit permissions.")
     user_id = current_user.get("user_id")
     v2_role = role_v2_of(current_user)
 
@@ -220,6 +228,7 @@ class StockDiscrepancyReview(BaseModel):
 
 @router.get("/discrepancies")
 async def list_stock_discrepancies(current_user: dict = Depends(get_current_user)):
+    require_roles(current_user, STOCK_READ_ROLES, detail="Access denied. Viewing stock discrepancies requires authorized inventory or audit permissions.")
     user_id = str(current_user.get("user_id", ""))
     records = db.get_records("StockDiscrepancies", fresh=True)
     if not is_manager(current_user) and role_v2_of(current_user) != "AUDITOR":

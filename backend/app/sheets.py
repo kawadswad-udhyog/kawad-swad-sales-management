@@ -1086,40 +1086,34 @@ class SheetsDatabase:
         }
 
     def ensure_required_tabs(self, spreadsheet: Any = None) -> bool:
-        """Create missing bookkeeping tabs and append missing headers. Never clears rows or creates tabs on failed discovery."""
+        """Read-only worksheet discovery on startup. Never creates tabs or mutates headers under Single-Write-Owner."""
         ss = spreadsheet if spreadsheet is not None else self.spreadsheet
         if ss is None or (spreadsheet is None and not self.is_connected):
             return False
         try:
-            # Single API call to retrieve all existing worksheets at once
+            # Single API call to retrieve all existing worksheets at once (strictly read-only)
             existing_ws = {ws.title: ws for ws in ss.worksheets()}
             with self._lock:
                 for title, ws in existing_ws.items():
                     self._worksheets[title] = ws
         except Exception as exc:
             logger.error(
-                "Worksheet discovery failed; aborting ensure_required_tabs safely without creating tabs: %s",
+                "Worksheet discovery failed; aborting ensure_required_tabs safely: %s",
                 exc,
             )
             return False
 
-        for tab, headers in REQUIRED_TABS.items():
-            try:
-                worksheet = existing_ws.get(tab)
-                if worksheet is None:
-                    worksheet = ss.add_worksheet(title=tab, rows=1000, cols=max(26, len(headers) + 2))
-                    worksheet.update("A1", [headers])
-                    with self._lock:
-                        self._worksheets[tab] = worksheet
-                    self.invalidate_diagnostic_cache()
-            except Exception as exc:
-                logger.error("Could not ensure tab %s: %s", tab, exc)
-                if self._is_quota_exception(exc) or self._classify_sheets_exception(exc) == "NETWORK_ERROR":
-                    logger.error("Stopping ensure_required_tabs safely due to Google Sheets quota/network error.")
-                    return False
+        missing_tabs = [tab for tab in REQUIRED_TABS if tab not in existing_ws]
+        if missing_tabs:
+            logger.warning(
+                "Startup read-only discovery found %d missing tab(s) (not auto-created under Single-Write-Owner): %s",
+                len(missing_tabs),
+                missing_tabs[:10],
+            )
         return True
 
     def _ensure_headers(self, worksheet, headers: List[str]):
+        self._assert_direct_mutation_allowed("_ensure_headers", str(getattr(worksheet, "title", "")))
         current = worksheet.row_values(1)
         if not current:
             worksheet.update("A1", [headers])
@@ -1166,18 +1160,8 @@ class SheetsDatabase:
             ws = self._worksheets.get(tab_name)
         if ws is not None:
             return ws
-        try:
-            ws = self.spreadsheet.worksheet(tab_name)
-        except Exception as exc:
-            # Auto-create ONLY if explicitly present in verified REQUIRED_TABS (never auto-create unmapped 255-tab snapshot sheets)
-            if tab_name in REQUIRED_TABS:
-                headers = REQUIRED_TABS[tab_name]
-                logger.info("Worksheet '%s' not found. Creating worksheet with default headers.", tab_name)
-                ws = self.spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=max(26, len(headers) + 2))
-                self._ensure_headers(ws, headers)
-                self.invalidate_diagnostic_cache()
-            else:
-                raise exc
+        # Strictly read-only lookup: never auto-create worksheets or mutate headers on read paths
+        ws = self.spreadsheet.worksheet(tab_name)
         with self._lock:
             self._worksheets[tab_name] = ws
         return ws

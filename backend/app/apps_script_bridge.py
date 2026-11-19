@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, Request
 
@@ -291,6 +291,7 @@ class AppsScriptBridge:
             if raw_payload_id:
                 lookup_id = str(raw_payload_id).strip()
 
+        scoped_rows: Optional[List[Dict[str, Any]]] = None
         if spec.readback.expect_absent or spec.readback.expect_absent_or_soft_deleted:
             target_criteria: List[Tuple[str, str]] = []
             if spec.id_field and lookup_id:
@@ -344,17 +345,53 @@ class AppsScriptBridge:
                 raise _ReadBackFailure(
                     f"Cannot verify read-back on '{spec.target_tab}': missing match fields {spec.readback.primary_match_fields}."
                 )
-            matched = next(
-                (
-                    r for r in fresh_rows
-                    if all(str(r.get(k, "")).strip() == v for k, v in criteria)
-                ),
-                None,
-            )
+            scoped_rows = [
+                r for r in fresh_rows
+                if all(str(r.get(k, "")).strip() == v for k, v in criteria)
+            ]
+            matched = scoped_rows[0] if scoped_rows else None
             if matched is None:
                 raise _ReadBackFailure(
                     f"Primary row matching {criteria} on '{spec.target_tab}' not found on read-back."
                 )
+
+        if spec.readback.bulk_rows_check is not None:
+            bulk_check = spec.readback.bulk_rows_check
+            rows_pool = scoped_rows if scoped_rows is not None else fresh_rows
+            submitted_items: List[Dict[str, Any]] = []
+            for list_key in bulk_check.payload_list_keys:
+                raw_list = payload.get(list_key)
+                if isinstance(raw_list, list):
+                    submitted_items.extend(item for item in raw_list if isinstance(item, dict))
+            if not submitted_items:
+                raise _ReadBackFailure(
+                    f"Bulk read-back failed on '{spec.target_tab}': no submitted rows found in payload keys {bulk_check.payload_list_keys}."
+                )
+            for item in submitted_items:
+                exp_key = str(item.get(bulk_check.item_key_field, "") or "").strip()
+                if not exp_key:
+                    raise _ReadBackFailure(
+                        f"Bulk read-back failed on '{spec.target_tab}': submitted row missing '{bulk_check.item_key_field}'."
+                    )
+                exp_state_raw = item.get(bulk_check.item_state_field) if bulk_check.item_state_field else None
+                check_state = (
+                    bulk_check.item_state_field is not None
+                    and exp_state_raw is not None
+                    and str(exp_state_raw).strip() != ""
+                )
+                exp_state_norm = _normalize_scalar(exp_state_raw) if check_state else ""
+                found_item = any(
+                    str(r.get(bulk_check.item_key_field, "") or "").strip() == exp_key
+                    and (
+                        not check_state
+                        or _normalize_scalar(r.get(bulk_check.item_state_field or "", "")) == exp_state_norm
+                    )
+                    for r in rows_pool
+                )
+                if not found_item:
+                    raise _ReadBackFailure(
+                        f"Bulk read-back failed on '{spec.target_tab}': missing or unconfirmed row for {bulk_check.item_key_field}='{exp_key}'."
+                    )
 
         if matched is not None and spec.readback.state_assertions:
             for payload_key, record_field in spec.readback.state_assertions:
@@ -366,6 +403,14 @@ class AppsScriptBridge:
                 if actual_norm != exp_norm:
                     raise _ReadBackFailure(
                         f"State mismatch on '{spec.target_tab}.{record_field}': expected '{exp_norm}', got '{actual_norm}'."
+                    )
+
+        if matched is not None and spec.readback.clear_assertions:
+            for record_field in spec.readback.clear_assertions:
+                actual_val = str(matched.get(record_field, "") or "").strip()
+                if actual_val != "":
+                    raise _ReadBackFailure(
+                        f"Expected cleared field '{spec.target_tab}.{record_field}' to be empty, got '{actual_val}'."
                     )
 
         for child_check in spec.readback.child_checks:
