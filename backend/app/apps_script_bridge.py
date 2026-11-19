@@ -45,10 +45,11 @@ from app.config import (
 )
 from app.schema_registry import (
     CONFIDENTIAL_TABS_NO_CACHE,
-    PENDING_OWNER_MAPPING_TABS,
-    TAB_RECONCILIATION_CONFLICTS,
+    get_allowed_id_prefixes_for_tab,
+    get_locked_prefix_for_tab,
+    get_schema_write_block_reason,
     is_forbidden_scratch_tab,
-    is_valid_locked_id_prefix,
+    validate_table_id_prefix,
 )
 from app.sheets import db
 from app.timeutil import now_iso
@@ -243,30 +244,27 @@ class AppsScriptBridge:
         ).hexdigest()
 
     @staticmethod
-    def _validate_id_format(spec: GovernedActionSpec, allocated_id: str) -> bool:
+    def _effective_locked_prefix(spec: GovernedActionSpec) -> Optional[str]:
+        if spec.locked_prefix:
+            return spec.locked_prefix
+        if spec.requires_allocated_id:
+            return get_locked_prefix_for_tab(spec.target_tab)
+        return None
+
+    @classmethod
+    def _validate_id_format(cls, spec: GovernedActionSpec, allocated_id: str) -> bool:
         clean = str(allocated_id or "").strip().upper()
         if not clean:
             return False
-        if not spec.locked_prefix:
+        effective_prefix = cls._effective_locked_prefix(spec)
+        if not effective_prefix:
             return True
-        allowed = {spec.locked_prefix.upper()}
-        # Transitional legacy ID prefixes allowed alongside locked v2 prefixes for pre-existing tables
-        if spec.target_tab == "JournalHeaders":
-            allowed.add("JRN")
-        elif spec.target_tab == "Sales":
-            allowed.add("SALE")
-        elif spec.target_tab == "PackagingBatches":
-            allowed.add("PKG")
-        elif spec.target_tab == "ProductionBatches":
-            allowed.add("PRB")
-        elif spec.target_tab == "Customers":
-            allowed.add("CUS")
-        elif spec.target_tab == "RawMaterials":
-            allowed.add("RWM")
-        prefix = clean.split("-", 1)[0] if "-" in clean else ""
-        if prefix in allowed and is_valid_locked_id_prefix(clean, expected_prefix=prefix):
-            return True
-        return is_valid_locked_id_prefix(clean, expected_prefix=spec.locked_prefix)
+        return validate_table_id_prefix(
+            spec.target_tab,
+            clean,
+            for_new_allocation=True,
+            explicit_locked_prefix=effective_prefix,
+        )
 
     def _verify_readback(
         self,
@@ -553,21 +551,17 @@ class AppsScriptBridge:
                 http_status=422,
             )
 
-        if clean_tab in PENDING_OWNER_MAPPING_TABS:
-            conflict = next(
-                (c for c in TAB_RECONCILIATION_CONFLICTS.values() if clean_tab in {c.get("snapshot_tab"), c.get("draft_tab")}),
-                None,
-            )
-            error_code = conflict["status"] if conflict else "PENDING_OWNER_MAPPING"
+        schema_block = get_schema_write_block_reason(clean_tab)
+        if schema_block is not None:
             return BridgeResult(
                 status="BLOCKED_PENDING_OWNER_SETUP",
                 correlation_id=corr_id,
                 nonce=clean_nonce,
-                error_code=error_code,
-                dependency="OWNER_SCHEMA_MAPPING_DEPENDENCY",
-                message=(
-                    f"Governed write blocked for '{clean_tab}' ({error_code}): "
-                    "Canonical Row-1 workbook headers have not been supplied or reconciled by Owner. Data was NOT SAVED."
+                error_code=str(schema_block.get("error_code") or "PENDING_OWNER_MAPPING"),
+                dependency=str(schema_block.get("dependency") or "OWNER_SCHEMA_MAPPING_DEPENDENCY"),
+                message=str(
+                    schema_block.get("message")
+                    or f"Governed write blocked for '{clean_tab}'. Data was NOT SAVED."
                 ),
                 retryable=False,
                 http_status=503,
@@ -827,14 +821,23 @@ class AppsScriptBridge:
                 payload_hash=payload_hash,
             )
 
-        if allocated_id and spec.locked_prefix and not self._validate_id_format(spec, allocated_id):
+        effective_locked_prefix = self._effective_locked_prefix(spec)
+        if allocated_id and effective_locked_prefix and not self._validate_id_format(spec, allocated_id):
+            allowed_prefixes = get_allowed_id_prefixes_for_tab(
+                spec.target_tab,
+                for_new_allocation=True,
+                explicit_locked_prefix=effective_locked_prefix,
+            )
             return BridgeResult(
                 status="PENDING_UNKNOWN",
                 correlation_id=corr_id,
                 nonce=clean_nonce,
                 allocated_id=allocated_id,
                 error_code="INVALID_ALLOCATED_ID_FORMAT",
-                message=f"Status not confirmed; allocated_id '{allocated_id}' failed prefix validation ({spec.locked_prefix}).",
+                message=(
+                    f"Status not confirmed; allocated_id '{allocated_id}' failed prefix validation for "
+                    f"'{spec.target_tab}' (allowed: {', '.join(allowed_prefixes)})."
+                ),
                 retryable=True,
                 http_status=504,
                 payload_hash=payload_hash,

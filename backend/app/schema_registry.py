@@ -16,7 +16,12 @@ import re
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.config import SALES_CA_POLICY_CONFIG_JSON
+from app.config import (
+    SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON,
+    SALES_CA_POLICY_CONFIG_JSON,
+)
+
+WORKBOOK_TARGET_TAB_COUNT: int = 255
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +105,8 @@ LOCKED_32_ID_PREFIXES: Dict[str, str] = {
     "EXC": "ExceptionRegister",
 }
 
+_TAB_TO_LOCKED_PREFIX: Dict[str, str] = {tab: pfx for pfx, tab in LOCKED_32_ID_PREFIXES.items()}
+
 DEPRECATED_TAB_ALIASES: Dict[str, str] = {
     "ExceptionLogs": "ExceptionRegister",
 }
@@ -126,23 +133,115 @@ TAB_RECONCILIATION_CONFLICTS: Dict[str, Dict[str, Any]] = {
         "status": "CONFLICT_RECONCILIATION_REQUIRED",
         "notes": (
             "Legacy sheets.ID_PREFIXES uses 'PKG' for PackagingBatches while LOCKED_32_ID_PREFIXES assigns "
-            "'PKG' -> PackagingMaterials and 'PKB' -> PackagingBatches. Apps Script single-write-owner "
-            "allocates canonical v2 PKB-* / PKG-* prefixes while legacy reads accept existing historical IDs."
+            "'PKG' -> PackagingMaterials and 'PKB' -> PackagingBatches. New PackagingBatches governed allocations "
+            "strictly require 'PKB-*' (PKG-* is rejected on new PackagingBatches writes to prevent collision with "
+            "PackagingMaterials) while historical PKG-* rows remain readable on legacy reads."
+        ),
+    },
+    "RCPT_PREFIX_COLLISION": {
+        "canonical_prefix": "RCPT",
+        "snapshot_tab": "Payments",
+        "draft_tab": "SalaryReceipts",
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "notes": (
+            "Legacy sheets.ID_PREFIXES assigns 'RCPT' to SalaryReceipts and 'PAY' to Payments, while "
+            "LOCKED_32_ID_PREFIXES assigns 'RCPT' to Payments. Reconcile SalaryReceipts prefix with Owner "
+            "and Apps Script allocator during prefix cutover."
+        ),
+    },
+    "SAL_PREFIX_COLLISION": {
+        "canonical_prefix": "SAL",
+        "snapshot_tab": "SalaryPayments",
+        "draft_tab": "SalaryIncentives",
+        "status": "CONFLICT_RECONCILIATION_REQUIRED",
+        "notes": (
+            "Legacy sheets.ID_PREFIXES assigns 'SAL' to SalaryIncentives while LOCKED_32_ID_PREFIXES assigns "
+            "'SAL' to SalaryPayments. Reconcile SalaryIncentives vs SalaryPayments allocation sequence with Owner."
         ),
     },
 }
 
-LEGACY_TO_LOCKED_ID_PREFIX_ALIASES: Dict[str, Dict[str, str]] = {
-    "Customers": {"legacy_prefix": "CUS", "locked_prefix": "CUST"},
-    "JournalHeaders": {"legacy_prefix": "JRN", "locked_prefix": "JV"},
-    "JournalLines": {"legacy_prefix": "JLN", "locked_prefix": "JVL"},
-    "PackagingBatches": {"legacy_prefix": "PKG", "locked_prefix": "PKB"},
-    "Payments": {"legacy_prefix": "PAY", "locked_prefix": "RCPT"},
-    "ProductionBatches": {"legacy_prefix": "PRB", "locked_prefix": "PB"},
-    "ProductionStockLedger": {"legacy_prefix": "PST", "locked_prefix": "MOV"},
-    "RawMaterials": {"legacy_prefix": "RWM", "locked_prefix": "RM"},
-    "SaleItems": {"legacy_prefix": "ITEM", "locked_prefix": "INVI"},
-    "Sales": {"legacy_prefix": "SALE", "locked_prefix": "INV"},
+LEGACY_TO_LOCKED_ID_PREFIX_ALIASES: Dict[str, Dict[str, Any]] = {
+    "Customers": {
+        "legacy_prefix": "CUS",
+        "locked_prefix": "CUST",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "JournalHeaders": {
+        "legacy_prefix": "JRN",
+        "locked_prefix": "JV",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "JournalLines": {
+        "legacy_prefix": "JLN",
+        "locked_prefix": "JVL",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "PackagingBatches": {
+        "legacy_prefix": "PKG",
+        "locked_prefix": "PKB",
+        "allow_on_read": True,
+        "allow_on_new_allocation": False,
+        "collides_with_locked_tab": "PackagingMaterials",
+        "migration_status": "PKG_BLOCKED_ON_NEW_ALLOCATION_PKB_REQUIRED",
+    },
+    "Payments": {
+        "legacy_prefix": "PAY",
+        "locked_prefix": "RCPT",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "ProductionBatches": {
+        "legacy_prefix": "PRB",
+        "locked_prefix": "PB",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "ProductionStockLedger": {
+        "legacy_prefix": "PST",
+        "locked_prefix": "MOV",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "RawMaterials": {
+        "legacy_prefix": "RWM",
+        "locked_prefix": "RM",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "SaleItems": {
+        "legacy_prefix": "ITEM",
+        "locked_prefix": "INVI",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
+    "Sales": {
+        "legacy_prefix": "SALE",
+        "locked_prefix": "INV",
+        "allow_on_read": True,
+        "allow_on_new_allocation": True,
+        "collides_with_locked_tab": None,
+        "migration_status": "TRANSITIONAL_LEGACY_ALIAS_PENDING_CUTOVER",
+    },
 }
 
 SCHEMA_HEADER_VARIANCES: Dict[str, Dict[str, Any]] = {
@@ -247,6 +346,73 @@ def is_valid_locked_id_prefix(identifier: str, expected_prefix: Optional[str] = 
     if expected_prefix:
         return prefix == expected_prefix.upper()
     return prefix in LOCKED_32_ID_PREFIXES
+
+
+def get_locked_prefix_for_tab(tab_name: str) -> Optional[str]:
+    clean_tab = str(tab_name or "").strip()
+    return _TAB_TO_LOCKED_PREFIX.get(clean_tab)
+
+
+def get_allowed_id_prefixes_for_tab(
+    tab_name: str,
+    *,
+    for_new_allocation: bool = True,
+    explicit_locked_prefix: Optional[str] = None,
+) -> Tuple[str, ...]:
+    """
+    Return the centrally governed tuple of allowed ID prefixes for a table.
+    - Always includes the table's canonical locked prefix (or explicit_locked_prefix when supplied).
+    - Includes a transitional legacy prefix ONLY when registered in LEGACY_TO_LOCKED_ID_PREFIX_ALIASES
+      and permitted for the requested mode (`allow_on_new_allocation` vs `allow_on_read`).
+    - For `PackagingBatches`, `PKG` collides with `PackagingMaterials`, so `PKG` is permitted on
+      historical reads (`for_new_allocation=False`) and strictly rejected on new governed allocations
+      (`for_new_allocation=True`), where only `PKB` is valid.
+    """
+    clean_tab = str(tab_name or "").strip()
+    canonical = (str(explicit_locked_prefix or "").strip().upper() or _TAB_TO_LOCKED_PREFIX.get(clean_tab, ""))
+    allowed: List[str] = []
+    if canonical:
+        allowed.append(canonical)
+    alias_info = LEGACY_TO_LOCKED_ID_PREFIX_ALIASES.get(clean_tab)
+    if alias_info:
+        legacy_prefix = str(alias_info.get("legacy_prefix") or "").strip().upper()
+        permit_legacy = bool(
+            alias_info.get("allow_on_new_allocation", False)
+            if for_new_allocation
+            else alias_info.get("allow_on_read", True)
+        )
+        if legacy_prefix and permit_legacy and legacy_prefix not in allowed:
+            allowed.append(legacy_prefix)
+    return tuple(allowed)
+
+
+def validate_table_id_prefix(
+    tab_name: str,
+    identifier: str,
+    *,
+    for_new_allocation: bool = True,
+    explicit_locked_prefix: Optional[str] = None,
+) -> bool:
+    """
+    Validate an identifier against the centralized table prefix contract.
+    Rejects malformed IDs, wrong-table prefixes, and colliding legacy prefixes (e.g. PKG-* on new
+    PackagingBatches allocations).
+    """
+    clean = str(identifier or "").strip().upper()
+    if not clean:
+        return False
+    allowed = get_allowed_id_prefixes_for_tab(
+        tab_name,
+        for_new_allocation=for_new_allocation,
+        explicit_locked_prefix=explicit_locked_prefix,
+    )
+    if not allowed:
+        return True
+    m = _ID_FORMAT_RE.match(clean)
+    if not m:
+        return False
+    prefix = m.group(1)
+    return prefix in allowed
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +555,11 @@ DATABASE_GROUPS_15: List[Dict[str, Any]] = [
         "module": "quality",
         "workbook_tabs": [
             "QualityChecks", "QualityChecks_IPQC", "QualityChecks_FGQC",
-            "ProductLots", "ComplaintsRecalls",
+            "ComplaintsRecalls",
         ],
+        # Canonical ownership of ProductLots resides in Group 03 (Inventory & Warehousing);
+        # Group 05 references ProductLots for QC release/hold/recall workflows without duplicate placement.
+        "referenced_tabs": ["ProductLots"],
         "header_mapping_status": "VERIFIED_CORE_AND_PENDING_EXTENDED",
     },
     {
@@ -510,13 +679,143 @@ EXTENDED_V2_TAB_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "DBV5_FIELD_DICTIONARY_3074": {"prefix": None, "prefix_status": "NOT_APPLICABLE", "header_status": "PENDING_OWNER_MAPPING", "auto_create": False, "group_code": "00"},
 }
 
-# Unverified / conflicting tabs that must FAIL CLOSED on writes until Owner supplies canonical Row-1 headers.
+# Unverified / conflicting extended tabs that must FAIL CLOSED on writes until Owner supplies canonical Row-1 headers.
 PENDING_OWNER_MAPPING_TABS: Set[str] = {
     tab for tab, meta in EXTENDED_V2_TAB_CONTRACTS.items()
     if meta.get("header_status") in {"PENDING_OWNER_MAPPING", "CONFLICT_RECONCILIATION_REQUIRED"}
 }
 
-_TAB_TO_LOCKED_PREFIX: Dict[str, str] = {tab: pfx for pfx, tab in LOCKED_32_ID_PREFIXES.items()}
+# Core REQUIRED_TABS tables with unresolved Row-1 header conflicts (12 tables / 46 declared missing fields).
+# Writes MUST FAIL CLOSED until Owner confirms physical Row-1 headers and an approved mapping.
+CONFLICTING_CORE_SCHEMA_TABS: Set[str] = {
+    tab for tab, meta in SCHEMA_HEADER_VARIANCES.items()
+    if str(meta.get("status", "")).upper() == "CONFLICT_RECONCILIATION_REQUIRED"
+}
+
+WRITE_BLOCKED_SCHEMA_TABS: Set[str] = PENDING_OWNER_MAPPING_TABS | CONFLICTING_CORE_SCHEMA_TABS
+
+_RUNTIME_CORE_SCHEMA_RECONCILIATIONS: Dict[str, Dict[str, Any]] = {}
+
+
+def get_approved_core_schema_reconciliations() -> Dict[str, Dict[str, Any]]:
+    """
+    Return Owner-approved core schema reconciliations (default EMPTY — fail-closed).
+    Only entries with status == 'RECONCILED_OWNER_APPROVED', non-empty approved_by, and non-empty
+    verified physical headers list are accepted.
+    """
+    approved: Dict[str, Dict[str, Any]] = {}
+    if SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON:
+        try:
+            raw = json.loads(SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON)
+            if isinstance(raw, dict):
+                for tab, entry in raw.items():
+                    if (
+                        tab in CONFLICTING_CORE_SCHEMA_TABS
+                        and isinstance(entry, dict)
+                        and str(entry.get("status", "")).strip().upper() == "RECONCILED_OWNER_APPROVED"
+                        and str(entry.get("approved_by", "")).strip()
+                        and isinstance(entry.get("headers"), list)
+                        and len(entry["headers"]) > 0
+                    ):
+                        approved[tab] = dict(entry)
+        except Exception:
+            pass
+    for tab, entry in _RUNTIME_CORE_SCHEMA_RECONCILIATIONS.items():
+        if (
+            tab in CONFLICTING_CORE_SCHEMA_TABS
+            and str(entry.get("status", "")).strip().upper() == "RECONCILED_OWNER_APPROVED"
+            and str(entry.get("approved_by", "")).strip()
+            and isinstance(entry.get("headers"), list)
+            and len(entry["headers"]) > 0
+        ):
+            approved[tab] = dict(entry)
+    return approved
+
+
+def approve_core_schema_reconciliation(
+    tab_name: str,
+    *,
+    headers: List[str],
+    approved_by: str,
+    notes: str = "",
+) -> Dict[str, Any]:
+    """Register an explicit Owner-approved reconciliation for a conflicting core tab."""
+    clean_tab = str(tab_name or "").strip()
+    if clean_tab not in CONFLICTING_CORE_SCHEMA_TABS:
+        raise ValueError(f"Tab '{clean_tab}' is not in CONFLICTING_CORE_SCHEMA_TABS.")
+    clean_approver = str(approved_by or "").strip()
+    if not clean_approver:
+        raise ValueError("approved_by is required to approve core schema reconciliation.")
+    clean_headers = [str(h or "").strip() for h in (headers or []) if str(h or "").strip()]
+    if not clean_headers or len(clean_headers) != len(set(clean_headers)):
+        raise ValueError("Verified non-empty unique physical Row-1 headers are required.")
+    entry = {
+        "tab_name": clean_tab,
+        "status": "RECONCILED_OWNER_APPROVED",
+        "headers": clean_headers,
+        "approved_by": clean_approver,
+        "notes": notes or f"Owner-approved physical Row-1 header reconciliation for {clean_tab}.",
+    }
+    _RUNTIME_CORE_SCHEMA_RECONCILIATIONS[clean_tab] = entry
+    return dict(entry)
+
+
+def clear_runtime_core_schema_reconciliations() -> None:
+    """Reset in-process Owner core schema reconciliation overrides (used by tests / resets)."""
+    _RUNTIME_CORE_SCHEMA_RECONCILIATIONS.clear()
+
+
+def get_schema_write_block_reason(tab_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Fail-closed write gate for both:
+    1. Unmapped extended Blueprint v2.1 tabs (PENDING_OWNER_MAPPING_TABS — 24 tabs).
+    2. Unreconciled conflicting core tabs (CONFLICTING_CORE_SCHEMA_TABS — 12 tabs in SCHEMA_HEADER_VARIANCES).
+    Returns None ONLY when the tab's schema contract is reconciled and write-eligible.
+    """
+    clean_tab = str(tab_name or "").strip()
+    if clean_tab in PENDING_OWNER_MAPPING_TABS:
+        conflict = next(
+            (
+                c for c in TAB_RECONCILIATION_CONFLICTS.values()
+                if clean_tab in {c.get("snapshot_tab"), c.get("draft_tab"), c.get("canonical_tab")}
+            ),
+            None,
+        )
+        error_code = str((conflict or {}).get("status") or "PENDING_OWNER_MAPPING")
+        return {
+            "tab_name": clean_tab,
+            "error_code": error_code,
+            "dependency": "OWNER_SCHEMA_MAPPING_DEPENDENCY",
+            "message": (
+                f"Governed write blocked for '{clean_tab}' ({error_code}): "
+                "Canonical Row-1 workbook headers have not been supplied or reconciled by Owner. Data was NOT SAVED."
+            ),
+        }
+
+    if clean_tab in CONFLICTING_CORE_SCHEMA_TABS:
+        approved = get_approved_core_schema_reconciliations()
+        if clean_tab not in approved:
+            variance = SCHEMA_HEADER_VARIANCES.get(clean_tab) or {}
+            missing_fields = list(variance.get("missing_from_required_tabs") or [])
+            missing_preview = ", ".join(missing_fields) if missing_fields else "unreconciled columns"
+            return {
+                "tab_name": clean_tab,
+                "error_code": "CORE_SCHEMA_CONFLICT_UNRECONCILED",
+                "dependency": "OWNER_SCHEMA_RECONCILIATION_DEPENDENCY",
+                "missing_from_required_tabs": missing_fields,
+                "message": (
+                    f"Governed write blocked for '{clean_tab}' (CONFLICT_RECONCILIATION_REQUIRED): "
+                    f"Schema conflict on {len(missing_fields)} field(s) [{missing_preview}] between router payload "
+                    "and REQUIRED_TABS Row-1 headers. Owner-confirmed physical workbook headers and an approved "
+                    "mapping are required before writes are permitted. Data was NOT SAVED."
+                ),
+            }
+
+    return None
+
+
+def is_tab_write_blocked_by_schema(tab_name: str) -> bool:
+    return get_schema_write_block_reason(tab_name) is not None
 
 
 def build_table_schema_registry(required_tabs: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
@@ -531,20 +830,34 @@ def build_table_schema_registry(required_tabs: Dict[str, List[str]]) -> Dict[str
         for t in g.get("workbook_tabs", []):
             group_lookup.setdefault(t, g["group_code"])
 
+    approved_reconciliations = get_approved_core_schema_reconciliations()
+
     registry: Dict[str, Dict[str, Any]] = {}
     for tab_name, headers in required_tabs.items():
         alias_info = LEGACY_TO_LOCKED_ID_PREFIX_ALIASES.get(tab_name)
         variance_info = SCHEMA_HEADER_VARIANCES.get(tab_name)
+        reconciled_entry = approved_reconciliations.get(tab_name)
+        effective_status = (
+            "RECONCILED_OWNER_APPROVED"
+            if reconciled_entry is not None
+            else (variance_info or {}).get("status", "VERIFIED_CORE")
+        )
+        effective_headers = list(reconciled_entry["headers"]) if reconciled_entry is not None else list(headers)
+        block_reason = get_schema_write_block_reason(tab_name)
         registry[tab_name] = {
             "tab_name": tab_name,
             "group_code": group_lookup.get(tab_name, "00"),
-            "status": (variance_info or {}).get("status", "VERIFIED_CORE"),
-            "headers": list(headers),
-            "header_count": len(headers),
+            "status": effective_status,
+            "headers": effective_headers,
+            "header_count": len(effective_headers),
             "locked_id_prefix": _TAB_TO_LOCKED_PREFIX.get(tab_name),
             "legacy_id_prefix": (alias_info or {}).get("legacy_prefix"),
+            "allowed_new_allocation_prefixes": list(get_allowed_id_prefixes_for_tab(tab_name, for_new_allocation=True)),
+            "allowed_read_prefixes": list(get_allowed_id_prefixes_for_tab(tab_name, for_new_allocation=False)),
             "id_prefix_reconciled": alias_info is None,
             "header_variance": variance_info,
+            "write_blocked": block_reason is not None,
+            "write_block_code": (block_reason or {}).get("error_code"),
             "confidential": tab_name in CONFIDENTIAL_TABS_NO_CACHE,
             "auto_create": False,
         }
@@ -552,6 +865,7 @@ def build_table_schema_registry(required_tabs: Dict[str, List[str]]) -> Dict[str
     for tab_name, contract in EXTENDED_V2_TAB_CONTRACTS.items():
         if tab_name in registry:
             continue
+        block_reason = get_schema_write_block_reason(tab_name)
         registry[tab_name] = {
             "tab_name": tab_name,
             "group_code": contract.get("group_code", group_lookup.get(tab_name, "00")),
@@ -560,6 +874,15 @@ def build_table_schema_registry(required_tabs: Dict[str, List[str]]) -> Dict[str
             "header_count": 0,
             "locked_id_prefix": contract.get("prefix"),
             "prefix_status": contract.get("prefix_status", "PENDING_OWNER_MAPPING"),
+            "allowed_new_allocation_prefixes": list(
+                get_allowed_id_prefixes_for_tab(
+                    tab_name,
+                    for_new_allocation=True,
+                    explicit_locked_prefix=contract.get("prefix"),
+                )
+            ),
+            "write_blocked": block_reason is not None,
+            "write_block_code": (block_reason or {}).get("error_code"),
             "confidential": tab_name in CONFIDENTIAL_TABS_NO_CACHE,
             "auto_create": False,
         }
@@ -570,6 +893,56 @@ def build_table_schema_registry(required_tabs: Dict[str, List[str]]) -> Dict[str
 def get_table_schema_registry() -> Dict[str, Dict[str, Any]]:
     from app.sheets import REQUIRED_TABS
     return build_table_schema_registry(REQUIRED_TABS)
+
+
+def get_schema_coverage_summary() -> Dict[str, Any]:
+    """
+    Compute honest, live schema-registry coverage counts against the 255-tab cleaned workbook baseline.
+    Never fabricates unmapped tabs or headers; reports exact counts of verified, conflicting, pending,
+    write-blocked, and unmapped tabs remaining until the authoritative 255-tab workbook export is supplied.
+    """
+    from app.sheets import REQUIRED_TABS
+
+    table_registry = build_table_schema_registry(REQUIRED_TABS)
+    seen_group_tabs: Dict[str, List[str]] = {}
+    total_group_tab_refs = 0
+    for g in DATABASE_GROUPS_15:
+        code = str(g.get("group_code", ""))
+        for tab in g.get("workbook_tabs", []):
+            total_group_tab_refs += 1
+            seen_group_tabs.setdefault(tab, []).append(code)
+
+    duplicate_group_placements = {
+        tab: codes for tab, codes in seen_group_tabs.items() if len(codes) > 1
+    }
+    approved_core = get_approved_core_schema_reconciliations()
+    active_conflicting_core = sorted(CONFLICTING_CORE_SCHEMA_TABS - set(approved_core.keys()))
+    active_pending_extended = sorted(PENDING_OWNER_MAPPING_TABS)
+    active_write_blocked = sorted(set(active_pending_extended) | set(active_conflicting_core))
+
+    unique_catalogued = len(table_registry)
+    unmapped_remaining = max(0, WORKBOOK_TARGET_TAB_COUNT - unique_catalogued)
+
+    return {
+        "cleaned_tab_baseline": WORKBOOK_TARGET_TAB_COUNT,
+        "declared_database_groups": len(DATABASE_GROUPS_15),
+        "group_tab_references_total": total_group_tab_refs,
+        "core_required_tabs_count": len(REQUIRED_TABS),
+        "extended_v2_contracts_count": len(EXTENDED_V2_TAB_CONTRACTS),
+        "unique_catalogued_workbook_tabs": unique_catalogued,
+        "unmapped_workbook_tabs_remaining": unmapped_remaining,
+        "pending_owner_mapping_tabs_count": len(active_pending_extended),
+        "conflicting_core_schema_tabs_count": len(active_conflicting_core),
+        "approved_core_schema_reconciliations_count": len(approved_core),
+        "write_blocked_schema_tabs_count": len(active_write_blocked),
+        "duplicate_group_placements": duplicate_group_placements,
+        "coverage_complete": unmapped_remaining == 0 and len(active_write_blocked) == 0,
+        "coverage_status": (
+            "COMPLETE_VERIFIED"
+            if (unmapped_remaining == 0 and len(active_write_blocked) == 0)
+            else "INCOMPLETE_PENDING_AUTHORITATIVE_WORKBOOK_EXPORT"
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

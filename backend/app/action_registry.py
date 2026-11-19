@@ -305,6 +305,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "customer_id",
         ("Customers",),
         requires_allocated_id=True,
+        locked_prefix="CUST",
         state_assertions=(("shop_name", "shop_name"),),
     ),
     _spec(
@@ -322,6 +323,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "raw_material_id",
         ("RawMaterials",),
         requires_allocated_id=True,
+        locked_prefix="RM",
         state_assertions=(("material_name", "material_name"),),
     ),
     _spec(
@@ -467,6 +469,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "movement_id",
         ("ProductionStockLedger", "Products"),
         requires_allocated_id=True,
+        locked_prefix="MOV",
     ),
     _spec(
         "RECORD_MILLING_BATCH",
@@ -489,6 +492,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "production_id",
         ("ProductionBatches", "RawMaterialLedger", "RawMaterials", "ApprovalRequests", "ProductLots", "ProductionStockLedger"),
         requires_allocated_id=True,
+        locked_prefix="PB",
         state_assertions=(("product_id", "product_id"),),
     ),
     _spec(
@@ -546,6 +550,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "packaging_id",
         ("PackagingBatches", "ApprovalRequests"),
         requires_allocated_id=True,
+        locked_prefix="PKB",
         state_assertions=(("status", "status"),),
     ),
     _spec(
@@ -562,6 +567,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "packaging_id",
         ("PackagingBatches", "ProductionStockLedger", "Products", "ProductLots", "JournalHeaders", "JournalLines"),
         requires_allocated_id=True,
+        locked_prefix="PKB",
         state_assertions=(("product_id", "product_id"), ("status", "status")),
         child_checks=(ChildTabCheck("ProductionStockLedger", "reference_id", "allocated_id"),),
     ),
@@ -656,6 +662,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "sale_id",
         ("Sales", "SaleItems", "SalesmanStockLedger", "Payments", "CashLedger", "ApprovalRequests", "JournalHeaders", "JournalLines"),
         requires_allocated_id=True,
+        locked_prefix="INV",
         state_assertions=(("txn_status", "txn_status"), ("bill_status", "bill_status")),
         child_checks=(
             ChildTabCheck("SaleItems", "sale_id", "allocated_id", min_rows_payload_key="sale_items"),
@@ -668,6 +675,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "sale_id",
         ("Sales", "SaleItems", "SalesmanStockLedger", "ProductionStockLedger", "Customers", "JournalHeaders", "JournalLines"),
         requires_allocated_id=True,
+        locked_prefix="INV",
         child_checks=(
             ChildTabCheck("SaleItems", "sale_id", "allocated_id", min_rows_payload_key="items"),
             ChildTabCheck("SalesmanStockLedger", "related_sale_id", "allocated_id"),
@@ -688,6 +696,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "sale_id",
         ("Sales", "SaleItems"),
         requires_allocated_id=True,
+        locked_prefix="INV",
         child_checks=(ChildTabCheck("SaleItems", "sale_id", "allocated_id", min_rows_payload_key="items"),),
     ),
     _spec(
@@ -745,6 +754,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "payment_id",
         ("Payments", "CashLedger", "Sales", "JournalHeaders", "JournalLines"),
         requires_allocated_id=True,
+        locked_prefix="RCPT",
         state_assertions=(("sale_id", "sale_id"), ("payment_status", "payment_status")),
     ),
     _spec(
@@ -827,6 +837,7 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         "movement_id",
         ("ProductionStockLedger",),
         requires_allocated_id=True,
+        locked_prefix="MOV",
     ),
     _spec(
         "RECONCILE_WAREHOUSE_STOCK",
