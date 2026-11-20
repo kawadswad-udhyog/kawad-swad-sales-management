@@ -275,9 +275,16 @@ def reverse_journal_voucher(
         id_field="journal_id",
         invalidate_tabs=["JournalHeaders", "JournalLines"],
     )
+    rev_journal_id = str(bridge_res.get("allocated_id") or "")
     return {
+        "journal_id": rev_journal_id,
         "reversal_of_id": clean_jid,
+        "reference_type": "JOURNAL_REVERSAL",
+        "reference_id": clean_jid,
         "voucher_type": "REVERSAL",
+        "total_debit": round_money(total_debit),
+        "total_credit": round_money(total_credit),
+        "status": "POSTED",
         "lines": reversal_lines,
         **bridge_res,
     }

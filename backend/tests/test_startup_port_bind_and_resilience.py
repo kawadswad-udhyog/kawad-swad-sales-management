@@ -203,11 +203,13 @@ class TestStartupPortBindAndResilience(unittest.TestCase):
         self.assertEqual(broken_ss.add_worksheet_calls, [])
 
     def test_fail_closed_writes_while_disconnected_and_restoration_on_connect(self):
-        """Writes and reads fail closed while disconnected; successful connection restores normal operation."""
+        """Reads and direct writes fail closed while disconnected; connect restores live reads while keeping direct writes blocked under Single-Write-Owner."""
         inst = self._make_isolated_db(allow_fallback=False)
         inst.last_connection_error = "Initializing in background"
 
-        self.assertFalse(inst.append_record("Sales", {"sale_id": "SALE-1", "bill_total": 100}, raise_on_error=False))
+        with self.assertRaises(RuntimeError) as ctx0:
+            inst.append_record("Sales", {"sale_id": "SALE-1", "bill_total": 100}, raise_on_error=False)
+        self.assertIn("BLOCKED_PENDING_OWNER_SETUP", str(ctx0.exception))
         with self.assertRaises(RuntimeError):
             inst.append_record("Sales", {"sale_id": "SALE-2"}, raise_on_error=True)
         with self.assertRaises(RuntimeError):
@@ -218,8 +220,9 @@ class TestStartupPortBindAndResilience(unittest.TestCase):
             inst.get_records("Sales", fresh=True)
         self.assertEqual(inst.memory_store["Sales"], [])
 
-        # Now simulate successful connection
+        # Now simulate successful connection with a pre-existing sheet row (written by Apps Script)
         fake_ss = _FakeSpreadsheet()
+        fake_ss.worksheet("Sales").rows.append({"sale_id": "SALE-100", "bill_total": 250})
 
         class FakeGspreadClient:
             http_client = MagicMock(timeout=None)
@@ -235,7 +238,11 @@ class TestStartupPortBindAndResilience(unittest.TestCase):
 
         self.assertTrue(inst.is_connected)
         self.assertEqual(inst._consecutive_failures, 0)
-        self.assertTrue(inst.append_record("Sales", {"sale_id": "SALE-100", "bill_total": 250}, raise_on_error=True))
+        # Single-Write-Owner: direct FastAPI sheet mutations remain strictly blocked even when connected
+        with self.assertRaises(RuntimeError) as ctx_direct:
+            inst.append_record("Sales", {"sale_id": "SALE-101", "bill_total": 250}, raise_on_error=True)
+        self.assertIn("BLOCKED_PENDING_OWNER_SETUP", str(ctx_direct.exception))
+        # Authoritative fresh reads are restored upon connection
         rows = inst.get_records("Sales", fresh=True)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sale_id"], "SALE-100")

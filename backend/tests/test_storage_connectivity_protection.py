@@ -27,25 +27,27 @@ class TestStorageConnectivityProtection(unittest.TestCase):
         db._worksheets.clear()
 
     def test_writes_strictly_blocked_when_disconnected_in_production(self):
-        """When in production (allow_in_memory_fallback=False) and disconnected, writes must be rejected to prevent data loss."""
+        """When in production (allow_in_memory_fallback=False) and disconnected, direct writes and reads must fail closed."""
         db.is_connected = False
         db.spreadsheet = None
         db.allow_in_memory_fallback = False
         db.last_connection_error = "Mock disconnected state"
 
-        # 1. append_record should return False and not store in memory
-        res = db.append_record("Sales", {"sale_id": "SALE-999999", "bill_total": 500}, raise_on_error=False)
-        self.assertFalse(res, "append_record must return False when disconnected in production")
+        # 1. append_record must fail closed under Single-Write-Owner and never store in memory
+        with self.assertRaises(RuntimeError) as ctx1:
+            db.append_record("Sales", {"sale_id": "SALE-999999", "bill_total": 500}, raise_on_error=False)
+        self.assertIn("blocked_pending_owner_setup", str(ctx1.exception).lower())
         self.assertNotIn("SALE-999999", [r.get("sale_id") for r in db.memory_store.get("Sales", [])])
 
         # 2. append_record with raise_on_error=True must raise RuntimeError
         with self.assertRaises(RuntimeError) as ctx:
             db.append_record("Sales", {"sale_id": "SALE-999998"}, raise_on_error=True)
-        self.assertIn("persistent storage is unavailable", str(ctx.exception).lower())
+        self.assertIn("blocked_pending_owner_setup", str(ctx.exception).lower())
 
-        # 3. update_record should return False and not update
-        res_update = db.update_record("Sales", "sale_id", "SALE-999999", {"bill_status": "PAID"})
-        self.assertFalse(res_update)
+        # 3. update_record must fail closed under Single-Write-Owner
+        with self.assertRaises(RuntimeError) as ctx_upd:
+            db.update_record("Sales", "sale_id", "SALE-999999", {"bill_status": "PAID"})
+        self.assertIn("blocked_pending_owner_setup", str(ctx_upd.exception).lower())
 
         # 4. get_records should raise RuntimeError rather than returning empty memory store
         with self.assertRaises(RuntimeError) as ctx:

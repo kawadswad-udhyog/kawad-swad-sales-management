@@ -1,0 +1,1163 @@
+# KAWAD SWAD ERP
+# PHASE 1 COMPLETE CODE CORRECTION & VERIFICATION MISSION
+## Phase 1.8: Full Regression Repair, System Stabilization & Closure Preparation
+
+---
+
+# 1. MISSION
+
+You are the senior software repair engineer responsible for completing Phase 1 of the Kawad Swad ERP system.
+
+Phase 1 is currently NOT COMPLETE.
+
+The latest audit identified the following:
+
+- Nine original Phase 1.5 code defects were reportedly repaired.
+- The duplicate-ID lookup fail-open defect was repaired.
+- Fresh authoritative reads were implemented for duplicate-ID validation.
+- Focused repair tests reportedly pass.
+- Backend focused suites reportedly pass.
+- Full backend test discovery still has substantial failures and errors.
+- Frontend verification remains incomplete.
+- Database blueprint and physical Google Sheets reconciliation remain incomplete.
+- Apps Script writer source is still unavailable for independent verification.
+
+Your mission is to correct every remaining code-level defect, investigate every failure and error, stabilize the repository, and prepare Phase 1 for a fresh independent verification.
+
+This is a DIRECT CODE CORRECTION MISSION.
+
+Do not merely produce:
+- A plan
+- An audit report
+- A list of recommendations
+- A theoretical solution
+- Pseudocode
+- A repair checklist
+
+You MUST modify the actual source code and tests in the local repository.
+
+---
+
+# 2. SOURCE OF TRUTH
+
+Use the latest repaired repository ZIP provided for this mission.
+
+Do not use older ZIP versions.
+
+Before making any change:
+
+1. Confirm the source directory.
+2. Identify the repository version.
+3. Inspect the current git status, if Git is available.
+4. Inspect existing changes.
+5. Preserve all current repairs.
+6. Create a local recovery checkpoint or patch backup.
+7. Record the starting source hash.
+8. Identify the current Python and Node environments.
+9. Identify dependency versions and lockfiles.
+10. Establish a reproducible baseline.
+
+Do not overwrite or discard user changes.
+
+Do not fabricate source code, files, configuration, schemas, or test results.
+
+---
+
+# 3. STRICT LIVE-SYSTEM SAFETY
+
+This mission is LOCAL-ONLY.
+
+## PROHIBITED
+
+Do not:
+
+- Access the live Google Sheets database.
+- Modify live Google Sheets.
+- Execute Apps Script against production.
+- Access production APIs.
+- Deploy to Render.
+- Modify production secrets.
+- Connect using production service-account credentials.
+- Restore historical business data.
+- Import pre-reset records.
+- Populate the clean database with sample business records.
+- Modify the live website.
+- Perform production migrations.
+- Trigger live ERP writes.
+- Send emails or messages.
+- Make external write requests.
+
+Do not attempt to discover or use production credentials.
+
+The repository must remain isolated from live systems.
+
+If a test could contact a live system, disable it safely or replace it with a controlled local mock. Document why it was disabled.
+
+---
+
+# 4. CURRENT BASELINE
+
+The last reported full backend test sweep produced:
+
+| Metric | Reported baseline |
+|---|---:|
+| Total tests | 567 |
+| Passed | 210 |
+| Failed | 26 |
+| Errors | 331 |
+| Problematic tests | 357 |
+
+These results are the starting reference, NOT guaranteed current results.
+
+First rerun the actual tests and establish the exact current baseline.
+
+The prior categorization included:
+
+- Legacy router signature mismatches
+- Test mocks incompatible with the current architecture
+- Multiprocessing and concurrency test problems
+- Startup and health-check resilience problems
+- JWT/test-harness issues
+- Accounting workflow test failures
+- Workforce workflow failures
+- ERP lifecycle test failures
+- Legacy tests expecting direct database writes
+- Tests expecting unguarded bridge writes
+- Tests using removed private functions
+
+Do not assume these are harmless legacy failures.
+
+Every failure and error must be individually examined.
+
+---
+
+# 5. REPAIR PRIORITY
+
+Follow this sequence.
+
+Do not skip ahead.
+
+---
+
+# PHASE A: BASELINE REPRODUCTION
+
+## A1. Reproduce the test baseline
+
+Run the complete backend test suite using the repository's documented test command.
+
+Record:
+
+- Exact command
+- Python version
+- Dependency environment
+- Test discovery count
+- Passed
+- Failed
+- Errors
+- Skipped
+- Duration
+- Logs
+
+Do not manipulate test discovery to reduce the test count.
+
+Do not silently exclude failing test files.
+
+## A2. Reproduce frontend baseline
+
+Inspect:
+
+- package.json
+- Lockfile
+- TypeScript configuration
+- Vite configuration
+- ESLint configuration
+- Available frontend scripts
+
+Determine whether frontend dependencies are already installed.
+
+Attempt a reproducible installation in the isolated local environment using the appropriate lockfile.
+
+Prefer deterministic installation.
+
+Do not modify dependency versions simply to make tests pass unless a verified compatibility defect requires it.
+
+Record any installation failure accurately.
+
+## A3. Build a failure inventory
+
+Create a failure inventory containing EVERY failing test and every errored test.
+
+Required fields:
+
+| Field |
+|---|
+| Test file |
+| Test name |
+| Failure/error type |
+| Exact failure message |
+| Stack trace |
+| Root cause |
+| Classification |
+| Code file involved |
+| Repair required |
+| Repair status |
+| Retest result |
+
+Classification must use one of:
+
+- ACTUAL_CODE_DEFECT
+- TEST_CONTRACT_OUTDATED
+- TEST_FIXTURE_DEFECT
+- ENVIRONMENT_LIMITATION
+- ARCHITECTURAL_CONFLICT
+- TEST_COVERAGE_GAP
+- UNKNOWN_REQUIRES_INVESTIGATION
+
+UNKNOWN is not an acceptable final classification.
+
+Investigate each unknown.
+
+---
+
+# PHASE B: REPAIR THE FULL BACKEND TEST FAILURE INVENTORY
+
+## B1. Router signature mismatches
+
+Investigate tests failing because current routers require a Request parameter, dependency injection, or v2.1 signatures.
+
+Determine for each failure:
+
+- Is production code correct?
+- Is the test calling the router incorrectly?
+- Is the route contract intentionally changed?
+- Is a test using a stale positional invocation?
+- Does the test need a real FastAPI request context?
+- Is dependency injection being bypassed?
+
+Repair the test harness properly.
+
+Do NOT remove request parameters from production routes just to make old tests pass.
+
+Do NOT weaken dependency injection or authentication.
+
+Create proper test helpers for router invocation where needed.
+
+Update outdated tests to test the actual current API contract.
+
+## B2. Single-Write-Owner architecture
+
+The ERP uses a governed Apps Script bridge and Google Sheets authoritative database architecture.
+
+MongoDB must NOT become the authoritative business database.
+
+Do not re-enable direct database writes to satisfy legacy tests.
+
+Investigate all failures involving:
+
+- db.append_record()
+- db.update_record()
+- db.delete_record()
+- Direct worksheet mutation
+- Legacy write paths
+- Unmocked Apps Script bridge
+- Missing schema reconciliation
+- BLOCKED_PENDING_OWNER_SETUP
+- Guarded write behavior
+
+Tests must correctly reflect the intended Single-Write-Owner architecture.
+
+Where a test requires a write:
+
+- Mock the governed bridge.
+- Mock schema state correctly.
+- Mock authentication correctly.
+- Mock permissions correctly.
+- Mock the relevant Sheets response.
+- Verify the expected governed action.
+
+Do not disable the production write guard.
+
+## B3. Removed private helper references
+
+Investigate tests that reference removed functions, including private approval helpers.
+
+Do not restore an obsolete private helper solely to satisfy legacy tests.
+
+Determine whether:
+
+- The functionality was replaced.
+- The test should target the current public route.
+- The private helper should be replaced by a supported service function.
+- A genuine missing function is present.
+
+Modernize tests and code architecture appropriately.
+
+## B4. Multiprocessing and concurrency failures
+
+Investigate all concurrency and multiprocessing failures.
+
+Check:
+
+- Process startup
+- Locks
+- Shared state
+- Worker cleanup
+- Timeout handling
+- Environment propagation
+- Test isolation
+- Thread safety
+- Race conditions
+- Cache behavior
+- ID allocation concurrency
+
+Distinguish environment failures from actual concurrency bugs.
+
+Do not simply skip tests because they are unstable.
+
+If a test is nondeterministic:
+
+1. Reproduce it.
+2. Identify the race.
+3. Correct the test or production code.
+4. Repeat it multiple times.
+5. Document evidence.
+
+## B5. Startup and health-check failures
+
+Investigate:
+
+- Application startup
+- Lifespan hooks
+- Health endpoint
+- Readiness checks
+- Google Sheets connection checks
+- Missing configuration
+- Production environment detection
+- Startup timeouts
+- Dependency failures
+
+Ensure local tests do not require production Google credentials.
+
+Correct the startup architecture so:
+
+- Local tests are isolated.
+- Production configuration fails closed.
+- Missing production spreadsheet configuration is detected.
+- Health endpoints do not leak credentials.
+- Readiness does not incorrectly report success.
+
+Do not make health checks falsely green.
+
+## B6. JWT and authentication test failures
+
+Inspect all authentication-related failures.
+
+Verify:
+
+- HMAC signature validation
+- JWT expiration
+- Invalid token handling
+- Missing token handling
+- Account deactivation
+- Session revocation
+- RevokedTokens lookup failures
+- sessions_revoked_at handling
+- Lockout threshold
+- Lockout duration
+- Login reset behavior
+- OAuth scope
+- Role and permission enforcement
+
+Tests must verify real cryptographic behavior or an appropriately faithful test implementation.
+
+Do not use a JWT mock that accepts expired, unsigned, malformed, or tampered tokens.
+
+Do not weaken production security to satisfy tests.
+
+---
+
+# PHASE C: WORKFORCE, ACCOUNTING AND ERP LIFECYCLE
+
+Investigate all failing tests in these areas.
+
+## C1. Workforce
+
+Inspect:
+
+- Workers
+- Attendance
+- Salary
+- Incentives
+- SalaryPayments
+- SalaryIncentives
+- Workforce migration
+- ID allocation
+- Cross-table collisions
+- Account permissions
+
+Confirm that the tests use correct current schemas and business rules.
+
+Do not invent fields.
+
+Do not restore old database records.
+
+## C2. Accounting
+
+Inspect:
+
+- Payments
+- SalaryPayments
+- SalaryReceipts
+- Expenses
+- CashLedger
+- DailyClosing
+- Receipts
+- Accounting reports
+- Cross-table IDs
+- Duplicate prevention
+
+Check whether failed tests expose actual accounting integrity defects.
+
+Correct any genuine problems.
+
+Never fabricate a balancing transaction or modify accounting behavior just to make a test pass.
+
+## C3. ERP lifecycle
+
+Review failing lifecycle tests.
+
+Verify:
+
+- Create
+- Update
+- Approve
+- Reject
+- Close
+- Reopen, if allowed
+- Cancel
+- Void
+- Readback
+- Audit logs
+- Status transitions
+- Permission checks
+- Duplicate prevention
+
+Ensure invalid state transitions are rejected.
+
+Ensure successful transitions are authorized and audited.
+
+Ensure blocked writes remain blocked.
+
+---
+
+# PHASE D: SECURITY REVALIDATION
+
+All nine Phase 1.5 defects must be independently rechecked after repairs.
+
+Do not rely on earlier green tests.
+
+## P1.5-001: Secondary-tab schema bypass
+
+Verify:
+
+- Caller-supplied invalidate_tabs cannot reduce required validation.
+- Primary target tab is always validated.
+- All mandatory secondary tabs are validated.
+- Child-check tabs are included.
+- Unknown tabs are rejected.
+- Conflicting tables block the operation.
+- No remote HTTP request occurs when blocked.
+
+Run adversarial tests with:
+
+- Primary tab only
+- Empty list
+- None
+- Partial list
+- Unknown tabs
+- Duplicate tabs
+- Conflicting secondary tab
+
+## P1.5-002: Salary Incentive ID allocation
+
+Verify:
+
+- Salary Incentive ID allocation no longer deadlocks.
+- Prefix enforcement is correct.
+- SAL collision handling is correct.
+- Payments and SalaryReceipts RCPT uniqueness is enforced.
+- SalaryIncentives and SalaryPayments cross-table collisions are enforced.
+- Duplicate child IDs within the same request are rejected.
+- Duplicate IDs across separate requests are rejected.
+
+Test both pre-write and post-write defense.
+
+## P1.5-003: Token revocation fail-open
+
+Verify:
+
+- RevokedTokens lookup errors deny access.
+- Malformed records deny access.
+- Corrupted session timestamps fail closed.
+- Account deactivation is consistent.
+- Protected writes fail during revocation outage.
+- Failure responses do not expose secrets.
+- No write bridge call occurs during authentication verification failure.
+
+## P1.5-004: Schema conflict audit accuracy
+
+Verify programmatic equality between:
+
+- Schema registry
+- Conflicting table registry
+- Required field definitions
+- Audit report
+- Conflict counts
+
+No invented tables.
+
+No omitted conflict tables.
+
+No false green reconciliation.
+
+## P1.5-005: Unsafe schema reconciliation unlock
+
+Verify:
+
+- Fabricated headers cannot unlock a table.
+- Unknown columns are rejected.
+- Required canonical headers are enforced.
+- Required ordering is preserved where required.
+- Declared variance rules are respected.
+- Environment-based unlock follows the same validator.
+- Rejections are logged.
+- No conflict is silently cleared.
+
+## P1.5-006: Frontend blocked-state handling
+
+Verify:
+
+- BLOCKED_PENDING_OWNER_SETUP is normalized correctly.
+- HTTP 503 is not treated as success.
+- Unknown statuses do not render green.
+- Loading is not green.
+- Pending is not green.
+- Conflict is not green.
+- Coverage counters are accurate.
+- Groups 02 and 10 reflect actual registry status.
+
+## P1.5-007: Pre-write ID validation
+
+Verify:
+
+- IDs are validated before bridge dispatch.
+- Prefixes are validated.
+- Blank update keys are rejected.
+- Duplicate primary IDs are rejected.
+- Duplicate child IDs are rejected.
+- Cross-table collisions are rejected.
+- Same-request duplicate IDs are rejected.
+- Post-write validation remains active.
+
+## P1.5-008: Direct writes and OAuth
+
+Verify:
+
+- Single-Write-Owner is enforced.
+- Direct mutation helpers are guarded.
+- Legacy scripts fail closed by default.
+- Production refusal guards work.
+- Offline opt-in cannot activate in production.
+- OAuth scope is read-only.
+- Router-level mutation paths cannot bypass governed bridge.
+
+Do not assume an AST scan alone proves the system secure.
+
+Perform a full mutation-path inventory.
+
+## P1.5-009: Authentication hardening
+
+Verify:
+
+- JWT signature
+- JWT expiration
+- Lockout attempts
+- Lockout duration
+- Deactivation
+- Production Sheets configuration
+- Authentication failure behavior
+- Mock fidelity
+
+---
+
+# PHASE E: DUPLICATE-ID LOOKUP SECURITY
+
+The duplicate-ID lookup defect received multiple repairs and must be re-audited adversarially.
+
+## E1. Fresh read
+
+Confirm that duplicate-ID validation always uses:
+
+fresh=True
+
+Verify that no cached read can be substituted.
+
+## E2. Fail-closed behavior
+
+Test:
+
+- Google Sheets outage
+- API timeout
+- Quota errors
+- 429
+- 500
+- 503
+- Authentication error
+- Malformed response
+- None
+- Unexpected dictionary
+- Missing headers
+- Missing ID column
+- Malformed rows
+- Empty records with valid header evidence
+- Stale cached records
+- Newly inserted duplicate invisible in stale cache
+- Cross-table collisions
+- Concurrent duplicate creation attempts
+
+## E3. Valid identifier-column evidence
+
+Confirm that a successful lookup contains trustworthy identifier-column evidence.
+
+Do not accept:
+
+- Arbitrary columns
+- Missing ID column
+- Wrong header
+- Empty response without header evidence
+- Malformed row
+- Partial data masquerading as complete data
+
+## E4. Legitimate empty-table behavior
+
+An empty table is valid only when the read proves:
+
+- The request succeeded.
+- The correct worksheet was read.
+- The expected header was verified.
+- The identifier column exists.
+- The result is authoritative.
+- The response is not malformed.
+
+A valid empty table may pass uniqueness validation.
+
+A failed or ambiguous read must never be interpreted as an empty table.
+
+## E5. Zero remote calls
+
+For every failed duplicate-ID verification case, assert:
+
+- Governed write rejected.
+- HTTP request not issued.
+- No Apps Script call.
+- No mutation.
+- No false success.
+- Appropriate error code returned.
+
+## E6. Concurrency
+
+Investigate whether fresh lookup alone is sufficient to guarantee uniqueness under concurrent requests.
+
+Simulate two requests attempting to create the same ID simultaneously.
+
+Determine whether the authoritative write system prevents both requests from succeeding.
+
+If the backend preflight alone cannot guarantee uniqueness under concurrency, document the limitation and implement the required protection at the authoritative writer layer if source is available.
+
+Do not claim atomic uniqueness if the remote Apps Script writer is unaudited.
+
+---
+
+# PHASE F: FRONTEND FULL REPAIR AND VERIFICATION
+
+The frontend has not been independently verified.
+
+## F1. Dependencies
+
+Inspect the lockfile and package manager.
+
+Install dependencies deterministically in the isolated environment.
+
+Do not silently change package versions.
+
+If installation fails, investigate and document the exact cause.
+
+## F2. TypeScript
+
+Run the project's real type-check command.
+
+Correct all genuine errors.
+
+Do not suppress errors using:
+
+- any
+- @ts-ignore
+- @ts-nocheck
+- blanket exclusions
+- disabling strict settings
+- deleting tests
+
+unless there is a documented, justified narrow exception.
+
+## F3. Lint
+
+Run the real lint command.
+
+Correct:
+
+- Errors
+- Security issues
+- Incorrect hooks
+- Unsafe type handling
+- Dead code
+- Unreachable code
+- API contract problems
+
+Do not disable rules globally.
+
+## F4. Frontend contracts
+
+Run frontend contract tests.
+
+Verify:
+
+- API error normalization
+- Blocked states
+- Schema status rendering
+- HTTP 401
+- HTTP 403
+- HTTP 409
+- HTTP 422
+- HTTP 503
+- Retry behavior
+- Loading behavior
+- No false success states
+
+## F5. Production build
+
+Run the actual production build.
+
+Record:
+
+- Command
+- Exit code
+- Build duration
+- Warnings
+- Errors
+- Output directory
+
+Correct all genuine build errors.
+
+Do not claim a build passed if the command timed out or wasn't executed.
+
+---
+
+# PHASE G: TEST QUALITY AND TEST INTEGRITY
+
+Tests must not be weakened.
+
+PROHIBITED:
+
+- Deleting failing tests
+- Skipping tests to produce green results
+- Reducing assertions
+- Changing expected outcomes without justification
+- Broad exception swallowing
+- Replacing meaningful tests with trivial tests
+- Mocking every function so no logic is tested
+- Removing test discovery
+- Reducing test count
+- Rewriting tests to always pass
+- Disabling security checks
+- Loosening production code protections
+
+If an outdated test contract must be updated:
+
+1. Document the old contract.
+2. Document the current contract.
+3. Explain why the change is legitimate.
+4. Preserve equivalent or stronger assertions.
+5. Test the real behavior.
+6. Include the test in the audit report.
+
+For every new security fix, add a regression test that would fail against the vulnerable version.
+
+---
+
+# PHASE H: FULL TEST MATRIX
+
+After all repairs, execute the entire test matrix.
+
+## Backend
+
+1. Python compilation
+2. Full pytest discovery
+3. All Phase 1.6 targeted tests
+4. Database schema guards
+5. Workforce migration safety
+6. CORS
+7. Health/security/quota tests
+8. Alias adapter
+9. Production routing
+10. Sheets quota handling
+11. Owner setup
+12. Authentication
+13. Authorization
+14. Accounting
+15. ERP lifecycle
+16. Concurrency
+17. Duplicate-ID verification
+18. All write guards
+
+## Frontend
+
+1. Dependency installation
+2. TypeScript
+3. Lint
+4. Frontend contracts
+5. Production build
+
+## Security
+
+1. Authentication failure paths
+2. Authorization failure paths
+3. Revocation failure paths
+4. Schema blocking
+5. Duplicate IDs
+6. ID collisions
+7. Direct-write bypass
+8. Unknown status handling
+9. Malformed input
+10. Failure during bridge communication
+
+## Test result requirements
+
+Final result must include:
+
+| Metric | Actual result |
+|---|---|
+| Total tests discovered | |
+| Passed | |
+| Failed | |
+| Errors | |
+| Skipped | |
+| Backend compilation | |
+| Backend test result | |
+| Frontend typecheck | |
+| Frontend lint | |
+| Frontend contracts | |
+| Frontend build | |
+| Security tests | |
+| Concurrency tests | |
+
+The counts must be taken from actual execution output.
+
+---
+
+# PHASE I: DATABASE BLOCKERS
+
+Do not fabricate or reconstruct external authoritative database evidence.
+
+## DB-003: Complete workbook and DBV5 field dictionary
+
+Current blocker:
+
+- 255 expected tabs
+- 91 reportedly catalogued
+- 164 unmapped
+
+Do not invent missing tables.
+
+Do not generate fake canonical schemas.
+
+Do not silently fill missing definitions using assumptions.
+
+Build code tools to validate the authoritative workbook when supplied.
+
+If the workbook is absent:
+
+- Keep the blocker open.
+- Identify exactly what artifact is needed.
+- Verify that all unknown tables remain protected.
+
+## DB-007: Physical Google Sheets Row-1 headers
+
+The 12 conflicting core tables remain unresolved.
+
+Do not unlock any table based on guessed headers.
+
+Ensure:
+
+- Conflicting tables remain write-blocked.
+- Canonical reconciliation is enforced.
+- No false VERIFIED_CORE status.
+- All reconciliation approval pathways are protected.
+
+## DB-008: Apps Script WebAppBridge writer
+
+The Apps Script writer source is not present.
+
+Do not fabricate the writer.
+
+Do not claim server-side atomicity.
+
+Do not claim concurrent ID safety.
+
+Do not claim writer authorization is secure without inspecting the actual code.
+
+Create a clearly documented source requirement and maintain the blocker.
+
+---
+
+# PHASE J: GOOGLE SHEETS AUTHORITY
+
+Google Sheets remains the authoritative business database.
+
+MongoDB must not become the authoritative database.
+
+Verify:
+
+- Sheets read pathways
+- Governed write pathways
+- Cache policy
+- Fresh-read behavior
+- Data consistency
+- Error handling
+- Read-only OAuth scope
+- No direct mutation bypass
+- No accidental local fallback
+- No fabricated business records
+
+Any database architectural changes must preserve the established authority model.
+
+---
+
+# PHASE K: REPAIR LOOP
+
+You must work iteratively.
+
+For each defect:
+
+1. Reproduce it.
+2. Record the failing evidence.
+3. Identify the actual root cause.
+4. Modify production code if required.
+5. Modify or update tests appropriately.
+6. Add a regression test.
+7. Run focused tests.
+8. Run related test suites.
+9. Run the complete backend suite.
+10. Run frontend validation if affected.
+11. Inspect the diff.
+12. Record the result.
+
+If a repair introduces another failure:
+
+- Do not hide it.
+- Fix it.
+- Re-run affected tests.
+- Re-run the full test matrix.
+
+Continue until the code-level defects have been corrected or a clearly evidenced environment blocker prevents completion.
+
+---
+
+# PHASE L: SOURCE CODE REVIEW
+
+After testing, review the complete final diff.
+
+Check for:
+
+- Accidental deletions
+- Unrelated changes
+- Credentials
+- Secrets
+- Debugging code
+- Temporary bypasses
+- TODOs that weaken security
+- Disabled protections
+- Unsafe exception handling
+- False success states
+- Direct database mutations
+- Unapproved OAuth scopes
+- Schema unlock bypass
+- Test manipulation
+- Dependency drift
+- Missing files
+
+Inspect the final source, not only Git summaries.
+
+---
+
+# PHASE M: REQUIRED DELIVERABLES
+
+Create all of the following in the repository.
+
+## 1. PHASE1_8_CODE_CORRECTION_REPORT.md
+
+Include:
+
+- Executive summary
+- Baseline
+- Every failure investigated
+- Root causes
+- Code repairs
+- Test modernization
+- Genuine regressions
+- Remaining issues
+- Final status
+
+## 2. PHASE1_8_FAILURE_INVENTORY.csv
+
+Every baseline failure and error, with:
+
+- Test file
+- Test name
+- Error type
+- Root cause
+- Classification
+- Related source file
+- Repair
+- Retest status
+- Evidence
+
+## 3. PHASE1_8_REPAIR_MATRIX.csv
+
+Every repair:
+
+- Defect ID
+- Severity
+- Source file
+- Root cause
+- Change
+- Regression test
+- Result
+
+## 4. PHASE1_8_FULL_TEST_RESULTS.md
+
+Full actual test results.
+
+Include failures and errors, not just passing results.
+
+## 5. PHASE1_8_SECURITY_REAUDIT.md
+
+Reaudit all original nine defects plus duplicate-ID lookup hardening.
+
+## 6. PHASE1_8_FRONTEND_VERIFICATION.md
+
+Dependency, TypeScript, lint, contract and build results.
+
+## 7. PHASE1_8_DATABASE_BLOCKERS.md
+
+DB-003, DB-007, DB-008 and other external blockers.
+
+## 8. PHASE1_8_CHANGELOG.md
+
+Detailed file-level changes.
+
+## 9. PHASE1_8_FINAL_GATE.md
+
+Final Phase 1 status.
+
+## 10. PHASE1_8_REPRODUCTION_COMMANDS.txt
+
+All commands needed to reproduce the verification.
+
+---
+
+# PHASE N: FINAL GATE RULES
+
+Phase 1 MUST NOT be declared complete if:
+
+- Code-level defects remain.
+- Genuine backend tests fail.
+- Important tests error.
+- Frontend verification remains incomplete.
+- Security defects remain.
+- A write bypass exists.
+- A conflict table can be falsely unlocked.
+- Duplicate IDs can pass without authoritative verification.
+- The test suite was weakened.
+- External authoritative schema blockers remain unresolved.
+- Apps Script writer safety remains unverified.
+
+Use one of these final verdicts:
+
+## 🟢 PHASE 1 COMPLETE
+
+Only if every mandatory code, test, frontend, security, and external database gate has passed with evidence.
+
+## 🟡 PHASE 1 CODE-STABLE, EXTERNAL GATES OPEN
+
+Only if all local code defects are fixed, all relevant local tests pass, frontend is verified, and remaining blockers are exclusively external artifacts or systems.
+
+## 🔴 PHASE 1 NOT COMPLETE
+
+If genuine code defects, test failures, errors, security problems, or incomplete mandatory verification remain.
+
+Do not issue a green verdict based on focused tests alone.
+
+---
+
+# PHASE O: FINAL RESPONSE TO OWNER
+
+When complete, report:
+
+1. What was actually changed.
+2. Which defects were found.
+3. Which defects were fixed.
+4. Which test failures were obsolete.
+5. Which failures were real.
+6. Which tests were updated and why.
+7. Exact backend test totals.
+8. Exact frontend test results.
+9. Security audit results.
+10. Remaining blockers.
+11. Files changed.
+12. Source ZIP location.
+13. Reproduction instructions.
+14. Honest final gate.
+
+Do not exaggerate.
+
+Do not claim independent verification if you only verified your own repairs.
+
+---
+
+# FINAL INSTRUCTION
+
+Start with baseline reproduction.
+
+Then investigate and repair the full failure inventory.
+
+Do not stop after generating the failure report.
+
+Do not send the task back to the owner as a prompt.
+
+Do not ask permission to fix the next code defect.
+
+Perform the complete local code correction mission within the safety restrictions.
+
+Work directly on the source.
+
+Keep Google Sheets authoritative.
+
+Keep all live systems untouched.
+
+Preserve all current repairs.
+
+Do not restore historical business records.
+
+Do not begin Phase 2.
+
+Your objective is to leave Kawad Swad ERP with a clean, secure, testable, correctly guarded Phase 1 codebase and a truthful evidence-based Phase 1 closure report.

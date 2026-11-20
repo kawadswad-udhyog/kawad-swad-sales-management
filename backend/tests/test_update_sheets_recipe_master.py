@@ -87,34 +87,39 @@ class TestUpdateSheetsRecipeMaster(unittest.TestCase):
         db._worksheets.clear()
 
     def test_safe_sheets_update_execution(self):
-        # Override SALES_GOOGLE_SPREADSHEET_ID for test execution
+        # Under Blueprint v2.1 Single-Write-Owner, legacy direct Sheets mutation scripts are fail-closed blocked
+        from app.recipes_master import MASTER_RECIPES_DEFINITION
         orig_id = script_mod.SALES_GOOGLE_SPREADSHEET_ID
         script_mod.SALES_GOOGLE_SPREADSHEET_ID = "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
         try:
-            run_update()
-            # 1. Historical recipe must be preserved
-            recipes = db.get_records("Recipes")
-            self.assertTrue(any(r["recipe_id"] == "RCP-OLD-1" for r in recipes))
+            self.assertEqual(script_mod.SCRIPT_MUTATION_MODE, "LEGACY_DIRECT_WRITE_DISABLED")
+            with self.assertRaises(RuntimeError) as ctx:
+                run_update()
+            self.assertIn("BLOCKED_PENDING_OWNER_SETUP", str(ctx.exception))
 
-            # 2. Moong Master V2 must be present and approved
-            moong_v2 = next(r for r in recipes if r["recipe_id"] == "RCP-MOONG-MASTER-V2")
-            self.assertEqual(moong_v2["approved"], "true")
+            # 1. Historical recipe must be preserved completely untouched
+            recipes = db.get_records("Recipes", fresh=True)
+            self.assertEqual(len(recipes), 1)
+            self.assertEqual(recipes[0]["recipe_id"], "RCP-OLD-1")
+
+            # 2. V2 recipe master definitions retain Moong Master V2 approved (1.2kg yield) & Chana Chotu V2 unapproved
+            moong_v2 = next(r for r in MASTER_RECIPES_DEFINITION if r["recipe_id"] == "RCP-MOONG-MASTER-V2")
+            self.assertTrue(moong_v2["approved"])
             self.assertEqual(moong_v2["expected_yield_kg"], 1.2)
 
-            # 3. Chana Chotu V2 must be present and unapproved (draft/proposed)
-            chana_v2 = next(r for r in recipes if r["recipe_id"] == "RCP-CHANA-CHOTU-V2")
-            self.assertEqual(chana_v2["approved"], "false")
+            chana_v2 = next(r for r in MASTER_RECIPES_DEFINITION if r["recipe_id"] == "RCP-CHANA-CHOTU-V2")
+            self.assertFalse(chana_v2["approved"])
 
-            # 4. Existing stock in RawMaterials must not be overwritten
-            moong_flour = next(r for r in db.get_records("RawMaterials") if r["material_name"].lower() == "moong dal flour")
+            # 3. Existing stock in RawMaterials must not be overwritten
+            moong_flour = next(r for r in db.get_records("RawMaterials", fresh=True) if r["material_name"].lower() == "moong dal flour")
             self.assertEqual(moong_flour["current_stock"], 500.0)
 
-            # 5. Historical production and packaging batches must remain untouched
-            batches = db.get_records("ProductionBatches")
+            # 4. Historical production and packaging batches must remain untouched
+            batches = db.get_records("ProductionBatches", fresh=True)
             self.assertEqual(len(batches), 1)
             self.assertEqual(batches[0]["production_id"], "PRB-000001")
 
-            packaging = db.get_records("PackagingBatches")
+            packaging = db.get_records("PackagingBatches", fresh=True)
             self.assertEqual(len(packaging), 1)
             self.assertEqual(packaging[0]["packaging_id"], "PKG-000001")
         finally:

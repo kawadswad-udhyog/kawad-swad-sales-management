@@ -36,6 +36,9 @@ from app.routers.sales import _compute_authoritative_cogs
 from app.accounting.reconciliation import audit_and_reconcile_operational_events
 
 
+from tests.v2_test_harness import LocalAppsScriptSimulator
+
+
 class TestAuditFixesRegression(unittest.TestCase):
     def setUp(self):
         self._orig_connected = db.is_connected
@@ -56,12 +59,15 @@ class TestAuditFixesRegression(unittest.TestCase):
             "Products",
             "Sales",
             "JournalHeaders",
+            "JournalLines",
             "JournalVouchers",
             "AccountingLedger",
         ]:
             db.memory_store[table] = []
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()

@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 import logging
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -289,25 +290,196 @@ class AppsScriptBridge:
                 return True, str(raw).strip() if raw is not None else ""
         return False, ""
 
-    @staticmethod
-    def _id_exists_in_tab(tab_name: str, id_fields: Tuple[str, ...], candidate_id: str) -> bool:
-        target_upper = candidate_id.strip().upper()
+    # In-process concurrency guard: prevents two threads in the same backend worker from
+    # passing pre-write duplicate-ID validation concurrently for the exact same (tab, ID).
+    # NOTE: Cross-worker / distributed atomic uniqueness still requires LockService inside
+    # the external Apps Script writer (tracked under DB-008).
+    _INFLIGHT_ID_LOCK = threading.Lock()
+    _INFLIGHT_IDS: Dict[Tuple[str, str], str] = {}
+
+    @classmethod
+    def _check_id_exists_authoritative(
+        cls,
+        tab_name: str,
+        id_fields: Tuple[str, ...],
+        candidate_id: str,
+    ) -> Tuple[bool, Optional[Tuple[str, int, str]]]:
+        """
+        Authoritative, fail-closed duplicate-ID lookup against fresh Google Sheets data.
+
+        Returns `(exists, error_info)` where `error_info` is `None` ONLY when:
+        1. `db.get_records(tab_name, fresh=True)` succeeded without exception.
+        2. Returned payload is a list of dict rows (never None / malformed / non-dict).
+        3. Row-1 header evidence (`db.get_verified_tab_headers(tab_name, fresh=True)`)
+           confirms the table schema includes at least one expected identifier column
+           (preventing missing/wrong-header reads from masquerading as an empty table).
+        4. For non-empty tables, every row contains at least one expected identifier column.
+
+        On ANY read outage, timeout, 429/500/503, auth failure, malformed response, or
+        unverified schema header, returns `(False, (error_code, 503, message))` so callers
+        FAIL CLOSED and perform zero remote writes.
+        """
+        target_upper = str(candidate_id or "").strip().upper()
         if not target_upper:
-            return False
+            return False, None
+
+        expected_fields = {str(f or "").strip() for f in id_fields if str(f or "").strip()}
+        if not expected_fields:
+            return False, (
+                "DUPLICATE_CHECK_SCHEMA_UNVERIFIED",
+                503,
+                f"Pre-write duplicate-ID check failed: no identifier columns specified for '{tab_name}'. Data was NOT SAVED.",
+            )
+
         try:
-            rows = db.get_records(tab_name, fresh=False)
-        except Exception:
-            return False
+            rows = db.get_records(tab_name, fresh=True)
+        except Exception as exc:
+            logger.error("Authoritative duplicate-ID read failed for '%s': %s", tab_name, exc)
+            return False, (
+                "DUPLICATE_CHECK_STORE_UNAVAILABLE",
+                503,
+                f"Pre-write duplicate-ID check failed: authoritative fresh read of '{tab_name}' is unavailable ({exc}). Data was NOT SAVED.",
+            )
+
         if not isinstance(rows, list):
-            return False
-        for row in rows:
+            logger.error(
+                "Authoritative duplicate-ID read for '%s' returned malformed non-list type %s",
+                tab_name,
+                type(rows).__name__,
+            )
+            return False, (
+                "DUPLICATE_CHECK_DATA_MALFORMED",
+                503,
+                f"Pre-write duplicate-ID check failed: '{tab_name}' returned malformed non-list data ({type(rows).__name__}). Data was NOT SAVED.",
+            )
+
+        for idx, row in enumerate(rows):
             if not isinstance(row, dict):
-                continue
+                logger.error(
+                    "Authoritative duplicate-ID read for '%s' contains malformed non-dict row at index %d (%s)",
+                    tab_name,
+                    idx,
+                    type(row).__name__,
+                )
+                return False, (
+                    "DUPLICATE_CHECK_DATA_MALFORMED",
+                    503,
+                    f"Pre-write duplicate-ID check failed: '{tab_name}' contains malformed row data at index {idx}. Data was NOT SAVED.",
+                )
+
+        # Require trustworthy Row-1 header evidence for BOTH empty and non-empty tables
+        try:
+            verified_headers = db.get_verified_tab_headers(tab_name, fresh=True)
+        except Exception as exc:
+            logger.error("Authoritative header verification failed for '%s': %s", tab_name, exc)
+            return False, (
+                "DUPLICATE_CHECK_SCHEMA_UNVERIFIED",
+                503,
+                f"Pre-write duplicate-ID check failed: unable to verify Row-1 schema headers for '{tab_name}' ({exc}). Data was NOT SAVED.",
+            )
+
+        if not isinstance(verified_headers, list) or not verified_headers:
+            return False, (
+                "DUPLICATE_CHECK_SCHEMA_UNVERIFIED",
+                503,
+                f"Pre-write duplicate-ID check failed: Row-1 schema headers for '{tab_name}' are missing or empty. Data was NOT SAVED.",
+            )
+
+        header_set = {str(h).strip() for h in verified_headers if isinstance(h, str) and str(h).strip()}
+        if not (expected_fields & header_set):
+            return False, (
+                "DUPLICATE_CHECK_SCHEMA_UNVERIFIED",
+                503,
+                (
+                    f"Pre-write duplicate-ID check failed: '{tab_name}' headers do not include expected "
+                    f"identifier column(s) {sorted(expected_fields)}. Data was NOT SAVED."
+                ),
+            )
+
+        # For non-empty tables, ensure returned rows actually carry at least one expected ID column
+        for idx, row in enumerate(rows):
+            row_keys = {str(k).strip() for k in row.keys()}
+            if not (expected_fields & row_keys):
+                return False, (
+                    "DUPLICATE_CHECK_SCHEMA_UNVERIFIED",
+                    503,
+                    (
+                        f"Pre-write duplicate-ID check failed: row {idx} in '{tab_name}' is missing expected "
+                        f"identifier column(s) {sorted(expected_fields)}. Data was NOT SAVED."
+                    ),
+                )
+
+        for row in rows:
             for field in id_fields:
                 existing_val = str(row.get(field) or "").strip().upper()
                 if existing_val and existing_val == target_upper:
-                    return True
-        return False
+                    return True, None
+
+        with cls._INFLIGHT_ID_LOCK:
+            if (tab_name, target_upper) in cls._INFLIGHT_IDS:
+                return True, None
+
+        return False, None
+
+    @classmethod
+    def _id_exists_in_tab(cls, tab_name: str, id_fields: Tuple[str, ...], candidate_id: str) -> bool:
+        """Fail-closed wrapper around `_check_id_exists_authoritative` (never fails open to False)."""
+        exists, err_info = cls._check_id_exists_authoritative(tab_name, id_fields, candidate_id)
+        if err_info is not None:
+            raise RuntimeError(f"{err_info[0]}: {err_info[2]}")
+        return exists
+
+    @classmethod
+    def _reserve_inflight_ids(
+        cls,
+        keys: List[Tuple[str, str]],
+        corr_id: str,
+    ) -> Tuple[Optional[Tuple[str, str]], List[Tuple[str, str]]]:
+        """Atomically reserve validated (tab_name, upper_id) keys for the duration of this write."""
+        unique_keys: List[Tuple[str, str]] = []
+        for k in keys:
+            if k not in unique_keys:
+                unique_keys.append(k)
+        if not unique_keys:
+            return None, []
+        with cls._INFLIGHT_ID_LOCK:
+            for key in unique_keys:
+                if key in cls._INFLIGHT_IDS:
+                    return key, []
+            for key in unique_keys:
+                cls._INFLIGHT_IDS[key] = corr_id
+            return None, unique_keys
+
+    @classmethod
+    def _release_inflight_ids(cls, keys: List[Tuple[str, str]], corr_id: str) -> None:
+        if not keys:
+            return
+        with cls._INFLIGHT_ID_LOCK:
+            for key in keys:
+                if cls._INFLIGHT_IDS.get(key) == corr_id:
+                    cls._INFLIGHT_IDS.pop(key, None)
+
+    @staticmethod
+    def _duplicate_check_error_result(
+        *,
+        err_info: Tuple[str, int, str],
+        corr_id: str,
+        clean_nonce: str,
+        payload_hash: str,
+        allocated_id: Optional[str] = None,
+    ) -> BridgeResult:
+        err_code, http_status, message = err_info
+        return BridgeResult(
+            status="REJECTED",
+            correlation_id=corr_id,
+            nonce=clean_nonce,
+            allocated_id=allocated_id,
+            error_code=err_code,
+            message=message,
+            retryable=True,
+            http_status=http_status,
+            payload_hash=payload_hash,
+        )
 
     def _preflight_validate_payload_ids(
         self,
@@ -317,14 +489,18 @@ class AppsScriptBridge:
         corr_id: str,
         clean_nonce: str,
         payload_hash: str,
-    ) -> Optional[BridgeResult]:
+    ) -> Tuple[Optional[BridgeResult], List[Tuple[str, str]]]:
         """
         Pre-write identifier, prefix, parent-reference, child-row, and cross-table
-        collision validation. Runs BEFORE any bridge HTTP POST or mutation so invalid
-        or colliding IDs never create partial records.
+        collision validation. Runs BEFORE any bridge HTTP POST or mutation so invalid,
+        colliding, or unverifiable IDs never create partial records.
+
+        Returns `(error_result, reserved_inflight_keys)`. Caller MUST release
+        `reserved_inflight_keys` in a `finally:` block whenever `error_result is None`.
         """
         effective_prefix = self._effective_locked_prefix(spec)
         primary_fields = spec.readback.primary_match_fields or ()
+        keys_to_reserve: List[Tuple[str, str]] = []
 
         # 1. Primary target identifier validation (if supplied in payload or explicitly blank on update/delete)
         if spec.id_field:
@@ -340,7 +516,7 @@ class AppsScriptBridge:
                         retryable=False,
                         http_status=422,
                         payload_hash=payload_hash,
-                    )
+                    ), []
             if supplied_id:
                 enforces_prefix = bool(
                     effective_prefix
@@ -373,12 +549,21 @@ class AppsScriptBridge:
                         retryable=False,
                         http_status=422,
                         payload_hash=payload_hash,
-                    )
+                    ), []
                 if spec.requires_allocated_id:
                     check_fields = (spec.id_field,)
                     if spec.target_tab == "SalaryIncentives":
                         check_fields = ("record_id", "incentive_id")
-                    if self._id_exists_in_tab(spec.target_tab, check_fields, supplied_id):
+                    exists, err_info = self._check_id_exists_authoritative(spec.target_tab, check_fields, supplied_id)
+                    if err_info is not None:
+                        return self._duplicate_check_error_result(
+                            err_info=err_info,
+                            corr_id=corr_id,
+                            clean_nonce=clean_nonce,
+                            payload_hash=payload_hash,
+                            allocated_id=supplied_id,
+                        ), []
+                    if exists:
                         return BridgeResult(
                             status="REJECTED",
                             correlation_id=corr_id,
@@ -392,10 +577,23 @@ class AppsScriptBridge:
                             retryable=False,
                             http_status=409,
                             payload_hash=payload_hash,
-                        )
+                        ), []
+                    keys_to_reserve.append((spec.target_tab, supplied_id.strip().upper()))
+
                     # Cross-table uniqueness for RCPT (Payments <-> SalaryReceipts) and SAL (SalaryPayments <-> SalaryIncentives)
                     if spec.target_tab == "Payments":
-                        if self._id_exists_in_tab("SalaryReceipts", ("receipt_id", "receipt_number"), supplied_id):
+                        exists_x, err_x = self._check_id_exists_authoritative(
+                            "SalaryReceipts", ("receipt_id", "receipt_number"), supplied_id
+                        )
+                        if err_x is not None:
+                            return self._duplicate_check_error_result(
+                                err_info=err_x,
+                                corr_id=corr_id,
+                                clean_nonce=clean_nonce,
+                                payload_hash=payload_hash,
+                                allocated_id=supplied_id,
+                            ), []
+                        if exists_x:
                             return BridgeResult(
                                 status="REJECTED",
                                 correlation_id=corr_id,
@@ -409,9 +607,21 @@ class AppsScriptBridge:
                                 retryable=False,
                                 http_status=409,
                                 payload_hash=payload_hash,
-                            )
+                            ), []
+                        keys_to_reserve.append(("SalaryReceipts", supplied_id.strip().upper()))
                     elif spec.target_tab == "SalaryIncentives":
-                        if self._id_exists_in_tab("SalaryPayments", ("salary_payment_id", "payment_id", "record_id"), supplied_id):
+                        exists_x, err_x = self._check_id_exists_authoritative(
+                            "SalaryPayments", ("salary_payment_id", "payment_id", "record_id"), supplied_id
+                        )
+                        if err_x is not None:
+                            return self._duplicate_check_error_result(
+                                err_info=err_x,
+                                corr_id=corr_id,
+                                clean_nonce=clean_nonce,
+                                payload_hash=payload_hash,
+                                allocated_id=supplied_id,
+                            ), []
+                        if exists_x:
                             return BridgeResult(
                                 status="REJECTED",
                                 correlation_id=corr_id,
@@ -425,7 +635,8 @@ class AppsScriptBridge:
                                 retryable=False,
                                 http_status=409,
                                 payload_hash=payload_hash,
-                            )
+                            ), []
+                        keys_to_reserve.append(("SalaryPayments", supplied_id.strip().upper()))
 
         # 2. Child-row ID & RCPT cross-table collision validation (e.g. RECORD_WORKFORCE_PAYMENT -> SalaryReceipts)
         touches_salary_receipts = (
@@ -454,8 +665,19 @@ class AppsScriptBridge:
                         retryable=False,
                         http_status=422,
                         payload_hash=payload_hash,
-                    )
-                if self._id_exists_in_tab("SalaryReceipts", ("receipt_id", "receipt_number"), child_rid):
+                    ), []
+                exists_sr, err_sr = self._check_id_exists_authoritative(
+                    "SalaryReceipts", ("receipt_id", "receipt_number"), child_rid
+                )
+                if err_sr is not None:
+                    return self._duplicate_check_error_result(
+                        err_info=err_sr,
+                        corr_id=corr_id,
+                        clean_nonce=clean_nonce,
+                        payload_hash=payload_hash,
+                        allocated_id=child_rid,
+                    ), []
+                if exists_sr:
                     return BridgeResult(
                         status="REJECTED",
                         correlation_id=corr_id,
@@ -468,8 +690,19 @@ class AppsScriptBridge:
                         retryable=False,
                         http_status=409,
                         payload_hash=payload_hash,
-                    )
-                if self._id_exists_in_tab("Payments", ("payment_id", "receipt_id", "receipt_number"), child_rid):
+                    ), []
+                exists_pay, err_pay = self._check_id_exists_authoritative(
+                    "Payments", ("payment_id", "receipt_id", "receipt_number"), child_rid
+                )
+                if err_pay is not None:
+                    return self._duplicate_check_error_result(
+                        err_info=err_pay,
+                        corr_id=corr_id,
+                        clean_nonce=clean_nonce,
+                        payload_hash=payload_hash,
+                        allocated_id=child_rid,
+                    ), []
+                if exists_pay:
                     return BridgeResult(
                         status="REJECTED",
                         correlation_id=corr_id,
@@ -482,7 +715,9 @@ class AppsScriptBridge:
                         retryable=False,
                         http_status=409,
                         payload_hash=payload_hash,
-                    )
+                    ), []
+                keys_to_reserve.append(("SalaryReceipts", child_rid.strip().upper()))
+                keys_to_reserve.append(("Payments", child_rid.strip().upper()))
 
         # 3. Validate any explicit child-item IDs supplied inside nested child row arrays
         child_array_contracts = (
@@ -516,9 +751,9 @@ class AppsScriptBridge:
                         retryable=False,
                         http_status=422,
                         payload_hash=payload_hash,
-                    )
+                    ), []
                 cid_upper = cid.upper()
-                if cid_upper in seen_child_ids or self._id_exists_in_tab(child_tab, (child_id_field,), cid):
+                if cid_upper in seen_child_ids:
                     return BridgeResult(
                         status="REJECTED",
                         correlation_id=corr_id,
@@ -531,10 +766,54 @@ class AppsScriptBridge:
                         retryable=False,
                         http_status=409,
                         payload_hash=payload_hash,
-                    )
+                    ), []
+                exists_child, err_child = self._check_id_exists_authoritative(child_tab, (child_id_field,), cid)
+                if err_child is not None:
+                    return self._duplicate_check_error_result(
+                        err_info=err_child,
+                        corr_id=corr_id,
+                        clean_nonce=clean_nonce,
+                        payload_hash=payload_hash,
+                        allocated_id=cid,
+                    ), []
+                if exists_child:
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code="DUPLICATE_CHILD_RECORD_ID",
+                        message=(
+                            f"Pre-write validation failed: duplicate child '{child_id_field}'='{cid}' "
+                            f"for '{child_tab}'. Data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=409,
+                        payload_hash=payload_hash,
+                    ), []
                 seen_child_ids.add(cid_upper)
+                keys_to_reserve.append((child_tab, cid_upper))
 
-        return None
+        # 4. Atomically reserve validated IDs in-process to prevent concurrent duplicate writes
+        colliding_key, reserved_keys = self._reserve_inflight_ids(keys_to_reserve, corr_id)
+        if colliding_key is not None:
+            col_tab, col_id = colliding_key
+            is_cross_tab = col_tab != spec.target_tab
+            return BridgeResult(
+                status="REJECTED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                allocated_id=col_id,
+                error_code="CROSS_TABLE_ID_COLLISION" if is_cross_tab else "DUPLICATE_RECORD_ID",
+                message=(
+                    f"Pre-write concurrency guard rejected concurrent duplicate identifier '{col_id}' "
+                    f"for '{col_tab}'. Data was NOT SAVED."
+                ),
+                retryable=False,
+                http_status=409,
+                payload_hash=payload_hash,
+            ), []
+
+        return None, reserved_keys
 
     def _verify_readback(
         self,
@@ -871,8 +1150,8 @@ class AppsScriptBridge:
             payload=payload,
         )
 
-        # Pre-write identifier, prefix, child-row, and cross-table collision validation (P1.5-002 / P1.5-007)
-        preflight_id_err = self._preflight_validate_payload_ids(
+        # Pre-write identifier, prefix, child-row, and cross-table collision validation (P1.5-002 / P1.5-007 / Phase 1.8)
+        preflight_id_err, reserved_inflight_keys = self._preflight_validate_payload_ids(
             spec=spec,
             payload=payload,
             corr_id=corr_id,
@@ -882,6 +1161,36 @@ class AppsScriptBridge:
         if preflight_id_err is not None:
             return preflight_id_err
 
+        try:
+            return self._execute_after_preflight(
+                spec=spec,
+                clean_action=clean_action,
+                clean_tab=clean_tab,
+                payload=payload,
+                corr_id=corr_id,
+                clean_nonce=clean_nonce,
+                payload_hash=payload_hash,
+                actor_user_id=actor_user_id,
+                actor_role=actor_role,
+                requested_inv=requested_inv,
+            )
+        finally:
+            self._release_inflight_ids(reserved_inflight_keys, corr_id)
+
+    def _execute_after_preflight(
+        self,
+        *,
+        spec: GovernedActionSpec,
+        clean_action: str,
+        clean_tab: str,
+        payload: Dict[str, Any],
+        corr_id: str,
+        clean_nonce: str,
+        payload_hash: str,
+        actor_user_id: str,
+        actor_role: str,
+        requested_inv: List[str],
+    ) -> BridgeResult:
         if not self.is_configured():
             return BridgeResult(
                 status="BLOCKED_PENDING_OWNER_SETUP",

@@ -401,6 +401,7 @@ class SheetsDatabase:
         self._fail_once: Dict[str, int] = {}
         self.shared_file_dir: Optional[str] = os.getenv("SALES_SHARED_TEST_DIR") or None
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        self._test_tab_headers: Dict[str, Any] = {}
         self._last_conn_attempt_time: float = 0.0
         if connect_on_init:
             self.init_connection()
@@ -1364,7 +1365,7 @@ class SheetsDatabase:
 
         err_str = str(last_exc).lower() if last_exc else ""
         if "429" in err_str or "quota" in err_str:
-            if not fresh and cached and cached[1]:
+            if not effective_fresh and cached and cached[1]:
                 return [dict(row) for row in cached[1]]
             logger.error("Exhausted retries on 429 quota error for %s: %s", tab_name, last_exc)
             raise RuntimeError(f"Google Sheets API quota temporarily exceeded for {tab_name}. Please retry in a few seconds.") from last_exc
@@ -1373,6 +1374,50 @@ class SheetsDatabase:
         raise RuntimeError(f"Could not read {tab_name} from Google Sheets.") from last_exc
 
     get_all_records = get_records
+
+    def get_verified_tab_headers(self, tab_name: str, fresh: bool = True) -> List[str]:
+        """
+        Return authoritative Row-1 column headers for a tab, failing closed on any
+        unreadable, disconnected, missing, or malformed header state.
+        """
+        if is_forbidden_scratch_tab(tab_name):
+            raise RuntimeError(
+                f"Access denied: legacy scratch tab '{tab_name}' is forbidden and must never be queried."
+            )
+
+        if self.is_connected and self.spreadsheet:
+            worksheet = self._get_worksheet(tab_name)
+            if not hasattr(worksheet, "row_values"):
+                raise RuntimeError(f"Worksheet '{tab_name}' does not support authoritative Row-1 header reads.")
+            raw_headers = worksheet.row_values(1)
+            if not isinstance(raw_headers, list):
+                raise RuntimeError(
+                    f"Malformed Row-1 headers for '{tab_name}': expected list, got {type(raw_headers).__name__}."
+                )
+            cleaned = [str(h).strip() for h in raw_headers if isinstance(h, str) and str(h).strip()]
+            if not cleaned:
+                raise RuntimeError(f"Row-1 headers for '{tab_name}' are empty or missing.")
+            return cleaned
+
+        shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+        if shared_dir or self.allow_in_memory_fallback:
+            if tab_name in self._test_tab_headers:
+                override = self._test_tab_headers[tab_name]
+                if not isinstance(override, list):
+                    raise RuntimeError(
+                        f"Malformed Row-1 headers for '{tab_name}': expected list, got {type(override).__name__}."
+                    )
+                cleaned = [str(h).strip() for h in override if isinstance(h, str) and str(h).strip()]
+                if not cleaned:
+                    raise RuntimeError(f"Row-1 headers for '{tab_name}' are empty or missing.")
+                return cleaned
+            if tab_name in REQUIRED_TABS and REQUIRED_TABS[tab_name]:
+                return list(REQUIRED_TABS[tab_name])
+            raise RuntimeError(f"Authoritative Row-1 headers are unverified for tab '{tab_name}'.")
+
+        raise RuntimeError(
+            f"Persistent storage is unavailable: cannot verify Row-1 headers for '{tab_name}' while disconnected."
+        )
 
     def query_records(
         self,

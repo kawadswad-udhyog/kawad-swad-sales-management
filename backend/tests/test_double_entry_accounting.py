@@ -32,8 +32,17 @@ from app.accounting.postings import (
 )
 
 
+from tests.v2_test_harness import LocalAppsScriptSimulator
+
+
 class TestDoubleEntryAccounting(unittest.TestCase):
     def setUp(self):
+        for tab in REQUIRED_TABS:
+            db.memory_store[tab] = []
+        self._sim = LocalAppsScriptSimulator().start()
+
+    def tearDown(self):
+        self._sim.stop()
         for tab in REQUIRED_TABS:
             db.memory_store[tab] = []
 

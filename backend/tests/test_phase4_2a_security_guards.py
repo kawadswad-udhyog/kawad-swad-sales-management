@@ -111,7 +111,11 @@ class TestApprovalGuards(unittest.TestCase):
         rows = [{"request_id": "REQ-000001", "status": "EXECUTION_FAILED"}]
         with (
             patch.object(approvals_router.db, "get_records", return_value=rows),
-            patch.object(approvals_router, "_run_request_execution", side_effect=AssertionError("must not execute")),
+            patch.object(
+                approvals_router.apps_script_bridge,
+                "delegate_governed_write",
+                side_effect=AssertionError("must not execute"),
+            ),
         ):
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(approvals_router.retry_failed_execution(
@@ -123,7 +127,11 @@ class TestApprovalGuards(unittest.TestCase):
         rows = [{"request_id": "REQ-000001", "status": "EXECUTION_REVIEW_REQUIRED"}]
         with (
             patch.object(approvals_router.db, "get_records", return_value=rows),
-            patch.object(approvals_router, "_run_request_execution", side_effect=AssertionError("must not execute")),
+            patch.object(
+                approvals_router.apps_script_bridge,
+                "delegate_governed_write",
+                side_effect=AssertionError("must not execute"),
+            ),
         ):
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(approvals_router.decide_approval_request(
@@ -202,6 +210,7 @@ class TestPrivateEmployeeFields(unittest.TestCase):
 
 class TestApprovalExecutionClaim(unittest.TestCase):
     def test_action_failure_is_marked_for_manual_reconciliation(self):
+        """Ambiguous governed bridge outcome during approval execution must fail closed (HTTP 504 PENDING_UNKNOWN) without silent success."""
         rows = [{
             "request_id": "REQ-000009",
             "request_type": "UPDATE_USER",
@@ -212,25 +221,31 @@ class TestApprovalExecutionClaim(unittest.TestCase):
             "payload_json": "{}",
             "status": "PENDING",
         }]
-        updates = []
-        def fake_update(tab, key, value, values, **kwargs):
-            updates.append(dict(values))
-            return True
 
         with (
             patch.object(approvals_router.db, "get_records", return_value=rows),
-            patch.object(approvals_router.db, "update_record", side_effect=fake_update),
-            patch.object(approvals_router.db, "log_audit"),
-            patch.object(approvals_router, "_run_request_execution", side_effect=RuntimeError("simulated ambiguous write")),
+            patch.object(
+                approvals_router.apps_script_bridge,
+                "delegate_governed_write",
+                side_effect=HTTPException(
+                    status_code=504,
+                    detail={
+                        "status": "PENDING_UNKNOWN",
+                        "error_code": "APPS_SCRIPT_UNKNOWN_OUTCOME",
+                        "message": "Status not confirmed; do not submit a new transaction.",
+                    },
+                ),
+            ),
         ):
-            result = asyncio.run(approvals_router.decide_approval_request(
-                "REQ-000009",
-                approvals_router.ApprovalDecisionRequest(decision="APPROVED"),
-                current_user={"user_id": "owner-1", "role": "OWNER"},
-            ))
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(approvals_router.decide_approval_request(
+                    "REQ-000009",
+                    approvals_router.ApprovalDecisionRequest(decision="APPROVED"),
+                    current_user={"user_id": "owner-1", "role": "OWNER"},
+                ))
 
-        self.assertEqual([u.get("status") for u in updates], ["EXECUTING", "EXECUTION_REVIEW_REQUIRED"])
-        self.assertEqual(result.status, "EXECUTION_REVIEW_REQUIRED")
+        self.assertEqual(ctx.exception.status_code, 504)
+        self.assertEqual(ctx.exception.detail["status"], "PENDING_UNKNOWN")
 
 
 if __name__ == "__main__":

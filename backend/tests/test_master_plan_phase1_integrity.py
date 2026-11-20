@@ -11,51 +11,11 @@ os.environ.setdefault("SALES_TESTING", "1")
 os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
 
 import sys
-import types
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-if "fastapi" not in sys.modules:
-    mock_fastapi = types.ModuleType("fastapi")
-    class MockAPIRouter:
-        def __init__(self, *args, **kwargs): pass
-        def post(self, *args, **kwargs): return lambda f: f
-        def get(self, *args, **kwargs): return lambda f: f
-        def put(self, *args, **kwargs): return lambda f: f
-        def patch(self, *args, **kwargs): return lambda f: f
-        def delete(self, *args, **kwargs): return lambda f: f
-    class MockHTTPException(Exception):
-        def __init__(self, status_code, detail=None, headers=None):
-            super().__init__(detail)
-            self.status_code = status_code
-            self.detail = detail
-    mock_fastapi.APIRouter = MockAPIRouter
-    mock_fastapi.HTTPException = MockHTTPException
-    mock_fastapi.Depends = lambda f: f
-    mock_fastapi.status = types.ModuleType("status")
-    sys.modules["fastapi"] = mock_fastapi
-    mock_sec = types.ModuleType("fastapi.security")
-    mock_sec.HTTPBearer = lambda **kwargs: None
-    mock_sec.HTTPAuthorizationCredentials = None
-    sys.modules["fastapi.security"] = mock_sec
-
-if "pydantic" not in sys.modules:
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items(): setattr(self, k, v)
-        def dict(self): return self.__dict__
-    mock_pydantic = types.ModuleType("pydantic")
-    mock_pydantic.BaseModel = MockBaseModel
-    mock_pydantic.Field = lambda *args, **kwargs: kwargs.get("default", args[0] if args else None)
-    sys.modules["pydantic"] = mock_pydantic
-
-if "jwt" not in sys.modules:
-    mock_jwt = types.ModuleType("jwt")
-    mock_jwt.encode = lambda *args, **kwargs: "mock-jwt"
-    mock_jwt.decode = lambda *args, **kwargs: {"sub": "USR-1"}
-    sys.modules["jwt"] = mock_jwt
-
+import tests  # noqa: F401 - standardized hardened stdlib shims
 import unittest
 from app.sheets import db
 from app.recipes_master import MASTER_RECIPES_DEFINITION
@@ -98,20 +58,20 @@ class TestMasterPlanPhase1Integrity(unittest.TestCase):
         self.assertEqual(expected_kg, 45.0)
 
     def test_write_failures_raise_clean_error(self):
-        """Verify that db.append_record with raise_on_error=True raises RuntimeError on failure."""
+        """Verify that direct db.append_record fails closed under Single-Write-Owner when production mode is active."""
         db.is_connected = False
         db.allow_in_memory_fallback = False
         with self.assertRaises(RuntimeError) as ctx:
             db.append_record("Products", {"product_id": "PRD-TEST", "product_name": "Test Papad"}, raise_on_error=True)
-        self.assertIn("persistent storage is unavailable", str(ctx.exception).lower())
+        self.assertIn("blocked_pending_owner_setup", str(ctx.exception).lower())
 
     def test_update_failures_raise_clean_error(self):
-        """Verify that db.update_record with raise_on_error=True raises RuntimeError when persistent storage is disconnected."""
+        """Verify that direct db.update_record fails closed under Single-Write-Owner when production mode is active."""
         db.is_connected = False
         db.allow_in_memory_fallback = False
         with self.assertRaises(RuntimeError) as ctx:
             db.update_record("Products", "product_id", "PRD-TEST", {"active": "false"}, raise_on_error=True)
-        self.assertIn("persistent storage is unavailable", str(ctx.exception).lower())
+        self.assertIn("blocked_pending_owner_setup", str(ctx.exception).lower())
 
 if __name__ == "__main__":
     unittest.main()

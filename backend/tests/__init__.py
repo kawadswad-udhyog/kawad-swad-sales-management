@@ -60,7 +60,18 @@ if "fastapi" not in sys.modules:
             def add_task(self, *args, **kwargs): pass
         class Request:
             def __init__(self, headers=None):
-                self.headers = dict(headers or {})
+                raw = dict(headers or {})
+                class _CIHeaders(dict):
+                    def get(self, key, default=None):
+                        kl = str(key).lower()
+                        for k, v in self.items():
+                            if str(k).lower() == kl:
+                                return v
+                        return default
+                    def __contains__(self, key):
+                        kl = str(key).lower()
+                        return any(str(k).lower() == kl for k in self.keys())
+                self.headers = _CIHeaders(raw)
         @staticmethod
         def Depends(f): return f
         @staticmethod
