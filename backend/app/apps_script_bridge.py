@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -87,29 +88,82 @@ class BridgeResult:
     payload_hash: Optional[str] = None
 
 
+# Strict plain decimal syntax for string-serialized Google Sheets numbers:
+# accepts optional sign, non-zero-padded integer or single "0", optional fractional part,
+# or leading decimal point (e.g. ".50"). Deliberately rejects zero-padded codes ("0010"),
+# scientific-notation lookalikes ("1E2"), and underscore separators ("1_000") so IDs/SKUs
+# are never coerced into numbers.
+_PLAIN_DECIMAL_RE = re.compile(r"^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)$")
+
+
+def _format_decimal_canonical(dec: Decimal) -> str:
+    """
+    Format a finite Decimal canonically without precision loss or integer-digit truncation.
+
+    Uses fixed-point formatting directly on `dec` (avoiding `dec.normalize()`, which rounds
+    to decimal context precision on values exceeding 28 digits and can emit exponents), and
+    strips trailing fractional zeroes ONLY when a decimal point '.' is present so meaningful
+    trailing zeroes on integers (e.g. 10, 100, 1000, 120) are never removed.
+    """
+    if dec == 0:
+        return "0"
+    text = format(dec, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
 def _normalize_scalar(value: Any) -> str:
+    """
+    Normalize a scalar value for Google Sheets read-back comparison.
+
+    Explicit comparison contract:
+    - Booleans (`bool` and case-insensitive `"true"` / `"false"`): normalized to `"true"` or
+      `"false"`. Checked BEFORE numeric types because `bool` subclasses `int` in Python, so
+      `True` NEVER collides with `1` and `False` NEVER collides with `0`.
+    - Null / Empty (`None`, `""`, whitespace-only strings): normalized to `""`, matching
+      Google Sheets' existing empty-cell representation where blank cells read back as `""`.
+      Does NOT collide with numeric `0` (`"0"`) or boolean `False` (`"false"`).
+    - Numeric values (`int`, `float`, `Decimal`) and strict plain-decimal strings (matching
+      `_PLAIN_DECIMAL_RE`, which Google Sheets returns via text formatting or `get_all_values()`
+      fallback): converted via `Decimal` (no float conversion on `Decimal` or numeric strings)
+      and formatted canonically so `1.2` == `1.20`, `0.5` == `0.50`, `100` == `"100"` == `100.0`,
+      while preserving all integer digits (`10` != `100` != `1000`, `120` != `12`, `0` != `10`).
+    - All other strings (IDs, SKUs, dates, statuses, zero-padded codes like `"0010"`,
+      alphanumeric codes like `"1E2"`, non-finite floats/Decimals): preserved as trimmed strings.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (int, float, Decimal)):
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        if value.is_finite():
+            return _format_decimal_canonical(value)
+        return str(value).strip()
+    if isinstance(value, float):
         try:
-            dec = value if isinstance(value, Decimal) else Decimal(str(value))
+            dec = Decimal(str(value))
             if dec.is_finite():
-                if dec == 0:
-                    return "0"
-                return format(dec.normalize(), "f").rstrip("0").rstrip(".")
+                return _format_decimal_canonical(dec)
         except (InvalidOperation, ValueError):
             pass
-    s = str(value if value is not None else "").strip()
-    if s.lower() in {"true", "false"}:
-        return s.lower()
-    try:
-        dec = Decimal(s)
-        if dec.is_finite():
-            if dec == 0:
-                return "0"
-            return format(dec.normalize(), "f").rstrip("0").rstrip(".")
-    except (InvalidOperation, ValueError):
-        pass
+        return str(value).strip()
+
+    s = str(value).strip()
+    if not s:
+        return ""
+    lower = s.lower()
+    if lower in {"true", "false"}:
+        return lower
+    if _PLAIN_DECIMAL_RE.match(s):
+        try:
+            dec = Decimal(s)
+            if dec.is_finite():
+                return _format_decimal_canonical(dec)
+        except (InvalidOperation, ValueError):
+            pass
     return s
 
 
