@@ -13,131 +13,12 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-if "fastapi" not in sys.modules:
-    class MockFastAPIModule(types.ModuleType):
-        class APIRouter:
-            def __init__(self, *args, **kwargs):
-                self.routes = []
-            def post(self, path="", **kwargs): return lambda f: f
-            def get(self, path="", **kwargs): return lambda f: f
-            def put(self, path="", **kwargs): return lambda f: f
-            def patch(self, path="", **kwargs): return lambda f: f
-            def delete(self, path="", **kwargs): return lambda f: f
-        class HTTPException(Exception):
-            def __init__(self, status_code, detail=None, headers=None):
-                super().__init__(detail)
-                self.status_code = status_code
-                self.detail = detail
-                self.headers = headers
-        class status:
-            HTTP_400_BAD_REQUEST = 400
-            HTTP_401_UNAUTHORIZED = 401
-            HTTP_403_FORBIDDEN = 403
-            HTTP_404_NOT_FOUND = 404
-            HTTP_409_CONFLICT = 409
-            HTTP_422_UNPROCESSABLE_ENTITY = 422
-            HTTP_429_TOO_MANY_REQUESTS = 429
-            HTTP_500_INTERNAL_SERVER_ERROR = 500
-            HTTP_503_SERVICE_UNAVAILABLE = 503
-        class FastAPI:
-            def __init__(self, *args, **kwargs): self.middleware = []
-            def add_middleware(self, mw, **kwargs): self.middleware.append((mw, kwargs))
-            def include_router(self, *args, **kwargs): pass
-            def on_event(self, *args, **kwargs): return lambda f: f
-        class BackgroundTasks:
-            def add_task(self, *args, **kwargs): pass
-        @staticmethod
-        def Depends(f): return f
-        @staticmethod
-        def Header(default=None, alias=None): return default
-        @staticmethod
-        def Query(default=None, **kwargs): return default
-
-    mock_mod = MockFastAPIModule("fastapi")
-    mock_mod.FastAPI = MockFastAPIModule.FastAPI
-    mock_mod.BackgroundTasks = MockFastAPIModule.BackgroundTasks
-    mock_mod.Query = MockFastAPIModule.Query
-
-    mock_mw = types.ModuleType("fastapi.middleware")
-    mock_cors = types.ModuleType("fastapi.middleware.cors")
-    mock_cors.CORSMiddleware = type("CORSMiddleware", (), {})
-    mock_mod.middleware = mock_mw
-
-    mock_sec = types.ModuleType("fastapi.security")
-    class MockCredentials:
-        def __init__(self, scheme="Bearer", credentials=""):
-            self.scheme = scheme
-            self.credentials = credentials
-    mock_sec.HTTPBearer = lambda **kwargs: None
-    mock_sec.HTTPAuthorizationCredentials = MockCredentials
-
-    sys.modules["fastapi"] = mock_mod
-    sys.modules["fastapi.middleware"] = mock_mw
-    sys.modules["fastapi.middleware.cors"] = mock_cors
-    sys.modules["fastapi.security"] = mock_sec
-
-class MockCredentials:
-    def __init__(self, scheme="Bearer", credentials=""):
-        self.scheme = scheme
-        self.credentials = credentials
-
-if "fastapi.security" not in sys.modules:
-    mock_sec = types.ModuleType("fastapi.security")
-    mock_sec.HTTPBearer = lambda **kwargs: None
-    mock_sec.HTTPAuthorizationCredentials = MockCredentials
-    sys.modules["fastapi.security"] = mock_sec
-
+import tests  # Hardened FastAPI/HMAC-JWT/Pydantic test shims
+from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
-import base64
-import json
-
-class SmartMockJWT:
-    _token_map = {}
-    @classmethod
-    def encode(cls, payload, secret, algorithm="HS256"):
-        data = dict(payload)
-        for k, v in list(data.items()):
-            if isinstance(v, datetime):
-                data[k] = int(v.timestamp())
-        token_str = "tok_" + base64.urlsafe_b64encode(json.dumps(data).encode("utf-8")).decode("utf-8").rstrip("=")
-        cls._token_map[token_str] = data
-        return token_str
-
-    @classmethod
-    def decode(cls, token, secret, algorithms=None):
-        if token in cls._token_map:
-            return dict(cls._token_map[token])
-        try:
-            if token.startswith("tok_"):
-                raw = token[4:]
-                padded = raw + "=" * (-len(raw) % 4)
-                return json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-        except Exception:
-            pass
-        return {"sub": "USR-000001", "role": "SALESMAN"}
-
-if "jwt" not in sys.modules:
-    mock_jwt = types.ModuleType("jwt")
-    mock_jwt.encode = SmartMockJWT.encode
-    mock_jwt.decode = SmartMockJWT.decode
-    sys.modules["jwt"] = mock_jwt
-
-if "pydantic" not in sys.modules:
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        def dict(self, **kwargs):
-            return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
-    mock_pyd = types.ModuleType("pydantic")
-    mock_pyd.BaseModel = MockBaseModel
-    mock_pyd.Field = lambda *args, **kwargs: kwargs.get("default", args[0] if args else None)
-    sys.modules["pydantic"] = mock_pyd
-
-from fastapi import HTTPException
-
 from app.sheets import db
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 from app.auth import (
     create_access_token,
     get_current_user,
@@ -253,10 +134,13 @@ class TestUserSystemPhase2(unittest.TestCase):
         self.owner_ctx = {"user_id": self.owner_user_id, "username": self.owner_username, "role": "OWNER"}
         self.pa_ctx = {"user_id": self.pa_user_id, "username": self.pa_username, "role": "PA"}
         self.salesman_ctx = {"user_id": self.salesman_user_id, "username": self.salesman_username, "role": "SALESMAN"}
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        self._sim.stop()
         db.allow_in_memory_fallback = self.orig_fallback
         db.is_connected = self.orig_is_connected
+        db._fail_once.clear()
         _REVOKED_TOKENS.clear()
         _USER_REVOKED_AT.clear()
 
@@ -290,7 +174,7 @@ class TestUserSystemPhase2(unittest.TestCase):
 
         # Owner deactivates the salesman
         status_req = UserStatusUpdate(active=False, reason="Security audit suspension")
-        res = asyncio.run(users_router.set_user_status(self.salesman_user_id, status_req, current_user=self.owner_ctx))
+        res = asyncio.run(users_router.set_user_status(self.salesman_user_id, status_req, current_user=self.owner_ctx, request=make_test_request()))
         self.assertFalse(res["active"])
 
         # The active token must immediately be rejected with 401
@@ -309,7 +193,7 @@ class TestUserSystemPhase2(unittest.TestCase):
 
         # Owner changes salesman to PA
         update_req = UserUpdate(role="PA")
-        asyncio.run(users_router.update_user(self.salesman_user_id, update_req, current_user=self.owner_ctx))
+        asyncio.run(users_router.update_user(self.salesman_user_id, update_req, current_user=self.owner_ctx, request=make_test_request()))
 
         # Prior session token must be revoked
         with self.assertRaises(HTTPException) as ctx:
@@ -327,7 +211,7 @@ class TestUserSystemPhase2(unittest.TestCase):
 
         # Owner resets the salesman's password
         reset_req = users_router.PasswordResetRequest(new_password="NewSecurePassword123")
-        res = asyncio.run(users_router.reset_password(self.salesman_user_id, reset_req, current_user=self.owner_ctx))
+        res = asyncio.run(users_router.reset_password(self.salesman_user_id, reset_req, current_user=self.owner_ctx, request=make_test_request()))
         self.assertTrue(res["ok"])
 
         # Prior session token must be revoked
@@ -362,12 +246,12 @@ class TestUserSystemPhase2(unittest.TestCase):
             password="TestPassword123",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(users_router.create_user(create_req, current_user=self.owner_ctx))
+            asyncio.run(users_router.create_user(create_req, current_user=self.owner_ctx, request=make_test_request()))
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertIn("already taken", str(ctx.exception.detail).lower())
 
     def test_two_phase_creation_rollback_on_auth_failure(self):
-        """Phase 2: If AuthUsers write fails, the created Users profile is rolled back so no orphan exists."""
+        """Phase 2: If AuthUsers write fails inside atomic Apps Script create, zero orphan Users or AuthUsers rows exist."""
         db._fail_once["AuthUsers"] = 1
 
         payload = {
@@ -378,16 +262,12 @@ class TestUserSystemPhase2(unittest.TestCase):
         }
 
         with self.assertRaises(HTTPException) as ctx:
-            execute_create_user(payload, actor_user_id=self.owner_user_id)
+            execute_create_user(payload, actor_user_id=self.owner_user_id, nonce="TEST-CREATE-ROLLBACK-1")
         self.assertEqual(ctx.exception.status_code, 503)
 
-        # Check Users sheet: the created record was deactivated or marked INCOMPLETE
+        # Atomic rollback: neither Users nor AuthUsers contains an orphan
         users = [u for u in db.memory_store["Users"] if u.get("username") == "new_worker"]
-        self.assertTrue(len(users) == 1)
-        self.assertEqual(users[0]["active"], "false")
-        self.assertIn("INCOMPLETE", users[0]["notes"])
-
-        # AuthUsers must not contain the orphan
+        self.assertEqual(len(users), 0)
         auths = [a for a in db.memory_store["AuthUsers"] if a.get("username") == "new_worker"]
         self.assertEqual(len(auths), 0)
 
@@ -401,19 +281,19 @@ class TestUserSystemPhase2(unittest.TestCase):
             password="StrongPassword123",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx))
+            asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx, request=make_test_request()))
         self.assertEqual(ctx.exception.status_code, 403)
 
         # PA attempts to edit Owner
         update_req = UserUpdate(full_name="Hacked Owner")
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(users_router.update_user(self.owner_user_id, update_req, current_user=self.pa_ctx))
+            asyncio.run(users_router.update_user(self.owner_user_id, update_req, current_user=self.pa_ctx, request=make_test_request()))
         self.assertEqual(ctx.exception.status_code, 403)
 
         # PA attempts to reset Owner password
         pw_req = users_router.PasswordResetRequest(new_password="NewPassword123")
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(users_router.reset_password(self.owner_user_id, pw_req, current_user=self.pa_ctx))
+            asyncio.run(users_router.reset_password(self.owner_user_id, pw_req, current_user=self.pa_ctx, request=make_test_request()))
         self.assertEqual(ctx.exception.status_code, 403)
 
     def test_pa_approval_workflow_lifecycle(self):
@@ -426,7 +306,7 @@ class TestUserSystemPhase2(unittest.TestCase):
             mobile="9876543210",
             password="RaghavPassword123",
         )
-        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx))
+        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx, request=make_test_request()))
         self.assertTrue(res["pending_approval"])
         req_id = res["request_id"]
 
@@ -440,7 +320,7 @@ class TestUserSystemPhase2(unittest.TestCase):
 
         # 3. Owner approves the request
         dec_req = ApprovalDecisionRequest(decision="APPROVED", notes="Approved by Owner")
-        decided = asyncio.run(approvals_router.decide_approval_request(req_id, dec_req, current_user=self.owner_ctx))
+        decided = asyncio.run(approvals_router.decide_approval_request(req_id, dec_req, current_user=self.owner_ctx, request=make_test_request()))
         self.assertEqual(decided.status, "EXECUTED")
 
         # Now the user profile and credentials must exist in Google Sheets!
@@ -456,12 +336,12 @@ class TestUserSystemPhase2(unittest.TestCase):
             role="SALESMAN",
             password="WorkerPassword123",
         )
-        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx))
+        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx, request=make_test_request()))
         req_id = res["request_id"]
 
         # Owner rejects
         dec_req = ApprovalDecisionRequest(decision="REJECTED", notes="Budget exceeded")
-        decided = asyncio.run(approvals_router.decide_approval_request(req_id, dec_req, current_user=self.owner_ctx))
+        decided = asyncio.run(approvals_router.decide_approval_request(req_id, dec_req, current_user=self.owner_ctx, request=make_test_request()))
         self.assertEqual(decided.status, "REJECTED")
 
         # User was not created
@@ -476,34 +356,40 @@ class TestUserSystemPhase2(unittest.TestCase):
             role="SALESMAN",
             password="WorkerPassword123",
         )
-        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx))
+        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx, request=make_test_request()))
         req_id = res["request_id"]
 
         # PA cancels request
-        cancelled = asyncio.run(approvals_router.cancel_approval_request(req_id, current_user=self.pa_ctx))
+        cancelled = asyncio.run(approvals_router.cancel_approval_request(req_id, current_user=self.pa_ctx, request=make_test_request()))
         self.assertEqual(cancelled.status, "CANCELLED")
 
     def test_approval_execution_failure_and_retry(self):
-        """Phase 4: When execution fails on approval, status is EXECUTION_FAILED and Owner can retry."""
+        """Phase 4: Atomic approval failure raises 503 with zero partial state, automatic retry endpoint stays disabled (409), and clean re-approval succeeds."""
         create_req = UserCreate(
             username="retry_worker",
             full_name="Retry Worker",
             role="SALESMAN",
             password="WorkerPassword123",
         )
-        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx))
+        res = asyncio.run(users_router.create_user(create_req, current_user=self.pa_ctx, request=make_test_request()))
         req_id = res["request_id"]
 
-        # Inject failure on Users sheet during approval execution
+        # Inject failure on Users sheet during atomic approval execution -> HTTP 503, request stays PENDING
         db._fail_once["Users"] = 1
         dec_req = ApprovalDecisionRequest(decision="APPROVED", notes="Approved")
-        decided = asyncio.run(approvals_router.decide_approval_request(req_id, dec_req, current_user=self.owner_ctx))
-        self.assertEqual(decided.status, "EXECUTION_FAILED")
-        self.assertTrue(len(decided.execution_error) > 0)
+        with self.assertRaises(HTTPException) as fail_ctx:
+            asyncio.run(approvals_router.decide_approval_request(req_id, dec_req, current_user=self.owner_ctx, request=make_test_request()))
+        self.assertEqual(fail_ctx.exception.status_code, 503)
+        self.assertEqual(len([a for a in db.memory_store["AuthUsers"] if a.get("username") == "retry_worker"]), 0)
 
-        # Retry execution without failure injection
-        retried = asyncio.run(approvals_router.retry_failed_execution(req_id, current_user=self.owner_ctx))
-        self.assertEqual(retried.status, "EXECUTED")
+        # Automatic retry endpoint is intentionally disabled (409 fail-closed safety guard)
+        with self.assertRaises(HTTPException) as retry_ctx:
+            asyncio.run(approvals_router.retry_failed_execution(req_id, current_user=self.owner_ctx))
+        self.assertEqual(retry_ctx.exception.status_code, 409)
+
+        # Clean Owner approval after storage recovery executes atomically
+        decided = asyncio.run(approvals_router.decide_approval_request(req_id, dec_req, current_user=self.owner_ctx, request=make_test_request()))
+        self.assertEqual(decided.status, "EXECUTED")
 
         # Verified created
         auths = [a for a in db.memory_store["AuthUsers"] if a.get("username") == "retry_worker"]

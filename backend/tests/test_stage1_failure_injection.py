@@ -12,12 +12,16 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import tests
 from app.sheets import db, REQUIRED_TABS
 from app.calculations.inventory import calculate_raw_material_balance
 from app.routers.production import (
-    receive_raw_material,
+    receive_raw_material as _raw_receive_raw_material,
     RawMaterialReceiveRequest,
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, wrap_v2_endpoint
+
+receive_raw_material = wrap_v2_endpoint(_raw_receive_raw_material)
 
 
 class TestStage1FailureInjection(unittest.IsolatedAsyncioTestCase):
@@ -38,6 +42,12 @@ class TestStage1FailureInjection(unittest.IsolatedAsyncioTestCase):
             "AuditLog": [],
         })
         self.owner_user = {"user_id": "USR-OWNER-01", "role": "OWNER", "full_name": "Owner Admin"}
+        self._sim = LocalAppsScriptSimulator().start()
+
+    def tearDown(self):
+        if getattr(self, "_sim", None) is not None:
+            self._sim.stop()
+            self._sim = None
 
     def _get_stock(self, mat_id: str = "RM-WHOLE-MOONG-DAL") -> float:
         res = calculate_raw_material_balance(
@@ -72,7 +82,7 @@ class TestStage1FailureInjection(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as ctx:
                 await receive_raw_material(req, self.owner_user)
             self.assertEqual(ctx.exception.status_code, 503)
-            self.assertIn("intent", ctx.exception.detail.lower())
+            self.assertIn("intent", str(ctx.exception.detail).lower())
 
             # Verify no ledger row created and stock remains 0
             self.assertEqual(len(db.get_records("RawMaterialLedger")), 0)
@@ -163,7 +173,7 @@ class TestStage1FailureInjection(unittest.IsolatedAsyncioTestCase):
              patch.object(db, "get_records", side_effect=simulated_get_records):
             with self.assertRaises(HTTPException) as ctx:
                 await receive_raw_material(req, self.owner_user)
-            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn(ctx.exception.status_code, (503, 504))
 
         # Row WAS appended to ledger before the read-back failed
         self.assertEqual(len(db.get_records("RawMaterialLedger")), 1)

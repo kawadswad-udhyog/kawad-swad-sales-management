@@ -21,10 +21,14 @@ if backend_dir not in sys.path:
 
 import asyncio
 import unittest
+import tests
 from fastapi import HTTPException
-from app.sheets import db
-from app.routers import production as prod
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
+from app.routers import production as _prod_mod
 from tests.phase4_fixtures import seed_basic_moong_recipe
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy
+
+prod = V2RouterProxy(_prod_mod)
 from app.calculations import (
     normalize_to_canonical_unit,
     convert_unit,
@@ -54,8 +58,9 @@ class TestERPStabilization(unittest.TestCase):
         db._records_cache.clear()
         db._worksheets.clear()
         db._fail_once.clear()
-        for key in list(db.memory_store):
+        for key in list(REQUIRED_TABS.keys()) + list(ID_PREFIXES.keys()):
             db.memory_store[key] = []
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store.update({
             "Products": [
                 {"product_id": "PRD-M-200", "sku": "KS-MP-200", "product_name": "Moong Master Papad", "active": "true", "pack_weight_g": 200},
@@ -86,6 +91,8 @@ class TestERPStabilization(unittest.TestCase):
         self.worker_user = {"user_id": "USR-WORKER-1", "role": "FACTORY_WORKER"}
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()
@@ -357,10 +364,18 @@ class TestERPStabilization(unittest.TestCase):
             asyncio.run(prod.summary(self.salesman_user))
         self.assertEqual(ctx_sales.exception.status_code, 403)
 
-        # 6. Factory Worker MUST BE DENIED (403) from production access
-        with self.assertRaises(HTTPException) as ctx_worker:
-            asyncio.run(prod.summary(self.worker_user))
-        self.assertEqual(ctx_worker.exception.status_code, 403)
+        # 6. Under Blueprint V2.1 RBAC, FACTORY_WORKER normalizes to PRODUCTION (read view allowed)
+        #    but MUST BE DENIED (403) on Owner-only production approval actions.
+        worker_summary = asyncio.run(prod.summary(self.worker_user))
+        self.assertIn("bulk_stock", worker_summary)
+        with self.assertRaises(HTTPException) as ctx_worker_approve:
+            asyncio.run(prod.approve_batch(
+                batch["batch_id"],
+                prod.ApprovalRequest(approved=True),
+                self.worker_user,
+            ))
+        self.assertEqual(ctx_worker_approve.exception.status_code, 403)
+        self.assertIn("Owner", str(ctx_worker_approve.exception.detail))
 
 
 if __name__ == "__main__":

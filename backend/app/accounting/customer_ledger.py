@@ -10,6 +10,7 @@ import logging
 import tempfile
 import threading
 import time
+import uuid
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, date, timedelta
 from decimal import Decimal
@@ -972,7 +973,7 @@ def reserve_credit_approval(
                         "reserved_by_sale_id": "",
                     },
                 },
-                nonce=f"RES-{clean_id}-{clean_sale_id}",
+                nonce=f"RES-{clean_id}-{clean_sale_id}-{uuid.uuid4().hex[:8]}",
                 actor_user_id="SYSTEM",
                 actor_role="SALES",
                 id_field="request_id",
@@ -1148,7 +1149,7 @@ def release_credit_approval(approval_request_id: str, sale_id: str) -> bool:
                         "is_consumed": False,
                     },
                 },
-                nonce=f"RELEASE-{clean_id}-{clean_sale_id}",
+                nonce=f"RELEASE-{clean_id}-{clean_sale_id}-{uuid.uuid4().hex[:8]}",
                 actor_user_id="SYSTEM",
                 actor_role="SALES",
                 id_field="request_id",

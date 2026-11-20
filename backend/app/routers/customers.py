@@ -59,7 +59,7 @@ async def create_customer(req: CustomerCreate, request: Request, current_user: d
         "alternate_mobile": (req.alternate_mobile or "").strip(),
         "address": (req.address or "").strip(),
         "locality_area": (req.locality_area or "").strip(),
-        "city": (req.city or "").strip(),
+        "city": (req.city or "Bhilwara").strip() or "Bhilwara",
         "gstin": (req.gstin or "").strip(),
         "map_location": (req.map_location or "").strip(),
         "active": "true",

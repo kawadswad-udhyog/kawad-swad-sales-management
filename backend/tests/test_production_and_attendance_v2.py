@@ -11,7 +11,8 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-from app.sheets import db, ID_PREFIXES
+import tests
+from app.sheets import db, ID_PREFIXES, REQUIRED_TABS
 from app.models import (
     BulkAttendanceCreate,
     BulkAttendanceItem,
@@ -19,15 +20,21 @@ from app.models import (
     DashboardMetrics,
 )
 from app.routers.production import (
-    create_batch,
-    approve_batch,
-    record_bulk_attendance,
-    record_attendance,
+    create_batch as _raw_create_batch,
+    approve_batch as _raw_approve_batch,
+    record_bulk_attendance as _raw_record_bulk_attendance,
+    record_attendance as _raw_record_attendance,
     ProductionCreate,
     ApprovalRequest,
     AttendanceCreate,
 )
 from app.routers.dashboard import get_dashboard_metrics
+from tests.v2_test_harness import LocalAppsScriptSimulator, wrap_v2_endpoint
+
+create_batch = wrap_v2_endpoint(_raw_create_batch)
+approve_batch = wrap_v2_endpoint(_raw_approve_batch)
+record_bulk_attendance = wrap_v2_endpoint(_raw_record_bulk_attendance)
+record_attendance = wrap_v2_endpoint(_raw_record_attendance)
 
 
 class TestProductionAndAttendanceV2(unittest.TestCase):
@@ -39,7 +46,8 @@ class TestProductionAndAttendanceV2(unittest.TestCase):
         db._records_cache.clear()
         db._worksheets.clear()
         db._fail_once.clear()
-        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store = {name: [] for name in list(REQUIRED_TABS) + list(ID_PREFIXES) + ["Settings"]}
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store.update({
             "Users": [
                 {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER", "active": "true"},
@@ -122,6 +130,8 @@ class TestProductionAndAttendanceV2(unittest.TestCase):
         self.sales_user = {"user_id": "USR-SALES-01", "role": "SALESMAN", "full_name": "Field Salesman"}
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()
@@ -197,7 +207,9 @@ class TestProductionAndAttendanceV2(unittest.TestCase):
         )
         with self.assertRaises(Exception) as ctx:
             asyncio.run(create_batch(req, self.sales_user))
-        self.assertIn("Owner or PA", str(ctx.exception))
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertIn("Owner", str(ctx.exception))
+        self.assertIn("PA", str(ctx.exception))
 
     def test_bulk_attendance_marks_multiple_workers_and_calculates_wages(self):
         req = BulkAttendanceCreate(

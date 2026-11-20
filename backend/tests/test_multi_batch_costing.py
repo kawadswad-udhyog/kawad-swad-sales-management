@@ -5,6 +5,7 @@ import asyncio
 from unittest.mock import patch
 from fastapi import HTTPException
 
+import tests
 from app.calculations.inventory import (
     calculate_batch_bulk_balances,
     resolve_packaging_batch_allocations,
@@ -12,8 +13,17 @@ from app.calculations.inventory import (
     calculate_finished_stock_balance,
 )
 from app.accounting.postings import post_packaging_batch_journal
-from app.routers.production import create_packaging, recover_packaging, PackagingCreate, BatchAllocationItem
-from app.sheets import db, ID_PREFIXES
+from app.routers.production import (
+    create_packaging as _raw_create_packaging,
+    recover_packaging as _raw_recover_packaging,
+    PackagingCreate,
+    BatchAllocationItem,
+)
+from app.sheets import db, ID_PREFIXES, REQUIRED_TABS
+from tests.v2_test_harness import LocalAppsScriptSimulator, wrap_v2_endpoint
+
+create_packaging = wrap_v2_endpoint(_raw_create_packaging)
+recover_packaging = wrap_v2_endpoint(_raw_recover_packaging)
 
 
 class TestMultiBatchCosting(unittest.TestCase):
@@ -26,7 +36,8 @@ class TestMultiBatchCosting(unittest.TestCase):
         db._worksheets.clear()
         db._fail_once.clear()
         # Configure in-memory testing store preserving all canonical tab keys
-        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store = {name: [] for name in list(REQUIRED_TABS) + list(ID_PREFIXES) + ["Settings"]}
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store.update({
             "ProductionBatches": [],
             "ProductionStockLedger": [],
@@ -70,6 +81,8 @@ class TestMultiBatchCosting(unittest.TestCase):
         self.user = {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER"}
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()
@@ -399,7 +412,7 @@ class TestMultiBatchCosting(unittest.TestCase):
                     self.user,
                 ))
             self.assertEqual(ctx.exception.status_code, 503)
-            self.assertIn("INCOMPLETE", ctx.exception.detail)
+            self.assertIn("INCOMPLETE", str(ctx.exception.detail))
 
         # 1. Verify batch marked as INCOMPLETE
         pack_batches = db.memory_store["PackagingBatches"]

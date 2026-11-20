@@ -168,13 +168,15 @@ def post_journal_voucher(
     )
 
     return {
+        **bridge_res,
         **header_payload,
+        "bridge_status": bridge_res.get("status", "CONFIRMED"),
+        "status": "POSTED",
         "journal_id": journal_id,
         "voucher_no": journal_id,
         "total_amount": header_payload["total_debit"],
         "lines": prepared_lines,
         "is_replay": False,
-        **bridge_res,
     }
 
 
@@ -277,6 +279,8 @@ def reverse_journal_voucher(
     )
     rev_journal_id = str(bridge_res.get("allocated_id") or "")
     return {
+        **bridge_res,
+        "bridge_status": bridge_res.get("status", "CONFIRMED"),
         "journal_id": rev_journal_id,
         "reversal_of_id": clean_jid,
         "reference_type": "JOURNAL_REVERSAL",
@@ -286,7 +290,6 @@ def reverse_journal_voucher(
         "total_credit": round_money(total_credit),
         "status": "POSTED",
         "lines": reversal_lines,
-        **bridge_res,
     }
 
 

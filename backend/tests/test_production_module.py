@@ -10,9 +10,13 @@ if backend_dir not in sys.path:
 
 import asyncio
 import unittest
+import tests
 from fastapi import HTTPException
-from app.sheets import db
-from app.routers import production as prod
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
+from app.routers import production as _prod_mod
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy
+
+prod = V2RouterProxy(_prod_mod)
 
 
 class TestProductionWorkflow(unittest.TestCase):
@@ -24,8 +28,9 @@ class TestProductionWorkflow(unittest.TestCase):
         db._records_cache.clear()
         db._worksheets.clear()
         db._fail_once.clear()
-        for key in list(db.memory_store):
+        for key in list(REQUIRED_TABS.keys()) + list(ID_PREFIXES.keys()):
             db.memory_store[key] = []
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store.update({
             "Products": [],
             "RawMaterials": [],
@@ -56,6 +61,8 @@ class TestProductionWorkflow(unittest.TestCase):
         })
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()

@@ -25,25 +25,46 @@ BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from app.sheets import db
+import tests
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
 from app.routers.production import (
-    save_recipe,
-    create_batch,
-    issue_materials,
-    create_packaging,
-    recover_packaging,
-    approve_packaging_discrepancy,
+    save_recipe as _raw_save_recipe,
+    create_batch as _raw_create_batch,
+    issue_materials as _raw_issue_materials,
+    create_packaging as _raw_create_packaging,
+    recover_packaging as _raw_recover_packaging,
+    approve_packaging_discrepancy as _raw_approve_packaging_discrepancy,
     RecipeSave,
     ProductionCreate,
     PackagingCreate,
     DiscrepancyApprovalRequest,
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, wrap_v2_endpoint
+
+save_recipe = wrap_v2_endpoint(_raw_save_recipe)
+create_batch = wrap_v2_endpoint(_raw_create_batch)
+issue_materials = wrap_v2_endpoint(_raw_issue_materials)
+create_packaging = wrap_v2_endpoint(_raw_create_packaging)
+recover_packaging = wrap_v2_endpoint(_raw_recover_packaging)
+approve_packaging_discrepancy = wrap_v2_endpoint(_raw_approve_packaging_discrepancy)
+
+
+def _seed_row(tab: str, record: dict) -> None:
+    db.memory_store.setdefault(tab, []).append(dict(record))
 
 
 class TestPhase10FPackagingSecurity(unittest.TestCase):
     def setUp(self):
         # Reset in-memory store for isolation
-        db.memory_store = {tab: [] for tab in db.memory_store}
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        db.memory_store = {tab: [] for tab in list(REQUIRED_TABS) + list(ID_PREFIXES) + ["Settings"]}
+        self._sim = LocalAppsScriptSimulator().start()
 
         # Authenticated users
         self.owner_user = {
@@ -58,11 +79,11 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "role": "PA",
             "full_name": "Gopal Sharma",
         }
-        db.append_record("Users", {**self.owner_user, "active": "true"})
-        db.append_record("Users", {**self.pa_user, "active": "true"})
+        _seed_row("Users", {**self.owner_user, "active": "true"})
+        _seed_row("Users", {**self.pa_user, "active": "true"})
 
         # Canonical Products
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-BULK",
             "sku": "MOONG-BULK",
             "product_name": "Moong Special Papad",
@@ -70,7 +91,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "active": "true",
             "category": "Papad",
         })
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-200G",
             "sku": "MOONG-BULK-200g",
             "product_name": "Moong Special Papad",
@@ -79,7 +100,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "active": "true",
             "category": "Papad",
         })
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-500G",
             "sku": "MOONG-BULK-500g",
             "product_name": "Moong Special Papad",
@@ -88,7 +109,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "active": "true",
             "category": "Papad",
         })
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-1000G",
             "sku": "MOONG-BULK-1000g",
             "product_name": "Moong Special Papad",
@@ -99,7 +120,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
         })
 
         # Canonical Raw Materials for recipe & costing
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-MOONG-FLOUR",
             "material_name": "Moong Flour",
             "current_stock": 500.0,
@@ -108,7 +129,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "category": "FLOUR",
             "opening_stock_verified": "true",
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-URAD-FLOUR",
             "material_name": "Urad Flour",
             "current_stock": 500.0,
@@ -117,7 +138,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "category": "FLOUR",
             "opening_stock_verified": "true",
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-BLACK-PEPPER",
             "material_name": "Black Pepper",
             "current_stock": 50.0,
@@ -126,7 +147,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "category": "SPICES",
             "opening_stock_verified": "true",
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-SALT",
             "material_name": "Salt",
             "current_stock": 200.0,
@@ -135,7 +156,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "category": "SPICES",
             "opening_stock_verified": "true",
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-PAPAD-KHAR",
             "material_name": "Papad Khar",
             "current_stock": 50.0,
@@ -145,9 +166,18 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "opening_stock_verified": "true",
         })
 
+    def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+
     def _seed_bulk_stock(self, batch_id="PRB-001", quantity_kg=100.0):
         """Helper to seed bulk stock in ProductionBatches and ProductionStockLedger."""
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": batch_id,
             "batch_id": batch_id,
             "product_id": "PRD-MOONG-BULK",
@@ -158,7 +188,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "cost_per_saleable_kg": 100.0,
             "cost_status": "ACTUAL",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": f"MVT-{batch_id}",
             "txn_datetime": "2026-10-20T10:00:00",
             "movement_type": "BULK_PRODUCED",
@@ -216,7 +246,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_02_non_owner_attempts_approval_rejected(self):
         """Case 2: Non-Owner attempts approval -> rejected (HTTP 403)."""
         pack_id = "PKG-TEST-002"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -243,7 +273,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_03_owner_approves_with_valid_explanation_accepted(self):
         """Case 3: Owner approves with valid explanation -> accepted (HTTP 200/SUCCESS)."""
         pack_id = "PKG-TEST-003"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -276,7 +306,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_04_owner_approval_records_authenticated_id_and_timestamp(self):
         """Case 4: Owner approval records authenticated Owner ID and server timestamp."""
         pack_id = "PKG-TEST-004"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -322,7 +352,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
 
         # 2. In approve-discrepancy, explanation with < 3 chars is rejected with HTTP 422
         pack_id = "PKG-TEST-005"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -460,7 +490,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_10_recovery_cannot_finalize_unapproved_discrepancy(self):
         """Case 10: Recovery cannot finalize unapproved discrepancy -> rejected (HTTP 409)."""
         pack_id = "PKG-DISC-010"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -489,7 +519,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_11_recovery_does_not_create_duplicate_stock_movements(self):
         """Case 11: Recovery does not create duplicate stock movements."""
         pack_id = "PKG-RECOV-011"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -504,7 +534,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
         })
 
         # Bulk movement already exists
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "MVT-BULK-011",
             "txn_datetime": "2026-11-08T10:00:00",
             "movement_type": "BULK_PACKAGED",
@@ -539,7 +569,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_12_repeated_recovery_requests_are_safe_and_idempotent(self):
         """Case 12: Repeated recovery requests are safe & idempotent."""
         pack_id = "PKG-RECOV-012"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -573,7 +603,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_13_legitimate_incomplete_transactions_can_be_recovered(self):
         """Case 13: Legitimate incomplete transactions can still be recovered."""
         pack_id = "PKG-LEGIT-013"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -587,7 +617,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "status": "INCOMPLETE",
             "notes": "Simulated interrupted write",
         })
-        db.append_record("IncompleteTransactions", {
+        _seed_row("IncompleteTransactions", {
             "transaction_id": "TXN-013",
             "idempotency_key": f"PACKAGING_{pack_id}",
             "status": "PENDING",
@@ -637,7 +667,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
         self._seed_bulk_stock("PRB-015", 100.0)
 
         ref = "REF-RETRY-015"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": "PKG-015",
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -709,7 +739,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_17_recovery_checks_canonical_journal_headers_and_lines(self):
         """Case 17: Recovery checks correct canonical journal tables (JournalHeaders, JournalLines)."""
         pack_id = "PKG-ACCT-017"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -739,7 +769,7 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
     def test_case_18_duplicate_journal_creation_is_prevented(self):
         """Case 18: Duplicate journal creation is prevented."""
         pack_id = "PKG-ACCT-018"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pack_id,
             "packaging_date": "2026-11-08",
             "product_id": "PRD-MOONG-BULK",
@@ -801,8 +831,8 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "discrepancy_approved": "",
             "notes": "Historical batch PKG-000002 pending review",
         }
-        db.append_record("PackagingBatches", pkg_01)
-        db.append_record("PackagingBatches", pkg_02)
+        _seed_row("PackagingBatches", pkg_01)
+        _seed_row("PackagingBatches", pkg_02)
 
         # Create new packaging batch
         req = PackagingCreate(
@@ -852,8 +882,8 @@ class TestPhase10FPackagingSecurity(unittest.TestCase):
             "quantity_packets": 100,
             "reference_id": "PKG-000001",
         }
-        db.append_record("ProductionStockLedger", pst_04)
-        db.append_record("ProductionStockLedger", pst_05)
+        _seed_row("ProductionStockLedger", pst_04)
+        _seed_row("ProductionStockLedger", pst_05)
 
         # Seed additional stock and run new operations
         self._seed_bulk_stock("PRB-020", 100.0)

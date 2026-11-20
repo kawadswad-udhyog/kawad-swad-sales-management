@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from app.sheets import db, ID_PREFIXES
 from app.routers import workforce
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 from app.models import (
     EmployeeAttendanceCheckIn,
     EmployeeAttendanceCheckOut,
@@ -94,8 +95,11 @@ class TestWorkforceManagement(unittest.TestCase):
             "designation": "Senior Packaging Designer",
             "department": "Creative",
         })
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db.spreadsheet = self._orig_spreadsheet
@@ -127,6 +131,7 @@ class TestWorkforceManagement(unittest.TestCase):
         res1 = asyncio.run(
             workforce.check_in_my_attendance(
                 req=EmployeeAttendanceCheckIn(notes="Shift punch"),
+                request=make_test_request(),
                 current_user=self.salesman_user,
             )
         )
@@ -137,6 +142,7 @@ class TestWorkforceManagement(unittest.TestCase):
         res2 = asyncio.run(
             workforce.check_in_my_attendance(
                 req=EmployeeAttendanceCheckIn(notes="Duplicate punch"),
+                request=make_test_request(),
                 current_user=self.salesman_user,
             )
         )
@@ -147,6 +153,7 @@ class TestWorkforceManagement(unittest.TestCase):
         res3 = asyncio.run(
             workforce.check_out_my_attendance(
                 req=EmployeeAttendanceCheckOut(notes="Shift complete"),
+                request=make_test_request(),
                 current_user=self.salesman_user,
             )
         )
@@ -165,6 +172,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     priority="HIGH",
                     due_date="2026-11-10",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -184,6 +192,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     submission_notes="Visited 12 shopkeepers, booked 4 orders",
                     proof_url="https://drive.google.com/orders-sheet",
                 ),
+                request=make_test_request(),
                 current_user=self.salesman_user,
             )
         )
@@ -197,6 +206,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     status="APPROVED",
                     review_notes="Excellent expansion in Sadar Bazaar",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -214,6 +224,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     total_budget=20000.0,
                     target_completion_date="2026-11-30",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -230,6 +241,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     amount=8000.0,
                     due_date="2026-11-15",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -249,6 +261,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     submission_notes="Vector AI and PDF files ready for cylinder engraving",
                     submission_link="https://figma.com/design/kawad-swad-pouch",
                 ),
+                request=make_test_request(),
                 current_user=self.freelancer_user,
             )
         )
@@ -262,6 +275,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     status="APPROVED",
                     review_notes="Approved for cylinder production",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -279,6 +293,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     base_rate=450.0,
                     mobile="9829011111",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -301,6 +316,7 @@ class TestWorkforceManagement(unittest.TestCase):
                         )
                     ],
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -317,6 +333,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     unit_of_measure="KG",
                     piece_rate=12.0,
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -335,6 +352,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     sales_commission_rate=0.0,  # Slab-based Rs 200/100kg
                     pf_deduction=1200.0,
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -356,6 +374,7 @@ class TestWorkforceManagement(unittest.TestCase):
         res_calc = asyncio.run(
             workforce.calculate_payroll_run(
                 req=PayrollRunCreate(month="2026-10"),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -373,6 +392,7 @@ class TestWorkforceManagement(unittest.TestCase):
         res_app = asyncio.run(
             workforce.approve_payroll_run(
                 payroll_run_id=run_id,
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -391,12 +411,14 @@ class TestWorkforceManagement(unittest.TestCase):
                     payment_reference="UTR987654321",
                     notes="Salary for October 2026",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
         self.assertTrue(res_pay["ok"])
         receipt_data = res_pay["receipt"]
-        self.assertTrue(receipt_data["receipt_id"].startswith("RCPT-"))
+        # P1.5-002: New SalaryReceipts allocations use non-colliding SRCP- prefix (RCPT- is locked to Payments)
+        self.assertTrue(receipt_data["receipt_id"].startswith("SRCP-"))
         self.assertTrue(receipt_data["receipt_number"].startswith("REC-"))
 
         # 6. Salesman fetches their own receipts
@@ -419,6 +441,7 @@ class TestWorkforceManagement(unittest.TestCase):
             asyncio.run(
                 workforce.create_or_update_salary_structure(
                     req=SalaryStructureCreate(user_id="USR-000003", basic_salary=15000.0),
+                    request=make_test_request(),
                     current_user=self.pa_user,
                 )
             )
@@ -433,6 +456,7 @@ class TestWorkforceManagement(unittest.TestCase):
             asyncio.run(
                 workforce.calculate_payroll_run(
                     req=PayrollRunCreate(month="2026-10"),
+                    request=make_test_request(),
                     current_user=self.pa_user,
                 )
             )
@@ -447,6 +471,7 @@ class TestWorkforceManagement(unittest.TestCase):
                 workforce.update_payroll_item(
                     item_id="PI-0001",
                     req=PayrollItemUpdate(notes="Unauthorized modification"),
+                    request=make_test_request(),
                     current_user=self.pa_user,
                 )
             )
@@ -463,6 +488,7 @@ class TestWorkforceManagement(unittest.TestCase):
                         recipient_name="Ramesh",
                         amount=1000.0,
                     ),
+                    request=make_test_request(),
                     current_user=self.pa_user,
                 )
             )
@@ -473,11 +499,11 @@ class TestWorkforceManagement(unittest.TestCase):
             asyncio.run(workforce.list_audit_logs(current_user=self.pa_user))
         self.assertEqual(ctx.exception.status_code, 403)
 
-        # 5. Salary masking in employee list for PA
+        # 5. POL-003 confidential salary stripping in employee list for PA (must be absent from response)
         employees = asyncio.run(workforce.list_workforce_employees(current_user=self.pa_user))
         for emp in employees:
-            self.assertEqual(emp["basic_salary"], 0.0)
-            self.assertEqual(emp["salary_structure_id"], "")
+            self.assertNotIn("basic_salary", emp)
+            self.assertNotIn("salary_structure_id", emp)
 
     def test_anti_self_approval_guards(self):
         """Managers and assignees cannot approve their own assigned tasks or milestones."""
@@ -489,6 +515,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     assigned_to_user_id="USR-000001",
                     priority="HIGH",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -500,6 +527,7 @@ class TestWorkforceManagement(unittest.TestCase):
                 workforce.review_task(
                     task_id=task_id,
                     req=WorkAssignmentReview(status="APPROVED", review_notes="Looks good to me"),
+                    request=make_test_request(),
                     current_user=self.owner_user,
                 )
             )
@@ -514,6 +542,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     freelancer_user_id="USR-000004",
                     total_budget=5000.0,
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -523,6 +552,7 @@ class TestWorkforceManagement(unittest.TestCase):
             workforce.create_project_milestone(
                 project_id=proj_id,
                 req=FreelancerMilestoneCreate(project_id=proj_id, title="Rough Draft", amount=2000.0),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -533,6 +563,7 @@ class TestWorkforceManagement(unittest.TestCase):
                 workforce.review_project_milestone(
                     milestone_id=ms_id,
                     req=FreelancerMilestoneReview(status="APPROVED", review_notes="Self approval attempt"),
+                    request=make_test_request(),
                     current_user=self.freelancer_user,
                 )
             )
@@ -548,6 +579,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     basic_salary=15000.0,
                     sales_commission_rate=0.0,  # Uses slab Rs 200/100kg
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -597,6 +629,7 @@ class TestWorkforceManagement(unittest.TestCase):
         res_calc = asyncio.run(
             workforce.calculate_payroll_run(
                 req=PayrollRunCreate(month="2026-10"),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -619,6 +652,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     payment_method="CASH",
                     payment_reference="CASH-VOUCHER-101",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -652,6 +686,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     payment_method="BANK_TRANSFER",
                     payment_reference="NEFT20261102",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -731,7 +766,7 @@ class TestWorkforceManagement(unittest.TestCase):
             amount=15000.0,
             payment_method="BANK_TRANSFER",
         )
-        res1 = asyncio.run(workforce.record_workforce_payment(req=req1, current_user=self.owner_user))
+        res1 = asyncio.run(workforce.record_workforce_payment(req=req1, request=make_test_request(), current_user=self.owner_user))
         self.assertTrue(res1["ok"])
         pay1 = res1["payment"]
         pay_id = pay1["payment_id"]
@@ -742,7 +777,7 @@ class TestWorkforceManagement(unittest.TestCase):
         self.assertEqual(len(journals_1), 1)
 
         # Replay identical payment
-        res2 = asyncio.run(workforce.record_workforce_payment(req=req1, current_user=self.owner_user))
+        res2 = asyncio.run(workforce.record_workforce_payment(req=req1, request=make_test_request(), current_user=self.owner_user))
         self.assertTrue(res2["ok"])
         self.assertTrue(res2.get("already_recorded"))
         self.assertEqual(res2["payment"]["payment_id"], pay_id)
@@ -761,7 +796,7 @@ class TestWorkforceManagement(unittest.TestCase):
             payment_method="BANK_TRANSFER",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(workforce.record_workforce_payment(req=req_conflict, current_user=self.owner_user))
+            asyncio.run(workforce.record_workforce_payment(req=req_conflict, request=make_test_request(), current_user=self.owner_user))
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_payroll_item_update_syncs_parent_run_totals(self):
@@ -769,6 +804,7 @@ class TestWorkforceManagement(unittest.TestCase):
         res_calc = asyncio.run(
             workforce.calculate_payroll_run(
                 req=PayrollRunCreate(month="2026-11"),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )
@@ -788,6 +824,7 @@ class TestWorkforceManagement(unittest.TestCase):
                     deductions=500.0,
                     notes="Festival bonus added",
                 ),
+                request=make_test_request(),
                 current_user=self.owner_user,
             )
         )

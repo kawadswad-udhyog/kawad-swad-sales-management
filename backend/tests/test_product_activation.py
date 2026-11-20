@@ -12,66 +12,20 @@ import unittest
 os.environ.setdefault("SALES_TESTING", "1")
 os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
 
-if False and "fastapi" not in sys.modules:
-    class MockFastAPIModule(types.ModuleType):
-        class APIRouter:
-            def __init__(self, *args, **kwargs):
-                self.routes = []
-            def post(self, path="", **kwargs): return lambda f: f
-            def get(self, path="", **kwargs): return lambda f: f
-            def put(self, path="", **kwargs): return lambda f: f
-            def patch(self, path="", **kwargs): return lambda f: f
-        class HTTPException(Exception):
-            def __init__(self, status_code, detail=None, headers=None):
-                super().__init__(detail)
-                self.status_code = status_code
-                self.detail = detail
-                self.headers = headers
-        class status:
-            HTTP_400_BAD_REQUEST = 400
-            HTTP_401_UNAUTHORIZED = 401
-            HTTP_403_FORBIDDEN = 403
-            HTTP_404_NOT_FOUND = 404
-            HTTP_409_CONFLICT = 409
-            HTTP_422_UNPROCESSABLE_ENTITY = 422
-            HTTP_429_TOO_MANY_REQUESTS = 429
-            HTTP_500_INTERNAL_SERVER_ERROR = 500
-            HTTP_503_SERVICE_UNAVAILABLE = 503
-        @staticmethod
-        def Depends(f): return f
-        @staticmethod
-        def Header(default=None, alias=None): return default
-
-    sys.modules["fastapi"] = MockFastAPIModule("fastapi")
-    sys.modules["fastapi.security"] = types.ModuleType("security")
-    sys.modules["fastapi.security"].HTTPBearer = lambda **kwargs: None
-    sys.modules["fastapi.security"].HTTPAuthorizationCredentials = None
-    sys.modules["jwt"] = types.ModuleType("jwt")
-    sys.modules["jwt"].encode = lambda payload, secret, algorithm="HS256": "mock-jwt"
-    sys.modules["jwt"].decode = lambda token, secret, algorithms=["HS256"]: {"sub": "USR-000001", "role": "OWNER"}
-
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        def dict(self):
-            return self.__dict__
-
-    sys.modules["pydantic"] = types.ModuleType("pydantic")
-    sys.modules["pydantic"].BaseModel = MockBaseModel
-    sys.modules["pydantic"].Field = lambda *args, **kwargs: kwargs.get("default", args[0] if args else None)
-
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import tests
 from app.sheets import db
 from app.models import Product, ProductCreate, ProductUpdate
 import app.routers.products as products_router
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 
 
 class TestProductActivation(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store["Products"] = [
             {
                 "product_id": "PRD-000001",
@@ -99,7 +53,9 @@ class TestProductActivation(unittest.IsolatedAsyncioTestCase):
         }
 
     def tearDown(self):
-        self.setUp()
+        self._sim.stop()
+        db.memory_store["Products"] = []
+        db.memory_store["AuditLog"] = []
 
     async def test_01_toggle_product_active_via_patch(self):
         """Manager can activate an inactive product via PATCH /api/products/{id}."""
@@ -110,7 +66,7 @@ class TestProductActivation(unittest.IsolatedAsyncioTestCase):
 
         # 2. Activate product via PATCH with active=True
         req = ProductUpdate(active=True)
-        updated = await products_router.update_product("PRD-000001", req, current_user=self.owner_user)
+        updated = await products_router.update_product("PRD-000001", req, request=make_test_request(), current_user=self.owner_user)
 
         self.assertTrue(updated.active)
         self.assertEqual(updated.sku, "KS-MMP-200")
@@ -124,19 +80,20 @@ class TestProductActivation(unittest.IsolatedAsyncioTestCase):
     async def test_02_toggle_product_inactive_via_patch(self):
         """Manager can deactivate an active product."""
         # Activate first
-        await products_router.update_product("PRD-000001", ProductUpdate(active=True), current_user=self.owner_user)
+        await products_router.update_product("PRD-000001", ProductUpdate(active=True), request=make_test_request(), current_user=self.owner_user)
         self.assertEqual(db.memory_store["Products"][0]["active"], "true")
 
         # Now deactivate
-        updated = await products_router.update_product("PRD-000001", ProductUpdate(active=False), current_user=self.owner_user)
+        updated = await products_router.update_product("PRD-000001", ProductUpdate(active=False), request=make_test_request(), current_user=self.owner_user)
         self.assertFalse(updated.active)
         self.assertEqual(db.memory_store["Products"][0]["active"], "false")
 
     async def test_03_salesman_forbidden_from_updating_product(self):
         """Salesman role cannot update or activate/deactivate products."""
         with self.assertRaises(Exception) as ctx:
-            await products_router.update_product("PRD-000001", ProductUpdate(active=True), current_user=self.salesman_user)
-        self.assertIn("Only Owner or PA", str(ctx.exception))
+            await products_router.update_product("PRD-000001", ProductUpdate(active=True), request=make_test_request(), current_user=self.salesman_user)
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 403)
+        self.assertIn("Permission denied", str(ctx.exception))
 
     async def test_04_boolean_parsing_handles_various_sheet_formats(self):
         """Boolean parsing handles TRUE, true, 1, FALSE, false, 0 cleanly."""

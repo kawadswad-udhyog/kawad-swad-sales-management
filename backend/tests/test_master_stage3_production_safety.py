@@ -15,6 +15,7 @@ BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
+import tests
 from app.calculations.inventory import (
     calculate_batch_bulk_balances,
     resolve_packaging_batch_allocations,
@@ -23,28 +24,45 @@ from app.calculations.inventory import (
 )
 from app.accounting.postings import post_packaging_batch_journal
 from app.routers.production import (
-    recover_packaging,
-    resolve_legacy_cost,
-    dispatch,
+    recover_packaging as _raw_recover_packaging,
+    resolve_legacy_cost as _raw_resolve_legacy_cost,
+    dispatch as _raw_dispatch,
     ResolveLegacyCostRequest,
     DispatchCreate,
 )
 from app.routers.stock import get_bulk_batch_tracking
-from app.sheets import db
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
+from tests.v2_test_harness import LocalAppsScriptSimulator, wrap_v2_endpoint
+
+recover_packaging = wrap_v2_endpoint(_raw_recover_packaging)
+resolve_legacy_cost = wrap_v2_endpoint(_raw_resolve_legacy_cost)
+dispatch = wrap_v2_endpoint(_raw_dispatch)
+
+
+def _seed_row(tab: str, record: dict) -> None:
+    db.memory_store.setdefault(tab, []).append(dict(record))
 
 
 class MasterStage3ProductionSafetyTests(unittest.TestCase):
     def setUp(self):
-        db.memory_store = {tab: [] for tab in db.memory_store}
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        db.memory_store = {tab: [] for tab in list(REQUIRED_TABS) + list(ID_PREFIXES) + ["Settings"]}
+        self._sim = LocalAppsScriptSimulator().start()
 
         # Seed Users
         self.owner_user = {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER"}
         self.prod_user = {"user_id": "USR-PROD-01", "username": "prod_mgr", "role": "PA"}
-        db.append_record("Users", {**self.owner_user, "active": "true", "full_name": "Sita Ram"})
-        db.append_record("Users", {**self.prod_user, "active": "true", "full_name": "Gopal Sharma"})
+        _seed_row("Users", {**self.owner_user, "active": "true", "full_name": "Sita Ram"})
+        _seed_row("Users", {**self.prod_user, "active": "true", "full_name": "Gopal Sharma"})
 
         # Seed Products (Bulk + Finished SKUs)
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-BULK",
             "sku": "MOONG-BULK",
             "product_name": "Moong Papad",
@@ -52,7 +70,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "active": "true",
             "category": "Papad",
         })
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-200G",
             "sku": "MOONG-200G",
             "product_name": "Moong Papad",
@@ -61,7 +79,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "active": "true",
             "category": "Papad",
         })
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-500G",
             "sku": "MOONG-500G",
             "product_name": "Moong Papad",
@@ -71,10 +89,19 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "category": "Papad",
         })
 
+    def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+
     def test_legacy_batch_cost_distinguishes_actual_estimated_and_missing(self):
         """Verify calculate_batch_bulk_balances distinguishes ACTUAL, ESTIMATED, and MISSING costs."""
         # Batch 1: Has actual cost per kg
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": "PRB-ACTUAL-01",
             "product_id": "PRD-MOONG-BULK",
             "product_name_snapshot": "Moong Papad",
@@ -83,7 +110,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "actual_cost_per_kg": 142.75,
             "production_date": "2026-11-01",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-001",
             "reference_id": "PRB-ACTUAL-01",
             "movement_type": "BULK_PRODUCED",
@@ -94,7 +121,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
         })
 
         # Batch 2: Legacy batch with recorded estimated cost
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": "PRB-LEGACY-02",
             "product_id": "PRD-MOONG-BULK",
             "product_name_snapshot": "Moong Papad",
@@ -105,7 +132,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "cost_source": "OWNER_AUDIT_OCT2026",
             "production_date": "2026-10-15",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-002",
             "reference_id": "PRB-LEGACY-02",
             "movement_type": "BULK_PRODUCED",
@@ -113,14 +140,14 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "bulk_product_key": "moong papad",
             "quantity_kg": 80.0,
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-MOONG-FLOUR",
             "material_name": "Moong Flour",
             "rate_per_unit": 138.0,
         })
 
         # Batch 3: Legacy batch of unknown product with NO rate anywhere
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": "PRB-UNKNOWN-03",
             "product_id": "PRD-UNKNOWN-BULK",
             "product_name_snapshot": "Unknown Special Papad",
@@ -129,7 +156,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "actual_cost_per_kg": "",
             "production_date": "2026-09-01",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-003",
             "reference_id": "PRB-UNKNOWN-03",
             "movement_type": "BULK_PRODUCED",
@@ -194,7 +221,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
 
     def test_owner_resolve_legacy_cost_endpoint(self):
         """Verify Owner can resolve legacy batch cost and it updates both batch and bulk ledger."""
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": "PRB-LEGACY-99",
             "product_id": "PRD-MOONG-BULK",
             "product_name_snapshot": "Moong Papad",
@@ -203,7 +230,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "actual_cost_per_kg": "",
             "production_date": "2026-10-01",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-LEGACY-99",
             "reference_id": "PRB-LEGACY-99",
             "movement_type": "BULK_PRODUCED",
@@ -236,7 +263,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
     def test_incomplete_packaging_excluded_from_finished_stock_and_dispatch(self):
         """Verify INCOMPLETE packaging batches do NOT produce usable finished stock for dispatch."""
         pkg_id = "PKG-INCOMPLETE-001"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pkg_id,
             "product_id": "PRD-MOONG-500G",
             "product_name_snapshot": "Moong Papad",
@@ -246,7 +273,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "status": "INCOMPLETE",
             "notes": "Interrupted packaging batch",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-INC-001",
             "reference_id": pkg_id,
             "movement_type": "PACKETS_PACKAGED",
@@ -282,7 +309,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             {"batch_id": "PRB-001", "quantity_kg": 60.0, "unit_cost_per_kg": 140.0, "total_cost": 8400.0},
             {"batch_id": "PRB-002", "quantity_kg": 40.0, "unit_cost_per_kg": 150.0, "total_cost": 6000.0},
         ]
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pkg_id,
             "product_id": "PRD-MOONG-BULK",
             "product_name_snapshot": "Moong Papad",
@@ -327,7 +354,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
 
     def test_stock_bulk_batches_endpoint(self):
         """Verify get_bulk_batch_tracking returns correct batch tracking breakdown."""
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": "PRB-TRACK-01",
             "product_id": "PRD-MOONG-BULK",
             "product_name_snapshot": "Moong Papad",
@@ -336,7 +363,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "actual_cost_per_kg": 144.20,
             "production_date": "2026-11-02",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-TRK-01",
             "reference_id": "PRB-TRACK-01",
             "movement_type": "BULK_PRODUCED",
@@ -346,7 +373,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "unit_cost_per_kg": 144.20,
         })
         # Deduct 50 kg from this batch
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-TRK-02",
             "reference_id": "PKG-001",
             "production_batch_id": "PRB-TRACK-01",
@@ -370,7 +397,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
     def test_rejected_packaging_batch_excluded_from_finished_goods(self):
         """Verify REJECTED packaging batches are excluded from finished goods stock and register."""
         pkg_id = "PKG-REJECTED-001"
-        db.append_record("PackagingBatches", {
+        _seed_row("PackagingBatches", {
             "packaging_id": pkg_id,
             "product_id": "PRD-MOONG-500G",
             "product_name_snapshot": "Moong Papad",
@@ -380,7 +407,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "status": "REJECTED",
             "notes": "Rejected by QC due to sealing defect",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-REJ-001",
             "reference_id": pkg_id,
             "movement_type": "PACKETS_PACKAGED",
@@ -408,7 +435,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
     def test_multiple_production_batches_partial_consumption_and_accounting_balance(self):
         """Verify multiple production batches with partial bulk consumption and balanced journal vouchers."""
         # Batch A: 100 kg @ ₹140.00
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": "PRB-MULTI-A",
             "product_id": "PRD-MOONG-BULK",
             "product_name_snapshot": "Moong Papad",
@@ -417,7 +444,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "actual_cost_per_kg": 140.0,
             "production_date": "2026-11-01",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-M-A1",
             "reference_id": "PRB-MULTI-A",
             "movement_type": "BULK_PRODUCED",
@@ -428,7 +455,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
         })
 
         # Batch B: 100 kg @ ₹150.00
-        db.append_record("ProductionBatches", {
+        _seed_row("ProductionBatches", {
             "production_id": "PRB-MULTI-B",
             "product_id": "PRD-MOONG-BULK",
             "product_name_snapshot": "Moong Papad",
@@ -437,7 +464,7 @@ class MasterStage3ProductionSafetyTests(unittest.TestCase):
             "actual_cost_per_kg": 150.0,
             "production_date": "2026-11-02",
         })
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "PSL-M-B1",
             "reference_id": "PRB-MULTI-B",
             "movement_type": "BULK_PRODUCED",

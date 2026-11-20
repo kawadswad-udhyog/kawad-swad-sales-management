@@ -11,17 +11,23 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import tests
 from app.sheets import db, REQUIRED_TABS
 from app.calculations.inventory import calculate_raw_material_balance
 from app.routers.production import (
-    receive_raw_material,
+    receive_raw_material as _raw_receive_raw_material,
     get_raw_material_balances,
     RawMaterialReceiveRequest,
     ProductionCreate,
-    create_batch,
-    approve_batch,
+    create_batch as _raw_create_batch,
+    approve_batch as _raw_approve_batch,
     ApprovalRequest,
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, wrap_v2_endpoint
+
+receive_raw_material = wrap_v2_endpoint(_raw_receive_raw_material)
+create_batch = wrap_v2_endpoint(_raw_create_batch)
+approve_batch = wrap_v2_endpoint(_raw_approve_batch)
 
 
 class TestStage1ComprehensiveVerification(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +89,12 @@ class TestStage1ComprehensiveVerification(unittest.IsolatedAsyncioTestCase):
 
         self.owner_user = {"user_id": "USR-OWNER-01", "role": "OWNER", "full_name": "Owner Admin"}
         self.pa_user = {"user_id": "USR-PA-01", "role": "PA", "full_name": "PA Manager"}
+        self._sim = LocalAppsScriptSimulator().start()
+
+    def tearDown(self):
+        if getattr(self, "_sim", None) is not None:
+            self._sim.stop()
+            self._sim = None
 
     def _get_available_stock(self, material_id_or_name: str) -> float:
         res = calculate_raw_material_balance(

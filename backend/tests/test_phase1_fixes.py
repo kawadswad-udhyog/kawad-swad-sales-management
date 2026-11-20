@@ -19,7 +19,10 @@ BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
+import tests
+from fastapi import HTTPException
 from app.sheets import db
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 from app.routers.sales import cancel_sale, SaleCancelRequest
 from app.routers.workforce import calculate_payroll_run, PayrollRunCreate
 from app.accounting.postings import post_sale_journal, post_packaging_batch_journal
@@ -32,6 +35,8 @@ class TestPhase1Fixes(unittest.TestCase):
     def setUp(self):
         # Reset memory store
         db.memory_store = {tab: [] for tab in db.memory_store}
+        db._fail_once.clear()
+        self._sim = LocalAppsScriptSimulator().start()
 
         # Setup standard test users
         self.owner_user = {
@@ -46,8 +51,12 @@ class TestPhase1Fixes(unittest.TestCase):
             "role": "SALESMAN",
             "full_name": "Vikram Singh",
         }
-        db.append_record("Users", {**self.owner_user, "active": "true"})
-        db.append_record("Users", {**self.salesman_user, "active": "true"})
+        db.memory_store["Users"].append({**self.owner_user, "active": "true"})
+        db.memory_store["Users"].append({**self.salesman_user, "active": "true"})
+
+    def tearDown(self):
+        self._sim.stop()
+        db._fail_once.clear()
 
     # =========================================================================
     # FIX 01: SEC-01 — Sales Cancellation Accounting Reversal
@@ -58,7 +67,7 @@ class TestPhase1Fixes(unittest.TestCase):
         sale_id = "SALE-101"
         bill_no = "BILL-101"
 
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": sale_id,
             "bill_number": bill_no,
             "sale_datetime": "2026-11-05T10:30:00",
@@ -92,7 +101,7 @@ class TestPhase1Fixes(unittest.TestCase):
 
         # Cancel the sale
         cancel_req = SaleCancelRequest(reason="Customer requested order cancellation")
-        res = asyncio.run(cancel_sale(sale_id, cancel_req, current_user=self.owner_user))
+        res = asyncio.run(cancel_sale(sale_id, cancel_req, request=make_test_request(), current_user=self.owner_user))
         self.assertTrue(res.get("ok"))
 
         # Verify original journal is now marked REVERSED
@@ -118,7 +127,7 @@ class TestPhase1Fixes(unittest.TestCase):
         sale_id = "SALE-102"
         bill_no = "BILL-102"
 
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": sale_id,
             "bill_number": bill_no,
             "sale_datetime": "2026-11-05T11:00:00",
@@ -139,14 +148,14 @@ class TestPhase1Fixes(unittest.TestCase):
 
         # First cancellation
         cancel_req = SaleCancelRequest(reason="Accidental duplicate entry")
-        res1 = asyncio.run(cancel_sale(sale_id, cancel_req, current_user=self.owner_user))
+        res1 = asyncio.run(cancel_sale(sale_id, cancel_req, request=make_test_request(), current_user=self.owner_user))
         self.assertTrue(res1.get("ok"))
 
         rev_count_1 = len([h for h in db.get_records("JournalHeaders") if h.get("voucher_type") == "REVERSAL" and h.get("reference_id") == orig_jid])
         self.assertEqual(rev_count_1, 1)
 
         # Second cancellation retry
-        res2 = asyncio.run(cancel_sale(sale_id, cancel_req, current_user=self.owner_user))
+        res2 = asyncio.run(cancel_sale(sale_id, cancel_req, request=make_test_request(), current_user=self.owner_user))
         self.assertTrue(res2.get("ok"))
         self.assertTrue(res2.get("already_cancelled"))
 
@@ -162,7 +171,7 @@ class TestPhase1Fixes(unittest.TestCase):
         emp_uid = self.salesman_user["user_id"]
 
         # Setup salary structure: basic 15000, 2% commission
-        db.append_record("SalaryStructures", {
+        db.memory_store["SalaryStructures"].append({
             "user_id": emp_uid,
             "employee_id": emp_uid,
             "basic_salary": 15000.0,
@@ -176,7 +185,7 @@ class TestPhase1Fixes(unittest.TestCase):
         })
 
         # Seed qualifying sales in November 2026
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": "SALE-NOV-01",
             "bill_number": "B-NOV-01",
             "salesman_user_id": emp_uid,
@@ -187,7 +196,7 @@ class TestPhase1Fixes(unittest.TestCase):
             "payment_status": "PAID",
             "delivery_status": "DELIVERED",
         })
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": "SALE-NOV-02",
             "bill_number": "B-NOV-02",
             "salesman_user_id": emp_uid,
@@ -200,7 +209,7 @@ class TestPhase1Fixes(unittest.TestCase):
         })
 
         # Seed a cancelled sale in November (must be excluded)
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": "SALE-NOV-CAN",
             "bill_number": "B-NOV-CAN",
             "salesman_user_id": emp_uid,
@@ -213,7 +222,7 @@ class TestPhase1Fixes(unittest.TestCase):
         })
 
         # Seed an October sale (must be excluded from Nov payroll)
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": "SALE-OCT-01",
             "bill_number": "B-OCT-01",
             "salesman_user_id": emp_uid,
@@ -227,7 +236,7 @@ class TestPhase1Fixes(unittest.TestCase):
 
         # Calculate payroll for November 2026
         req = PayrollRunCreate(month="2026-11", days_in_month=30)
-        res = asyncio.run(calculate_payroll_run(req, current_user=self.owner_user))
+        res = asyncio.run(calculate_payroll_run(req, request=make_test_request(), current_user=self.owner_user))
 
         items = res.get("items", [])
         emp_item = next(i for i in items if i["employee_id"] == emp_uid)
@@ -253,7 +262,7 @@ class TestPhase1Fixes(unittest.TestCase):
         }
 
         # Seed production batch and stock ledger for authoritative costing
-        db.append_record("ProductionBatches", {
+        db.memory_store["ProductionBatches"].append({
             "production_id": "PRB-001",
             "product_name_snapshot": "Moong Special Papad",
             "status": "APPROVED",
@@ -261,7 +270,7 @@ class TestPhase1Fixes(unittest.TestCase):
             "total_batch_cost": 5000.0,
             "cost_per_saleable_kg": 100.0,
         })
-        db.append_record("ProductionStockLedger", {
+        db.memory_store["ProductionStockLedger"].append({
             "movement_id": "MVT-001",
             "movement_type": "BULK_PACKAGED",
             "reference_id": pack_id,
@@ -311,12 +320,12 @@ class TestPhase1Fixes(unittest.TestCase):
             salesman_user_id=salesman_id,
             receipt_link_or_file_ref="https://example.com/receipt.jpg",
         )
-        submitted = asyncio.run(submit_expense(exp_req, current_user=self.salesman_user))
+        submitted = asyncio.run(submit_expense(exp_req, request=make_test_request(), current_user=self.salesman_user))
         exp_id = submitted.expense_id
 
         # Approve expense
         appr_req = ExpenseApproveRequest(approved=True, notes="Approved fuel expense")
-        asyncio.run(review_expense(exp_id, appr_req, current_user=self.owner_user))
+        asyncio.run(review_expense(exp_id, appr_req, request=make_test_request(), current_user=self.owner_user))
 
         # Verify expense lists with legacy and canonical fields intact
         all_exp = asyncio.run(list_expenses(current_user=self.owner_user))
@@ -326,12 +335,12 @@ class TestPhase1Fixes(unittest.TestCase):
 
         # Seed a cash payment of 5000.0 for today
         from app.timeutil import now_iso
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": "SALE-TODAY-01",
             "salesman_user_id": salesman_id,
             "txn_status": "COMPLETE",
         })
-        db.append_record("Payments", {
+        db.memory_store["Payments"].append({
             "payment_id": "PAY-TODAY-01",
             "sale_id": "SALE-TODAY-01",
             "payment_datetime": now_iso(),
@@ -347,7 +356,7 @@ class TestPhase1Fixes(unittest.TestCase):
             physical_cash_returned=5550.0,
             idempotency_key="CLOSE-TEST-001",
         )
-        closing_res = asyncio.run(submit_daily_closing(closing_req, current_user=self.salesman_user))
+        closing_res = asyncio.run(submit_daily_closing(closing_req, request=make_test_request(nonce=closing_req.idempotency_key), current_user=self.salesman_user))
 
         self.assertEqual(closing_res.approved_cash_expenses, 450.0)
         self.assertEqual(closing_res.expected_cash_return, 5550.0)
@@ -379,7 +388,7 @@ class TestPhase1Fixes(unittest.TestCase):
         sale_id = "SALE-103"
         bill_no = "BILL-103"
 
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": sale_id,
             "bill_number": bill_no,
             "sale_datetime": "2026-11-06T10:00:00",
@@ -404,7 +413,7 @@ class TestPhase1Fixes(unittest.TestCase):
 
         # Cancel sale and assert explicit accounting fields in response
         cancel_req = SaleCancelRequest(reason="Customer returned goods")
-        res1 = asyncio.run(cancel_sale(sale_id, cancel_req, current_user=self.owner_user))
+        res1 = asyncio.run(cancel_sale(sale_id, cancel_req, request=make_test_request(), current_user=self.owner_user))
 
         self.assertTrue(res1.get("ok"))
         self.assertEqual(res1.get("accounting_status"), "REVERSED")
@@ -413,7 +422,7 @@ class TestPhase1Fixes(unittest.TestCase):
         self.assertIn("Accounting voucher reversed", res1.get("message", ""))
 
         # Retry cancellation (idempotent replay)
-        res2 = asyncio.run(cancel_sale(sale_id, cancel_req, current_user=self.owner_user))
+        res2 = asyncio.run(cancel_sale(sale_id, cancel_req, request=make_test_request(), current_user=self.owner_user))
         self.assertTrue(res2.get("ok"))
         self.assertTrue(res2.get("already_cancelled"))
         self.assertEqual(res2.get("accounting_status"), "ALREADY_REVERSED")
@@ -421,7 +430,7 @@ class TestPhase1Fixes(unittest.TestCase):
         self.assertIsNone(res2.get("accounting_error"))
 
     def test_phase1_1_daily_closing_expense_stamping_failure_recovery(self):
-        """Phase 1.1: If expense stamping fails during closing, it is recorded in IncompleteTransactions and recovered on retry."""
+        """Phase 1.1: Atomic closing fails closed (503) if expense stamping fails, and succeeds cleanly with idempotent replay on retry."""
         salesman_id = self.salesman_user["user_id"]
         from app.timeutil import now_iso
 
@@ -432,13 +441,13 @@ class TestPhase1Fixes(unittest.TestCase):
             description="Taxi to market",
             salesman_user_id=salesman_id,
         )
-        exp_res = asyncio.run(submit_expense(exp_req, current_user=self.salesman_user))
+        exp_res = asyncio.run(submit_expense(exp_req, request=make_test_request(), current_user=self.salesman_user))
         exp_id = exp_res.expense_id
-        asyncio.run(review_expense(exp_id, ExpenseApproveRequest(approved=True, cash_reducing=True), current_user=self.owner_user))
+        asyncio.run(review_expense(exp_id, ExpenseApproveRequest(approved=True, cash_reducing=True), request=make_test_request(), current_user=self.owner_user))
 
         # Seed payment
-        db.append_record("Sales", {"sale_id": "SALE-TODAY-02", "salesman_user_id": salesman_id, "txn_status": "COMPLETE"})
-        db.append_record("Payments", {
+        db.memory_store["Sales"].append({"sale_id": "SALE-TODAY-02", "salesman_user_id": salesman_id, "txn_status": "COMPLETE"})
+        db.memory_store["Payments"].append({
             "payment_id": "PAY-TODAY-02",
             "sale_id": "SALE-TODAY-02",
             "payment_datetime": now_iso(),
@@ -446,47 +455,30 @@ class TestPhase1Fixes(unittest.TestCase):
             "payment_method": "CASH",
         })
 
-        # Intercept update_record to simulate partial failure on stamping this expense
-        orig_update = db.update_record
-        fail_target = exp_id
+        # Simulate storage failure on Expenses stamping inside atomic SUBMIT_DAILY_CLOSING
+        db._fail_once["Expenses"] = 1
+        closing_req = DailyClosingCreate(
+            opening_cash=500.0,
+            physical_cash_returned=2250.0,  # 500 + 2000 - 250 = 2250
+            idempotency_key="CLOSE-FAIL-RECOVER-01",
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(submit_daily_closing(closing_req, request=make_test_request(nonce=closing_req.idempotency_key), current_user=self.salesman_user))
+        self.assertEqual(ctx.exception.status_code, 503)
+        # No partial DailyClosing row committed on failure
+        self.assertEqual(len(db.get_records("DailyClosing", fresh=True)), 0)
 
-        def mock_update(tab, key_col, key_val, updates, **kwargs):
-            if tab == "Expenses" and key_val == fail_target and "related_closing_id" in updates:
-                return False  # Simulate storage failure on expense stamping
-            return orig_update(tab, key_col, key_val, updates, **kwargs)
-
-        db.update_record = mock_update
-
-        try:
-            closing_req = DailyClosingCreate(
-                opening_cash=500.0,
-                physical_cash_returned=2250.0,  # 500 + 2000 - 250 = 2250
-                idempotency_key="CLOSE-FAIL-RECOVER-01",
-            )
-            closing = asyncio.run(submit_daily_closing(closing_req, current_user=self.salesman_user))
-            self.assertEqual(closing.approved_cash_expenses, 250.0)
-            self.assertIn("EXPENSE_LINK_PENDING", closing.notes)
-
-            # Verify IncompleteTransactions has recorded the failure
-            incomp = db.get_records("IncompleteTransactions", fresh=True)
-            pending_stamp = next((t for t in incomp if t.get("transaction_type") == "CLOSING_EXPENSE_LINK_PENDING"), None)
-            self.assertIsNotNone(pending_stamp)
-            self.assertEqual(pending_stamp.get("status"), "LINK_FAILED")
-        finally:
-            db.update_record = orig_update
-
-        # Retry with the same idempotency key (simulating network or client retry after recovery)
-        retry_res = asyncio.run(submit_daily_closing(closing_req, current_user=self.salesman_user))
-        self.assertEqual(retry_res.closing_id, closing.closing_id)
+        # Retry with the same idempotency key after storage recovery
+        closing = asyncio.run(submit_daily_closing(closing_req, request=make_test_request(nonce=closing_req.idempotency_key), current_user=self.salesman_user))
+        self.assertEqual(closing.approved_cash_expenses, 250.0)
 
         # Verify expense is now stamped
         exp_after = next(e for e in db.get_records("Expenses", fresh=True) if e["expense_id"] == exp_id)
         self.assertEqual(exp_after.get("related_closing_id"), closing.closing_id)
 
-        # Verify IncompleteTransactions record is RESOLVED
-        incomp_after = db.get_records("IncompleteTransactions", fresh=True)
-        resolved_stamp = next((t for t in incomp_after if t.get("transaction_type") == "CLOSING_EXPENSE_LINK_PENDING"), None)
-        self.assertEqual(resolved_stamp.get("status"), "RESOLVED")
+        # Replay with same idempotency key returns identical closing without double-posting
+        retry_res = asyncio.run(submit_daily_closing(closing_req, request=make_test_request(nonce=closing_req.idempotency_key), current_user=self.salesman_user))
+        self.assertEqual(retry_res.closing_id, closing.closing_id)
 
 
 if __name__ == "__main__":

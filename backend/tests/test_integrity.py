@@ -4,16 +4,23 @@ os.environ.setdefault("SALES_TESTING", "1")
 os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
 
 import unittest
+import tests
 from fastapi import HTTPException
 
 from app.auth import hash_password, verify_password, password_needs_reset
-from app.sheets import db
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
 from app.models import SaleCreate, SaleItemCreate
-import app.routers.sales as sales_router
-import app.routers.auth as auth_router
-import app.routers.users as users_router
-import app.routers.closing as closing_router
+import app.routers.sales as _sales_mod
+import app.routers.auth as _auth_mod
+import app.routers.users as _users_mod
+import app.routers.closing as _closing_mod
 from app.models import DailyClosingCreate, UserCreate
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy
+
+sales_router = V2RouterProxy(_sales_mod)
+auth_router = V2RouterProxy(_auth_mod)
+users_router = V2RouterProxy(_users_mod)
+closing_router = V2RouterProxy(_closing_mod)
 
 
 def _stock(user="USR-000001", product="PRD-000001", qty=50):
@@ -35,8 +42,9 @@ class IntegrityTests(unittest.IsolatedAsyncioTestCase):
         db._records_cache.clear()
         db._worksheets.clear()
         db._fail_once.clear()
-        for key in list(db.memory_store):
+        for key in list(REQUIRED_TABS.keys()) + list(ID_PREFIXES.keys()):
             db.memory_store[key] = []
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store["Products"] = [{
             "product_id": "PRD-000001", "sku": "PAPAD-500", "product_name": "Moong Papad",
             "pack_weight_g": 500, "selling_unit": "PACKET", "active": "true",
@@ -50,6 +58,8 @@ class IntegrityTests(unittest.IsolatedAsyncioTestCase):
         self.user = {"user_id": "USR-000001", "role": "SALESMAN", "full_name": "Ramesh"}
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()
@@ -88,18 +98,65 @@ class IntegrityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Insufficient stock", ctx.exception.detail)
 
     async def test_retry_repairs_payment_without_duplicate_stock(self):
+        # 1. Under V2.1 Single-Write-Owner, CREATE_SALE fails atomically if Payments fails
+        #    (no orphan INCOMPLETE Sales row or premature SOLD_DELIVERY deduction).
         db._fail_once["Payments"] = 1
         with self.assertRaises(HTTPException):
             await sales_router.create_sale(self._sale(key="RECOVER"), self.user)
-        self.assertEqual(len(db.memory_store["Sales"]), 1)
-        self.assertEqual(db.memory_store["Sales"][0]["txn_status"], "INCOMPLETE")
-        self.assertEqual(len([r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]), 1)
+        self.assertEqual(len(db.memory_store["Sales"]), 0)
+        self.assertEqual(len([r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]), 0)
         self.assertEqual(db.memory_store["Payments"], [])
         sale = await sales_router.create_sale(self._sale(key="RECOVER"), self.user)
         self.assertEqual(sale.txn_status, "COMPLETE")
+        self.assertEqual(len(db.memory_store["Sales"]), 1)
         self.assertEqual(len(db.memory_store["Payments"]), 1)
         self.assertEqual(len([r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]), 1)
         self.assertEqual(len(db.memory_store["SaleItems"]), 1)
+
+        # 2. Legacy INCOMPLETE sale recovery via RESUME_SALE must complete missing payment
+        #    without duplicating existing SaleItems or SOLD_DELIVERY stock rows.
+        db.memory_store["Sales"].append({
+            "sale_id": "SALE-999001",
+            "bill_number": "BILL-999001",
+            "sale_datetime": "2026-04-12T10:00:00Z",
+            "salesman_user_id": "USR-000001",
+            "sales_type": "Retailer Sale",
+            "payment_method": "UPI",
+            "payment_reference": "UPI123",
+            "payment_status": "PAID",
+            "cash_collected": 200.0,
+            "bill_total": 200.0,
+            "txn_status": "INCOMPLETE",
+            "idempotency_key": "RECOVER-LEGACY",
+            "notes": "[idemp:RECOVER-LEGACY] [txn:INCOMPLETE]",
+        })
+        db.memory_store["SaleItems"].append({
+            "sale_item_id": "SIT-999001",
+            "sale_id": "SALE-999001",
+            "product_id": "PRD-000001",
+            "quantity_packets": 2,
+            "actual_unit_price": 100.0,
+            "line_total": 200.0,
+            "notes": "[line:0]",
+        })
+        db.memory_store["SalesmanStockLedger"].append({
+            "stock_txn_id": "STK-999001",
+            "salesman_user_id": "USR-000001",
+            "product_id": "PRD-000001",
+            "txn_type": "SOLD_DELIVERY",
+            "quantity": -2,
+            "related_sale_id": "SALE-999001",
+            "reference_id": "BILL-999001#0",
+            "notes": "[line:0] Sale delivery against bill",
+        })
+        resumed = await sales_router.create_sale(self._sale(key="RECOVER-LEGACY"), self.user)
+        self.assertEqual(resumed.txn_status, "COMPLETE")
+        legacy_stock = [r for r in db.memory_store["SalesmanStockLedger"] if r.get("related_sale_id") == "SALE-999001" and r.get("txn_type") == "SOLD_DELIVERY"]
+        legacy_items = [r for r in db.memory_store["SaleItems"] if r.get("sale_id") == "SALE-999001"]
+        legacy_payments = [r for r in db.memory_store["Payments"] if r.get("sale_id") == "SALE-999001"]
+        self.assertEqual(len(legacy_stock), 1)
+        self.assertEqual(len(legacy_items), 1)
+        self.assertEqual(len(legacy_payments), 1)
 
     async def test_salesman_cannot_bill_as_someone_else(self):
         req = self._sale()

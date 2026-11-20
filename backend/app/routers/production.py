@@ -985,7 +985,18 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, request: Request,
         raw_master = db.get_records("RawMaterials", fresh=True)
 
         incomp_records = db.get_records("IncompleteTransactions", fresh=True)
-        existing_txn = next((t for t in incomp_records if str(t.get("idempotency_key", "")).strip() == clean_idemp_key), None)
+        existing_txn = None
+        for t in incomp_records:
+            if str(t.get("idempotency_key", "")).strip() == clean_idemp_key:
+                existing_txn = t
+                break
+            try:
+                t_meta = json.loads(str(t.get("payload_json", "")).strip() or "{}")
+                if str(t_meta.get("line_key", "")).strip() == line_key:
+                    existing_txn = t
+                    break
+            except Exception:
+                pass
         if existing_txn:
             stored_hash = None
             try:
@@ -1105,6 +1116,14 @@ async def receive_raw_material(req: RawMaterialReceiveRequest, request: Request,
         ledger_txn_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("raw_material_txn_id") or "")
 
         raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
+        if ledger_txn_id and not any(
+            str(r.get("raw_material_txn_id", "")).strip() == ledger_txn_id
+            for r in raw_ledger_after
+        ):
+            raise HTTPException(
+                503,
+                f"Post-write verification failed: raw material receipt '{ledger_txn_id}' was not visible on fresh readback. Safe to retry.",
+            )
         bal_after = calculate_raw_material_balance(canonical_mat_name, raw_master, raw_ledger_after)
         new_avail = float(bal_after.get("available", 0.0))
 
@@ -1555,6 +1574,14 @@ async def record_dal_milling_batch(req: DalMillingCreate, request: Request, user
         output_txn_id = str(saved_rec.get("output_txn_id") or "")
 
         raw_ledger_after = db.get_records("RawMaterialLedger", fresh=True)
+        if output_txn_id and not any(
+            str(r.get("raw_material_txn_id", "")).strip() == output_txn_id
+            for r in raw_ledger_after
+        ):
+            raise HTTPException(
+                503,
+                f"Post-write verification failed: milling output '{output_txn_id}' was not visible on fresh readback. Safe to retry.",
+            )
         db.log_audit(
             actor,
             "RECORD_MILLING_BATCH",
@@ -3934,7 +3961,15 @@ async def create_packaging(req: PackagingCreate, request: Request, user: dict = 
         "has_estimated_cost": allocation_res.get("has_estimated_cost", False),
         "batch_allocations_json": json.dumps(allocation_res["allocations"]),
     }
-    post_packaging_batch_journal(pack_dict, bulk_cost=bulk_cost, packing_material_cost=mat_cost, packing_labor_cost=lab_cost, actor=actor)
+    if total_fin_cost > Decimal("0"):
+        post_packaging_batch_journal(pack_dict, bulk_cost=bulk_cost, packing_material_cost=mat_cost, packing_labor_cost=lab_cost, actor=actor)
+    else:
+        logger.warning(
+            "Deferred packaging batch journal for %s: total finished valuation is ₹0.00 (cost_status=%s; pending cost allocation).",
+            pack_id,
+            pack_dict.get("cost_status"),
+        )
+        saved["accounting_status"] = "DEFERRED_PENDING_COST_VALUATION"
 
     saved["packaging_batch_id"] = pack_id
     saved["packaging_id"] = pack_id

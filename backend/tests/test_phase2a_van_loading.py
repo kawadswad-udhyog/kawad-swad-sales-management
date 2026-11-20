@@ -38,6 +38,7 @@ os.environ["PYTHONPATH"] = f"{backend_dir}:{tests_dir}:{os.environ.get('PYTHONPA
 os.environ["SALES_TESTING"] = "1"
 os.environ["SALES_AUTH_MOCK"] = "1"
 
+import tests
 from app.sheets import db
 from app.stock_math import balances, salesman_available
 from app.models import (
@@ -48,7 +49,37 @@ from app.models import (
     StockIssueCreate,
 )
 from app.accounting.customer_ledger import CrossProcessLock
-from app.routers import stock
+from app.routers import stock as _stock_mod
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
+
+
+class _TestStockProxy:
+    def __getattr__(self, name):
+        return getattr(_stock_mod, name)
+
+    async def record_stock_movement(self, req, request=None, current_user=None):
+        return await _stock_mod.record_stock_movement(req, request=request or make_test_request(), current_user=current_user)
+
+    async def reconcile_physical_stock(self, req, request=None, current_user=None):
+        return await _stock_mod.reconcile_physical_stock(req, request=request or make_test_request(), current_user=current_user)
+
+    async def create_van_loading_pass(self, req, request=None, current_user=None):
+        nonce = getattr(req, "idempotency_key", None) or None
+        return await _stock_mod.create_van_loading_pass(req, request=request or make_test_request(nonce=nonce), current_user=current_user)
+
+    async def accept_van_loading_pass(self, pass_id_or_number, req=None, request=None, current_user=None):
+        nonce = getattr(req, "idempotency_key", None) or None
+        return await _stock_mod.accept_van_loading_pass(pass_id_or_number, request=request or make_test_request(nonce=nonce), req=req, current_user=current_user)
+
+    async def report_van_loading_discrepancy(self, pass_id_or_number, req, request=None, current_user=None):
+        return await _stock_mod.report_van_loading_discrepancy(pass_id_or_number, req, request=request or make_test_request(), current_user=current_user)
+
+    async def cancel_van_loading_pass(self, pass_id_or_number, req=None, request=None, current_user=None):
+        nonce = getattr(req, "idempotency_key", None) or None
+        return await _stock_mod.cancel_van_loading_pass(pass_id_or_number, request=request or make_test_request(nonce=nonce), req=req, current_user=current_user)
+
+
+stock = _TestStockProxy()
 
 
 def _concurrent_accept_worker(test_dir: str, pass_id: str, salesman_user: dict, result_queue: multiprocessing.Queue):
@@ -157,6 +188,8 @@ class TestPhase2AVanLoadingPass(unittest.TestCase):
         shutil.rmtree(cls.test_dir, ignore_errors=True)
 
     def setUp(self):
+        if getattr(self, "_sim", None) is not None:
+            self._sim.stop()
         # Reset memory and shared files for a clean slate
         if os.path.exists(self.test_dir):
             for fname in os.listdir(self.test_dir):
@@ -170,6 +203,7 @@ class TestPhase2AVanLoadingPass(unittest.TestCase):
         with db._lock:
             db._fail_once.clear()
         db.enable_shared_file_store(self.test_dir)
+        self._sim = LocalAppsScriptSimulator().start()
 
         # Users setup
         self.owner_user = {"user_id": "USR-TEST-OWNER", "full_name": "Ramesh Owner", "role": "OWNER"}
@@ -221,6 +255,11 @@ class TestPhase2AVanLoadingPass(unittest.TestCase):
                 "reference_id": "FACTORY-INITIAL-RECEIPT",
                 "notes": "Initial factory dispatch to central warehouse",
             })
+
+    def tearDown(self):
+        if getattr(self, "_sim", None) is not None:
+            self._sim.stop()
+            self._sim = None
 
     def test_01_successful_loading_creation_and_acceptance(self):
         """Happy Path: Warehouse keeper creates loading pass, salesman accepts, stock transfers atomically."""

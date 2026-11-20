@@ -12,70 +12,20 @@ import asyncio
 os.environ.setdefault("SALES_TESTING", "1")
 os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
 
-if False and "fastapi" not in sys.modules:
-    class MockFastAPIModule(types.ModuleType):
-        class APIRouter:
-            def __init__(self, *args, **kwargs):
-                self.routes = []
-            def post(self, path="", **kwargs):
-                return lambda f: f
-            def get(self, path="", **kwargs):
-                return lambda f: f
-            def put(self, path="", **kwargs):
-                return lambda f: f
-            def patch(self, path="", **kwargs):
-                return lambda f: f
-        class HTTPException(Exception):
-            def __init__(self, status_code, detail=None, headers=None):
-                super().__init__(detail)
-                self.status_code = status_code
-                self.detail = detail
-                self.headers = headers
-        class status:
-            HTTP_400_BAD_REQUEST = 400
-            HTTP_401_UNAUTHORIZED = 401
-            HTTP_403_FORBIDDEN = 403
-            HTTP_404_NOT_FOUND = 404
-            HTTP_409_CONFLICT = 409
-            HTTP_422_UNPROCESSABLE_ENTITY = 422
-            HTTP_429_TOO_MANY_REQUESTS = 429
-            HTTP_500_INTERNAL_SERVER_ERROR = 500
-            HTTP_503_SERVICE_UNAVAILABLE = 503
-        @staticmethod
-        def Depends(f): return f
-        @staticmethod
-        def Header(default=None, alias=None): return default
-
-    sys.modules["fastapi"] = MockFastAPIModule("fastapi")
-    sys.modules["fastapi.security"] = types.ModuleType("security")
-    sys.modules["fastapi.security"].HTTPBearer = lambda **kwargs: None
-    sys.modules["fastapi.security"].HTTPAuthorizationCredentials = None
-    sys.modules["jwt"] = types.ModuleType("jwt")
-    sys.modules["jwt"].encode = lambda payload, secret, algorithm="HS256": "mock-jwt"
-    sys.modules["jwt"].decode = lambda token, secret, algorithms=["HS256"]: {"sub": "USR-000001", "role": "SALESMAN"}
-
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        def dict(self):
-            return self.__dict__
-
-    sys.modules["pydantic"] = types.ModuleType("pydantic")
-    sys.modules["pydantic"].BaseModel = MockBaseModel
-    sys.modules["pydantic"].Field = lambda *args, **kwargs: kwargs.get("default", args[0] if args else None)
-
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import tests
 from app.sheets import db
 from app.models import SaleCreate, SaleItemCreate
 import app.routers.sales as sales_router
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 
 
 class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self._sim = LocalAppsScriptSimulator().start()
         # Reset in-memory database store
         db.memory_store["Customers"] = [
             {
@@ -108,6 +58,8 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
                 "selling_unit": "PACKET",
             }
         ]
+        db.memory_store["JournalHeaders"] = []
+        db.memory_store["JournalLines"] = []
         self.mock_user = {
             "user_id": "USR-000001",
             "full_name": "Ramesh Salesman",
@@ -115,7 +67,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         }
 
     def tearDown(self):
-        self.setUp()
+        self._sim.stop()
 
     async def test_01_idempotent_retry_returns_original_sale_without_duplication(self):
         """Re-submitting the exact same idempotency_key returns original sale and prevents duplicate financial/stock writes."""
@@ -138,7 +90,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         )
 
         # 1. First execution
-        first_sale = await sales_router.create_sale(req, current_user=self.mock_user)
+        first_sale = await sales_router.create_sale(req, request=make_test_request(nonce=idemp_key), current_user=self.mock_user)
         self.assertIsNotNone(first_sale.sale_id)
         self.assertEqual(first_sale.idempotency_key, idemp_key)
         self.assertEqual(len(db.memory_store["Sales"]), 1)
@@ -148,7 +100,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([r for r in db.memory_store["SalesmanStockLedger"] if r.get("txn_type") == "SOLD_DELIVERY"]), 1)
 
         # 2. Replayed execution with SAME idempotency key (simulating retry after timeout)
-        second_sale = await sales_router.create_sale(req, current_user=self.mock_user)
+        second_sale = await sales_router.create_sale(req, request=make_test_request(nonce=idemp_key), current_user=self.mock_user)
 
         # Must return the identical sale ID and bill number
         self.assertEqual(second_sale.sale_id, first_sale.sale_id)
@@ -181,7 +133,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
             ],
             bill_total=200.0,
         )
-        sale1 = await sales_router.create_sale(req1, current_user=self.mock_user)
+        sale1 = await sales_router.create_sale(req1, request=make_test_request(nonce=req1.idempotency_key), current_user=self.mock_user)
 
         # Immediate second sale for same customer and same total, but different legitimate key
         req2 = SaleCreate(
@@ -200,7 +152,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
             ],
             bill_total=200.0,
         )
-        sale2 = await sales_router.create_sale(req2, current_user=self.mock_user)
+        sale2 = await sales_router.create_sale(req2, request=make_test_request(nonce=req2.idempotency_key), current_user=self.mock_user)
 
         self.assertNotEqual(sale1.sale_id, sale2.sale_id)
         self.assertNotEqual(sale1.bill_number, sale2.bill_number)
@@ -218,7 +170,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
             items=[SaleItemCreate(product_id="PRD-000001", actual_unit_price=100.0, quantity=1)],
         )
         with self.assertRaises(Exception) as ctx:
-            await sales_router.create_sale(req_long, current_user=self.mock_user)
+            await sales_router.create_sale(req_long, request=make_test_request(nonce=long_key), current_user=self.mock_user)
         self.assertIn("120 characters", str(ctx.exception))
 
         req_ctrl = SaleCreate(
@@ -227,7 +179,7 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
             items=[SaleItemCreate(product_id="PRD-000001", actual_unit_price=100.0, quantity=1)],
         )
         with self.assertRaises(Exception) as ctx:
-            await sales_router.create_sale(req_ctrl, current_user=self.mock_user)
+            await sales_router.create_sale(req_ctrl, request=make_test_request(nonce="INVALID\nKEY"), current_user=self.mock_user)
         self.assertIn("invalid control characters", str(ctx.exception))
 
     async def test_04_concurrent_requests_with_same_key_serialize_safely(self):
@@ -250,9 +202,9 @@ class TestDuplicateSaleIdempotency(unittest.IsolatedAsyncioTestCase):
         )
 
         results = await asyncio.gather(
-            sales_router.create_sale(req, current_user=self.mock_user),
-            sales_router.create_sale(req, current_user=self.mock_user),
-            sales_router.create_sale(req, current_user=self.mock_user),
+            sales_router.create_sale(req, request=make_test_request(nonce=idemp_key), current_user=self.mock_user),
+            sales_router.create_sale(req, request=make_test_request(nonce=idemp_key), current_user=self.mock_user),
+            sales_router.create_sale(req, request=make_test_request(nonce=idemp_key), current_user=self.mock_user),
         )
 
         # All results should have the exact same sale_id

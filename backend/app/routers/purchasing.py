@@ -863,6 +863,18 @@ async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, 
 
                 ex_status = str(existing_pay.get("status", "")).strip().upper()
                 if ex_status == "PAID":
+                    # Fail-closed accounting recovery: ensure journal exists before returning idempotent replay
+                    existing_pay_id = str(existing_pay.get("payment_id", "")).strip()
+                    if existing_pay_id:
+                        existing_journals = db.get_records("JournalHeaders", fresh=True) or []
+                        has_journal = any(
+                            str(j.get("reference_type", "")).strip().upper() == "SUPPLIER_PAYMENT"
+                            and str(j.get("reference_id", "")).strip() == existing_pay_id
+                            and str(j.get("status", "")).strip().upper() != "REVERSED"
+                            for j in existing_journals
+                        )
+                        if not has_journal:
+                            post_supplier_payment_journal(existing_pay, actor=actor)
                     bills_snapshot = db.get_records("SupplierBills", fresh=True) if clean_bill_id else []
                     bill_row = (
                         next((b for b in bills_snapshot if str(b.get("bill_id", "")).strip() == clean_bill_id), None)
@@ -945,7 +957,7 @@ async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, 
             "reference_number": clean_ref,
             "status": "PAID",
             "paid_by": actor,
-            "created_at": now,
+            "created_at": (str(existing_pay.get("created_at") or now) if existing_pay else now),
             "notes": (req.notes or "").strip(),
             "payment_type": pay_type,
             "allocated_amount": float(req_amount) if clean_bill_id else 0.0,
@@ -953,40 +965,68 @@ async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, 
             "allocations_json": json.dumps(allocs_initial),
             "idempotency_key": clean_idemp_key,
         }
+        if existing_pay is not None and str(existing_pay.get("payment_id", "")).strip():
+            pay_row["payment_id"] = str(existing_pay.get("payment_id", "")).strip()
 
         new_bal = 0.0
         new_status = pay_type
         bill_update_payload = None
         if bill is not None:
-            old_paid = float(bill.get("paid_amount", 0) or 0)
-            new_paid = round(old_paid + float(req_amount), 2)
-            tot_amt = float(bill.get("total_amount", 0) or 0)
-            new_bal = max(0.0, round(tot_amt - new_paid, 2))
-            new_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
-            bill_update_payload = {
-                "bill_id": clean_bill_id,
-                "paid_amount": new_paid,
-                "balance_amount": new_bal,
-                "payment_status": new_status,
-                "existing_notes": str(bill.get("notes", "") or ""),
-            }
+            spay_marker_present = existing_pay is not None and f"[spay:{existing_pay.get('payment_id')}]" in str(bill.get("notes", ""))
+            if spay_marker_present:
+                new_bal = round(float(bill.get("balance_amount", 0) or 0), 2)
+                new_status = str(bill.get("payment_status", "PARTIALLY_PAID"))
+            else:
+                old_paid = float(bill.get("paid_amount", 0) or 0)
+                new_paid = round(old_paid + float(req_amount), 2)
+                tot_amt = float(bill.get("total_amount", 0) or 0)
+                new_bal = max(0.0, round(tot_amt - new_paid, 2))
+                new_status = "PAID" if new_bal <= 0.05 else "PARTIALLY_PAID"
+                bill_update_payload = {
+                    "bill_id": clean_bill_id,
+                    "paid_amount": new_paid,
+                    "balance_amount": new_bal,
+                    "payment_status": new_status,
+                    "existing_notes": str(bill.get("notes", "") or ""),
+                }
 
-        bridge_res = apps_script_bridge.delegate_governed_write(
-            action="RECORD_SUPPLIER_PAYMENT",
-            target_tab="SupplierPayments",
-            payload={
-                "payment": pay_row,
-                "bill_update": bill_update_payload,
-            },
-            actor_user_id=actor,
-            actor_role=actor_role,
-            nonce=clean_idemp_key or None,
-            request=request,
-            id_field="payment_id",
-            invalidate_tabs=["SupplierPayments", "SupplierBills"],
-        )
-        pay_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("payment_id") or "")
-        saved_pay = bridge_res.get("record") or {**pay_row, "payment_id": pay_id}
+        if existing_pay is not None and str(existing_pay.get("payment_id", "")).strip():
+            existing_pid = str(existing_pay.get("payment_id", "")).strip()
+            pay_row["payment_id"] = existing_pid
+            bridge_res = apps_script_bridge.delegate_governed_write(
+                action="APPLY_SUPPLIER_ADVANCE",
+                target_tab="SupplierPayments",
+                payload={
+                    "payment_id": existing_pid,
+                    "payment_update": pay_row,
+                    "bill_update": bill_update_payload,
+                },
+                actor_user_id=actor,
+                actor_role=actor_role,
+                nonce=clean_idemp_key or None,
+                request=request,
+                id_field="payment_id",
+                invalidate_tabs=["SupplierPayments", "SupplierBills"],
+            )
+            pay_id = existing_pid
+            saved_pay = bridge_res.get("record") or {**pay_row, "payment_id": pay_id}
+        else:
+            bridge_res = apps_script_bridge.delegate_governed_write(
+                action="RECORD_SUPPLIER_PAYMENT",
+                target_tab="SupplierPayments",
+                payload={
+                    "payment": pay_row,
+                    "bill_update": bill_update_payload,
+                },
+                actor_user_id=actor,
+                actor_role=actor_role,
+                nonce=clean_idemp_key or None,
+                request=request,
+                id_field="payment_id",
+                invalidate_tabs=["SupplierPayments", "SupplierBills"],
+            )
+            pay_id = str(bridge_res.get("allocated_id") or (bridge_res.get("record") or {}).get("payment_id") or "")
+            saved_pay = bridge_res.get("record") or {**pay_row, "payment_id": pay_id}
 
         # Post double-entry accounting journal (fail-closed via bridge)
         post_supplier_payment_journal(saved_pay, actor=actor)

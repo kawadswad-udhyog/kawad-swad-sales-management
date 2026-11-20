@@ -23,6 +23,7 @@ if backend_dir not in sys.path:
 import tests  # Trigger mock framework stubs if needed
 from fastapi import HTTPException
 from app.sheets import db
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 from app.models import SalePaymentCreate
 from app.routers.sales import record_sale_payment
 from app.accounting.journal_engine import (
@@ -48,8 +49,12 @@ class TestAccountingIntegrityReview(unittest.TestCase):
     def setUp(self):
         for k in list(db.memory_store.keys()):
             db.memory_store[k] = []
+        db._fail_once.clear()
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        self._sim.stop()
+        db._fail_once.clear()
         for k in list(db.memory_store.keys()):
             db.memory_store[k] = []
 
@@ -101,40 +106,38 @@ class TestAccountingIntegrityReview(unittest.TestCase):
         self.assertIn("6000.00", str(ctx.exception))
 
     def test_2_partial_journal_write_failure_protection(self):
-        """Verify failure during line write marks header FAILED and excludes it from Trial Balance."""
-        real_append = db.append_record
+        """Verify atomic failure during line write rolls back cleanly and Trial Balance excludes FAILED vouchers."""
+        db._fail_once["JournalLines"] = 1
+        lines = [
+            {"account_code": "1110", "debit_amount": 2500.0, "notes": "Cash"},
+            {"account_code": "4100", "credit_amount": 2500.0, "notes": "Sales"},
+        ]
+        with self.assertRaises(HTTPException) as ctx:
+            post_journal_voucher(
+                voucher_type="SALES",
+                reference_type="TEST_FAIL",
+                reference_id="TF-001",
+                narration="Failing transaction",
+                lines=lines,
+                posted_by="AUDITOR",
+            )
+        self.assertEqual(ctx.exception.status_code, 503)
 
-        def failing_append(tab, rec, raise_on_error=True):
-            if tab == "JournalLines":
-                raise IOError("Simulated network failure appending JournalLines")
-            return real_append(tab, rec, raise_on_error)
+        # Atomic rollback: neither header nor lines committed
+        self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 0)
+        self.assertEqual(len(db.get_records("JournalLines", fresh=True)), 0)
 
-        with patch.object(db, "append_record", side_effect=failing_append):
-            lines = [
-                {"account_code": "1110", "debit_amount": 2500.0, "notes": "Cash"},
-                {"account_code": "4100", "credit_amount": 2500.0, "notes": "Sales"},
-            ]
-            with self.assertRaises(RuntimeError):
-                post_journal_voucher(
-                    voucher_type="SALES",
-                    reference_type="TEST_FAIL",
-                    reference_id="TF-001",
-                    narration="Failing transaction",
-                    lines=lines,
-                    posted_by="AUDITOR",
-                )
-
-        # Inspect headers: Voucher header exists but status MUST be 'FAILED'
-        headers = db.get_records("JournalHeaders", fresh=True)
-        self.assertEqual(len(headers), 1)
-        self.assertEqual(headers[0]["status"], "FAILED")
-        self.assertIn("Simulated network failure", headers[0]["narration"])
-
-        # Lines table must have 0 rows
-        lines_stored = db.get_records("JournalLines", fresh=True)
-        self.assertEqual(len(lines_stored), 0)
-
-        # Trial balance must completely exclude FAILED vouchers, preserving $0.00 ledger balance
+        # Also verify Trial Balance excludes any FAILED header present in storage
+        db.memory_store["JournalHeaders"].append({
+            "journal_id": "JV-LEGACY-FAIL",
+            "voucher_type": "SALES",
+            "reference_type": "TEST_FAIL",
+            "reference_id": "TF-001",
+            "status": "FAILED",
+            "total_debit": 2500.0,
+            "total_credit": 2500.0,
+            "narration": "Simulated network failure",
+        })
         tb = calculate_trial_balance()
         self.assertTrue(tb["is_balanced"])
         self.assertEqual(tb["total_debits"], 0.0)
@@ -159,7 +162,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "customer_id": "CUS-001",
             "customer_name_snapshot": "Shree Ram Stores",
         }
-        db.append_record("Sales", sale_row)
+        db.memory_store["Sales"].append(sale_row)
         post_sale_journal(sale_row, actor="SALESMAN_1")
 
         # Trial Balance check: AR (1130) has 10,000; Revenue (4100) has 9,500; Output CGST (2210) 250; SGST (2220) 250
@@ -178,7 +181,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "payment_method": "CASH",
             "amount": 4000.0,
         }
-        db.append_record("Payments", pay1)
+        db.memory_store["Payments"].append(pay1)
         post_payment_collection_journal(pay1, actor="SALESMAN_1")
 
         tb2 = calculate_trial_balance()
@@ -198,7 +201,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "payment_method": "UPI",
             "amount": 6000.0,
         }
-        db.append_record("Payments", pay2)
+        db.memory_store["Payments"].append(pay2)
         post_payment_collection_journal(pay2, actor="SALESMAN_1")
 
         tb3 = calculate_trial_balance()
@@ -294,7 +297,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
     def test_6_reconciliation_scanner_and_idempotent_backfill(self):
         """Verify reconciliation scanner finds unposted operational events and backfills them safely."""
         # Insert raw operational records WITHOUT posting journal vouchers
-        db.append_record("RawMaterialLedger", {
+        db.memory_store["RawMaterialLedger"].append({
             "raw_material_txn_id": "RML-RECON-01",
             "txn_datetime": "2026-10-01T08:00:00",
             "material_name_snapshot": "Moong Dal",
@@ -305,7 +308,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "itc_eligible": True,
             "txn_type": "RECEIVE",
         })
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": "SALE-RECON-01",
             "bill_number": "BILL-RECON-1",
             "sale_datetime": "2026-10-02T15:00:00",
@@ -338,19 +341,19 @@ class TestAccountingIntegrityReview(unittest.TestCase):
     def test_7_opening_balance_proposal_mathematical_balance(self):
         """Verify opening balance proposal derives balanced Assets = Liabilities + Equity."""
         # Add some sample operational stock and cash
-        db.append_record("RawMaterialLedger", {
+        db.memory_store["RawMaterialLedger"].append({
             "raw_material_txn_id": "RML-INIT-01",
             "category": "Whole Dal",
             "quantity_kg": 1000.0,
             "unit_price_inr": 100.0,
             "txn_type": "RECEIVE",
         })
-        db.append_record("PackagingBatches", {
+        db.memory_store["PackagingBatches"].append({
             "packaging_batch_id": "PKG-INIT-01",
             "packet_count": 200,
             "status": "APPROVED",
         })
-        db.append_record("CashLedger", {
+        db.memory_store["CashLedger"].append({
             "cash_txn_id": "CSH-INIT-01",
             "amount": 25000.0,
         })
@@ -450,49 +453,34 @@ class TestAccountingIntegrityReview(unittest.TestCase):
 
     def test_9_partial_write_stages_and_repair(self):
         """
-        Verify multi-stage write failure safety and subsequent repair:
-        - Failure during line 2 marks header FAILED.
-        - Trial Balance strictly ignores FAILED vouchers (total debits/credits remain 0.00).
-        - Re-running post_journal_voucher with same reference purges orphan partial lines,
-          updates header to POSTED, and brings Trial Balance into clean balance.
+        Verify atomic write failure safety and subsequent recovery/retry:
+        - Failure during JournalLines write rejects atomically (HTTP 503), leaving zero partial lines.
+        - Trial Balance remains cleanly balanced at 0.00.
+        - Re-running post_journal_voucher after storage recovery commits header + 2 lines
+          and brings Trial Balance into clean ₹8,000 balance.
         """
-        real_append = db.append_record
-        attempt_line = 0
-
-        def fail_on_second_line(tab, rec, raise_on_error=True):
-            nonlocal attempt_line
-            if tab == "JournalLines":
-                attempt_line += 1
-                if attempt_line == 2:
-                    raise IOError("Simulated network timeout appending second journal line")
-            return real_append(tab, rec, raise_on_error)
-
         lines = [
             {"account_code": "1110", "debit_amount": 8000.0, "notes": "Cash Line"},
             {"account_code": "4100", "credit_amount": 8000.0, "notes": "Revenue Line"},
         ]
 
-        with patch.object(db, "append_record", side_effect=fail_on_second_line):
-            with self.assertRaises(RuntimeError):
-                post_journal_voucher(
-                    voucher_type="SALES",
-                    reference_type="SALE_PARTIAL",
-                    reference_id="SP-001",
-                    narration="Failing 2nd line",
-                    lines=lines,
-                    posted_by="CLERK",
-                )
+        db._fail_once["JournalLines"] = 1
+        with self.assertRaises(HTTPException) as ctx:
+            post_journal_voucher(
+                voucher_type="SALES",
+                reference_type="SALE_PARTIAL",
+                reference_id="SP-001",
+                narration="Failing 2nd line",
+                lines=lines,
+                posted_by="CLERK",
+            )
+        self.assertEqual(ctx.exception.status_code, 503)
 
-        # Header status must be FAILED
+        # Atomic Apps Script rollback leaves zero orphan header/lines
         headers = [h for h in db.get_records("JournalHeaders", fresh=True) if h.get("reference_id") == "SP-001"]
-        self.assertEqual(len(headers), 1)
-        self.assertEqual(headers[0]["status"], "FAILED")
+        self.assertEqual(len(headers), 0)
 
-        # 1 partial line exists in table
-        orphan_lines = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == headers[0]["journal_id"]]
-        self.assertEqual(len(orphan_lines), 1)
-
-        # Trial Balance MUST ignore FAILED header (no ledger contamination)
+        # Trial Balance remains cleanly at 0.00
         tb_before = calculate_trial_balance()
         self.assertTrue(tb_before["is_balanced"])
         self.assertEqual(tb_before["total_debits"], 0.0)
@@ -508,10 +496,9 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             posted_by="CLERK",
         )
         self.assertEqual(v_repaired["status"], "POSTED")
-        self.assertEqual(v_repaired["journal_id"], headers[0]["journal_id"])
 
-        # Lines table must now contain exactly 2 lines (no duplicate orphan line from failed attempt)
-        repaired_lines = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == headers[0]["journal_id"]]
+        # Lines table must now contain exactly 2 lines
+        repaired_lines = [l for l in db.get_records("JournalLines", fresh=True) if l.get("journal_id") == v_repaired["journal_id"]]
         self.assertEqual(len(repaired_lines), 2)
 
         # Trial balance now reflects the ₹8,000 transaction with perfect balance
@@ -544,7 +531,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "payment_status": "UNPAID",
             "salesman_user_id": "USR-SALES-01",
         }
-        db.append_record("Sales", sale_record)
+        db.memory_store["Sales"].append(sale_record)
         post_sale_journal(sale_record, actor="SALESMAN")
 
         current_user = {"user_id": "USR-SALES-01", "username": "salesman1", "role": "SALESMAN"}
@@ -556,7 +543,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             idempotency_key="IDEMP-PAY-001",
             notes="First installment",
         )
-        res1 = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p1, current_user=current_user))
+        res1 = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p1, request=make_test_request(nonce=p1.idempotency_key), current_user=current_user))
         self.assertTrue(res1["ok"])
         self.assertEqual(res1["amount_paid"], 2000.0)
         self.assertEqual(res1["remaining_balance"], 3000.0)
@@ -567,7 +554,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
         self.assertEqual(float(cash_rows[0]["amount"]), 2000.0)
 
         # 2. Idempotent replay with same key and amount
-        res1_replay = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p1, current_user=current_user))
+        res1_replay = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p1, request=make_test_request(nonce=p1.idempotency_key), current_user=current_user))
         self.assertTrue(res1_replay.get("is_replay"))
         self.assertEqual(res1_replay["payment_id"], res1["payment_id"])
 
@@ -579,7 +566,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             notes="Altered amount",
         )
         with self.assertRaises(HTTPException) as ctx_conf:
-            asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_conflict, current_user=current_user))
+            asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_conflict, request=make_test_request(nonce=p_conflict.idempotency_key), current_user=current_user))
         self.assertEqual(ctx_conf.exception.status_code, 409)
 
         # 4. Overpayment (₹3,500 exceeds remaining balance ₹3,000) -> HTTP 400
@@ -590,27 +577,20 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             notes="Overpayment attempt",
         )
         with self.assertRaises(HTTPException) as ctx_over:
-            asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_over, current_user=current_user))
+            asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_over, request=make_test_request(nonce=p_over.idempotency_key), current_user=current_user))
         self.assertEqual(ctx_over.exception.status_code, 400)
 
-        # 5. Rollback on CashLedger append failure
-        real_append = db.append_record
-
-        def fail_cash_ledger(tab, rec, raise_on_error=True):
-            if tab == "CashLedger":
-                raise IOError("Simulated CashLedger disk write failure")
-            return real_append(tab, rec, raise_on_error)
-
+        # 5. Rollback on CashLedger write failure inside atomic bridge
+        db._fail_once["CashLedger"] = 1
         p_fail = SalePaymentCreate(
             amount=500.0,
             payment_method="CASH",
             idempotency_key="IDEMP-PAY-FAIL",
             notes="Failing cash write",
         )
-        with patch.object(db, "append_record", side_effect=fail_cash_ledger):
-            with self.assertRaises(HTTPException) as ctx_503:
-                asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_fail, current_user=current_user))
-            self.assertEqual(ctx_503.exception.status_code, 503)
+        with self.assertRaises(HTTPException) as ctx_503:
+            asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_fail, request=make_test_request(nonce=p_fail.idempotency_key), current_user=current_user))
+        self.assertEqual(ctx_503.exception.status_code, 503)
 
         # Verify Payments record was rolled back
         payments_after_fail = [
@@ -627,7 +607,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             reference_number="UPI-REF-9988",
             notes="Final settlement",
         )
-        res_final = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_final, current_user=current_user))
+        res_final = asyncio.run(record_sale_payment("SALE-ROUTER-PAY-01", p_final, request=make_test_request(nonce=p_final.idempotency_key), current_user=current_user))
         self.assertTrue(res_final["ok"])
         self.assertEqual(res_final["remaining_balance"], 0.0)
 
@@ -657,7 +637,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
         3. Live backfill repairs and posts vouchers, bringing ledger into balance.
         """
         # 1 unposted sale
-        db.append_record("Sales", {
+        db.memory_store["Sales"].append({
             "sale_id": "SALE-RECON-UNPOSTED",
             "bill_number": "BILL-RU-1",
             "sale_datetime": "2026-10-22T10:00:00",
@@ -668,7 +648,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
         })
 
         # 1 failed voucher in JournalHeaders
-        db.append_record("JournalHeaders", {
+        db.memory_store["JournalHeaders"].append({
             "journal_id": "JRN-FAIL-01",
             "reference_type": "EXPENSE",
             "reference_id": "EXP-RECON-FAIL",
@@ -677,7 +657,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "total_debit": 500.0,
             "total_credit": 500.0,
         })
-        db.append_record("Expenses", {
+        db.memory_store["Expenses"].append({
             "expense_id": "EXP-RECON-FAIL",
             "expense_datetime": "2026-10-22T11:00:00",
             "category": "Petrol & Fuel",
@@ -687,7 +667,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
         })
 
         # 1 incomplete voucher
-        db.append_record("JournalHeaders", {
+        db.memory_store["JournalHeaders"].append({
             "journal_id": "JRN-INC-01",
             "reference_type": "PAYMENT_COLLECTION",
             "reference_id": "PAY-RECON-INC",
@@ -696,7 +676,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "total_debit": 300.0,
             "total_credit": 300.0,
         })
-        db.append_record("Payments", {
+        db.memory_store["Payments"].append({
             "payment_id": "PAY-RECON-INC",
             "sale_id": "SALE-ANY",
             "payment_datetime": "2026-10-22T12:00:00",
@@ -706,7 +686,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
         })
 
         # Duplicate reference in JournalHeaders (2 vouchers for same reference)
-        db.append_record("JournalHeaders", {
+        db.memory_store["JournalHeaders"].append({
             "journal_id": "JRN-DUP-01",
             "reference_type": "TEST_DUP",
             "reference_id": "DUP-REF-99",
@@ -715,7 +695,7 @@ class TestAccountingIntegrityReview(unittest.TestCase):
             "total_debit": 100.0,
             "total_credit": 100.0,
         })
-        db.append_record("JournalHeaders", {
+        db.memory_store["JournalHeaders"].append({
             "journal_id": "JRN-DUP-02",
             "reference_type": "TEST_DUP",
             "reference_id": "DUP-REF-99",

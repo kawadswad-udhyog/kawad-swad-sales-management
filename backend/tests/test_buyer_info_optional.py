@@ -13,97 +13,21 @@ import types
 os.environ.setdefault("SALES_TESTING", "1")
 os.environ.setdefault("SALES_JWT_SECRET", "test-only-secret-do-not-use-for-deployment-32")
 
-if "fastapi" not in sys.modules:
-    class MockFastAPIModule(types.ModuleType):
-        class APIRouter:
-            def __init__(self, *args, **kwargs):
-                self.routes = []
-            def post(self, path="", **kwargs):
-                return lambda f: f
-            def get(self, path="", **kwargs):
-                return lambda f: f
-            def put(self, path="", **kwargs):
-                return lambda f: f
-            def patch(self, path="", **kwargs):
-                return lambda f: f
-        class HTTPException(Exception):
-            def __init__(self, status_code, detail=None, headers=None):
-                super().__init__(detail)
-                self.status_code = status_code
-                self.detail = detail
-                self.headers = headers
-        class status:
-            HTTP_400_BAD_REQUEST = 400
-            HTTP_401_UNAUTHORIZED = 401
-            HTTP_403_FORBIDDEN = 403
-            HTTP_404_NOT_FOUND = 404
-            HTTP_409_CONFLICT = 409
-            HTTP_422_UNPROCESSABLE_ENTITY = 422
-            HTTP_429_TOO_MANY_REQUESTS = 429
-            HTTP_500_INTERNAL_SERVER_ERROR = 500
-            HTTP_503_SERVICE_UNAVAILABLE = 503
-        class FastAPI:
-            def __init__(self, *args, **kwargs):
-                self.middleware = []
-            def add_middleware(self, mw, **kwargs):
-                self.middleware.append((mw, kwargs))
-            def include_router(self, *args, **kwargs): pass
-            def on_event(self, *args, **kwargs): return lambda f: f
-            def get(self, *args, **kwargs): return lambda f: f
-            def post(self, *args, **kwargs): return lambda f: f
-        class BackgroundTasks:
-            def add_task(self, *args, **kwargs): pass
-        @staticmethod
-        def Depends(f): return f
-        @staticmethod
-        def Header(default=None, alias=None): return default
-        @staticmethod
-        def Query(default=None, **kwargs): return default
-
-    mock_mod = MockFastAPIModule("fastapi")
-    mock_mod.FastAPI = MockFastAPIModule.FastAPI
-    mock_mod.BackgroundTasks = MockFastAPIModule.BackgroundTasks
-    mock_mod.Query = MockFastAPIModule.Query
-
-    mock_mw = types.ModuleType("fastapi.middleware")
-    mock_cors = types.ModuleType("fastapi.middleware.cors")
-    mock_cors.CORSMiddleware = type("CORSMiddleware", (), {})
-    mock_mod.middleware = mock_mw
-
-    sys.modules["fastapi"] = mock_mod
-    sys.modules["fastapi.middleware"] = mock_mw
-    sys.modules["fastapi.middleware.cors"] = mock_cors
-    sys.modules["fastapi.security"] = types.ModuleType("security")
-    sys.modules["fastapi.security"].HTTPBearer = lambda **kwargs: None
-    sys.modules["fastapi.security"].HTTPAuthorizationCredentials = None
-    sys.modules["jwt"] = types.ModuleType("jwt")
-    sys.modules["jwt"].encode = lambda payload, secret, algorithm="HS256": "mock-jwt"
-    sys.modules["jwt"].decode = lambda token, secret, algorithms=["HS256"]: {"sub": "USR-000001", "role": "SALESMAN"}
-
-if "pydantic" not in sys.modules:
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        def dict(self):
-            return self.__dict__
-
-    sys.modules["pydantic"] = types.ModuleType("pydantic")
-    sys.modules["pydantic"].BaseModel = MockBaseModel
-    sys.modules["pydantic"].Field = lambda *args, **kwargs: kwargs.get("default", args[0] if args else None)
-
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import tests
 from app.sheets import db
 from app.models import CustomerCreate, SaleCreate, SaleItemCreate
 import app.routers.customers as customers_router
 import app.routers.sales as sales_router
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 
 
 class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self._sim = LocalAppsScriptSimulator().start()
         # Reset in-memory database store
         db.memory_store["Customers"] = []
         db.memory_store["Sales"] = []
@@ -127,6 +51,8 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
                 "selling_unit": "PACKET",
             }
         ]
+        db.memory_store["JournalHeaders"] = []
+        db.memory_store["JournalLines"] = []
         self.mock_user = {
             "user_id": "USR-000001",
             "full_name": "Test Salesman",
@@ -134,7 +60,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
         }
 
     def tearDown(self):
-        self.setUp()
+        self._sim.stop()
 
     async def test_01_anonymous_retail_billing_no_customer_record(self):
         """Sale succeeds with completely empty/omitted customer details, creating a clean walk-in bill."""
@@ -158,7 +84,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             bill_total=120.0,
         )
 
-        sale = await sales_router.create_sale(req, current_user=self.mock_user)
+        sale = await sales_router.create_sale(req, request=make_test_request(), current_user=self.mock_user)
 
         self.assertEqual(sale.customer_id, "CUS-WALKIN")
         self.assertEqual(sale.customer_name_snapshot, "Walk-in Customer")
@@ -200,7 +126,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             bill_total=55.0,
         )
 
-        sale = await sales_router.create_sale(req, current_user=self.mock_user)
+        sale = await sales_router.create_sale(req, request=make_test_request(), current_user=self.mock_user)
 
         self.assertEqual(sale.customer_id, "CUS-WALKIN")
         self.assertEqual(sale.customer_name_snapshot, "Ramesh Bhai (Direct Retail)")
@@ -223,9 +149,9 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             notes="",
         )
 
-        cust = await customers_router.create_customer(req, current_user=self.mock_user)
+        cust = await customers_router.create_customer(req, request=make_test_request(), current_user=self.mock_user)
 
-        self.assertTrue(cust.customer_id.startswith("CUS-"))
+        self.assertTrue(cust.customer_id.startswith("CUST-"))
         self.assertEqual(cust.shop_name, "Mahadev Kirana Store")
         self.assertEqual(cust.mobile, "")
         self.assertEqual(cust.address, "")
@@ -240,7 +166,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             address="",
         )
 
-        cust = await customers_router.create_customer(req, current_user=self.mock_user)
+        cust = await customers_router.create_customer(req, request=make_test_request(), current_user=self.mock_user)
 
         self.assertEqual(cust.shop_name, "Patidar Daily Needs")
         self.assertEqual(cust.mobile, "9826012345")
@@ -250,7 +176,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
         """Customer and Sale endpoints gracefully handle completely omitted optional attributes."""
         # Customer creation with only shop_name attribute
         cust_req = CustomerCreate(shop_name="Sharma Traders")
-        cust = await customers_router.create_customer(cust_req, current_user=self.mock_user)
+        cust = await customers_router.create_customer(cust_req, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(cust.shop_name, "Sharma Traders")
         self.assertEqual(cust.mobile, "")
 
@@ -258,7 +184,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
         sale_req = SaleCreate(
             items=[SaleItemCreate(product_id="PRD-000001", quantity=3, actual_unit_price=50.0)]
         )
-        sale = await sales_router.create_sale(sale_req, current_user=self.mock_user)
+        sale = await sales_router.create_sale(sale_req, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(sale.customer_name_snapshot, "Walk-in Customer")
         self.assertEqual(sale.bill_total, 150.0)
 
@@ -271,7 +197,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             address="  ",
             notes="",
         )
-        cust = await customers_router.create_customer(cust_req, current_user=self.mock_user)
+        cust = await customers_router.create_customer(cust_req, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(cust.shopkeeper_name, "")
         self.assertEqual(cust.mobile, "")
         self.assertEqual(cust.address, "")
@@ -288,7 +214,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
         req = SaleCreate(
             items=[SaleItemCreate(product_id="PRD-000001", quantity=1, actual_unit_price=60.0)]
         )
-        await sales_router.create_sale(req, current_user=self.mock_user)
+        await sales_router.create_sale(req, request=make_test_request(), current_user=self.mock_user)
 
         all_sales = await sales_router.list_sales(current_user=self.mock_user)
         self.assertEqual(len(all_sales), 1)
@@ -303,7 +229,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             items=[SaleItemCreate(product_id="", quantity=1, actual_unit_price=50.0)]
         )
         with self.assertRaises(sales_router.HTTPException) as ctx:
-            await sales_router.create_sale(req, current_user=self.mock_user)
+            await sales_router.create_sale(req, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertIn("Product selection is mandatory", ctx.exception.detail)
 
@@ -313,7 +239,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             items=[SaleItemCreate(product_id="PRD-000001", quantity=0, actual_unit_price=50.0)]
         )
         with self.assertRaises(sales_router.HTTPException) as ctx:
-            await sales_router.create_sale(req_zero, current_user=self.mock_user)
+            await sales_router.create_sale(req_zero, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertIn("Quantity must be greater than zero", ctx.exception.detail)
 
@@ -321,7 +247,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             items=[SaleItemCreate(product_id="PRD-000001", quantity=-3, actual_unit_price=50.0)]
         )
         with self.assertRaises(sales_router.HTTPException) as ctx2:
-            await sales_router.create_sale(req_neg, current_user=self.mock_user)
+            await sales_router.create_sale(req_neg, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(ctx2.exception.status_code, 422)
 
     async def test_10_backend_rejection_invalid_price(self):
@@ -330,7 +256,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             items=[SaleItemCreate(product_id="PRD-000001", quantity=2, actual_unit_price=-15.0)]
         )
         with self.assertRaises(sales_router.HTTPException) as ctx:
-            await sales_router.create_sale(req, current_user=self.mock_user)
+            await sales_router.create_sale(req, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertIn("Price cannot be negative", ctx.exception.detail)
 
@@ -343,7 +269,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             discount_amount=70.0,
         )
         with self.assertRaises(sales_router.HTTPException) as ctx:
-            await sales_router.create_sale(req_over_discount, current_user=self.mock_user)
+            await sales_router.create_sale(req_over_discount, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertIn("Discount cannot exceed subtotal", ctx.exception.detail)
 
@@ -354,7 +280,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             discount_amount=20.0,
             tax_amount=10.0,
         )
-        sale = await sales_router.create_sale(req_valid, current_user=self.mock_user)
+        sale = await sales_router.create_sale(req_valid, request=make_test_request(), current_user=self.mock_user)
         self.assertEqual(sale.subtotal, 200.0)
         self.assertEqual(sale.discount_amount, 20.0)
         self.assertEqual(sale.tax_amount, 10.0)
@@ -371,7 +297,7 @@ class TestBuyerInfoOptional(unittest.IsolatedAsyncioTestCase):
             notes=None,
             items=[SaleItemCreate(product_id="PRD-000001", quantity=1, actual_unit_price=50.0)],
         )
-        await sales_router.create_sale(req, current_user=self.mock_user)
+        await sales_router.create_sale(req, request=make_test_request(), current_user=self.mock_user)
 
         raw_sales = db.get_records("Sales")
         self.assertEqual(len(raw_sales), 1)

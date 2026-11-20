@@ -36,6 +36,7 @@ if tests_dir not in sys.path:
 os.environ["SALES_TESTING"] = "1"
 os.environ["SALES_AUTH_MOCK"] = "1"
 
+import tests
 from app.sheets import db, ID_PREFIXES, StorageIOError
 from app.accounting.customer_ledger import reset_cross_process_state
 from app.accounting.journal_engine import calculate_trial_balance
@@ -43,13 +44,28 @@ from app.routers.purchasing import (
     SupplierBillCreate,
     SupplierPaymentCreate,
     SupplierAdvanceApplyRequest,
-    create_supplier_bill,
-    record_supplier_payment,
-    apply_supplier_advance_to_bill,
+    create_supplier_bill as _raw_create_supplier_bill,
+    record_supplier_payment as _raw_record_supplier_payment,
+    apply_supplier_advance_to_bill as _raw_apply_supplier_advance_to_bill,
     list_supplier_payments,
     purchasing_summary,
 )
 from app.routers.accounting import get_supplier_outstanding_balances
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
+
+
+async def create_supplier_bill(req, request=None, user=None):
+    return await _raw_create_supplier_bill(req, request=request or make_test_request(), user=user)
+
+
+async def record_supplier_payment(req, request=None, user=None):
+    nonce = getattr(req, "idempotency_key", None) or None
+    return await _raw_record_supplier_payment(req, request=request or make_test_request(nonce=nonce), user=user)
+
+
+async def apply_supplier_advance_to_bill(payment_id, req, request=None, user=None):
+    nonce = getattr(req, "idempotency_key", None) or None
+    return await _raw_apply_supplier_advance_to_bill(payment_id, req, request=request or make_test_request(nonce=nonce), user=user)
 
 
 class TestSupplierPaymentIntegrity(unittest.TestCase):
@@ -63,6 +79,7 @@ class TestSupplierPaymentIntegrity(unittest.TestCase):
         db._fail_once.clear()
         reset_cross_process_state()
         db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        self._sim = LocalAppsScriptSimulator().start()
 
         db.append_record("Suppliers", {
             "supplier_id": "SUP-001",
@@ -87,6 +104,7 @@ class TestSupplierPaymentIntegrity(unittest.TestCase):
         self.pa_user = {"user_id": "USR-PA-01", "username": "pa_suresh", "role": "PA"}
 
     def tearDown(self):
+        self._sim.stop()
         reset_cross_process_state()
         db._fail_once.clear()
         db._records_cache.clear()
@@ -439,7 +457,7 @@ class TestSupplierPaymentIntegrity(unittest.TestCase):
             idempotency_key="fail-rec-a",
         )
         db.inject_failure_once("SupplierBills", 1)
-        with self.assertRaises((RuntimeError, StorageIOError)):
+        with self.assertRaises((RuntimeError, StorageIOError, HTTPException)):
             asyncio.run(record_supplier_payment(req_a, user=self.owner_user))
 
         payments_mid = db.get_records("SupplierPayments", fresh=True)
@@ -468,7 +486,7 @@ class TestSupplierPaymentIntegrity(unittest.TestCase):
             idempotency_key="fail-rec-b",
         )
         db.inject_failure_once("JournalHeaders", 1)
-        with self.assertRaises((RuntimeError, StorageIOError)):
+        with self.assertRaises((RuntimeError, StorageIOError, HTTPException)):
             asyncio.run(record_supplier_payment(req_b, user=self.owner_user))
 
         # Bill was already updated once; payment is still INCOMPLETE
@@ -1143,7 +1161,7 @@ class TestSupplierPaymentIntegrity(unittest.TestCase):
             idempotency_key="idem-30-persist",
         )
         db.inject_failure_once("SupplierBills", 1)
-        with self.assertRaises((RuntimeError, StorageIOError)):
+        with self.assertRaises((RuntimeError, StorageIOError, HTTPException)):
             asyncio.run(record_supplier_payment(req, user=self.owner_user))
 
         # Even while INCOMPLETE, a conflicting payload with the same key must still return 409
@@ -1182,7 +1200,7 @@ class TestSupplierPaymentIntegrity(unittest.TestCase):
             idempotency_key="idem-31-acct",
         )
         db.inject_failure_once("JournalHeaders", 1)
-        with self.assertRaises((RuntimeError, StorageIOError)):
+        with self.assertRaises((RuntimeError, StorageIOError, HTTPException)):
             asyncio.run(record_supplier_payment(req, user=self.owner_user))
 
         self.assertEqual(len(db.get_records("JournalHeaders", fresh=True)), 0)

@@ -8,57 +8,15 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-import types
-
-if "fastapi" not in sys.modules:
-    mock_fastapi = types.ModuleType("fastapi")
-    class MockAPIRouter:
-        def __init__(self, *args, **kwargs): pass
-        def post(self, *args, **kwargs): return lambda f: f
-        def get(self, *args, **kwargs): return lambda f: f
-        def put(self, *args, **kwargs): return lambda f: f
-        def patch(self, *args, **kwargs): return lambda f: f
-        def delete(self, *args, **kwargs): return lambda f: f
-    class MockHTTPException(Exception):
-        def __init__(self, status_code, detail=None, headers=None):
-            super().__init__(detail)
-            self.status_code = status_code
-            self.detail = detail
-    mock_fastapi.APIRouter = MockAPIRouter
-    mock_fastapi.HTTPException = MockHTTPException
-    mock_fastapi.Depends = lambda f: f
-    mock_fastapi.status = types.ModuleType("status")
-    sys.modules["fastapi"] = mock_fastapi
-    mock_sec = types.ModuleType("fastapi.security")
-    mock_sec.HTTPBearer = lambda **kwargs: None
-    mock_sec.HTTPAuthorizationCredentials = None
-    sys.modules["fastapi.security"] = mock_sec
-
-if "pydantic" not in sys.modules:
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        def dict(self):
-            return self.__dict__
-    mock_pydantic = types.ModuleType("pydantic")
-    mock_pydantic.BaseModel = MockBaseModel
-    mock_pydantic.Field = lambda *args, **kwargs: None
-    sys.modules["pydantic"] = mock_pydantic
-
-if "jwt" not in sys.modules:
-    mock_jwt = types.ModuleType("jwt")
-    mock_jwt.encode = lambda *args, **kwargs: "mock-jwt"
-    mock_jwt.decode = lambda *args, **kwargs: {"sub": "USR-OWNER-01", "role": "OWNER"}
-    sys.modules["jwt"] = mock_jwt
-
 import asyncio
 import unittest
+import tests  # noqa: F401
 from fastapi import HTTPException
 from app.sheets import db
 from app.calculations import calculate_consolidated_finished_goods_register
 from app.routers import production as prod
 from app.routers import stock as stock_router
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 
 
 class TestFinishedGoodsInventory(unittest.TestCase):
@@ -116,8 +74,11 @@ class TestFinishedGoodsInventory(unittest.TestCase):
             "SaleItems": [],
             "AuditLog": [],
         })
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()
@@ -175,7 +136,7 @@ class TestFinishedGoodsInventory(unittest.TestCase):
         )
 
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.create_packaging(req, {"user_id": "USR-OWNER-01", "role": "OWNER"}))
+            asyncio.run(prod.create_packaging(req, request=make_test_request(), user={"user_id": "USR-OWNER-01", "role": "OWNER"}))
 
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("No active 1000 g SKU product found", ctx.exception.detail)
@@ -218,7 +179,7 @@ class TestFinishedGoodsInventory(unittest.TestCase):
             reference="DISP-WH-001",
             notes="Factory to Warehouse transfer",
         )
-        res = asyncio.run(prod.dispatch(disp_req, {"user_id": "USR-OWNER-01", "role": "OWNER"}))
+        res = asyncio.run(prod.dispatch(disp_req, request=make_test_request(), user={"user_id": "USR-OWNER-01", "role": "OWNER"}))
         self.assertEqual(res["status"], "DISPATCHED_NOT_SALE")
 
         # 3. Register after dispatch: Factory = 60, Warehouse = 40, Total = 100 (No packets lost or duplicated!)
@@ -242,7 +203,7 @@ class TestFinishedGoodsInventory(unittest.TestCase):
             reason="Opening physical inventory count verified",
             notes="Counted by Owner",
         )
-        res = asyncio.run(stock_router.reconcile_physical_stock(rec_req, {"user_id": "USR-OWNER-01", "role": "OWNER"}))
+        res = asyncio.run(stock_router.reconcile_physical_stock(rec_req, request=make_test_request(), current_user={"user_id": "USR-OWNER-01", "role": "OWNER"}))
         self.assertTrue(res["ok"])
         self.assertEqual(res["adjustment"], 50)
         self.assertEqual(res["new_stock"], 50)
@@ -254,7 +215,7 @@ class TestFinishedGoodsInventory(unittest.TestCase):
             physical_count=30,
             reason="Opening warehouse count",
         )
-        res_wh = asyncio.run(stock_router.reconcile_physical_stock(wh_rec, {"user_id": "USR-OWNER-01", "role": "OWNER"}))
+        res_wh = asyncio.run(stock_router.reconcile_physical_stock(wh_rec, request=make_test_request(), current_user={"user_id": "USR-OWNER-01", "role": "OWNER"}))
         self.assertTrue(res_wh["ok"])
         self.assertEqual(res_wh["adjustment"], 30)
 

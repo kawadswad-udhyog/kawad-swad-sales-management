@@ -1381,6 +1381,13 @@ async def calculate_payroll_run(req: PayrollRunCreate, request: Request, current
     )
     run_id = str(bridge_res.get("allocated_id") or existing_run_id or (bridge_res.get("record") or {}).get("payroll_run_id") or "")
     saved_run = bridge_res.get("record") or {**payroll_run_record, "payroll_run_id": run_id}
+    persisted_items = [
+        i for i in (db.get_records("PayrollItems", fresh=True) or [])
+        if str(i.get("payroll_run_id") or "").strip() == run_id
+    ]
+    returned_items = persisted_items if persisted_items else (
+        (bridge_res.get("data") or {}).get("items") or items_to_save
+    )
 
     _log_workforce_audit("CALCULATE_PAYROLL", "PayrollRuns", run_id, actor_id, f"Calculated payroll {run_month} for {len(items_to_save)} employees (Rs {round(total_net, 2)})")
     return {
@@ -1392,7 +1399,7 @@ async def calculate_payroll_run(req: PayrollRunCreate, request: Request, current
         "total_net": round(total_net, 2),
         "total_gross": round(total_gross, 2),
         "status": "DRAFT",
-        "items": items_to_save,
+        "items": returned_items,
     }
 
 
@@ -1673,16 +1680,39 @@ async def record_workforce_payment(req: WorkforcePaymentCreate, request: Request
     }, actor=actor_id)
     if post_res and post_res.get("journal_id"):
         journal_ref = str(post_res["journal_id"])
+        saved_payment = {**saved_payment, "accounting_journal_ref": journal_ref}
 
     _log_workforce_audit("RECORD_PAYMENT", "WorkforcePayments", pay_id, actor_id, f"Disbursed Rs {pay_amount} to {req.recipient_name} ({pay_type}) [Journal: {journal_ref}]")
 
+    receipt_rows = db.get_records("SalaryReceipts", fresh=True) or []
+    persisted_receipt = next(
+        (r for r in receipt_rows if str(r.get("payment_id") or "").strip() == pay_id),
+        None,
+    )
+    receipt_id = str(
+        (persisted_receipt or {}).get("receipt_id")
+        or (bridge_res.get("record") or {}).get("receipt_id")
+        or ""
+    )
+    receipt_num = str(
+        (persisted_receipt or {}).get("receipt_number")
+        or (bridge_res.get("record") or {}).get("receipt_number")
+        or ""
+    )
+    if not receipt_num and receipt_id:
+        receipt_num = f"REC-{pay_date.replace('-', '')}-{receipt_id.split('-')[-1]}"
+    saved_receipt = (
+        {**receipt_record, **persisted_receipt, "payment_id": pay_id, "receipt_id": receipt_id, "receipt_number": receipt_num}
+        if persisted_receipt
+        else {**receipt_record, "payment_id": pay_id, "receipt_id": receipt_id, "receipt_number": receipt_num}
+    )
     return {
         "ok": True,
         "message": f"Payment of Rs {pay_amount} recorded for {req.recipient_name}.",
         "payment": saved_payment,
-        "receipt": {**receipt_record, "payment_id": pay_id},
+        "receipt": saved_receipt,
         "payment_id": pay_id,
-        "receipt_id": str((bridge_res.get("record") or {}).get("receipt_id") or ""),
+        "receipt_id": receipt_id,
         "amount": pay_amount,
         "status": "COMPLETED",
         "accounting_journal_ref": journal_ref,

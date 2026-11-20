@@ -32,106 +32,13 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-if "fastapi" not in sys.modules:
-    import types
-    class MockFastAPIModule(types.ModuleType):
-        class APIRouter:
-            def __init__(self, *args, **kwargs): self.routes = []
-            def post(self, path="", **kwargs): return lambda f: f
-            def get(self, path="", **kwargs): return lambda f: f
-            def put(self, path="", **kwargs): return lambda f: f
-            def patch(self, path="", **kwargs): return lambda f: f
-            def delete(self, path="", **kwargs): return lambda f: f
-        class HTTPException(Exception):
-            def __init__(self, status_code, detail=None, headers=None):
-                super().__init__(detail)
-                self.status_code = status_code
-                self.detail = detail
-                self.headers = headers
-        class status:
-            HTTP_400_BAD_REQUEST = 400
-            HTTP_401_UNAUTHORIZED = 401
-            HTTP_403_FORBIDDEN = 403
-            HTTP_404_NOT_FOUND = 404
-            HTTP_409_CONFLICT = 409
-            HTTP_422_UNPROCESSABLE_ENTITY = 422
-            HTTP_429_TOO_MANY_REQUESTS = 429
-            HTTP_500_INTERNAL_SERVER_ERROR = 500
-            HTTP_503_SERVICE_UNAVAILABLE = 503
-        class FastAPI:
-            def __init__(self, *args, **kwargs): self.middleware = []
-            def add_middleware(self, mw, **kwargs): self.middleware.append((mw, kwargs))
-            def include_router(self, *args, **kwargs): pass
-            def on_event(self, *args, **kwargs): return lambda f: f
-        class BackgroundTasks:
-            def add_task(self, *args, **kwargs): pass
-        @staticmethod
-        def Depends(f): return f
-        @staticmethod
-        def Header(default=None, alias=None): return default
-        @staticmethod
-        def Query(default=None, **kwargs): return default
-
-    mock_mod = MockFastAPIModule("fastapi")
-    mock_mod.FastAPI = MockFastAPIModule.FastAPI
-    mock_mod.BackgroundTasks = MockFastAPIModule.BackgroundTasks
-    mock_mod.Query = MockFastAPIModule.Query
-    mock_mod.APIRouter = MockFastAPIModule.APIRouter
-    mock_mod.HTTPException = MockFastAPIModule.HTTPException
-    mock_mod.status = MockFastAPIModule.status
-    mock_mod.Depends = MockFastAPIModule.Depends
-    mock_mod.Header = MockFastAPIModule.Header
-
-    mock_mw = types.ModuleType("fastapi.middleware")
-    mock_cors = types.ModuleType("fastapi.middleware.cors")
-    mock_cors.CORSMiddleware = object
-    sys.modules["fastapi"] = mock_mod
-    sys.modules["fastapi.middleware"] = mock_mw
-    sys.modules["fastapi.middleware.cors"] = mock_cors
-
-if "fastapi.security" not in sys.modules:
-    import types
-    mock_sec = types.ModuleType("fastapi.security")
-    mock_sec.HTTPBearer = lambda **kwargs: None
-    class MockCredentials:
-        def __init__(self, scheme="Bearer", credentials=""):
-            self.scheme = scheme
-            self.credentials = credentials
-    mock_sec.HTTPAuthorizationCredentials = MockCredentials
-    sys.modules["fastapi.security"] = mock_sec
-
-if "jwt" not in sys.modules:
-    import types
-    import base64
-    class SmartMockJWT:
-        @classmethod
-        def encode(cls, payload, secret, algorithm="HS256"):
-            return "tok_mock"
-        @classmethod
-        def decode(cls, token, secret, algorithms=None):
-            return {"sub": "USR-OWNER-01", "role": "OWNER"}
-    mock_jwt = types.ModuleType("jwt")
-    mock_jwt.encode = SmartMockJWT.encode
-    mock_jwt.decode = SmartMockJWT.decode
-    sys.modules["jwt"] = mock_jwt
-
-if "pydantic" not in sys.modules:
-    import types
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items(): setattr(self, k, v)
-        def model_dump(self, *args, **kwargs): return self.__dict__
-        def dict(self, *args, **kwargs): return self.__dict__
-    def MockField(default=None, **kwargs): return default
-
-    mock_pyd = types.ModuleType("pydantic")
-    mock_pyd.BaseModel = MockBaseModel
-    mock_pyd.Field = MockField
-    sys.modules["pydantic"] = mock_pyd
-
+import tests
 from fastapi import HTTPException
 from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
-from app.routers import production as prod
+from app.routers import production as _prod_mod
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy
+
+prod = V2RouterProxy(_prod_mod)
 
 
 class TestRawMaterialIssuanceRecovery(unittest.TestCase):
@@ -147,6 +54,7 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
             db.memory_store[k] = []
         for k in list(ID_PREFIXES.keys()):
             db.memory_store.setdefault(k, [])
+        self._sim = LocalAppsScriptSimulator().start()
 
         db.memory_store.update({
             "Users": [
@@ -198,6 +106,8 @@ class TestRawMaterialIssuanceRecovery(unittest.TestCase):
         self.pa_user = {"user_id": "USR-PA-01", "role": "PA", "username": "pa_user"}
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()

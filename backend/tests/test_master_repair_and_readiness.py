@@ -12,7 +12,8 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-from app.sheets import db, ID_PREFIXES
+import tests
+from app.sheets import db, ID_PREFIXES, REQUIRED_TABS
 from app.models import (
     SaleCreate,
     SaleItemCreate,
@@ -24,11 +25,17 @@ from app.permissions import (
     validate_custom_role_permissions,
     OWNER_ONLY_PERMISSIONS,
 )
-import app.routers.production as prod_router
-import app.routers.stock as stock_router
-import app.routers.sales as sales_router
-import app.routers.users as users_router
+import app.routers.production as _prod_mod
+import app.routers.stock as _stock_mod
+import app.routers.sales as _sales_mod
+import app.routers.users as _users_mod
 from tests.phase4_fixtures import seed_basic_moong_recipe
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy
+
+prod_router = V2RouterProxy(_prod_mod)
+stock_router = V2RouterProxy(_stock_mod)
+sales_router = V2RouterProxy(_sales_mod)
+users_router = V2RouterProxy(_users_mod)
 from app.user_service import audit_user_reconciliation
 from app.calculations.inventory import (
     calculate_bulk_stock_balance,
@@ -49,7 +56,8 @@ class TestMasterRepairAndReadiness(unittest.TestCase):
         db._records_cache.clear()
         db._worksheets.clear()
         db._fail_once.clear()
-        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store = {name: [] for name in list(REQUIRED_TABS) + list(ID_PREFIXES) + ["Settings"]}
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store.update({
             "Users": [
                 {"user_id": "USR-OWNER-01", "username": "owner", "role": "OWNER", "active": "true", "full_name": "Test Owner"},
@@ -133,6 +141,8 @@ class TestMasterRepairAndReadiness(unittest.TestCase):
         self.salesman = {"user_id": "USR-SALES-01", "username": "sales_anand", "role": "SALESMAN"}
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()

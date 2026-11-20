@@ -20,6 +20,7 @@ from app.sheets import db, ID_PREFIXES, REQUIRED_TABS
 from app.routers import production as prod
 from app.calculations.production import reconcile_production_output
 from app.calculations.costing import get_latest_purchase_rate
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 
 
 class PhaseFourCleanDataContracts(unittest.TestCase):
@@ -42,8 +43,11 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
             "category": "PAPAD", "variant": "TEST", "pack_weight_g": 200,
             "selling_unit": "PACKET", "active": "true",
         }]
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         db.is_connected = self.old_connected
         db.allow_in_memory_fallback = self.old_fallback
         db.spreadsheet = self.old_spreadsheet
@@ -72,7 +76,7 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
             invoice_number="INV-P4-UNKNOWN-01",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.receive_raw_material(req, self.pa))
+            asyncio.run(prod.receive_raw_material(req, request=make_test_request(), user=self.pa))
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(db.memory_store["RawMaterials"], [])
         self.assertEqual(db.memory_store["RawMaterialLedger"], [])
@@ -83,7 +87,7 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
             confirm_physical_count=True, reason="Test physical count",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.verify_raw_material_opening_stock(req, self.owner))
+            asyncio.run(prod.verify_raw_material_opening_stock(req, request=make_test_request(), user=self.owner))
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(db.memory_store["RawMaterials"], [])
         self.assertEqual(db.memory_store["RawMaterialLedger"], [])
@@ -93,7 +97,7 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
             material_name="Moong Flour", unit="kg", category="FLOUR", rate_status="PENDING"
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.create_raw_material_master(req, self.pa))
+            asyncio.run(prod.create_raw_material_master(req, request=make_test_request(), user=self.pa))
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertEqual(db.memory_store["RawMaterials"], [])
 
@@ -101,7 +105,7 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
         req = prod.RawMaterialMasterCreate(
             material_name="  Moong   Flour ", unit="kg", category="flour", rate_status="PENDING"
         )
-        created = asyncio.run(prod.create_raw_material_master(req, self.owner))
+        created = asyncio.run(prod.create_raw_material_master(req, request=make_test_request(), user=self.owner))
         self.assertEqual(created["material_name"], "Moong Flour")
         self.assertEqual(created["current_stock"], 0)
         self.assertEqual(created["rate_status"], "PENDING")
@@ -109,11 +113,13 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
 
     def test_duplicate_master_is_rejected_before_second_id_claim(self):
         req = prod.RawMaterialMasterCreate(material_name="Moong Flour", unit="kg")
-        asyncio.run(prod.create_raw_material_master(req, self.owner))
+        asyncio.run(prod.create_raw_material_master(req, request=make_test_request(), user=self.owner))
         allocation_count = len(db.memory_store["IdAllocations"])
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(prod.create_raw_material_master(
-                prod.RawMaterialMasterCreate(material_name=" moong flour ", unit="kg"), self.owner
+                prod.RawMaterialMasterCreate(material_name=" moong flour ", unit="kg"),
+                request=make_test_request(),
+                user=self.owner,
             ))
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(len(db.memory_store["IdAllocations"]), allocation_count)
@@ -124,7 +130,7 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
             material_name="Chilli Paste", unit="kg", rate_status="CONFIRMED"
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.create_raw_material_master(request, self.owner))
+            asyncio.run(prod.create_raw_material_master(request, request=make_test_request(), user=self.owner))
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(db.memory_store["RawMaterials"], [])
 
@@ -132,7 +138,9 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
         allocation_count = len(db.memory_store["IdAllocations"])
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(prod.create_batch(
-                prod.ProductionCreate(product_id="PRD-NOT-FOUND", quantity_kg=10), self.pa
+                prod.ProductionCreate(product_id="PRD-NOT-FOUND", quantity_kg=10),
+                request=make_test_request(),
+                user=self.pa,
             ))
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(db.memory_store["ProductionBatches"], [])
@@ -141,7 +149,9 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
     def test_product_without_persisted_approved_recipe_cannot_be_scheduled(self):
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(prod.create_batch(
-                prod.ProductionCreate(product_id="PRD-P4-001", quantity_kg=10), self.pa
+                prod.ProductionCreate(product_id="PRD-P4-001", quantity_kg=10),
+                request=make_test_request(),
+                user=self.pa,
             ))
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(db.memory_store["ProductionBatches"], [])
@@ -152,13 +162,13 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
             ingredients=[{"material_name": "Flour", "quantity_per_kg": 0.8, "unit": "kg"}],
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.create_batch(req, self.pa))
+            asyncio.run(prod.create_batch(req, request=make_test_request(), user=self.pa))
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(db.memory_store["ProductionBatches"], [])
 
     def test_no_default_batch_quantity(self):
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.create_batch(prod.ProductionCreate(product_id="PRD-P4-001"), self.pa))
+            asyncio.run(prod.create_batch(prod.ProductionCreate(product_id="PRD-P4-001"), request=make_test_request(), user=self.pa))
         self.assertEqual(ctx.exception.status_code, 422)
 
     def test_milling_requires_actual_source_and_flour_master_records(self):
@@ -171,7 +181,11 @@ class PhaseFourCleanDataContracts(unittest.TestCase):
         )
         allocation_count = len(db.memory_store["IdAllocations"])
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.record_dal_milling_batch(request, self.pa))
+            asyncio.run(prod.record_dal_milling_batch(
+                request,
+                request=make_test_request(nonce="P4-MILL-NO-MASTERS"),
+                user=self.pa,
+            ))
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(db.memory_store["RawMaterialLedger"], [])
         self.assertEqual(len(db.memory_store["IdAllocations"]), allocation_count)

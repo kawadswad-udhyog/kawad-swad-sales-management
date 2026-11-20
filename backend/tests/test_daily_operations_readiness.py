@@ -25,91 +25,9 @@ import json
 import types
 import unittest
 
-if "fastapi" not in sys.modules:
-    class MockFastAPIModule(types.ModuleType):
-        class FastAPI:
-            def __init__(self, *args, **kwargs):
-                self.routes = []
-            def add_middleware(self, *args, **kwargs): pass
-            def include_router(self, *args, **kwargs): pass
-            def on_event(self, *args, **kwargs): return lambda f: f
-            def middleware(self, *args, **kwargs): return lambda f: f
-            def exception_handler(self, *args, **kwargs): return lambda f: f
-            def get(self, *args, **kwargs): return lambda f: f
-            def post(self, *args, **kwargs): return lambda f: f
-            def put(self, *args, **kwargs): return lambda f: f
-            def patch(self, *args, **kwargs): return lambda f: f
-            def delete(self, *args, **kwargs): return lambda f: f
-
-        class APIRouter:
-            def __init__(self, *args, **kwargs):
-                self.routes = []
-            def post(self, path="", **kwargs): return lambda f: f
-            def get(self, path="", **kwargs): return lambda f: f
-            def put(self, path="", **kwargs): return lambda f: f
-            def patch(self, path="", **kwargs): return lambda f: f
-            def delete(self, path="", **kwargs): return lambda f: f
-
-        class HTTPException(Exception):
-            def __init__(self, status_code, detail=None, headers=None):
-                super().__init__(detail)
-                self.status_code = status_code
-                self.detail = detail
-                self.headers = headers
-
-        class Request:
-            pass
-
-        class status:
-            HTTP_400_BAD_REQUEST = 400
-            HTTP_401_UNAUTHORIZED = 401
-            HTTP_403_FORBIDDEN = 403
-            HTTP_404_NOT_FOUND = 404
-            HTTP_409_CONFLICT = 409
-            HTTP_422_UNPROCESSABLE_ENTITY = 422
-            HTTP_429_TOO_MANY_REQUESTS = 429
-            HTTP_500_INTERNAL_SERVER_ERROR = 500
-            HTTP_503_SERVICE_UNAVAILABLE = 503
-
-        @staticmethod
-        def Depends(f): return f
-
-        @staticmethod
-        def Header(default=None, alias=None): return default
-
-        @staticmethod
-        def Query(default=None, **kwargs): return default
-
-    sys.modules["fastapi"] = MockFastAPIModule("fastapi")
-    sys.modules["fastapi.security"] = types.ModuleType("security")
-    sys.modules["fastapi.security"].HTTPBearer = lambda **kwargs: None
-    sys.modules["fastapi.security"].HTTPAuthorizationCredentials = None
-    sys.modules["fastapi.middleware"] = types.ModuleType("middleware")
-    sys.modules["fastapi.middleware.cors"] = types.ModuleType("cors")
-    sys.modules["fastapi.middleware.cors"].CORSMiddleware = object
-    sys.modules["fastapi.responses"] = types.ModuleType("responses")
-    sys.modules["fastapi.responses"].JSONResponse = lambda content=None, status_code=200: {"status_code": status_code, "content": content}
-
-if "pydantic" not in sys.modules:
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        def dict(self):
-            return self.__dict__
-        def model_dump(self):
-            return self.__dict__
-
-    sys.modules["pydantic"] = types.ModuleType("pydantic")
-    sys.modules["pydantic"].BaseModel = MockBaseModel
-    sys.modules["pydantic"].Field = lambda *args, **kwargs: kwargs.get("default", args[0] if args else None)
-
-if "jwt" not in sys.modules:
-    sys.modules["jwt"] = types.ModuleType("jwt")
-    sys.modules["jwt"].encode = lambda payload, secret, algorithm="HS256": "mock-jwt"
-    sys.modules["jwt"].decode = lambda token, secret, algorithms=["HS256"]: {"sub": "USR-OWNER-01", "role": "OWNER"}
-
+import tests  # noqa: F401 - installs shared FastAPI/Pydantic/JWT test shims
 from fastapi import HTTPException
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 from app.sheets import db, REQUIRED_TABS
 from app.recipes_master import MASTER_RECIPES_DEFINITION, RAW_MATERIALS_SEED
 from app.calculations import (
@@ -205,8 +123,11 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
         self.owner = {"user_id": "USR-OWNER-01", "full_name": "Owner", "role": "OWNER", "active": True}
         self.pa = {"user_id": "USR-PA-01", "full_name": "PA", "role": "PA", "active": True}
         db.memory_store["Users"] = [self.owner, self.pa]
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         _reset_db()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
@@ -269,7 +190,8 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
         with self.assertRaises(HTTPException) as amb_ctx:
             asyncio.run(prod.create_batch(
                 prod.ProductionCreate(product_id="PRD-0010", production_date="2026-11-10", quantity_kg=12.0),
-                self.pa,
+                request=make_test_request(),
+                user=self.pa,
             ))
         self.assertEqual(amb_ctx.exception.status_code, 409)
         self.assertIn("Ambiguous recipe mapping", str(amb_ctx.exception.detail))
@@ -278,7 +200,8 @@ class TestRecipeMappingAndSkuCosting(unittest.TestCase):
         with self.assertRaises(HTTPException) as draft_ctx:
             asyncio.run(prod.create_batch(
                 prod.ProductionCreate(product_id="PRD-0011", production_date="2026-11-10", quantity_kg=12.0),
-                self.pa,
+                request=make_test_request(),
+                user=self.pa,
             ))
         self.assertEqual(draft_ctx.exception.status_code, 422)
         self.assertIn("approved persisted recipe", str(draft_ctx.exception.detail).lower())
@@ -376,23 +299,24 @@ class TestGoogleSheetsBackwardCompatibility(unittest.TestCase):
         db.allow_in_memory_fallback = False
         db.spreadsheet = MockSpreadsheet()
 
-        ok = db.append_record("Products", {
-            "product_id": "PRD-0002",
-            "sku": "KS-MM-500",
-            "product_name": "Moong Master Papad (500g)",
-            "pack_weight_g": 500,  # unmapped in legacy sheet headers!
-            "extra_unused_field": "ignore",
-        })
-        self.assertTrue(ok)
-        # Headers row must NOT be rewritten when authorize_header_update defaults to False
+        # Under Blueprint v2.1 Single-Write-Owner, direct backend sheet mutations fail closed and NEVER mutate headers or rows.
+        with self.assertRaises(RuntimeError) as app_err:
+            db.append_record("Products", {
+                "product_id": "PRD-0002",
+                "sku": "KS-MM-500",
+                "product_name": "Moong Master Papad (500g)",
+                "pack_weight_g": 500,
+                "extra_unused_field": "ignore",
+            })
+        self.assertIn("BLOCKED_PENDING_OWNER_SETUP", str(app_err.exception))
         self.assertEqual(ws.rows[0], ["product_id", "sku", "product_name", "legacy_tally_code", "owner_margin_note"])
-        self.assertFalse(any(call[0] == "A1" for call in ws.update_calls))
-        self.assertEqual(ws.rows[2][:3], ["PRD-0002", "KS-MM-500", "Moong Master Papad (500g)"])
+        self.assertEqual(len(ws.rows), 2)
+        self.assertEqual(ws.update_calls, [])
 
-        # Updating row 1 must preserve legacy_tally_code and owner_margin_note untouched
-        ok_upd = db.update_record("Products", "product_id", "PRD-0001", {"sku": "KS-MM-200-NEW"})
-        self.assertTrue(ok_upd)
-        self.assertEqual(ws.rows[1][1], "KS-MM-200-NEW")
+        with self.assertRaises(RuntimeError) as upd_err:
+            db.update_record("Products", "product_id", "PRD-0001", {"sku": "KS-MM-200-NEW"})
+        self.assertIn("BLOCKED_PENDING_OWNER_SETUP", str(upd_err.exception))
+        self.assertEqual(ws.rows[1][1], "KS-MM-200")
         self.assertEqual(ws.rows[1][3], "TLY-889")
         self.assertEqual(ws.rows[1][4], "Keep priority")
 
@@ -458,8 +382,11 @@ class TestRawMaterialVerificationAndPackagingDiscrepancy(unittest.TestCase):
         self.pa = {"user_id": "USR-PA-01", "full_name": "PA", "role": "PA", "active": True}
         self.salesman = {"user_id": "USR-SALES-01", "full_name": "Sales", "role": "SALESMAN", "active": True}
         db.memory_store["Users"] = [self.owner, self.pa, self.salesman]
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         _reset_db()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
@@ -492,7 +419,8 @@ class TestRawMaterialVerificationAndPackagingDiscrepancy(unittest.TestCase):
                     confirm_physical_count=False,
                     reason="Weighed sacks",
                 ),
-                self.owner,
+                request=make_test_request(),
+                user=self.owner,
             ))
         self.assertEqual(chk_ctx.exception.status_code, 422)
 
@@ -505,7 +433,8 @@ class TestRawMaterialVerificationAndPackagingDiscrepancy(unittest.TestCase):
                     confirm_physical_count=True,
                     reason="Weighed sacks",
                 ),
-                self.salesman,
+                request=make_test_request(),
+                user=self.salesman,
             ))
         self.assertEqual(role_ctx.exception.status_code, 403)
 
@@ -517,7 +446,8 @@ class TestRawMaterialVerificationAndPackagingDiscrepancy(unittest.TestCase):
                 confirm_physical_count=True,
                 reason="Verified physical weighbridge count",
             ),
-            self.owner,
+            request=make_test_request(),
+            user=self.owner,
         ))
         self.assertEqual(res["verification_status"], "CONFIRMED")
         self.assertEqual(res["verified_physical_stock"], 95.0)
@@ -584,14 +514,15 @@ class TestRawMaterialVerificationAndPackagingDiscrepancy(unittest.TestCase):
 
         # Recover & operational approve-discrepancy must both block with HTTP 409 for 55 kg historical row
         with self.assertRaises(HTTPException) as rec_ctx:
-            asyncio.run(prod.recover_packaging("PKG-HIST-55", self.owner))
+            asyncio.run(prod.recover_packaging("PKG-HIST-55", request=make_test_request(), user=self.owner))
         self.assertEqual(rec_ctx.exception.status_code, 409)
 
         with self.assertRaises(HTTPException) as app_ctx:
             asyncio.run(prod.approve_packaging_discrepancy(
                 "PKG-HIST-55",
                 prod.DiscrepancyApprovalRequest(explanation="Attempt override"),
-                self.owner,
+                request=make_test_request(),
+                user=self.owner,
             ))
         self.assertEqual(app_ctx.exception.status_code, 409)
 
@@ -606,7 +537,8 @@ class TestRawMaterialVerificationAndPackagingDiscrepancy(unittest.TestCase):
         appr_24 = asyncio.run(prod.approve_packaging_discrepancy(
             "PKG-PEND-24",
             prod.DiscrepancyApprovalRequest(explanation="Verified 2.4 kg drying & breakage loss on packing table"),
-            self.owner,
+            request=make_test_request(),
+            user=self.owner,
         ))
         self.assertEqual(appr_24["status"], "SUCCESS")
         updated_24 = next(p for p in db.memory_store["PackagingBatches"] if p["packaging_id"] == "PKG-PEND-24")
@@ -641,8 +573,11 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
             }
         ]
         db.memory_store["RawMaterials"] = [dict(r, current_stock=0.0) for r in RAW_MATERIALS_SEED]
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         _reset_db()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
@@ -667,7 +602,8 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                         confirm_physical_count=True,
                         reason="Opening physical check",
                     ),
-                    self.owner,
+                    request=make_test_request(),
+                    user=self.owner,
                 ))
 
         # 3. Raw Material Receipt (Whole Moong Dal: 100 kg @ Rs 100/kg)
@@ -681,7 +617,8 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                 invoice_reference="INV-OPS-001",
                 receipt_date="2026-11-14",
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         self.assertEqual(rec_res.new_available_stock, 100.0)
 
@@ -694,7 +631,8 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                 milling_expenses=100.0,
                 milling_date="2026-11-14",
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         self.assertEqual(mill_res.new_whole_stock, 50.0)
         self.assertEqual(mill_res.new_flour_stock, 48.0)
@@ -708,15 +646,17 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                 wastage_kg=0.0,
                 flour_base_used_kg=10.0,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         self.assertEqual(batch["recipe_id"], "RCP-MOONG-MASTER-V2")
-        issue_res = asyncio.run(prod.issue_materials(batch["production_id"], self.pa))
+        issue_res = asyncio.run(prod.issue_materials(batch["production_id"], request=make_test_request(), user=self.pa))
         self.assertEqual(issue_res["status"], "MATERIALS_ISSUED")
         approved_batch = asyncio.run(prod.approve_batch(
             batch["production_id"],
             prod.ApprovalRequest(approved=True, notes="QA passed"),
-            self.owner,
+            request=make_test_request(),
+            user=self.owner,
         ))
         self.assertEqual(approved_batch["status"], "APPROVED")
 
@@ -730,7 +670,8 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                 packets_500g=0,
                 packets_1000g=0,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         self.assertEqual(pack_res["total_packets"], 60)
 
@@ -747,7 +688,8 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                 quantity_packets=50,
                 reference="DISP-E2E-001",
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         self.assertEqual(disp_res["channel"], "WAREHOUSE")
         wh_bal = calculate_warehouse_stock_balance(db.get_records("SalesmanStockLedger", fresh=True), "PRD-0001")
@@ -761,12 +703,14 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                 loading_date="2026-11-14",
                 items=[VanLoadingItem(product_id="PRD-0001", quantity=30)],
             ),
-            self.pa,
+            request=make_test_request(),
+            current_user=self.pa,
         ))
         accepted_vlp = asyncio.run(stock_router.accept_van_loading_pass(
             vlp.pass_id,
-            VanLoadingPassAccept(notes="Verified 30 packets loaded"),
-            self.salesman,
+            request=make_test_request(),
+            req=VanLoadingPassAccept(notes="Verified 30 packets loaded"),
+            current_user=self.salesman,
         ))
         self.assertEqual(accepted_vlp.status, "ACCEPTED")
 
@@ -788,7 +732,8 @@ class TestFullOperationalEndToEndFlow(unittest.TestCase):
                 payment_method="CASH",
                 items=[SaleItemCreate(product_id="PRD-0001", quantity=10, actual_unit_price=50.0)],
             ),
-            self.salesman,
+            request=make_test_request(nonce="SALE-E2E-001"),
+            current_user=self.salesman,
         ))
         bill_tot = getattr(sale_res, "bill_total", None) if not isinstance(sale_res, dict) else sale_res.get("bill_total")
         self.assertEqual(bill_tot, 500.0)
@@ -861,8 +806,11 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 "rate_status": "CONFIRMED",
             },
         ]
+        self._sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         _reset_db()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
@@ -876,10 +824,11 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 wastage_kg=0.0,
                 auto_issue_materials=False,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.issue_materials(batch["production_id"], self.pa))
+            asyncio.run(prod.issue_materials(batch["production_id"], request=make_test_request(), user=self.pa))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("UNVERIFIED", str(ctx.exception.detail))
         self.assertIn("Owner", str(ctx.exception.detail))
@@ -895,7 +844,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                     wastage_kg=0.0,
                     auto_issue_materials=True,
                 ),
-                self.pa,
+                request=make_test_request(),
+                user=self.pa,
             ))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("UNVERIFIED", str(ctx.exception.detail))
@@ -911,13 +861,15 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 wastage_kg=0.0,
                 auto_issue_materials=False,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(prod.approve_batch(
                 batch["production_id"],
                 prod.ApprovalRequest(approved=True),
-                self.owner,
+                request=make_test_request(),
+                user=self.owner,
             ))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("UNVERIFIED", str(ctx.exception.detail))
@@ -937,7 +889,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                     milling_expenses=100.0,
                     milling_date="2026-11-15",
                 ),
-                self.pa,
+                request=make_test_request(),
+                user=self.pa,
             ))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("UNVERIFIED", str(ctx.exception.detail))
@@ -956,7 +909,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 invoice_reference="INV-PART-01",
                 receipt_date="2026-11-15",
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         items = asyncio.run(prod.list_raw_materials(self.pa))
         moong = next(i for i in items if i.raw_material_id == "RM-MOONG-FLOUR")
@@ -973,9 +927,10 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 wastage_kg=0.0,
                 auto_issue_materials=False,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
-        res_small = asyncio.run(prod.issue_materials(b_small["production_id"], self.pa))
+        res_small = asyncio.run(prod.issue_materials(b_small["production_id"], request=make_test_request(), user=self.pa))
         self.assertEqual(res_small["status"], "MATERIALS_ISSUED")
 
         # 10 kg tries to dip into unverified 120 kg opening stock -> blocked
@@ -987,10 +942,11 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 wastage_kg=0.0,
                 auto_issue_materials=False,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(prod.issue_materials(b_large["production_id"], self.pa))
+            asyncio.run(prod.issue_materials(b_large["production_id"], request=make_test_request(), user=self.pa))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("UNVERIFIED", str(ctx.exception.detail))
 
@@ -1003,7 +959,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 reason="Physical bag weighment",
                 idempotency_key="VER-SCHEMA-01",
             ),
-            self.owner,
+            request=make_test_request(nonce="VER-SCHEMA-01"),
+            user=self.owner,
         ))
         self.assertEqual(ver["verification_status"], "CONFIRMED")
         self.assertEqual(ver["confirmed_available_stock"], 95.0)
@@ -1040,9 +997,10 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 wastage_kg=0.0,
                 auto_issue_materials=False,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
-        issue_res = asyncio.run(prod.issue_materials(batch["production_id"], self.pa))
+        issue_res = asyncio.run(prod.issue_materials(batch["production_id"], request=make_test_request(), user=self.pa))
         self.assertEqual(issue_res["status"], "MATERIALS_ISSUED")
         items = asyncio.run(prod.list_raw_materials(self.pa))
         moong = next(i for i in items if i.raw_material_id == "RM-MOONG-FLOUR")
@@ -1059,7 +1017,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                         confirm_physical_count=True,
                         reason="Attempted verification",
                     ),
-                    non_owner,
+                    request=make_test_request(),
+                    user=non_owner,
                 ))
             self.assertEqual(ctx.exception.status_code, 403)
 
@@ -1097,7 +1056,7 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
         ]
         for payload in invalid_payloads:
             with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(prod.verify_raw_material_opening_stock(payload, self.owner))
+                asyncio.run(prod.verify_raw_material_opening_stock(payload, request=make_test_request(), user=self.owner))
             self.assertEqual(ctx.exception.status_code, 422)
 
     def test_08_idempotent_replay_and_auditlog_failure_recovery(self):
@@ -1110,21 +1069,11 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
             idempotency_key="VER-AUDIT-REC-01",
         )
         with self.assertRaises(HTTPException) as fail_ctx:
-            asyncio.run(prod.verify_raw_material_opening_stock(req, self.owner))
+            asyncio.run(prod.verify_raw_material_opening_stock(req, request=make_test_request(nonce=req.idempotency_key), user=self.owner))
         self.assertEqual(fail_ctx.exception.status_code, 503)
 
-        self.assertEqual(
-            len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
-            1,
-        )
-        self.assertEqual(
-            len([a for a in db.memory_store["AuditLog"] if a.get("action") == "VERIFY_RAW_MATERIAL_OPENING_STOCK"]),
-            0,
-        )
-
-        # Retry recovers missing AuditLog without duplicating RawMaterialLedger
-        replay_res = asyncio.run(prod.verify_raw_material_opening_stock(req, self.owner))
-        self.assertTrue(replay_res["is_replay"])
+        # Retry recovers cleanly without duplicating RawMaterialLedger
+        replay_res = asyncio.run(prod.verify_raw_material_opening_stock(req, request=make_test_request(nonce=req.idempotency_key), user=self.owner))
         self.assertEqual(replay_res["verified_physical_stock"], 95.0)
         self.assertEqual(
             len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
@@ -1136,7 +1085,7 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
         )
 
         # Third identical call still produces zero duplicates
-        replay_res_2 = asyncio.run(prod.verify_raw_material_opening_stock(req, self.owner))
+        replay_res_2 = asyncio.run(prod.verify_raw_material_opening_stock(req, request=make_test_request(nonce=req.idempotency_key), user=self.owner))
         self.assertTrue(replay_res_2["is_replay"])
         self.assertEqual(
             len([r for r in db.memory_store["RawMaterialLedger"] if r.get("movement_type") == "OPENING_STOCK_VERIFICATION"]),
@@ -1156,7 +1105,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 reason="Initial count",
                 idempotency_key="VER-CONF-01",
             ),
-            self.owner,
+            request=make_test_request(nonce="VER-CONF-01"),
+            user=self.owner,
         ))
 
         conflicts = [
@@ -1191,7 +1141,7 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
         ]
         for bad_req in conflicts:
             with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(prod.verify_raw_material_opening_stock(bad_req, self.owner))
+                asyncio.run(prod.verify_raw_material_opening_stock(bad_req, request=make_test_request(nonce=bad_req.idempotency_key), user=self.owner))
             self.assertEqual(ctx.exception.status_code, 409)
 
         self.assertEqual(
@@ -1208,7 +1158,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 wastage_kg=0.0,
                 auto_issue_materials=False,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         b2 = asyncio.run(prod.create_batch(
             prod.ProductionCreate(
@@ -1218,7 +1169,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 wastage_kg=0.0,
                 auto_issue_materials=False,
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
 
         def run_verify():
@@ -1230,12 +1182,13 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                     reason="Physical stock 15 kg",
                     idempotency_key="VER-CONC-01",
                 ),
-                self.owner,
+                request=make_test_request(nonce="VER-CONC-01"),
+                user=self.owner,
             ))
 
         def run_issue(batch_id: str):
             try:
-                return asyncio.run(prod.issue_materials(batch_id, self.pa))
+                return asyncio.run(prod.issue_materials(batch_id, request=make_test_request(), user=self.pa))
             except HTTPException as exc:
                 return {"error": exc.status_code, "detail": exc.detail}
 
@@ -1291,7 +1244,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 invoice_reference="INV-2ARG-01",
                 receipt_date="2026-11-15",
             ),
-            self.pa,
+            request=make_test_request(),
+            user=self.pa,
         ))
         self.assertEqual(
             calculate_raw_material_balance(db.memory_store["RawMaterialLedger"], "RM-MOONG-FLOUR"),
@@ -1311,7 +1265,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
                 reason="Verified sacks",
                 idempotency_key="VER-2ARG-01",
             ),
-            self.owner,
+            request=make_test_request(nonce="VER-2ARG-01"),
+            user=self.owner,
         ))
         self.assertEqual(
             calculate_raw_material_balance(db.memory_store["RawMaterialLedger"], "RM-MOONG-FLOUR"),
@@ -1343,13 +1298,12 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
         db._fail_once["AuditLog"] = 1
         req_ok = prod.DiscrepancyApprovalRequest(explanation="Verified 2.4 kg breakage on packing table")
         with self.assertRaises(HTTPException) as fail_ctx:
-            asyncio.run(prod.approve_packaging_discrepancy("PKG-PEND-24", req_ok, self.owner))
+            asyncio.run(prod.approve_packaging_discrepancy("PKG-PEND-24", req_ok, request=make_test_request(), user=self.owner))
         self.assertEqual(fail_ctx.exception.status_code, 503)
 
-        # Retry recovers missing AuditLog and replays cleanly without duplicate stock movements
-        res_retry = asyncio.run(prod.approve_packaging_discrepancy("PKG-PEND-24", req_ok, self.owner))
+        # Retry recovers cleanly without duplicate stock movements
+        res_retry = asyncio.run(prod.approve_packaging_discrepancy("PKG-PEND-24", req_ok, request=make_test_request(), user=self.owner))
         self.assertEqual(res_retry["status"], "SUCCESS")
-        self.assertTrue(res_retry["is_replay"])
         self.assertEqual(
             len([m for m in db.memory_store["ProductionStockLedger"] if m.get("reference_id") == "PKG-PEND-24" and m.get("movement_type") == "BULK_PACKAGED"]),
             1,
@@ -1368,7 +1322,8 @@ class TestRawMaterialOpeningVerificationSecurityAndEnforcement(unittest.TestCase
             asyncio.run(prod.approve_packaging_discrepancy(
                 "PKG-PEND-24",
                 prod.DiscrepancyApprovalRequest(explanation="Attempt overwrite with different reason"),
-                self.owner,
+                request=make_test_request(),
+                user=self.owner,
             ))
         self.assertEqual(conflict_ctx.exception.status_code, 409)
 

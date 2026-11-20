@@ -10,76 +10,19 @@ if backend_dir not in sys.path:
 
 import asyncio
 import unittest
-import types
 
-if "fastapi" not in sys.modules:
-    class MockFastAPIModule(types.ModuleType):
-        class APIRouter:
-            def __init__(self, *args, **kwargs):
-                self.routes = []
-            def post(self, path="", **kwargs):
-                return lambda f: f
-            def get(self, path="", **kwargs):
-                return lambda f: f
-            def put(self, path="", **kwargs):
-                return lambda f: f
-            def patch(self, path="", **kwargs):
-                return lambda f: f
-            def delete(self, path="", **kwargs):
-                return lambda f: f
-        class HTTPException(Exception):
-            def __init__(self, status_code, detail=None, headers=None):
-                super().__init__(detail)
-                self.status_code = status_code
-                self.detail = detail
-                self.headers = headers
-        class status:
-            HTTP_400_BAD_REQUEST = 400
-            HTTP_401_UNAUTHORIZED = 401
-            HTTP_403_FORBIDDEN = 403
-            HTTP_404_NOT_FOUND = 404
-            HTTP_409_CONFLICT = 409
-            HTTP_422_UNPROCESSABLE_ENTITY = 422
-            HTTP_429_TOO_MANY_REQUESTS = 429
-            HTTP_500_INTERNAL_SERVER_ERROR = 500
-            HTTP_503_SERVICE_UNAVAILABLE = 503
-        @staticmethod
-        def Depends(f): return f
-        @staticmethod
-        def Header(default=None, alias=None): return default
-
-    sys.modules["fastapi"] = MockFastAPIModule("fastapi")
-    sys.modules["fastapi.security"] = types.ModuleType("security")
-    sys.modules["fastapi.security"].HTTPBearer = lambda **kwargs: None
-    sys.modules["fastapi.security"].HTTPAuthorizationCredentials = None
-
-if "pydantic" not in sys.modules:
-    class MockBaseModel:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        def dict(self):
-            return self.__dict__
-        def model_dump(self):
-            return self.__dict__
-
-    sys.modules["pydantic"] = types.ModuleType("pydantic")
-    sys.modules["pydantic"].BaseModel = MockBaseModel
-    sys.modules["pydantic"].Field = lambda *args, **kwargs: kwargs.get("default", args[0] if args else None)
-
-if "jwt" not in sys.modules:
-    sys.modules["jwt"] = types.ModuleType("jwt")
-    sys.modules["jwt"].encode = lambda payload, secret, algorithm="HS256": "mock-jwt"
-    sys.modules["jwt"].decode = lambda token, secret, algorithms=["HS256"]: {"sub": "USR-000001", "role": "SALESMAN"}
-
+import tests
 from fastapi import HTTPException
-from app.sheets import db
-from app.routers import production as prod
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
+from app.routers import production as _prod_mod
 from app.recipes_master import (
     MASTER_RECIPES_DEFINITION,
     RAW_MATERIALS_SEED,
     calculate_recipe_cost,
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy
+
+prod = V2RouterProxy(_prod_mod)
 
 class TestRecipeMasterV2(unittest.TestCase):
     def setUp(self):
@@ -90,8 +33,9 @@ class TestRecipeMasterV2(unittest.TestCase):
         db._records_cache.clear()
         db._worksheets.clear()
         db._fail_once.clear()
-        for key in list(db.memory_store):
+        for key in list(REQUIRED_TABS.keys()) + list(ID_PREFIXES.keys()):
             db.memory_store[key] = []
+        self._sim = LocalAppsScriptSimulator().start()
         db.memory_store.update({
             "Products": [
                 {"product_id": "PRD-MOONG-MASTER", "sku": "KS-MM-200", "product_name": "Moong Master Papad", "active": "true", "pack_weight_g": 200},
@@ -118,6 +62,8 @@ class TestRecipeMasterV2(unittest.TestCase):
         self.salesman = {"user_id": "USR-SALES", "role": "SALESMAN"}
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db._records_cache.clear()

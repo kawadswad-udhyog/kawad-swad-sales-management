@@ -9,7 +9,8 @@ import asyncio
 from unittest.mock import patch, MagicMock
 from decimal import Decimal
 
-from app.sheets import db
+import tests
+from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
 from app.calculations import (
     calculate_raw_material_balance,
     calculate_bulk_stock_balance,
@@ -22,39 +23,58 @@ from app.calculations import (
     validate_recipe_formulation,
 )
 from app.routers.production import (
-    receive_raw_material,
+    receive_raw_material as _raw_receive_raw_material,
     RawMaterialReceiveRequest,
-    record_dal_milling_batch,
+    record_dal_milling_batch as _raw_record_dal_milling_batch,
     DalMillingCreate,
-    create_batch,
-    approve_batch,
-    create_packaging,
+    create_batch as _raw_create_batch,
+    approve_batch as _raw_approve_batch,
+    create_packaging as _raw_create_packaging,
     ProductionCreate,
     PackagingCreate,
     ApprovalRequest,
-    save_recipe,
+    save_recipe as _raw_save_recipe,
     RecipeSave,
     RecipeItemInput,
 )
-from app.routers import sales
-from app.routers import stock
-from app.routers import closing
+from app.routers import sales as _sales_mod
+from app.routers import stock as _stock_mod
+from app.routers import closing as _closing_mod
 from app.models import (
     StockIssueCreate,
     SaleCreate,
     SaleItemCreate,
     DailyClosingCreate,
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy, wrap_v2_endpoint
+
+receive_raw_material = wrap_v2_endpoint(_raw_receive_raw_material)
+record_dal_milling_batch = wrap_v2_endpoint(_raw_record_dal_milling_batch)
+create_batch = wrap_v2_endpoint(_raw_create_batch)
+approve_batch = wrap_v2_endpoint(_raw_approve_batch)
+create_packaging = wrap_v2_endpoint(_raw_create_packaging)
+save_recipe = wrap_v2_endpoint(_raw_save_recipe)
+sales = V2RouterProxy(_sales_mod)
+stock = V2RouterProxy(_stock_mod)
+closing = V2RouterProxy(_closing_mod)
 
 
-
-from app.sheets import db, REQUIRED_TABS
+def _seed_row(tab: str, record: dict) -> None:
+    db.memory_store.setdefault(tab, []).append(dict(record))
 
 
 class TestERPFullLifecycle(unittest.TestCase):
     def setUp(self):
-        for tab in REQUIRED_TABS:
+        self._orig_connected = db.is_connected
+        self._orig_fallback = db.allow_in_memory_fallback
+        db.is_connected = False
+        db.allow_in_memory_fallback = True
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
+        for tab in list(REQUIRED_TABS) + list(ID_PREFIXES):
             db.memory_store[tab] = []
+        self._sim = LocalAppsScriptSimulator().start()
         self.owner_user = {
             "user_id": "USR-OWNER-01",
             "full_name": "Test Owner",
@@ -72,10 +92,10 @@ class TestERPFullLifecycle(unittest.TestCase):
         }
 
         # Seed master data
-        db.append_record("Users", self.owner_user)
-        db.append_record("Users", self.salesman_user)
+        _seed_row("Users", self.owner_user)
+        _seed_row("Users", self.salesman_user)
 
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-WHOLE-MOONG-DAL",
             "material_name": "Whole Moong Dal",
             "category": "WHOLE_GRAIN",
@@ -84,7 +104,7 @@ class TestERPFullLifecycle(unittest.TestCase):
             "rate_per_unit": 110.0,
             "rate_status": "CONFIRMED",
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-MOONG-FLOUR",
             "material_name": "Moong Dal Flour",
             "category": "FLOUR",
@@ -93,7 +113,7 @@ class TestERPFullLifecycle(unittest.TestCase):
             "rate_per_unit": 120.0,
             "rate_status": "CONFIRMED",
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-BLACK-PEPPER",
             "material_name": "Black Pepper",
             "category": "SPICE",
@@ -103,7 +123,7 @@ class TestERPFullLifecycle(unittest.TestCase):
             "rate_status": "CONFIRMED",
             "opening_stock_verified": "true",
         })
-        db.append_record("RawMaterials", {
+        _seed_row("RawMaterials", {
             "raw_material_id": "RM-SALT",
             "material_name": "Salt",
             "category": "SALT",
@@ -114,7 +134,7 @@ class TestERPFullLifecycle(unittest.TestCase):
             "opening_stock_verified": "true",
         })
 
-        db.append_record("Products", {
+        _seed_row("Products", {
             "product_id": "PRD-MOONG-200",
             "product_name": "Moong Master Papad",
             "sku": "MM-200G",
@@ -124,6 +144,15 @@ class TestERPFullLifecycle(unittest.TestCase):
             "wholesale_packet_price": 50.0,
             "retailer_packet_price": 55.0,
         })
+
+    def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
+        db.is_connected = self._orig_connected
+        db.allow_in_memory_fallback = self._orig_fallback
+        db._records_cache.clear()
+        db._worksheets.clear()
+        db._fail_once.clear()
 
     # =========================================================================
     # 1. RAW MATERIAL RECEIVING & COSTING INTEGRITY
@@ -162,7 +191,7 @@ class TestERPFullLifecycle(unittest.TestCase):
     def test_stage2_milling_transformation_and_costing(self):
         """Verify milling consumes whole dal, credits flour, and absorbs milling expense."""
         # Setup: initial 100 kg whole dal
-        db.append_record("RawMaterialLedger", {
+        _seed_row("RawMaterialLedger", {
             "raw_material_txn_id": "RML-SEED-01",
             "txn_datetime": "2026-10-29T10:00:00Z",
             "raw_material_id": "RM-WHOLE-MOONG-DAL",
@@ -226,7 +255,7 @@ class TestERPFullLifecycle(unittest.TestCase):
     def test_stage3_papad_production_material_issue_and_approval(self):
         """Verify valid recipe issues flour and credits bulk stock upon batch approval."""
         # 1. Seed 100 kg flour in ledger
-        db.append_record("RawMaterialLedger", {
+        _seed_row("RawMaterialLedger", {
             "raw_material_txn_id": "RML-FLOUR-01",
             "txn_datetime": "2026-10-29T10:00:00Z",
             "raw_material_id": "RM-MOONG-FLOUR",
@@ -285,7 +314,7 @@ class TestERPFullLifecycle(unittest.TestCase):
     def test_stage4_packaging_bulk_to_packets(self):
         """Verify bulk papad is converted into finished packet SKUs."""
         # Seed 10 kg bulk papad in ProductionStockLedger
-        db.append_record("ProductionStockLedger", {
+        _seed_row("ProductionStockLedger", {
             "movement_id": "MVT-BULK-01",
             "txn_datetime": "2026-10-29T11:00:00Z",
             "movement_type": "BULK_PRODUCED",
@@ -334,7 +363,7 @@ class TestERPFullLifecycle(unittest.TestCase):
     def test_stage5_stock_issuance_and_salesman_billing(self):
         """Verify finished goods are issued to salesman and billed with stock deduction."""
         # 1. Company warehouse stock: 50 packets
-        db.append_record("SalesmanStockLedger", {
+        _seed_row("SalesmanStockLedger", {
             "stock_txn_id": "STK-REC-01",
             "txn_datetime": "2026-10-29T12:00:00Z",
             "salesman_user_id": "",
@@ -366,7 +395,7 @@ class TestERPFullLifecycle(unittest.TestCase):
         self.assertEqual(salesman_bal, 20)
 
         # 3. Salesman sells 5 packets to retailer
-        db.append_record("Customers", {
+        _seed_row("Customers", {
             "customer_id": "CUS-001",
             "shop_name": "Shree Ram Kirana Store",
             "active": "true",
@@ -423,14 +452,14 @@ class TestERPFullLifecycle(unittest.TestCase):
     def test_stage6_daily_closing_reconciliation(self):
         """Verify daily closing reconciles opening cash, collections, and physical returns."""
         # Salesman collected Rs 275 in cash
-        db.append_record("Sales", {
+        _seed_row("Sales", {
             "sale_id": "SALE-01",
             "sale_datetime": "2026-10-29T14:00:00Z",
             "salesman_user_id": "USR-SALES-01",
             "bill_total": 275.0,
             "txn_status": "COMPLETE",
         })
-        db.append_record("Payments", {
+        _seed_row("Payments", {
             "payment_id": "PAY-01",
             "sale_id": "SALE-01",
             "payment_datetime": "2026-10-29T14:00:00Z",

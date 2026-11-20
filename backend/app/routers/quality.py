@@ -561,7 +561,7 @@ async def close_complaint(
         invalidate_tabs=["ComplaintsRecalls"],
     )
     db.log_audit(actor, "CLOSE_COMPLAINT", "ComplaintsRecalls", complaint_id, reason=corrective_action)
-    return {"ok": True, "complaint_id": complaint_id, "status": "CLOSED", **res}
+    return {"ok": True, **res, "complaint_id": complaint_id, "status": "CLOSED", "bridge_status": res.get("status")}
 
 
 @router.get("/summary")

@@ -22,6 +22,7 @@ from decimal import Decimal
 os.environ["SALES_TESTING"] = "1"
 os.environ["SALES_AUTH_MOCK"] = "1"
 
+import tests
 from app.sheets import db, ID_PREFIXES
 from app.timeutil import now_iso
 from app.models import SaleCreate, SaleItemCreate, SalePaymentCreate
@@ -38,6 +39,7 @@ from app.accounting.journal_engine import (
     calculate_trial_balance,
     reverse_journal_voucher,
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 
 
 class TestPhase141SalesPayment(unittest.TestCase):
@@ -51,9 +53,11 @@ class TestPhase141SalesPayment(unittest.TestCase):
         db._fail_once.clear()
         reset_cross_process_state()
         db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        self._sim = LocalAppsScriptSimulator().start()
         self._seed_core_data()
 
     def tearDown(self):
+        self._sim.stop()
         reset_cross_process_state()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
@@ -63,19 +67,19 @@ class TestPhase141SalesPayment(unittest.TestCase):
 
     def _seed_core_data(self):
         # Users
-        db.append_record("Users", {
+        db.memory_store["Users"].append({
             "user_id": "USR-OWNER-01",
             "username": "owner_ramesh",
             "role": "OWNER",
             "active": "TRUE",
         })
-        db.append_record("Users", {
+        db.memory_store["Users"].append({
             "user_id": "USR-PA-01",
             "username": "pa_suresh",
             "role": "PA",
             "active": "TRUE",
         })
-        db.append_record("Users", {
+        db.memory_store["Users"].append({
             "user_id": "USR-SALES-01",
             "username": "sales_vikram",
             "role": "SALESMAN",
@@ -83,14 +87,14 @@ class TestPhase141SalesPayment(unittest.TestCase):
         })
 
         # Customers
-        db.append_record("Customers", {
+        db.memory_store["Customers"].append({
             "customer_id": "CUS-REG-01",
             "shop_name": "Sharma Kirana",
             "credit_limit": 5000.0,
             "max_overdue_days": 30,
             "active": "TRUE",
         })
-        db.append_record("Customers", {
+        db.memory_store["Customers"].append({
             "customer_id": "CUS-TIGHT-01",
             "shop_name": "Verma Store",
             "credit_limit": 1000.0,
@@ -99,7 +103,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         })
 
         # Products
-        db.append_record("Products", {
+        db.memory_store["Products"].append({
             "product_id": "PRD-PAPAD-200G",
             "product_name": "Moong Papad 200g",
             "sku": "MP-200G",
@@ -109,7 +113,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         })
 
         # Stock for salesman
-        db.append_record("SalesmanStockLedger", {
+        db.memory_store["SalesmanStockLedger"].append({
             "stock_txn_id": "STK-INIT-01",
             "txn_datetime": now_iso(),
             "salesman_user_id": "USR-SALES-01",
@@ -159,7 +163,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=72, actual_unit_price=50.0)],
             idempotency_key="multi-coll-sale-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
         self.assertEqual(sale.total_amount, 3600.0)
         self.assertEqual(sale.cash_collected, 1600.0)
@@ -170,6 +174,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         pay1 = asyncio.run(record_sale_payment(
             sale_id=sale_id,
             payload=SalePaymentCreate(amount=600.0, payment_method="UPI", notes="Later UPI collection"),
+            request=make_test_request(),
             current_user=self.salesman_user,
         ))
         self.assertTrue(pay1["ok"])
@@ -180,6 +185,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         pay2 = asyncio.run(record_sale_payment(
             sale_id=sale_id,
             payload=SalePaymentCreate(amount=1400.0, payment_method="CASH", notes="Final cash collection"),
+            request=make_test_request(),
             current_user=self.salesman_user,
         ))
         self.assertTrue(pay2["ok"])
@@ -203,6 +209,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         cancel_res = asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="Customer returned entire batch, cancel bill and all collections"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
         self.assertTrue(cancel_res["ok"])
@@ -247,13 +254,14 @@ class TestPhase141SalesPayment(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=40, actual_unit_price=50.0)],
             idempotency_key="settle-sale-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
 
         # Cancel sale
         asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="Customer cancelled order"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
 
@@ -281,13 +289,14 @@ class TestPhase141SalesPayment(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=40, actual_unit_price=50.0)],
             idempotency_key="ledger-recon-sale-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
 
         # Record partial collection of ₹500
         asyncio.run(record_sale_payment(
             sale_id=sale_id,
             payload=SalePaymentCreate(amount=500.0, payment_method="CASH", notes="Mid collection"),
+            request=make_test_request(),
             current_user=self.salesman_user,
         ))
 
@@ -295,6 +304,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="Return and cancellation"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
 
@@ -319,7 +329,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
     def test_04_customer_credit_balance_advance_payment_preserved(self):
         """Advance payment gives negative outstanding balance; must not be clamped to 0."""
         # Record an advance collection of ₹500 against no invoice
-        db.append_record("Payments", {
+        db.memory_store["Payments"].append({
             "payment_id": "PAY-ADV-01",
             "sale_id": "",
             "payment_datetime": now_iso(),
@@ -341,17 +351,18 @@ class TestPhase141SalesPayment(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=6, actual_unit_price=50.0)],
             idempotency_key="adv-sale-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
 
         # Record a payment of ₹200 on this sale
         asyncio.run(record_sale_payment(
             sale_id=sale.sale_id,
             payload=SalePaymentCreate(amount=200.0, payment_method="CASH", notes="Excess payment"),
+            request=make_test_request(),
             current_user=self.salesman_user,
         ))
 
         # Record direct customer payment of 400
-        db.append_record("Payments", {
+        db.memory_store["Payments"].append({
             "payment_id": "PAY-OVERPAY-01",
             "sale_id": sale.sale_id,
             "payment_datetime": now_iso(),
@@ -402,7 +413,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
     def test_07_wrong_customer_approval_rejected(self):
         """Approval granted for Customer A cannot be used by Customer B (HTTP 400)."""
         from fastapi import HTTPException
-        db.append_record("ApprovalRequests", {
+        db.memory_store["ApprovalRequests"].append({
             "request_id": "APP-WRONG-CUST",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -425,7 +436,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
     def test_08_approval_amount_exceeded_rejected(self):
         """Requested credit exceeding approved limit must be rejected with HTTP 400."""
         from fastapi import HTTPException
-        db.append_record("ApprovalRequests", {
+        db.memory_store["ApprovalRequests"].append({
             "request_id": "APP-LIMIT-EXCEED",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -449,7 +460,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         """Expired or revoked approval request must be rejected with HTTP 400."""
         from fastapi import HTTPException
         # 1. Expired approval
-        db.append_record("ApprovalRequests", {
+        db.memory_store["ApprovalRequests"].append({
             "request_id": "APP-EXPIRED",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -469,7 +480,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         self.assertIn("expired", ctx.exception.detail)
 
         # 2. Revoked approval
-        db.append_record("ApprovalRequests", {
+        db.memory_store["ApprovalRequests"].append({
             "request_id": "APP-REVOKED",
             "request_type": "CREDIT_EXCEPTION",
             "status": "REVOKED",
@@ -491,7 +502,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
     def test_10_already_consumed_approval_cannot_be_reused(self):
         """Approval consumed by a previous transaction cannot be reused (HTTP 400)."""
         from fastapi import HTTPException
-        db.append_record("ApprovalRequests", {
+        db.memory_store["ApprovalRequests"].append({
             "request_id": "APP-CONSUMED",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -523,13 +534,14 @@ class TestPhase141SalesPayment(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=40, actual_unit_price=50.0)],
             idempotency_key="dup-cancel-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
 
         # First cancellation
         res1 = asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="Customer cancel"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
         self.assertTrue(res1["ok"])
@@ -543,6 +555,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         res2 = asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="Customer cancel retry"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
         self.assertTrue(res2["ok"])
@@ -564,11 +577,13 @@ class TestPhase141SalesPayment(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=40, actual_unit_price=50.0)],
             idempotency_key="interrupted-cancel-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
 
         # Simulate interruption: bill status is updated to CANCELLED in Sales, but journal voucher remains POSTED
-        db.update_record("Sales", "sale_id", sale_id, {"bill_status": "CANCELLED"})
+        for s_row in db.memory_store["Sales"]:
+            if s_row.get("sale_id") == sale_id:
+                s_row["bill_status"] = "CANCELLED"
 
         # Check voucher is still POSTED
         voucher = next(h for h in db.get_records("JournalHeaders", fresh=True) if str(h.get("reference_id")) == sale_id)
@@ -578,6 +593,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         recov_res = asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="Recovery of interrupted cancellation"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
         self.assertTrue(recov_res["ok"])
@@ -599,13 +615,14 @@ class TestPhase141SalesPayment(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=20, actual_unit_price=50.0)],
             idempotency_key="upi-sale-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
 
         # Record UPI collection of ₹1,000
         pay_res = asyncio.run(record_sale_payment(
             sale_id=sale_id,
             payload=SalePaymentCreate(amount=1000.0, payment_method="UPI", notes="Online UPI payment"),
+            request=make_test_request(),
             current_user=self.salesman_user,
         ))
         self.assertTrue(pay_res["ok"])
@@ -617,6 +634,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
         cancel_res = asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="UPI sale returned"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
         self.assertTrue(cancel_res["ok"])
@@ -643,7 +661,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
             idempotency_key="idemp-credit-retry-01",
         )
         # First creation succeeds
-        sale1 = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale1 = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(sale1.sale_id, sale1.sale_id)
 
         # Outstanding is now ₹1,000 (credit limit fully utilized)
@@ -651,12 +669,12 @@ class TestPhase141SalesPayment(unittest.TestCase):
         self.assertEqual(out, 1000.0)
 
         # Retrying the exact same request with the same idempotency key must succeed (not fail credit check!)
-        sale2 = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale2 = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(sale2.sale_id, sale1.sale_id)
 
     def test_15_approval_request_is_marked_consumed_when_sale_completes(self):
         """When an Owner approval is used in a sale, it must be marked consumed."""
-        db.append_record("ApprovalRequests", {
+        db.memory_store["ApprovalRequests"].append({
             "request_id": "APP-CONSUME-TEST",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -676,7 +694,7 @@ class TestPhase141SalesPayment(unittest.TestCase):
             owner_credit_approval_id="APP-CONSUME-TEST",
             idempotency_key="consume-appr-sale-01",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertTrue(sale.sale_id)
 
         # Check approval record in database

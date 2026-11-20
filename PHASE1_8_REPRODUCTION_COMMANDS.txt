@@ -1,0 +1,48 @@
+# Kawad Swad ERP — Phase 1.8 Local Verification & Reproduction Commands
+# Run all commands from workspace root: /app/applet
+# Strict Local-Only Mode: NEVER set live GOOGLE_SHEETS_* or APPS_SCRIPT_* env vars.
+
+# 1. Confirm Local Isolation (all live env vars & secret file must print False)
+python3 -c 'import os; print({k: bool(os.environ.get(k)) for k in ("GOOGLE_SHEETS_SPREADSHEET_ID","GOOGLE_SERVICE_ACCOUNT_JSON","APPS_SCRIPT_WEBAPP_URL","APPS_SCRIPT_SHARED_SECRET")}, "secret_file:", os.path.exists("/etc/secrets/sales-service-account.json"))'
+
+# 2. Backend Python Syntax Compilation
+python3 -m compileall -q backend/app backend/scripts backend/tests && echo "PY_COMPILE_OK"
+
+# 3. Full Backend Test Suite Discovery (52 test files, 569 tests -> 568 PASS, 0 FAIL, 0 ERROR, 1 expected uvicorn skip)
+SALES_TESTING=1 SALES_ENV=development PYTHONPATH=backend python3 -m unittest discover -s backend/tests -p "test_*.py" -t backend -v
+
+# 4. Dedicated Security Re-Audit Bundle (6 suites -> 72/72 PASS)
+SALES_TESTING=1 SALES_ENV=development PYTHONPATH=backend python3 -m unittest \
+  tests.test_phase1_6_targeted_repairs \
+  tests.test_phase1_8_duplicate_id_security \
+  tests.test_phase4_2a_security_guards \
+  tests.test_phase1_database_schema_guards \
+  tests.test_health_diagnostics_security_and_quota \
+  tests.test_master_plan_phase1_integrity -v
+
+# 5. Concurrency & Failure-Injection Determinism Check (3 consecutive runs -> 116/116 PASS x3)
+for i in 1 2 3; do
+  echo "=== Determinism Run $i ==="
+  SALES_TESTING=1 SALES_ENV=development PYTHONPATH=backend python3 -m unittest \
+    tests.test_phase1_8_duplicate_id_security \
+    tests.test_attendance_and_workflow \
+    tests.test_phase1_4_1_failure_injection \
+    tests.test_phase2a_van_loading \
+    tests.test_stock_discrepancy_idempotency \
+    tests.test_daily_operations_readiness
+done
+
+# 6. Programmatic Schema Registry & Blocker Audit
+SALES_TESTING=1 SALES_ENV=development PYTHONPATH=backend python3 -c 'import tests; from app import schema_registry as sr; print(sr.get_schema_coverage_summary()); print("CONFLICTING:", sorted(sr.CONFLICTING_CORE_SCHEMA_TABS))'
+
+# 7. Frontend TypeScript Typecheck
+npx tsc --noEmit
+
+# 8. Frontend Lint
+npm run lint
+
+# 9. Frontend Contract Tests (14/14 PASS)
+npx tsx scripts/test_phase1_6_frontend_contracts.ts
+
+# 10. Frontend Production Build (2,325 modules -> dist/)
+npm run build

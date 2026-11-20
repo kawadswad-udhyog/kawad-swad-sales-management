@@ -287,7 +287,7 @@ async def submit_stock_discrepancy(req: StockDiscrepancyCreate, request: Request
         disc_id,
         reason=f"Reported discrepancy of {diff} for {product.get('product_name')} at {req.location}. Reason: {req.reason}",
     )
-    return {**record, "discrepancy_id": disc_id, **res}
+    return {**res, **record, "discrepancy_id": disc_id, "bridge_status": res.get("status")}
 
 
 @router.post("/discrepancies/{discrepancy_id}/review", dependencies=[Depends(require_sheets_connection)])
@@ -432,6 +432,43 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
                     "notes": " | ".join(notes_parts),
                 }
 
+        audit_related_id = f"AUDIT-DISC-{discrepancy_id}-{status_str}"
+        existing_audits = db.get_records("AuditLog", fresh=True) or []
+        has_review_audit = any(
+            str(a.get("related_record_id", "")).strip() == audit_related_id
+            or (
+                str(a.get("entity_type", "")).strip() == "StockDiscrepancies"
+                and str(a.get("entity_id", "")).strip() == discrepancy_id
+                and str(a.get("action", "")).strip().upper() == audit_action
+            )
+            for a in existing_audits
+        )
+
+        # Fully idempotent replay: status already finalized, adjustment already applied (or not needed), and audit already recorded
+        if curr_status == status_str and adj_record is None and has_review_audit:
+            return {
+                "ok": True,
+                "status": status_str,
+                "discrepancy_id": discrepancy_id,
+                "idempotent": True,
+            }
+
+        audit_event = None
+        if not has_review_audit:
+            audit_event = {
+                "event_datetime": stamped,
+                "actor_user_id": user_id,
+                "action": audit_action,
+                "entity_type": "StockDiscrepancies",
+                "entity_id": discrepancy_id,
+                "field_changed": "status",
+                "old_value": curr_status,
+                "new_value": status_str,
+                "reason": f"{status_str} stock discrepancy {discrepancy_id}. Adjustment: {diff if action == 'APPROVE' else 0}. Notes: {req.notes}",
+                "approved_by_user_id": user_id,
+                "related_record_id": audit_related_id,
+            }
+
         review_payload = {
             "discrepancy_id": discrepancy_id,
             "status": status_str,
@@ -439,25 +476,39 @@ async def review_stock_discrepancy(discrepancy_id: str, req: StockDiscrepancyRev
             "approved_adjustment": diff if action == "APPROVE" else 0,
             "reason": f"{match.get('reason', '')} [REVIEW:{status_str}:{user_id}:{req.notes}]".strip(),
             "ledger_adjustment": adj_record,
+            "audit_event": audit_event,
         }
-        res = apps_script_bridge.delegate_governed_write(
-            action="REVIEW_STOCK_DISCREPANCY",
-            target_tab="StockDiscrepancies",
-            payload=review_payload,
-            request=request,
-            actor_user_id=user_id,
-            actor_role=v2_role,
-            id_field="discrepancy_id",
-            invalidate_tabs=["StockDiscrepancies", "SalesmanStockLedger", "AuditLog"],
-        )
-        db.log_audit(
-            user_id,
-            audit_action,
-            "StockDiscrepancies",
-            discrepancy_id,
-            reason=f"{status_str} stock discrepancy {discrepancy_id}. Adjustment: {diff if action == 'APPROVE' else 0}. Notes: {req.notes}",
-        )
-        return {"ok": True, "status": status_str, "discrepancy_id": discrepancy_id, **res}
+        try:
+            res = apps_script_bridge.delegate_governed_write(
+                action="REVIEW_STOCK_DISCREPANCY",
+                target_tab="StockDiscrepancies",
+                payload=review_payload,
+                request=request,
+                actor_user_id=user_id,
+                actor_role=v2_role,
+                id_field="discrepancy_id",
+                invalidate_tabs=["StockDiscrepancies", "SalesmanStockLedger", "AuditLog"],
+            )
+        except HTTPException as exc:
+            if exc.status_code == 503 and isinstance(exc.detail, dict):
+                msg = str(exc.detail.get("message") or "Discrepancy review write failed.")
+                if "audit" in msg.lower():
+                    raise HTTPException(status_code=503, detail=msg)
+            raise
+        if not has_review_audit:
+            db.log_audit(
+                user_id,
+                audit_action,
+                "StockDiscrepancies",
+                discrepancy_id,
+                field_changed="status",
+                old_val=curr_status,
+                new_val=status_str,
+                reason=f"{status_str} stock discrepancy {discrepancy_id}. Adjustment: {diff if action == 'APPROVE' else 0}. Notes: {req.notes}",
+                approved_by=user_id,
+                related_id=audit_related_id,
+            )
+        return {"ok": True, **res, "status": status_str, "discrepancy_id": discrepancy_id, "bridge_status": res.get("status")}
 
 
 class PhysicalStockReconcile(BaseModel):

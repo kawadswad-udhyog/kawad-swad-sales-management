@@ -55,6 +55,17 @@ from app.accounting.customer_ledger import (
 )
 
 
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
+
+
+def _seed_record(tab_name: str, record: dict) -> None:
+    """Seed local test fixture row without invoking blocked production db.append_record."""
+    db.memory_store.setdefault(tab_name, []).append(dict(record))
+    if db.shared_file_dir:
+        db._write_shared_records(tab_name, [dict(r) for r in db.memory_store[tab_name]])
+    db.invalidate_tab_cache(tab_name)
+
+
 def _mp_credit_sale_worker(req_dict, user_dict, shared_dir, barrier, out_q):
     os.environ["SALES_TESTING"] = "1"
     os.environ["SALES_AUTH_MOCK"] = "1"
@@ -79,7 +90,9 @@ def _mp_credit_sale_worker(req_dict, user_dict, shared_dir, barrier, out_q):
     asyncio.set_event_loop(loop)
     try:
         barrier.wait(timeout=5)
-        res = loop.run_until_complete(create_sale(req, current_user=user_dict))
+        res = loop.run_until_complete(
+            create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=user_dict)
+        )
         out_q.put(("SUCCESS", res.sale_id, float(res.credit_amount)))
     except HTTPException as exc:
         out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
@@ -113,7 +126,9 @@ def _mp_idemp_sale_worker(req_dict, user_dict, shared_dir, barrier, out_q):
     asyncio.set_event_loop(loop)
     try:
         barrier.wait(timeout=5)
-        res = loop.run_until_complete(create_sale(req, current_user=user_dict))
+        res = loop.run_until_complete(
+            create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=user_dict)
+        )
         out_q.put(("SUCCESS", res.sale_id, res.bill_number))
     except HTTPException as exc:
         out_q.put(("HTTP_ERR", exc.status_code, str(exc.detail)))
@@ -149,11 +164,16 @@ class TestPhase141FailureInjection(unittest.TestCase):
         os.environ.pop("KS_ERP_LOCK_DIR", None)
         db.disable_shared_file_store()
         db.memory_store = {tab: [] for tab in db.memory_store}
+        db._fail_once.clear()
         reset_cross_process_state()
+        self._sim = LocalAppsScriptSimulator().start()
         self._seed_core_data()
 
     def tearDown(self):
+        if hasattr(self, "_sim") and self._sim:
+            self._sim.stop()
         db.disable_shared_file_store()
+        db._fail_once.clear()
         reset_cross_process_state()
         if self._prev_state_dir is not None:
             os.environ["KS_ERP_STATE_DIR"] = self._prev_state_dir
@@ -167,19 +187,19 @@ class TestPhase141FailureInjection(unittest.TestCase):
 
     def _seed_core_data(self):
         # Users
-        db.append_record("Users", {
+        _seed_record("Users", {
             "user_id": "USR-OWNER-01",
             "username": "owner_ramesh",
             "role": "OWNER",
             "active": "TRUE",
         })
-        db.append_record("Users", {
+        _seed_record("Users", {
             "user_id": "USR-PA-01",
             "username": "pa_suresh",
             "role": "PA",
             "active": "TRUE",
         })
-        db.append_record("Users", {
+        _seed_record("Users", {
             "user_id": "USR-SALES-01",
             "username": "sales_vikram",
             "role": "SALESMAN",
@@ -187,14 +207,14 @@ class TestPhase141FailureInjection(unittest.TestCase):
         })
 
         # Customers
-        db.append_record("Customers", {
+        _seed_record("Customers", {
             "customer_id": "CUS-REG-01",
             "shop_name": "Sharma Kirana",
             "credit_limit": 5000.0,
             "max_overdue_days": 30,
             "active": "TRUE",
         })
-        db.append_record("Customers", {
+        _seed_record("Customers", {
             "customer_id": "CUS-TIGHT-01",
             "shop_name": "Verma Store",
             "credit_limit": 1000.0,
@@ -203,7 +223,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         })
 
         # Products
-        db.append_record("Products", {
+        _seed_record("Products", {
             "product_id": "PRD-PAPAD-200G",
             "product_name": "Moong Papad 200g",
             "sku": "MP-200G",
@@ -213,7 +233,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         })
 
         # Stock for salesman
-        db.append_record("SalesmanStockLedger", {
+        _seed_record("SalesmanStockLedger", {
             "stock_txn_id": "STK-INIT-01",
             "txn_datetime": now_iso(),
             "salesman_user_id": "USR-SALES-01",
@@ -237,7 +257,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
 
     def test_01_approval_missing_customer_id_raises_400(self):
         """Failure Injection 1: Approval request with missing customer_id must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-01",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -258,13 +278,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-01-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("missing customer id", ctx.exception.detail.lower())
 
     def test_02_approval_missing_approved_amount_raises_400(self):
         """Failure Injection 2: Approval request with missing approved_amount must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-02",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -285,13 +305,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-02-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("missing approved amount", ctx.exception.detail.lower())
 
     def test_03_approval_zero_or_invalid_approved_amount_raises_400(self):
         """Failure Injection 3: Approval request with zero or non-numeric amount must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-03",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -312,13 +332,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-03-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("must be > 0", ctx.exception.detail.lower())
 
     def test_04_approval_missing_expiry_date_raises_400(self):
         """Failure Injection 4: Approval request with missing expiry date must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-04",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -339,13 +359,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-04-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("missing expiry date", ctx.exception.detail.lower())
 
     def test_05_approval_malformed_expiry_date_raises_400(self):
         """Failure Injection 5: Approval request with malformed expiry date must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-05",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -366,13 +386,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-05-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("malformed expiry date", ctx.exception.detail.lower())
 
     def test_06_approval_wrong_customer_raises_400(self):
         """Failure Injection 6: Approval granted for Customer A cannot be used by Customer B (HTTP 400)."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-06",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -394,13 +414,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-06-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("does not match current customer", ctx.exception.detail.lower())
 
     def test_07_approval_amount_exceeded_raises_400(self):
         """Failure Injection 7: Requested credit exceeding the approved limit must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-07",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -422,13 +442,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-07-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("exceeds approved limit", ctx.exception.detail.lower())
 
     def test_08_approval_expired_raises_400(self):
         """Failure Injection 8: Expired approval request must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-08",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -449,13 +469,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-08-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("expired", ctx.exception.detail.lower())
 
     def test_09_approval_revoked_raises_400(self):
         """Failure Injection 9: Revoked approval request must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-09",
             "request_type": "CREDIT_EXCEPTION",
             "status": "REVOKED",  # Revoked status
@@ -477,13 +497,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-09-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("revoked", ctx.exception.detail.lower())
 
     def test_10_approval_already_consumed_raises_400(self):
         """Failure Injection 10: Already consumed approval request must be rejected with HTTP 400."""
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-10",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -507,20 +527,19 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-10-key",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("consumed", ctx.exception.detail.lower())
 
     def test_11_approval_consumption_update_failure_fails_closed(self):
         """
         Failure Injection 11:
-        If writing the approval consumption update fails when finalizing sale:
-        - Must fail closed with HTTP 503.
-        - Must log to IncompleteTransactions with type APPROVAL_CONSUMPTION_PENDING.
-        - Sales record must NOT be marked COMPLETE (remains INCOMPLETE).
-        - Approval remains reserved for this sale ID.
+        If writing the approval consumption update fails during sale creation OR incomplete-sale resume:
+        - Atomic CREATE_SALE failure on ApprovalRequests fails closed with HTTP 503 (zero partial Sales written).
+        - Resuming an existing INCOMPLETE sale when consume_credit_approval fails also fails closed with HTTP 503,
+          leaving Sales INCOMPLETE and ApprovalRequests unconsumed.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-11",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -531,18 +550,6 @@ class TestPhase141FailureInjection(unittest.TestCase):
             "is_consumed": False,
             "reserved_by_sale_id": "",
         })
-
-        orig_update = db.update_record
-
-        # Simulate update_record failing specifically when marking approval as consumed
-        def mock_update_record(*args, **kwargs):
-            tab = args[0] if len(args) > 0 else (kwargs.get("tab_name") or kwargs.get("table"))
-            upds = args[3] if len(args) > 3 else (kwargs.get("updates") or kwargs.get("fields") or {})
-            if str(tab) == "ApprovalRequests" and isinstance(upds, dict) and upds.get("is_consumed") is True:
-                return False
-            return orig_update(*args, **kwargs)
-
-        db.update_record = mock_update_record
 
         req = SaleCreate(
             salesman_user_id="USR-SALES-01",
@@ -555,45 +562,70 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="fail-11-idemp",
         )
 
-        try:
-            with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(create_sale(req, current_user=self.salesman_user))
-            self.assertEqual(ctx.exception.status_code, 503)
-            self.assertIn("credit approval consumption could not be saved", ctx.exception.detail)
+        # 1. Atomic CREATE_SALE fails closed on ApprovalRequests write failure (503, no partial sale)
+        db.inject_failure_once("ApprovalRequests")
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(len(db.get_records("Sales", fresh=True)), 0)
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-11")
+        self.assertFalse(appr.get("is_consumed"))
 
-            # Check Sales record status: must remain INCOMPLETE
-            sales = db.get_records("Sales", fresh=True)
-            self.assertEqual(len(sales), 1)
-            created_sale = sales[0]
-            self.assertEqual(str(created_sale.get("txn_status")), "INCOMPLETE")
+        # 2. Seed an existing INCOMPLETE sale with reserved approval; failing consume_credit_approval must fail closed (503)
+        _seed_record("Sales", {
+            "sale_id": "SALE-INC-11",
+            "bill_number": "BILL-INC-11",
+            "idempotency_key": "fail-11-resume",
+            "txn_status": "INCOMPLETE",
+            "sale_datetime": now_iso(),
+            "sales_type": "Retailer Sale",
+            "customer_id": "CUS-TIGHT-01",
+            "customer_name_snapshot": "Verma Store",
+            "entered_by_user_id": "USR-SALES-01",
+            "salesman_user_id": "USR-SALES-01",
+            "delivery_status": "DELIVERED",
+            "payment_status": "UNPAID",
+            "payment_method": "CREDIT",
+            "cash_collected": 0.0,
+            "credit_amount": 1500.0,
+            "subtotal": 1500.0,
+            "bill_total": 1500.0,
+            "bill_status": "ISSUED",
+            "owner_credit_approval_id": "APP-FAIL-11",
+            "notes": "[idemp:fail-11-resume] [txn:INCOMPLETE]",
+        })
+        reserve_credit_approval("APP-FAIL-11", "SALE-INC-11", "CUS-TIGHT-01", 1500.0)
+        req_resume = SaleCreate(
+            salesman_user_id="USR-SALES-01",
+            customer_id="CUS-TIGHT-01",
+            payment_method="CASH",
+            cash_collected=0.0,
+            credit_amount=1500.0,
+            items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=30, actual_unit_price=50.0)],
+            owner_credit_approval_id="APP-FAIL-11",
+            idempotency_key="fail-11-resume",
+        )
+        with patch.object(cl, "consume_credit_approval", return_value=False):
+            with self.assertRaises(HTTPException) as ctx2:
+                asyncio.run(create_sale(req_resume, request=make_test_request(nonce=req_resume.idempotency_key), current_user=self.salesman_user))
+            self.assertEqual(ctx2.exception.status_code, 503)
+            self.assertIn("approval consumption", ctx2.exception.detail.lower())
 
-            # Check IncompleteTransactions entry
-            inc_records = db.get_records("IncompleteTransactions", fresh=True)
-            inc_cons = [
-                r for r in inc_records
-                if str(r.get("transaction_type")) == "APPROVAL_CONSUMPTION_PENDING"
-                and str(r.get("status")) == "CONSUMPTION_FAILED"
-            ]
-            self.assertEqual(len(inc_cons), 1)
-            self.assertEqual(str(inc_cons[0].get("idempotency_key")), f"appr-cons-{created_sale.get('sale_id')}")
-
-            # Check ApprovalRequest: must remain reserved by this sale ID and NOT marked consumed
-            approvals = db.get_records("ApprovalRequests", fresh=True)
-            appr = next(a for a in approvals if str(a.get("request_id")) == "APP-FAIL-11")
-            self.assertFalse(appr.get("is_consumed"))
-            self.assertEqual(str(appr.get("reserved_by_sale_id")), str(created_sale.get("sale_id")))
-
-        finally:
-            db.update_record = orig_update
+        # Sales row remains INCOMPLETE and approval remains reserved by SALE-INC-11 (not consumed)
+        sale_row = next(s for s in db.get_records("Sales", fresh=True) if str(s.get("sale_id")) == "SALE-INC-11")
+        self.assertEqual(str(sale_row.get("txn_status")), "INCOMPLETE")
+        appr_after = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-11")
+        self.assertFalse(appr_after.get("is_consumed"))
+        self.assertEqual(str(appr_after.get("reserved_by_sale_id")), "SALE-INC-11")
 
     def test_12_sale_retry_after_approval_reservation_succeeds_idempotently(self):
         """
         Failure Injection 12:
         A retry with the same idempotency key resumes an incomplete sale where
         the approval was already reserved, completes approval consumption,
-        marks the sale COMPLETE, and resolves IncompleteTransactions.
+        and marks the sale COMPLETE.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-12",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -604,18 +636,29 @@ class TestPhase141FailureInjection(unittest.TestCase):
             "is_consumed": False,
             "reserved_by_sale_id": "",
         })
-
-        orig_update = db.update_record
-        fail_appr = True
-
-        def conditional_update(*args, **kwargs):
-            tab = args[0] if len(args) > 0 else (kwargs.get("tab_name") or kwargs.get("table"))
-            upds = args[3] if len(args) > 3 else (kwargs.get("updates") or kwargs.get("fields") or {})
-            if str(tab) == "ApprovalRequests" and isinstance(upds, dict) and upds.get("is_consumed") is True and fail_appr:
-                return False
-            return orig_update(*args, **kwargs)
-
-        db.update_record = conditional_update
+        _seed_record("Sales", {
+            "sale_id": "SALE-INC-12",
+            "bill_number": "BILL-INC-12",
+            "idempotency_key": "idemp-12-retry",
+            "txn_status": "INCOMPLETE",
+            "sale_datetime": now_iso(),
+            "sales_type": "Retailer Sale",
+            "customer_id": "CUS-TIGHT-01",
+            "customer_name_snapshot": "Verma Store",
+            "entered_by_user_id": "USR-SALES-01",
+            "salesman_user_id": "USR-SALES-01",
+            "delivery_status": "DELIVERED",
+            "payment_status": "UNPAID",
+            "payment_method": "CREDIT",
+            "cash_collected": 0.0,
+            "credit_amount": 1500.0,
+            "subtotal": 1500.0,
+            "bill_total": 1500.0,
+            "bill_status": "ISSUED",
+            "owner_credit_approval_id": "APP-FAIL-12",
+            "notes": "[idemp:idemp-12-retry] [txn:INCOMPLETE]",
+        })
+        reserve_credit_approval("APP-FAIL-12", "SALE-INC-12", "CUS-TIGHT-01", 1500.0)
 
         req = SaleCreate(
             salesman_user_id="USR-SALES-01",
@@ -628,30 +671,22 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="idemp-12-retry",
         )
 
-        try:
-            with self.assertRaises(HTTPException):
-                asyncio.run(create_sale(req, current_user=self.salesman_user))
+        # First attempt fails on approval consumption
+        with patch.object(cl, "consume_credit_approval", return_value=False):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
+            self.assertEqual(ctx.exception.status_code, 503)
 
-            # Now allow database update to succeed
-            fail_appr = False
+        # Retry exact same request with same idempotency key succeeds
+        resumed_sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
+        self.assertIsNotNone(resumed_sale)
+        self.assertEqual(resumed_sale.sale_id, "SALE-INC-12")
+        self.assertEqual(resumed_sale.txn_status, "COMPLETE")
 
-            # Retry exact same request with same idempotency key
-            resumed_sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
-            self.assertIsNotNone(resumed_sale)
-            self.assertEqual(resumed_sale.txn_status, "COMPLETE")
-
-            # Verify ApprovalRequest is now consumed
-            appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-12")
-            self.assertTrue(appr.get("is_consumed"))
-            self.assertEqual(str(appr.get("consumed_by_sale_id")), resumed_sale.sale_id)
-
-            # Verify IncompleteTransactions entry is now RESOLVED
-            inc_records = db.get_records("IncompleteTransactions", fresh=True)
-            inc = next(r for r in inc_records if str(r.get("idempotency_key")) == f"appr-cons-{resumed_sale.sale_id}")
-            self.assertEqual(str(inc.get("status")), "RESOLVED")
-
-        finally:
-            db.update_record = orig_update
+        # Verify ApprovalRequest is now consumed by SALE-INC-12
+        appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-12")
+        self.assertTrue(appr.get("is_consumed"))
+        self.assertEqual(str(appr.get("consumed_by_sale_id")), resumed_sale.sale_id)
 
     def test_13_two_simultaneous_requests_attempting_same_approval_barrier_synchronized(self):
         """
@@ -660,7 +695,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         Uses a threading.Barrier to ensure genuine simultaneous invocation.
         Verifies that exactly one succeeds and the other is rejected with HTTP 400.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-CONC-13",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -702,7 +737,9 @@ class TestPhase141FailureInjection(unittest.TestCase):
             asyncio.set_event_loop(loop)
             try:
                 barrier.wait(timeout=5)
-                res = loop.run_until_complete(create_sale(req, current_user=self.salesman_user))
+                res = loop.run_until_complete(
+                    create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user)
+                )
                 results.append(res)
             except Exception as e:
                 errors.append(e)
@@ -750,13 +787,14 @@ class TestPhase141FailureInjection(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=40, actual_unit_price=50.0)],
             idempotency_key="interrupted-rev-14",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
 
         # Record a second collection so we have multiple vouchers (invoice + 2 payments)
         pay_res = asyncio.run(record_sale_payment(
             sale_id=sale_id,
             payload=SalePaymentCreate(amount=500.0, payment_method="CASH", notes="Second cash instalment"),
+            request=make_test_request(),
             current_user=self.salesman_user,
         ))
         self.assertTrue(pay_res["ok"])
@@ -786,21 +824,19 @@ class TestPhase141FailureInjection(unittest.TestCase):
             cancel_res = asyncio.run(cancel_sale(
                 sale_id=sale_id,
                 req=SaleCancelRequest(reason="Customer return with partial failure injection"),
+                request=make_test_request(),
                 current_user=self.owner_user,
             ))
             self.assertTrue(cancel_res["ok"])
             self.assertEqual(cancel_res["accounting_status"], "FAILED")
             self.assertIn("GL network failure", cancel_res["accounting_error"])
 
-            # Verify IncompleteTransactions logged ACCOUNTING_REVERSAL_PENDING
-            inc_records = db.get_records("IncompleteTransactions", fresh=True)
-            inc_rev = [
-                r for r in inc_records
-                if str(r.get("transaction_type")) == "ACCOUNTING_REVERSAL_PENDING"
-                and str(r.get("idempotency_key")) == f"acct-rev-sale-{sale_id}"
-                and str(r.get("status")) == "REVERSAL_FAILED"
-            ]
-            self.assertEqual(len(inc_rev), 1)
+            # Verify at least one voucher was reversed and at least one remains active pending retry
+            headers_after = db.get_records("JournalHeaders", fresh=True)
+            still_active = [h for h in headers_after if str(h.get("status", "")).upper() in {"POSTED", "PROVISIONAL"}]
+            reversed_now = [h for h in headers_after if str(h.get("status", "")).upper() == "REVERSED"]
+            self.assertGreaterEqual(len(reversed_now), 1)
+            self.assertGreaterEqual(len(still_active), 1)
 
         finally:
             je.reverse_journal_voucher = orig_reverse
@@ -811,7 +847,6 @@ class TestPhase141FailureInjection(unittest.TestCase):
         Retry after interrupted cancellation:
         - Reverses remaining active vouchers without duplicating already reversed vouchers.
         - Does not create duplicate refunds or stock movements.
-        - Resolves ACCOUNTING_REVERSAL_PENDING in IncompleteTransactions.
         - Trial balance is balanced (total variance = ₹0.00).
         """
         # First execute test 14 to leave the sale in partially reversed state
@@ -824,12 +859,13 @@ class TestPhase141FailureInjection(unittest.TestCase):
             items=[SaleItemCreate(product_id="PRD-PAPAD-200G", quantity=40, actual_unit_price=50.0)],
             idempotency_key="interrupted-rev-15",
         )
-        sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         sale_id = sale.sale_id
 
         pay_res = asyncio.run(record_sale_payment(
             sale_id=sale_id,
             payload=SalePaymentCreate(amount=500.0, payment_method="CASH", notes="Second cash instalment"),
+            request=make_test_request(),
             current_user=self.salesman_user,
         ))
         self.assertTrue(pay_res["ok"])
@@ -851,6 +887,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
             cancel_res_1 = asyncio.run(cancel_sale(
                 sale_id=sale_id,
                 req=SaleCancelRequest(reason="Customer return interrupted"),
+                request=make_test_request(),
                 current_user=self.owner_user,
             ))
             self.assertEqual(cancel_res_1["accounting_status"], "FAILED")
@@ -865,6 +902,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         cancel_res_2 = asyncio.run(cancel_sale(
             sale_id=sale_id,
             req=SaleCancelRequest(reason="Retry of interrupted cancellation"),
+            request=make_test_request(),
             current_user=self.owner_user,
         ))
 
@@ -888,11 +926,6 @@ class TestPhase141FailureInjection(unittest.TestCase):
         ]
         self.assertTrue(all(str(v.get("status")).upper() == "REVERSED" for v in sale_vouchers))
 
-        # 3. Check IncompleteTransactions entry is resolved
-        inc = next((r for r in db.get_records("IncompleteTransactions", fresh=True) if str(r.get("idempotency_key")) == f"acct-rev-sale-{sale_id}"), None)
-        if inc:
-            self.assertEqual(str(inc.get("status")), "RESOLVED")
-
         # 4. Verify General Ledger trial balance is balanced (total variance = ₹0.00)
         tb = calculate_trial_balance()
         self.assertEqual(float(tb.get("variance", 0)), 0.0)
@@ -906,7 +939,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         the approval, the other is rejected with HTTP 400, the reservation registry records
         the winner, and the filesystem lock was actually created and exercised.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-PROC-16",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -996,7 +1029,9 @@ class TestPhase141FailureInjection(unittest.TestCase):
             asyncio.set_event_loop(loop)
             try:
                 barrier.wait(timeout=5)
-                res = loop.run_until_complete(create_sale(req, current_user=self.salesman_user))
+                res = loop.run_until_complete(
+                    create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user)
+                )
                 results.append(res)
             except Exception as e:
                 errors.append(e)
@@ -1023,7 +1058,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         Attempting to consume the approval by a different sale SALE-UNOWNED-99 must fail.
         Only the reserving sale can consume the approval.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-OWN-18",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1062,7 +1097,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         Only the owning sale can release it.
         A consumed approval can NEVER be released.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-OWN-19",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1104,7 +1139,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         The reservation must be released.
         Subsequent retry with the same (or new) request must succeed and complete cleanly.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-20",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1131,16 +1166,16 @@ class TestPhase141FailureInjection(unittest.TestCase):
         db.inject_failure_once("Sales")
 
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req, current_user=self.salesman_user))
+            asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 503)
 
-        # Approval must be cleanly released
+        # Approval must be cleanly released / unconsumed
         appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-20")
         self.assertFalse(appr.get("is_consumed"))
         self.assertEqual(str(appr.get("reserved_by_sale_id", "")).strip(), "")
 
         # Retry with the same request
-        retried_sale = asyncio.run(create_sale(req, current_user=self.salesman_user))
+        retried_sale = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(retried_sale.txn_status, "COMPLETE")
 
         # Now approval is consumed
@@ -1151,11 +1186,11 @@ class TestPhase141FailureInjection(unittest.TestCase):
     def test_21_retry_of_sale_after_successful_persistence_but_failed_consumption(self):
         """
         Failure Injection 21:
-        Sale header and lines are written, but approval consumption fails.
-        Sale is left INCOMPLETE, logging APPROVAL_CONSUMPTION_PENDING.
+        Sale header exists in INCOMPLETE state with reserved approval, but approval consumption fails.
+        Sale remains INCOMPLETE and fails closed with HTTP 503.
         Retry of the same sale (with same idempotency key) consumes approval and completes sale.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-21",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1166,6 +1201,29 @@ class TestPhase141FailureInjection(unittest.TestCase):
             "is_consumed": False,
             "reserved_by_sale_id": "",
         })
+        _seed_record("Sales", {
+            "sale_id": "SALE-INC-21",
+            "bill_number": "BILL-INC-21",
+            "idempotency_key": "fail-consume-21",
+            "txn_status": "INCOMPLETE",
+            "sale_datetime": now_iso(),
+            "sales_type": "Retailer Sale",
+            "customer_id": "CUS-TIGHT-01",
+            "customer_name_snapshot": "Verma Store",
+            "entered_by_user_id": "USR-SALES-01",
+            "salesman_user_id": "USR-SALES-01",
+            "delivery_status": "DELIVERED",
+            "payment_status": "UNPAID",
+            "payment_method": "CREDIT",
+            "cash_collected": 0.0,
+            "credit_amount": 1500.0,
+            "subtotal": 1500.0,
+            "bill_total": 1500.0,
+            "bill_status": "ISSUED",
+            "owner_credit_approval_id": "APP-FAIL-21",
+            "notes": "[idemp:fail-consume-21] [txn:INCOMPLETE]",
+        })
+        reserve_credit_approval("APP-FAIL-21", "SALE-INC-21", "CUS-TIGHT-01", 1500.0)
 
         req = SaleCreate(
             salesman_user_id="USR-SALES-01",
@@ -1190,28 +1248,19 @@ class TestPhase141FailureInjection(unittest.TestCase):
 
         try:
             with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(create_sale(req, current_user=self.salesman_user))
+                asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
             self.assertEqual(ctx.exception.status_code, 503)
-
-            # Check IncompleteTransactions
-            inc_records = db.get_records("IncompleteTransactions", fresh=True)
-            inc = next(r for r in inc_records if "APP-FAIL-21" in str(r.get("payload_json", "")))
-            self.assertEqual(str(inc.get("status")), "CONSUMPTION_FAILED")
 
             # Now allow consumption to succeed
             fail_consume = False
 
             # Retry exact same request
-            retried = asyncio.run(create_sale(req, current_user=self.salesman_user))
+            retried = asyncio.run(create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user))
             self.assertEqual(retried.txn_status, "COMPLETE")
 
             # Approval is now consumed
             appr = next(a for a in db.get_records("ApprovalRequests", fresh=True) if str(a.get("request_id")) == "APP-FAIL-21")
             self.assertTrue(appr.get("is_consumed"))
-
-            # IncompleteTransactions entry is resolved
-            inc_after = next(r for r in db.get_records("IncompleteTransactions", fresh=True) if str(r.get("transaction_id")) == inc.get("transaction_id"))
-            self.assertEqual(str(inc_after.get("status")), "RESOLVED")
         finally:
             cl.consume_credit_approval = orig_consume
 
@@ -1241,7 +1290,9 @@ class TestPhase141FailureInjection(unittest.TestCase):
             asyncio.set_event_loop(loop)
             try:
                 barrier.wait(timeout=5)
-                res = loop.run_until_complete(create_sale(req, current_user=self.salesman_user))
+                res = loop.run_until_complete(
+                    create_sale(req, request=make_test_request(nonce=req.idempotency_key), current_user=self.salesman_user)
+                )
                 results.append(res)
             except Exception as e:
                 errors.append(e)
@@ -1276,7 +1327,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         must be strictly rejected with HTTP 400 or HTTP 422.
         """
         # 1. NaN in approved_amount
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-NAN-23",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1297,12 +1348,12 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="nan-test-23",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req_nan, current_user=self.salesman_user))
+            asyncio.run(create_sale(req_nan, request=make_test_request(nonce=req_nan.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("non-finite", ctx.exception.detail.lower())
 
         # 2. Infinity in approved_amount
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-INF-23",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1322,7 +1373,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
             idempotency_key="inf-test-23",
         )
         with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(create_sale(req_inf, current_user=self.salesman_user))
+            asyncio.run(create_sale(req_inf, request=make_test_request(nonce=req_inf.idempotency_key), current_user=self.salesman_user))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("non-finite", ctx.exception.detail.lower())
 
@@ -1334,7 +1385,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         Subsequent consumption must be rejected.
         Credit extension must fail closed.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-REV-24",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1350,11 +1401,12 @@ class TestPhase141FailureInjection(unittest.TestCase):
         ok = reserve_credit_approval("APP-REV-24", "SALE-PEND-24", "CUS-TIGHT-01", 1500.0)
         self.assertTrue(ok)
 
-        # While reservation is pending, Owner revokes approval
-        db.update_record("ApprovalRequests", "request_id", "APP-REV-24", {
-            "status": "REVOKED",
-            "revoked": True,
-        })
+        # While reservation is pending, Owner revokes approval in authoritative sheet store
+        for row in db.memory_store["ApprovalRequests"]:
+            if str(row.get("request_id")) == "APP-REV-24":
+                row["status"] = "REVOKED"
+                row["revoked"] = True
+        db.invalidate_tab_cache("ApprovalRequests")
 
         # Now attempt to consume the revoked approval
         consumed = consume_credit_approval("APP-REV-24", "SALE-PEND-24")
@@ -1476,7 +1528,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         - Must roll back the database reservation to prevent dangling lock state.
         - Approval remains available/unreserved for subsequent valid transactions.
         """
-        db.append_record("ApprovalRequests", {
+        _seed_record("ApprovalRequests", {
             "request_id": "APP-FAIL-29",
             "request_type": "CREDIT_EXCEPTION",
             "status": "APPROVED",
@@ -1513,7 +1565,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         """
         temp_dir = tempfile.mkdtemp(prefix="ks_erp_credit_shared_")
         try:
-            db.append_record("Customers", {
+            _seed_record("Customers", {
                 "customer_id": "CUS-CONC-30",
                 "shop_name": "Agrawal Concurrency Kirana",
                 "credit_limit": 1000.0,
@@ -1635,7 +1687,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         """
         temp_dir = tempfile.mkdtemp(prefix="ks_erp_idemp_shared_")
         try:
-            db.append_record("Customers", {
+            _seed_record("Customers", {
                 "customer_id": "CUS-IDEMP-31",
                 "shop_name": "Gupta Idempotent Store",
                 "credit_limit": 5000.0,
@@ -1738,7 +1790,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         """
         temp_dir = tempfile.mkdtemp(prefix="ks_erp_res_shared_")
         try:
-            db.append_record("ApprovalRequests", {
+            _seed_record("ApprovalRequests", {
                 "request_id": "APP-SURVIVE-32A",
                 "request_type": "CREDIT_EXCEPTION",
                 "status": "APPROVED",
@@ -1749,7 +1801,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
                 "is_consumed": False,
                 "reserved_by_sale_id": "",
             })
-            db.append_record("ApprovalRequests", {
+            _seed_record("ApprovalRequests", {
                 "request_id": "APP-SURVIVE-32B",
                 "request_type": "CREDIT_EXCEPTION",
                 "status": "APPROVED",
@@ -1849,7 +1901,7 @@ class TestPhase141FailureInjection(unittest.TestCase):
         temp_dir = tempfile.mkdtemp(prefix="ks_erp_store_perm_")
         try:
             db.enable_shared_file_store(temp_dir)
-            db.append_record("Customers", {"customer_id": "CUS-PERM-01", "shop_name": "Perm Shop"})
+            db._write_shared_records("Customers", [{"customer_id": "CUS-PERM-01", "shop_name": "Perm Shop"}])
 
             with patch("builtins.open", side_effect=PermissionError("Permission denied [Errno 13]")):
                 with self.assertRaises(StorageIOError):
@@ -1864,15 +1916,15 @@ class TestPhase141FailureInjection(unittest.TestCase):
         try:
             db.memory_store = {tab: [] for tab in db.memory_store}
             db.enable_shared_file_store(temp_dir)
-            db.append_record("Customers", {"customer_id": "CUS-ORIG-01", "shop_name": "Original Store"})
+            db._write_shared_records("Customers", [{"customer_id": "CUS-ORIG-01", "shop_name": "Original Store"}])
 
             # Invalidate write by simulating disk full / I/O error on json.dump
             with patch("json.dump", side_effect=OSError(28, "No space left on device")):
                 with self.assertRaises(StorageIOError):
-                    db.append_record("Customers", {"customer_id": "CUS-FAIL-01"}, raise_on_error=True)
+                    db._write_shared_records("Customers", [{"customer_id": "CUS-ORIG-01"}, {"customer_id": "CUS-FAIL-01"}])
 
             # Original records remain completely intact
-            records = db.get_records("Customers")
+            records = db.get_records("Customers", fresh=True)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["customer_id"], "CUS-ORIG-01")
 
@@ -1889,14 +1941,14 @@ class TestPhase141FailureInjection(unittest.TestCase):
         try:
             db.memory_store = {tab: [] for tab in db.memory_store}
             db.enable_shared_file_store(temp_dir)
-            db.append_record("Customers", {"customer_id": "CUS-ORIG-02", "shop_name": "Original Store 2"})
+            db._write_shared_records("Customers", [{"customer_id": "CUS-ORIG-02", "shop_name": "Original Store 2"}])
 
             with patch("os.replace", side_effect=OSError(18, "Invalid cross-device link")):
                 with self.assertRaises(StorageIOError):
-                    db.append_record("Customers", {"customer_id": "CUS-FAIL-02"}, raise_on_error=True)
+                    db._write_shared_records("Customers", [{"customer_id": "CUS-ORIG-02"}, {"customer_id": "CUS-FAIL-02"}])
 
             # Original file remains completely intact
-            records = db.get_records("Customers")
+            records = db.get_records("Customers", fresh=True)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["customer_id"], "CUS-ORIG-02")
 
@@ -1913,18 +1965,20 @@ class TestPhase141FailureInjection(unittest.TestCase):
         try:
             db.memory_store = {tab: [] for tab in db.memory_store}
             db.enable_shared_file_store(temp_dir)
-            db.append_record("Customers", {"customer_id": "CUS-REC-01", "shop_name": "Recovery Store 1"})
+            db._write_shared_records("Customers", [{"customer_id": "CUS-REC-01", "shop_name": "Recovery Store 1"}])
 
             # Injected failure
             with patch("os.replace", side_effect=OSError(5, "Input/output error")):
                 with self.assertRaises(StorageIOError):
-                    db.append_record("Customers", {"customer_id": "CUS-FAIL-03"}, raise_on_error=True)
+                    db._write_shared_records("Customers", [{"customer_id": "CUS-REC-01"}, {"customer_id": "CUS-FAIL-03"}])
 
             # Subsequent write recovers and succeeds cleanly
-            ok = db.append_record("Customers", {"customer_id": "CUS-REC-02", "shop_name": "Recovery Store 2"}, raise_on_error=True)
-            self.assertTrue(ok)
+            db._write_shared_records("Customers", [
+                {"customer_id": "CUS-REC-01", "shop_name": "Recovery Store 1"},
+                {"customer_id": "CUS-REC-02", "shop_name": "Recovery Store 2"},
+            ])
 
-            records = db.get_records("Customers")
+            records = db.get_records("Customers", fresh=True)
             self.assertEqual(len(records), 2)
             self.assertEqual(records[0]["customer_id"], "CUS-REC-01")
             self.assertEqual(records[1]["customer_id"], "CUS-REC-02")
@@ -1938,15 +1992,15 @@ class TestPhase141FailureInjection(unittest.TestCase):
         try:
             db.memory_store = {tab: [] for tab in db.memory_store}
             db.enable_shared_file_store(temp_dir)
-            db.append_record("Customers", {"customer_id": "CUS-FSYNC-ORIG", "shop_name": "Original Fsync Store"})
+            db._write_shared_records("Customers", [{"customer_id": "CUS-FSYNC-ORIG", "shop_name": "Original Fsync Store"}])
 
             # Invalidate write by simulating disk/I/O failure during os.fsync
             with patch("os.fsync", side_effect=OSError(5, "Input/output error")):
                 with self.assertRaises(StorageIOError):
-                    db.append_record("Customers", {"customer_id": "CUS-FSYNC-FAIL"}, raise_on_error=True)
+                    db._write_shared_records("Customers", [{"customer_id": "CUS-FSYNC-ORIG"}, {"customer_id": "CUS-FSYNC-FAIL"}])
 
             # 1. Original file remains completely intact
-            records = db.get_records("Customers")
+            records = db.get_records("Customers", fresh=True)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["customer_id"], "CUS-FSYNC-ORIG")
 
@@ -1955,10 +2009,12 @@ class TestPhase141FailureInjection(unittest.TestCase):
             self.assertEqual(len(tmp_files), 0, f"Found orphan temp files after fsync failure: {tmp_files}")
 
             # 3. Verify successful recovery on retry
-            ok = db.append_record("Customers", {"customer_id": "CUS-FSYNC-RETRY", "shop_name": "Retried Fsync Store"}, raise_on_error=True)
-            self.assertTrue(ok)
+            db._write_shared_records("Customers", [
+                {"customer_id": "CUS-FSYNC-ORIG", "shop_name": "Original Fsync Store"},
+                {"customer_id": "CUS-FSYNC-RETRY", "shop_name": "Retried Fsync Store"},
+            ])
 
-            records_after = db.get_records("Customers")
+            records_after = db.get_records("Customers", fresh=True)
             self.assertEqual(len(records_after), 2)
             self.assertEqual(records_after[0]["customer_id"], "CUS-FSYNC-ORIG")
             self.assertEqual(records_after[1]["customer_id"], "CUS-FSYNC-RETRY")

@@ -12,17 +12,22 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import tests
 from app.sheets import db, REQUIRED_TABS
 from app.calculations.inventory import calculate_raw_material_balance
 from app.calculations.costing import get_latest_purchase_rate
 from app.recipes_master import calculate_recipe_cost
 from app.routers.production import (
-    receive_raw_material,
+    receive_raw_material as _raw_receive_raw_material,
     RawMaterialReceiveRequest,
-    record_dal_milling_batch,
+    record_dal_milling_batch as _raw_record_dal_milling_batch,
     list_milling_history,
     DalMillingCreate,
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, wrap_v2_endpoint
+
+receive_raw_material = wrap_v2_endpoint(_raw_receive_raw_material)
+record_dal_milling_batch = wrap_v2_endpoint(_raw_record_dal_milling_batch)
 
 
 class TestDalMillingStage2(unittest.IsolatedAsyncioTestCase):
@@ -48,6 +53,12 @@ class TestDalMillingStage2(unittest.IsolatedAsyncioTestCase):
             "AuditLog": [],
         })
         self.owner_user = {"user_id": "USR-OWNER-01", "role": "OWNER", "full_name": "Owner Admin"}
+        self._sim = LocalAppsScriptSimulator().start()
+
+    def tearDown(self):
+        if getattr(self, "_sim", None) is not None:
+            self._sim.stop()
+            self._sim = None
 
     def _get_stock(self, mat_id: str) -> float:
         res = calculate_raw_material_balance(
@@ -112,13 +123,21 @@ class TestDalMillingStage2(unittest.IsolatedAsyncioTestCase):
         # 4. Downstream Costing Integration
         raw_master = db.get_records("RawMaterials")
         raw_ledger = db.get_records("RawMaterialLedger")
+        # Under Phase 4 clean-data contract, get_latest_purchase_rate strictly reflects supplier
+        # PURCHASE_RECEIPT observations (never internal MILLING_OUTPUT transfers).
         flour_rate_info = get_latest_purchase_rate("Moong Dal Flour", raw_master, raw_ledger)
-        self.assertEqual(flour_rate_info.get("status"), "CONFIRMED")
-        self.assertEqual(flour_rate_info.get("rate_per_canonical_unit"), 115.31)
+        self.assertEqual(flour_rate_info.get("status"), "MISSING_RATE")
+        milling_out_row = next(
+            (r for r in raw_ledger if str(r.get("movement_type", "")).upper() == "MILLING_OUTPUT" and r.get("raw_material_id") == "RM-MOONG-FLOUR"),
+            None,
+        )
+        self.assertIsNotNone(milling_out_row)
+        milled_flour_rate = float(milling_out_row.get("rate_per_unit", 0.0))
+        self.assertEqual(milled_flour_rate, 115.31)
 
-        # 5. Papad recipe cost calculation using new flour rate
+        # 5. Papad recipe cost calculation using new milled flour rate
         recipe_items = [
-            {"material_name": "Moong Dal Flour", "quantity": 1000, "unit": "g", "rate_per_unit": flour_rate_info["rate_per_canonical_unit"], "rate_status": "CONFIRMED"},
+            {"material_name": "Moong Dal Flour", "quantity": 1000, "unit": "g", "rate_per_unit": milled_flour_rate, "rate_status": "CONFIRMED"},
             {"material_name": "Salt", "quantity": 50, "unit": "g", "rate_per_unit": 20.0, "rate_status": "CONFIRMED"},
         ]
         calc = calculate_recipe_cost(recipe_items, expected_yield_kg=1.2)

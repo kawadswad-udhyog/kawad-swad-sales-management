@@ -19,18 +19,28 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import tests
 from app.sheets import db, REQUIRED_TABS, ID_PREFIXES
 from app.auth import hash_password, create_access_token, get_current_user
-import app.routers.auth as auth_router
-import app.routers.sales as sales_router
-import app.routers.stock as stock_router
-import app.routers.dashboard as dashboard_router
-import app.routers.users as users_router
-import app.routers.production as production_router
-import app.routers.salary as salary_router
+import app.routers.auth as _auth_mod
+import app.routers.sales as _sales_mod
+import app.routers.stock as _stock_mod
+import app.routers.dashboard as _dashboard_mod
+import app.routers.users as _users_mod
+import app.routers.production as _production_mod
+import app.routers.salary as _salary_mod
 from app.models import (
     LoginRequest, UserCreate, SalaryCreateRequest, SalaryApproveRequest, SalaryPayRequest
 )
+from tests.v2_test_harness import LocalAppsScriptSimulator, V2RouterProxy
+
+auth_router = V2RouterProxy(_auth_mod)
+sales_router = V2RouterProxy(_sales_mod)
+stock_router = V2RouterProxy(_stock_mod)
+dashboard_router = V2RouterProxy(_dashboard_mod)
+users_router = V2RouterProxy(_users_mod)
+production_router = V2RouterProxy(_production_mod)
+salary_router = V2RouterProxy(_salary_mod)
 
 
 class TestStabilizationUpgrade(unittest.TestCase):
@@ -44,8 +54,9 @@ class TestStabilizationUpgrade(unittest.TestCase):
         db._worksheets.clear()
         db._fail_once.clear()
 
-        db.memory_store = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
+        db.memory_store = {name: [] for name in list(REQUIRED_TABS) + list(ID_PREFIXES) + ["Settings"]}
         db.memory_store.setdefault("AuthUsers", [])
+        self._sim = LocalAppsScriptSimulator().start()
 
         # Clear brute force tracker
         auth_router._LOGIN_ATTEMPTS.clear()
@@ -65,6 +76,8 @@ class TestStabilizationUpgrade(unittest.TestCase):
         })
 
     def tearDown(self):
+        if hasattr(self, "_sim"):
+            self._sim.stop()
         db.is_connected = self._orig_connected
         db.allow_in_memory_fallback = self._orig_fallback
         db.spreadsheet = self._orig_spreadsheet
