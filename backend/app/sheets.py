@@ -563,6 +563,20 @@ class SheetsDatabase:
         exponent = min(self._consecutive_failures - 1, 3)
         return min(self._reconnect_cooldown_seconds * (2 ** exponent), self._max_auto_backoff_seconds)
 
+    @property
+    def storage_init_status(self) -> str:
+        """Return explicit storage initialization state separate from HTTP server readiness."""
+        with self._connect_state_lock:
+            in_progress = self._connect_in_progress
+            failures = self._consecutive_failures
+        if self.is_connected and self.spreadsheet is not None:
+            return "connected"
+        if in_progress:
+            return "initializing"
+        if failures > 0 or self.last_connection_error:
+            return "failed"
+        return "not_started"
+
     def start_background_init(self) -> bool:
         """Start Google Sheets initialization on a single background daemon thread after port bind."""
         if self.is_connected and self.spreadsheet is not None:

@@ -1,0 +1,12 @@
+# Reproducible development & full-ASGI backend test dependencies.
+# Install with: pip install -r backend/requirements-dev.txt
+#
+# Notes:
+# - Pure standard-library unittest execution (`python3 -m unittest discover -s backend/tests -t backend`)
+#   runs all unit, security, accounting, manufacturing, and stdlib HTTP subprocess resilience tests
+#   without requiring third-party packages.
+# - Full ASGI Uvicorn subprocess verification (`test_uvicorn_binds_and_serves_health_within_3s_when_sheets_hangs_over_5s`)
+#   requires the runtime dependencies declared in backend/requirements.txt (`uvicorn`, `fastapi`, `pydantic`, `starlette`, `pyjwt`).
+-r requirements.txt
+pytest>=8.0.0
+httpx>=0.27.0

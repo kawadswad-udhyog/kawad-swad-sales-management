@@ -232,11 +232,13 @@ def health_check():
     """Public minimal liveness & connectivity check for Render and frontend pre-login indicator."""
     status_str = "ok" if db.is_connected else "storage_disconnected"
     persistent_writes = bool(db.is_connected and db.spreadsheet is not None)
+    init_status = getattr(db, "storage_init_status", "connected" if persistent_writes else "not_started")
     return {
         "status": status_str,
         "service": "kawad-swad-sales-dev",
         "google_sheets_connected": bool(db.is_connected),
         "persistent_writes_enabled": persistent_writes,
+        "storage_init_status": init_status,
         "backend": {
             "status": "CONNECTED",
             "service": "kawad-swad-sales-dev",
@@ -260,6 +262,8 @@ def health_details(current_user: dict = Depends(auth.get_current_user)):
 
     require_manager(current_user)
     status_str = "ok" if db.is_connected else "storage_disconnected"
+    persistent_writes = bool(db.is_connected and db.spreadsheet is not None)
+    init_status = getattr(db, "storage_init_status", "connected" if persistent_writes else "not_started")
     has_sa_file = bool(SALES_GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(SALES_GOOGLE_SERVICE_ACCOUNT_FILE))
     has_sa_json = bool(SALES_GOOGLE_SERVICE_ACCOUNT_JSON and len(SALES_GOOGLE_SERVICE_ACCOUNT_JSON.strip()) > 10)
     sanitized_error = _sanitize_diagnostic_error(db.last_connection_error)
@@ -273,6 +277,9 @@ def health_details(current_user: dict = Depends(auth.get_current_user)):
     elif db.is_connected and db.spreadsheet is not None:
         gs_status = "CONNECTED"
         gs_message = "Google Sheets connected and accessible"
+    elif init_status == "initializing":
+        gs_status = "INITIALIZING"
+        gs_message = "Google Sheets initialization is in progress in the background"
     else:
         gs_status = "ERROR"
         gs_message = sanitized_error or "Google Sheets connection failed"
@@ -281,7 +288,8 @@ def health_details(current_user: dict = Depends(auth.get_current_user)):
         "status": status_str,
         "service": "kawad-swad-sales-dev",
         "google_sheets_connected": bool(db.is_connected),
-        "persistent_writes_enabled": bool(db.is_connected and db.spreadsheet is not None),
+        "persistent_writes_enabled": persistent_writes,
+        "storage_init_status": init_status,
         "spreadsheet_id_configured": bool(SALES_GOOGLE_SPREADSHEET_ID),
         "service_account_configured": has_sa_file or has_sa_json,
         "last_connection_error": sanitized_error,
@@ -294,7 +302,8 @@ def health_details(current_user: dict = Depends(auth.get_current_user)):
         "google_sheets": {
             "status": gs_status,
             "connected": bool(db.is_connected),
-            "persistent_writes_enabled": bool(db.is_connected and db.spreadsheet is not None),
+            "persistent_writes_enabled": persistent_writes,
+            "init_status": init_status,
             "message": gs_message,
         },
         "required_sheets": {

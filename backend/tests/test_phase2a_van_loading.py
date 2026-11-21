@@ -199,7 +199,10 @@ class TestPhase2AVanLoadingPass(unittest.TestCase):
                         os.unlink(fpath)
                 except Exception:
                     pass
+        from app.sheets import ID_PREFIXES
         db.memory_store.clear()
+        for tab_name in list(ID_PREFIXES) + ["Settings"]:
+            db.memory_store[tab_name] = []
         with db._lock:
             db._fail_once.clear()
         db.enable_shared_file_store(self.test_dir)

@@ -29,8 +29,58 @@ import app.sheets as sheets_mod
 from app.sheets import DEFAULT_GSPREAD_TIMEOUT, REQUIRED_TABS, SheetsDatabase
 
 
+import urllib.error
+
+
+_UVICORN_SUBPROCESS_REQUIRED_MODULES = (
+    "uvicorn",
+    "fastapi",
+    "pydantic",
+    "starlette",
+    "jwt",
+)
+
+
+def _missing_uvicorn_subprocess_deps() -> list:
+    """Return all packages required to launch the real Uvicorn/FastAPI subprocess that are absent."""
+    missing = []
+    for mod_name in _UVICORN_SUBPROCESS_REQUIRED_MODULES:
+        try:
+            spec = importlib.util.find_spec(mod_name)
+        except (ModuleNotFoundError, ValueError):
+            spec = None
+        if spec is None:
+            missing.append(mod_name)
+    return missing
+
+
 def _has_real_uvicorn_and_fastapi() -> bool:
-    return importlib.util.find_spec("uvicorn") is not None
+    return len(_missing_uvicorn_subprocess_deps()) == 0
+
+
+def _terminate_subprocess_safely(proc: subprocess.Popen) -> str:
+    """Terminate a test subprocess cleanly and return any remaining output."""
+    output = ""
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                out, _ = proc.communicate(timeout=5)
+                output = out or ""
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, _ = proc.communicate(timeout=5)
+                output = out or ""
+        else:
+            out, _ = proc.communicate(timeout=5)
+            output = out or ""
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+    return output
 
 
 @contextmanager
@@ -395,7 +445,292 @@ class TestStartupPortBindAndResilience(unittest.TestCase):
 
         asyncio.run(run_check())
 
-    @unittest.skipUnless(_has_real_uvicorn_and_fastapi(), "Requires real uvicorn and fastapi packages")
+    def test_storage_init_status_transitions_and_health_reporting(self):
+        """storage_init_status accurately tracks not_started -> initializing -> failed -> connected."""
+        inst = self._make_isolated_db(allow_fallback=False)
+        self.assertEqual(inst.storage_init_status, "not_started")
+
+        entered = threading.Event()
+        release = threading.Event()
+        should_fail = {"flag": True}
+        fake_ss = _FakeSpreadsheet()
+
+        class ToggleClient:
+            http_client = MagicMock(timeout=None)
+
+            def set_timeout(self, t):
+                self.http_client.timeout = t
+
+            def open_by_key(self, key):
+                entered.set()
+                release.wait(timeout=5.0)
+                if should_fail["flag"]:
+                    raise TimeoutError("Simulated stall failure")
+                return fake_ss
+
+        with _patched_google_modules(ToggleClient()):
+            self.assertTrue(inst.start_background_init())
+            self.assertTrue(entered.wait(timeout=2.0))
+            self.assertEqual(inst.storage_init_status, "initializing")
+            self.assertFalse(inst.is_connected)
+
+            release.set()
+            inst._background_thread.join(timeout=2.0)
+            self.assertEqual(inst.storage_init_status, "failed")
+            self.assertFalse(inst.is_connected)
+
+            # Now recover cleanly
+            should_fail["flag"] = False
+            self.assertTrue(inst.reconnect())
+            self.assertEqual(inst.storage_init_status, "connected")
+            self.assertTrue(inst.is_connected)
+
+    def test_uvicorn_dependency_check_validates_all_required_asgi_modules(self):
+        """Dependency helper must verify all required ASGI runtime imports and report missing packages visibly."""
+        with patch.object(
+            importlib.util,
+            "find_spec",
+            side_effect=lambda name: object() if name == "uvicorn" else None,
+        ):
+            missing = _missing_uvicorn_subprocess_deps()
+            self.assertNotIn("uvicorn", missing)
+            self.assertIn("fastapi", missing)
+            self.assertIn("pydantic", missing)
+            self.assertIn("starlette", missing)
+            self.assertIn("jwt", missing)
+            self.assertFalse(_has_real_uvicorn_and_fastapi())
+
+        with patch.object(importlib.util, "find_spec", return_value=object()):
+            self.assertEqual(_missing_uvicorn_subprocess_deps(), [])
+            self.assertTrue(_has_real_uvicorn_and_fastapi())
+
+    def test_http_subprocess_binds_and_serves_health_within_3s_when_sheets_hangs_over_5s_stdlib(self):
+        """
+        Deterministic stdlib HTTP subprocess test (runs in every Python environment):
+        Verifies real app startup (_check_configuration + _schedule_post_bind_sheets_init)
+        binds a TCP port and serves /health <3s while Google Sheets open_by_key() hangs 6s,
+        accurately separates HTTP readiness from storage_init_status, fails closed (503) on
+        business endpoints while storage is unavailable, recovers after the 6s delay, and
+        cleans up the subprocess.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        runner = f"""
+import asyncio
+import json
+import sys
+import threading
+import time
+import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import MagicMock
+
+# Inject deterministic gspread & google.oauth2 stubs with a real 6.0s open_by_key() stall
+fake_sa_mod = types.ModuleType("google.oauth2.service_account")
+fake_sa_mod.Credentials = types.SimpleNamespace(
+    from_service_account_info=lambda info, scopes=None: MagicMock(),
+    from_service_account_file=lambda path, scopes=None: MagicMock(),
+)
+fake_oauth2_mod = types.ModuleType("google.oauth2")
+fake_oauth2_mod.service_account = fake_sa_mod
+fake_google_mod = types.ModuleType("google")
+fake_google_mod.oauth2 = fake_oauth2_mod
+
+class HangingWorksheet:
+    def __init__(self, title, headers):
+        self.title = title
+        self._headers = list(headers)
+        self._rows = [{{"sale_id": "SALE-HEALTH-1", "bill_total": 100}}] if title == "Sales" else []
+    def row_values(self, row):
+        return list(self._headers) if row == 1 else []
+    def get_all_records(self):
+        return [dict(r) for r in self._rows]
+
+class HangingSpreadsheet:
+    def __init__(self):
+        req_tabs = __import__("app.sheets", fromlist=["REQUIRED_TABS"]).REQUIRED_TABS
+        self._tabs = {{t: HangingWorksheet(t, cols) for t, cols in req_tabs.items()}}
+    def worksheets(self):
+        return list(self._tabs.values())
+    def worksheet(self, name):
+        return self._tabs[name]
+
+class HangingClient:
+    def __init__(self):
+        self.http_client = MagicMock(timeout=None)
+    def set_timeout(self, timeout):
+        self.http_client.timeout = timeout
+    def open_by_key(self, key):
+        assert self.http_client.timeout is not None, "gspread timeout must never be None"
+        time.sleep(6.0)
+        return HangingSpreadsheet()
+
+fake_gspread = types.ModuleType("gspread")
+fake_gspread.authorize = lambda creds: HangingClient()
+
+sys.modules["gspread"] = fake_gspread
+sys.modules["google"] = fake_google_mod
+sys.modules["google.oauth2"] = fake_oauth2_mod
+sys.modules["google.oauth2.service_account"] = fake_sa_mod
+
+import tests  # ensures stdlib FastAPI/Pydantic/JWT stubs only when real packages are absent
+import os
+os.environ["SALES_TESTING"] = "0"
+
+import app.main as main_mod
+import app.auth as auth_mod
+import app.sheets as sheets_mod
+
+# Ensure production-like fail-closed mode (no in-memory fallback)
+sheets_mod.db.allow_in_memory_fallback = False
+
+# Run real startup configuration validation and post-bind background Sheets scheduler
+main_mod._check_configuration()
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path == "/health":
+            self._send_json(200, main_mod.health_check())
+            return
+        if self.path == "/api/sales":
+            try:
+                asyncio.run(auth_mod.require_sheets_connection())
+                rows = sheets_mod.db.get_records("Sales", fresh=True)
+                self._send_json(200, {{"rows": rows}})
+            except Exception as exc:
+                code = getattr(exc, "status_code", 503)
+                detail = getattr(exc, "detail", str(exc))
+                self._send_json(code, {{"detail": detail}})
+            return
+        self._send_json(404, {{"detail": "Not Found"}})
+
+server = ThreadingHTTPServer(("127.0.0.1", {port}), Handler)
+
+# Trigger background Sheets init immediately after HTTP port bind (mirrors lifespan post-bind schedule)
+threading.Timer(0.05, sheets_mod.db.start_background_init).start()
+server.serve_forever()
+"""
+        env = os.environ.copy()
+        env["SALES_TESTING"] = "0"
+        env["SALES_ENV"] = "production"
+        env["SALES_JWT_SECRET"] = "x" * 40
+        env["SALES_CORS_ORIGINS"] = "https://kawad-swad-sales-frontend.onrender.com"
+        env["SALES_GOOGLE_SPREADSHEET_ID"] = "dummy-sheet-id-123"
+        env["SALES_GOOGLE_SERVICE_ACCOUNT_JSON"] = json.dumps({
+            "type": "service_account",
+            "project_id": "p",
+            "private_key": "k",
+            "client_email": "sa@p.iam.gserviceaccount.com",
+        })
+
+        t0 = time.monotonic()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", runner],
+            cwd=backend_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            health_payload = None
+            elapsed = None
+            while time.monotonic() - t0 < 3.0:
+                if proc.poll() is not None:
+                    out = _terminate_subprocess_safely(proc)
+                    self.fail(f"Startup resilience subprocess exited early (rc={proc.returncode}):\n{out}")
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
+                        if resp.status == 200:
+                            health_payload = json.loads(resp.read().decode("utf-8"))
+                            elapsed = time.monotonic() - t0
+                            break
+                except Exception:
+                    time.sleep(0.05)
+
+            if health_payload is None:
+                out = _terminate_subprocess_safely(proc)
+                self.fail(f"HTTP server did not bind and answer /health within 3 seconds.\nSubprocess output:\n{out}")
+
+            self.assertLess(elapsed, 3.0)
+            self.assertEqual(health_payload["backend"]["status"], "CONNECTED")
+            self.assertEqual(health_payload["status"], "storage_disconnected")
+            self.assertFalse(health_payload["google_sheets_connected"])
+            self.assertFalse(health_payload["persistent_writes_enabled"])
+
+            # Wait briefly past the 50ms post-bind schedule so background Sheets init is actively hanging
+            time.sleep(0.15)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
+                during_hang = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(during_hang["storage_init_status"], "initializing")
+            self.assertFalse(during_hang["google_sheets_connected"])
+            self.assertFalse(during_hang["persistent_writes_enabled"])
+
+            # Business endpoint requiring storage MUST fail closed promptly (503) while Sheets is still hanging
+            t_biz = time.monotonic()
+            with self.assertRaises(urllib.error.HTTPError) as biz_err:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/sales", timeout=2.0)
+            biz_elapsed = time.monotonic() - t_biz
+            self.assertEqual(biz_err.exception.code, 503)
+            self.assertLess(biz_elapsed, 1.5, "Business endpoint blocked instead of failing closed while Sheets hung")
+            biz_err.exception.close()
+
+            # Confirm Sheets hang is genuinely >5 seconds (still not connected before t0 + 4.5s)
+            if time.monotonic() - t0 < 4.5:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
+                    still_hanging = json.loads(resp.read().decode("utf-8"))
+                self.assertFalse(still_hanging["google_sheets_connected"])
+                self.assertEqual(still_hanging["storage_init_status"], "initializing")
+
+            # Wait until the 6s simulated Sheets stall finishes and verify recovery
+            recovered = False
+            deadline = t0 + 10.0
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    out = _terminate_subprocess_safely(proc)
+                    self.fail(f"Subprocess exited unexpectedly during Sheets recovery (rc={proc.returncode}):\n{out}")
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        if data.get("google_sheets_connected") is True:
+                            recovered = True
+                            self.assertGreaterEqual(time.monotonic() - t0, 5.0, "Simulated Sheets delay finished before 5s")
+                            self.assertEqual(data["status"], "ok")
+                            self.assertTrue(data["persistent_writes_enabled"])
+                            self.assertEqual(data["storage_init_status"], "connected")
+                            break
+                except Exception:
+                    pass
+                time.sleep(0.2)
+            self.assertTrue(recovered, "Background init did not restore connected state after 6s Sheets delay")
+
+            # After recovery, business read succeeds
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/sales", timeout=2.0) as resp:
+                self.assertEqual(resp.status, 200)
+                sales_data = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(len(sales_data["rows"]), 1)
+                self.assertEqual(sales_data["rows"][0]["sale_id"], "SALE-HEALTH-1")
+        finally:
+            _terminate_subprocess_safely(proc)
+            self.assertIsNotNone(proc.poll(), "Subprocess was not cleaned up")
+
+    @unittest.skipUnless(
+        _has_real_uvicorn_and_fastapi(),
+        f"Requires real ASGI runtime packages ({', '.join(_missing_uvicorn_subprocess_deps()) or 'uvicorn/fastapi'}); "
+        "install backend/requirements.txt to execute full Uvicorn ASGI subprocess check",
+    )
     def test_uvicorn_binds_and_serves_health_within_3s_when_sheets_hangs_over_5s(self):
         """Real uvicorn subprocess must bind 0.0.0.0:$PORT and answer /health <3s even if Sheets hangs >5s."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -404,11 +739,21 @@ class TestStartupPortBindAndResilience(unittest.TestCase):
         sock.close()
 
         runner = f"""
-import time, gspread, uvicorn
+import sys, time, types, uvicorn
 from unittest.mock import MagicMock
-import google.oauth2.service_account as sa
 
-sa.Credentials.from_service_account_info = lambda info, scopes=None: MagicMock()
+# Provide deterministic gspread + google.oauth2.service_account stubs in sys.modules
+# so the real Uvicorn + FastAPI ASGI startup test does not crash if optional Google
+# client libraries are absent from a minimal test environment.
+fake_sa_mod = types.ModuleType("google.oauth2.service_account")
+fake_sa_mod.Credentials = types.SimpleNamespace(
+    from_service_account_info=lambda info, scopes=None: MagicMock(),
+    from_service_account_file=lambda path, scopes=None: MagicMock(),
+)
+fake_oauth2_mod = types.ModuleType("google.oauth2")
+fake_oauth2_mod.service_account = fake_sa_mod
+fake_google_mod = types.ModuleType("google")
+fake_google_mod.oauth2 = fake_oauth2_mod
 
 class HangingWorksheet:
     def __init__(self, title):
@@ -428,7 +773,14 @@ class HangingClient:
         time.sleep(6.0)
         return HangingSpreadsheet()
 
-gspread.authorize = lambda creds: HangingClient()
+fake_gspread = types.ModuleType("gspread")
+fake_gspread.authorize = lambda creds: HangingClient()
+
+sys.modules["gspread"] = fake_gspread
+sys.modules["google"] = fake_google_mod
+sys.modules["google.oauth2"] = fake_oauth2_mod
+sys.modules["google.oauth2.service_account"] = fake_sa_mod
+
 uvicorn.run("main:app", host="0.0.0.0", port={port}, log_level="warning")
 """
         env = os.environ.copy()
@@ -458,6 +810,9 @@ uvicorn.run("main:app", host="0.0.0.0", port={port}, log_level="warning")
             health_payload = None
             elapsed = None
             while time.monotonic() - t0 < 3.0:
+                if proc.poll() is not None:
+                    out = _terminate_subprocess_safely(proc)
+                    self.fail(f"Uvicorn subprocess exited early (rc={proc.returncode}):\n{out}")
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
                         if resp.status == 200:
@@ -467,30 +822,60 @@ uvicorn.run("main:app", host="0.0.0.0", port={port}, log_level="warning")
                 except Exception:
                     time.sleep(0.1)
 
-            self.assertIsNotNone(health_payload, "Uvicorn did not bind and answer /health within 3 seconds")
+            if health_payload is None:
+                out = _terminate_subprocess_safely(proc)
+                self.fail(f"Uvicorn did not bind and answer /health within 3 seconds.\nSubprocess output:\n{out}")
+
             self.assertLess(elapsed, 3.0)
+            self.assertEqual(health_payload["backend"]["status"], "CONNECTED")
+            self.assertEqual(health_payload["status"], "storage_disconnected")
             self.assertFalse(health_payload["google_sheets_connected"])
             self.assertFalse(health_payload["persistent_writes_enabled"])
 
+            # Verify storage_init_status tracks initializing and business auth fails closed (503) promptly
+            time.sleep(0.15)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
+                during_hang = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(during_hang["storage_init_status"], "initializing")
+            self.assertFalse(during_hang["google_sheets_connected"])
+
+            login_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/auth/login",
+                data=json.dumps({"username": "owner", "password": "Password123!"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            t_biz = time.monotonic()
+            with self.assertRaises(urllib.error.HTTPError) as biz_err:
+                urllib.request.urlopen(login_req, timeout=2.0)
+            self.assertEqual(biz_err.exception.code, 503)
+            self.assertLess(time.monotonic() - t_biz, 1.5)
+            biz_err.exception.close()
+
             # Wait until the 6s simulated Sheets stall finishes and verify recovery
             recovered = False
-            deadline = t0 + 9.5
+            deadline = t0 + 10.0
             while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    out = _terminate_subprocess_safely(proc)
+                    self.fail(f"Uvicorn subprocess exited unexpectedly during recovery (rc={proc.returncode}):\n{out}")
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
                         data = json.loads(resp.read().decode("utf-8"))
                         if data.get("google_sheets_connected") is True:
                             recovered = True
+                            self.assertGreaterEqual(time.monotonic() - t0, 5.0)
                             self.assertEqual(data["status"], "ok")
                             self.assertTrue(data["persistent_writes_enabled"])
+                            self.assertEqual(data["storage_init_status"], "connected")
                             break
                 except Exception:
                     pass
                 time.sleep(0.2)
             self.assertTrue(recovered, "Background init did not restore connected state after 6s Sheets delay")
         finally:
-            proc.terminate()
-            proc.communicate(timeout=5)
+            _terminate_subprocess_safely(proc)
+            self.assertIsNotNone(proc.poll(), "Uvicorn subprocess was not cleaned up")
 
 
 if __name__ == "__main__":
