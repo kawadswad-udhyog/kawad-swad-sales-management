@@ -37,21 +37,68 @@ class PasswordResetRequest(BaseModel):
 
 def _get_target_user_role(user_id: str) -> str:
     """
-    Resolve target user's authoritative role across AuthUsers and Users without silent defaults.
-    If either sheet classifies the account as an Owner, return 'OWNER_ADMIN' so PA cannot bypass
-    Owner protection via stale or blank Users.role.
+    Resolve target user's authoritative role across ALL matching AuthUsers and Users rows
+    without silent defaults (M07-A02).
+    - Rejects malformed non-list/non-dict records fail-closed (503).
+    - Rejects duplicate matching user_id rows in either table fail-closed (409 Conflict).
+    - If any matching row across either table indicates Owner, returns 'OWNER_ADMIN' so PA
+      cannot bypass Owner protection via stale or blank Users.role.
     """
-    clean_uid = user_id.strip()
-    auth_users = db.get_records("AuthUsers", fresh=True) or []
-    users = db.get_records("Users", fresh=True) or []
-    auth_target = next((a for a in auth_users if str(a.get("user_id") or "").strip() == clean_uid), None)
-    user_target = next((u for u in users if str(u.get("user_id") or "").strip() == clean_uid), None)
-    if not auth_target and not user_target:
+    clean_uid = str(user_id or "").strip()
+    if not clean_uid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Valid target user_id is required.",
+        )
+    auth_users = db.get_records("AuthUsers", fresh=True)
+    users = db.get_records("Users", fresh=True)
+    if not isinstance(auth_users, list) or not isinstance(users, list):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to verify target user identity from authoritative sheets.",
+        )
+
+    auth_matches = []
+    for a in auth_users:
+        if not isinstance(a, dict):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="AuthUsers contains malformed records. Action blocked.",
+            )
+        if str(a.get("user_id") or "").strip() == clean_uid:
+            auth_matches.append(a)
+
+    user_matches = []
+    for u in users:
+        if not isinstance(u, dict):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Users contains malformed records. Action blocked.",
+            )
+        if str(u.get("user_id") or "").strip() == clean_uid:
+            user_matches.append(u)
+
+    if not auth_matches and not user_matches:
         raise HTTPException(status_code=404, detail="Employee record not found.")
-    auth_role = str((auth_target or {}).get("role") or "").strip().upper()
-    user_role = str((user_target or {}).get("role") or "").strip().upper()
-    if auth_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} or user_role in {"OWNER", "OWNER_ADMIN", "ADMIN"}:
+
+    if len(auth_matches) > 1 or len(user_matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Ambiguous identity: Multiple records exist for user_id '{clean_uid}' "
+                f"(Users={len(user_matches)}, AuthUsers={len(auth_matches)}). "
+                "Account changes are blocked until duplicates are resolved by Owner."
+            ),
+        )
+
+    all_roles = [
+        str(row.get("role") or "").strip().upper()
+        for row in (auth_matches + user_matches)
+    ]
+    if any(r in {"OWNER", "OWNER_ADMIN", "ADMIN"} for r in all_roles):
         return "OWNER_ADMIN"
+    auth_role = str(auth_matches[0].get("role") or "").strip().upper() if auth_matches else ""
+    user_role = str(user_matches[0].get("role") or "").strip().upper() if user_matches else ""
     return auth_role or user_role
 
 

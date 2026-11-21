@@ -211,11 +211,26 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 
 @router.post("/api/auth/change-password", dependencies=[Depends(require_sheets_connection)])
 async def change_password(req: ChangePasswordRequest, request: Request, current_user: dict = Depends(get_current_user)):
-    user_id = str(current_user.get("user_id") or "")
+    user_id = str(current_user.get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user identity is missing user_id.")
     rows = db.get_records("AuthUsers", fresh=True)
-    match = next((row for row in rows if str(row.get("user_id")) == user_id), None)
-    if not match:
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=503, detail="Unable to verify account credentials from AuthUsers.")
+    matches = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise HTTPException(status_code=503, detail="AuthUsers contains malformed records. Password change blocked.")
+        if str(row.get("user_id") or "").strip() == user_id:
+            matches.append(row)
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ambiguous identity: Multiple authentication records exist for this account. Password change blocked.",
+        )
+    if not matches:
         raise HTTPException(status_code=404, detail="Login account not found")
+    match = matches[0]
     if not verify_password(req.current_password, str(match.get("password_hash", ""))):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     if req.new_password == req.current_password:

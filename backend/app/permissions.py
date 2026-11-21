@@ -134,28 +134,41 @@ _EXPLICIT_ACTIVE_VALUES: Set[str] = {"true", "1", "yes", "active"}
 
 def is_active_custom_role(row: Any) -> bool:
     """
-    Fail-closed custom role active check.
-    Rejects non-dict rows, blank role_name, soft-deleted rows, and any explicit
-    non-active status value (only explicit truthy active values are accepted when set).
+    Strictly fail-closed custom role active-state predicate (M07-A01).
+    Returns True ONLY when:
+    - row is a dict with a non-empty role_name;
+    - row is not soft-deleted (deleted is absent/blank or an explicit false value);
+    - row contains an explicit 'active' value matching the active allow-list
+      (bool True, int 1, or case-insensitive string in {'true', '1', 'yes', 'active'}).
+    Missing 'active' key, None, empty/whitespace string, False, 0, or any malformed/unknown
+    value fails closed (returns False).
     """
     if not isinstance(row, dict):
         return False
     role_name = str(row.get("role_name") or "").strip().upper()
     if not role_name:
         return False
-    if str(row.get("deleted") or "").strip().lower() in {"true", "1", "yes"}:
+    deleted_val = row.get("deleted")
+    if isinstance(deleted_val, bool):
+        if deleted_val:
+            return False
+    elif isinstance(deleted_val, int):
+        if deleted_val != 0:
+            return False
+    elif deleted_val is not None:
+        deleted_str = str(deleted_val).strip().lower()
+        if deleted_str and deleted_str not in {"false", "0", "no"}:
+            return False
+    if "active" not in row:
         return False
-    if "active" in row:
-        active_val = row.get("active")
-        if isinstance(active_val, bool):
-            return active_val
-        if isinstance(active_val, int):
-            return active_val == 1
-        if active_val is not None:
-            active_str = str(active_val).strip().lower()
-            if active_str != "" and active_str not in _EXPLICIT_ACTIVE_VALUES:
-                return False
-    return True
+    active_val = row.get("active")
+    if isinstance(active_val, bool):
+        return active_val
+    if isinstance(active_val, int):
+        return active_val == 1
+    if isinstance(active_val, str):
+        return active_val.strip().lower() in _EXPLICIT_ACTIVE_VALUES
+    return False
 
 
 def is_recognized_role(role: Any, custom_roles: Optional[List[dict]] = None) -> bool:

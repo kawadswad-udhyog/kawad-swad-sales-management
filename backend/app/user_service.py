@@ -1104,10 +1104,26 @@ def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, 
     if len(new_password) < 8:
         raise HTTPException(status_code=422, detail="New password must be at least 8 characters.")
 
-    auth_records = db.get_records("AuthUsers", fresh=True) or []
-    target_auth = next((r for r in auth_records if str(r.get("user_id", "")).strip() == user_id.strip()), None)
-    if not target_auth:
+    clean_uid = str(user_id or "").strip()
+    if not clean_uid:
+        raise HTTPException(status_code=400, detail="Valid target user_id is required.")
+    auth_records = db.get_records("AuthUsers", fresh=True)
+    if not isinstance(auth_records, list):
+        raise HTTPException(status_code=503, detail="Unable to read AuthUsers for password reset.")
+    matching_auth = []
+    for r in auth_records:
+        if not isinstance(r, dict):
+            raise HTTPException(status_code=503, detail="AuthUsers contains malformed records. Password reset blocked.")
+        if str(r.get("user_id", "")).strip() == clean_uid:
+            matching_auth.append(r)
+    if len(matching_auth) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ambiguous identity: Multiple authentication records ({len(matching_auth)}) exist with user_id '{clean_uid}'. Password reset is frozen until duplicates are resolved by Owner.",
+        )
+    if not matching_auth:
         raise HTTPException(status_code=404, detail="Login account was not found in AuthUsers.")
+    target_auth = matching_auth[0]
 
     current_active_status = "true" if is_account_active(target_auth.get("active")) else "false"
     revoke_ts = datetime.now(timezone.utc).isoformat()
