@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from app.models import AuditLogItem
 from app.sheets import db
 from app.auth import get_current_user
-from app.permissions import require_owner
+from app.permissions import require_roles
 
 router = APIRouter(prefix="/api/audit-logs", tags=["Audit Log"])
 
@@ -14,8 +14,13 @@ async def list_audit_logs(
     entity_type: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    # Audit history may contain sensitive employee and financial metadata.
-    require_owner(current_user)
+    # Audit history may contain sensitive employee and financial metadata;
+    # strictly restricted to OWNER_ADMIN and read-only AUDITOR (PA and other roles denied).
+    require_roles(
+        current_user,
+        {"OWNER_ADMIN", "AUDITOR"},
+        detail="Audit log access requires Owner or Auditor privileges.",
+    )
     records = db.get_records("AuditLog")
     items: List[AuditLogItem] = []
     for r in records:

@@ -43,7 +43,8 @@ const CUSTOMER_TYPE_OPTIONS: Array<{ value: CustomerType | 'ALL'; label: string 
 ];
 
 export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
-  const { customers, addCustomer, setActiveCustomerIdForBilling } = useStore();
+  const { currentUser, customers, addCustomer, setActiveCustomerIdForBilling } = useStore();
+  const isReadOnlyAuditor = String(currentUser?.role || '').trim().toUpperCase() === 'AUDITOR';
   const [filter, setFilter] = useState('');
   const [selectedType, setSelectedType] = useState<CustomerType | 'ALL'>('ALL');
   const [notice, setNotice] = useState<{ msg: string; error?: boolean } | null>(null);
@@ -147,14 +148,16 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
         subtitle="Search retail outlets, wholesale accounts, contact details, and start 1-tap sales orders"
         icon={<Users size={22} />}
         actions={
-          <button
-            type="button"
-            onClick={() => setIsFormOpen(!isFormOpen)}
-            className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
-          >
-            {isFormOpen ? <X size={15} /> : <Plus size={15} />}
-            <span>{isFormOpen ? 'Cancel' : 'Add Customer'}</span>
-          </button>
+          !isReadOnlyAuditor ? (
+            <button
+              type="button"
+              onClick={() => setIsFormOpen(!isFormOpen)}
+              className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+            >
+              {isFormOpen ? <X size={15} /> : <Plus size={15} />}
+              <span>{isFormOpen ? 'Cancel' : 'Add Customer'}</span>
+            </button>
+          ) : undefined
         }
       />
 

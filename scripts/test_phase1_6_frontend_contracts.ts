@@ -234,4 +234,40 @@ runTest('14. Retryability accurately separates non-retryable blocked setup from 
   assert.equal(isBlockedOwnerSetupError(errPending), false);
 });
 
-console.log(`\nALL ${passed}/14 PHASE 1.6 FRONTEND CONTRACT TESTS PASSED.`);
+// 15. Stock adjustment payload normalization & idempotency key forwarding contracts
+runTest('15. api.ts normalizes stock adjustment payloads to StockAdjustmentRequest and forwards idempotencyKey on payments/v2 writes', () => {
+  const apiSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/services/api.ts'), 'utf-8');
+  assert.match(apiSrc, /item_type:\s*'RAW_MATERIAL'/);
+  assert.match(apiSrc, /item_type:\s*'FINISHED_GOODS'/);
+  assert.match(apiSrc, /quantity_change:\s*Number\(payload\.quantity_change\s*\?\?\s*payload\.adjusted_quantity/);
+  assert.match(apiSrc, /quantity_change:\s*Number\(payload\.quantity_change\s*\?\?\s*payload\.adjusted_packets/);
+  assert.match(apiSrc, /recordSupplierPayment[\s\S]*?idempotencyKey:\s*effectiveIdempKey/);
+  assert.match(apiSrc, /applySupplierAdvance[\s\S]*?idempotencyKey:\s*effectiveIdempKey/);
+  assert.match(apiSrc, /postV2GovernedAction[\s\S]*?idempotencyKey:\s*payload\.nonce/);
+});
+
+// 16. Confidentiality parity for accountant workspace & designation
+runTest('16. Accountant workspace and designation exclude confidential salary and owner-only audit views', () => {
+  const wsSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/utils/workspaces.ts'), 'utf-8');
+  const acctWsMatch = wsSrc.match(/accountant:\s*\{[\s\S]*?allowedViews:\s*\[([\s\S]*?)\]/);
+  assert.ok(acctWsMatch, 'accountant workspace config must exist');
+  assert.doesNotMatch(acctWsMatch[1], /'salary'/);
+  assert.doesNotMatch(acctWsMatch[1], /'audit'/);
+});
+
+// 17. POL-013 zero fabricated records in QualityView & canonical v2 dashboard routing
+runTest('17. QualityView has zero fabricated sample customer/lot defaults and DashboardView routes canonical v2 workspaces', () => {
+  const qvSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/views/QualityView.tsx'), 'utf-8');
+  assert.doesNotMatch(qvSrc, /Balaji Kirana Store/);
+  assert.doesNotMatch(qvSrc, /Agarwal Traders/);
+  assert.doesNotMatch(qvSrc, /LOT-202610-001/);
+  assert.match(qvSrc, /isAuditor/);
+
+  const dvSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/views/DashboardView.tsx'), 'utf-8');
+  assert.match(dvSrc, /timeZone:\s*'Asia\/Kolkata'/);
+  assert.match(dvSrc, /'field_salesman'/);
+  assert.match(dvSrc, /'accounts'/);
+  assert.match(dvSrc, /workspaceConfig\.id === 'auditor'/);
+});
+
+console.log(`\nALL ${passed}/17 FRONTEND CONTRACT TESTS PASSED.`);

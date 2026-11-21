@@ -42,8 +42,8 @@ export const ClosingView: React.FC = () => {
   const isManager = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT', 'ACCOUNTS'].includes(userRole);
   const currentSalesmanId = currentUser?.user_id || '';
 
-  const [openingCash, setOpeningCash] = useState<number>(500);
-  const [physicalCashReturned, setPhysicalCashReturned] = useState<number>(500);
+  const [openingCash, setOpeningCash] = useState<number>(0);
+  const [physicalCashReturned, setPhysicalCashReturned] = useState<number>(0);
   const [notes, setNotes] = useState('');
   const [submissionNonce, setSubmissionNonce] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ msg: string; error?: boolean; unknownOutcome?: boolean } | null>(null);
@@ -55,6 +55,8 @@ export const ClosingView: React.FC = () => {
     decision: 'CONFIRMED' | 'CORRECTION_REQUIRED';
   } | null>(null);
   const [reviewNote, setReviewNote] = useState('');
+  const [reviewNonce, setReviewNonce] = useState<string | null>(null);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
 
   // Live metrics for today
   const metrics = getTodayClosingMetrics(currentSalesmanId, Number(openingCash));
@@ -107,19 +109,33 @@ export const ClosingView: React.FC = () => {
   };
 
   const handleConfirmReview = async () => {
-    if (!reviewingClosing) return;
+    if (!reviewingClosing || reviewSubmitting) return;
     const { closing, decision } = reviewingClosing;
     if (decision === 'CORRECTION_REQUIRED' && !reviewNote.trim()) {
       setNotice({ msg: 'A note explaining the discrepancy is required.', error: true });
       return;
     }
+    const activeNonce = reviewNonce || createSubmissionNonce('CLSRVW');
+    if (!reviewNonce) setReviewNonce(activeNonce);
+    setReviewSubmitting(true);
     try {
-      await reviewDailyClosing(closing.closing_id, decision, reviewNote.trim());
+      await reviewDailyClosing(closing.closing_id, decision, reviewNote.trim(), activeNonce);
+      setReviewNonce(null);
       setNotice({ msg: `Daily closing #${closing.closing_id} marked as ${decision}.` });
       setReviewingClosing(null);
       setReviewNote('');
     } catch (err: unknown) {
-      setNotice({ msg: err instanceof Error ? err.message : 'Closing review was not saved.', error: true });
+      if (isUnknownOutcomeError(err)) {
+        setNotice({
+          msg: `Status not confirmed; do not submit a new review. Your retry key (${activeNonce}) is preserved—retry safely.`,
+          error: true,
+          unknownOutcome: true,
+        });
+      } else {
+        setNotice({ msg: err instanceof Error ? err.message : 'Closing review was not saved.', error: true });
+      }
+    } finally {
+      setReviewSubmitting(false);
     }
   };
 

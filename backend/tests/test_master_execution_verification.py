@@ -178,6 +178,50 @@ class TestMasterExecutionVerification(unittest.TestCase):
         res = asyncio.run(customers_router.create_customer(req, request=make_test_request(), current_user=owner))
         self.assertEqual(res.city, "Bhilwara")
 
+    def test_audit_log_allows_owner_and_auditor_and_denies_pa_and_salesman(self):
+        """OWNER_ADMIN and read-only AUDITOR may view AuditLog; PA and FIELD_SALESMAN receive 403."""
+        import app.routers.audit as audit_router
+        from fastapi import HTTPException
+
+        db.memory_store.setdefault("AuditLog", []).append({
+            "audit_id": "AUD-TEST-1",
+            "event_datetime": "2026-11-21T08:00:00Z",
+            "actor_user_id": "USR-000001",
+            "action": "CREATE",
+            "entity_type": "Product",
+            "entity_id": "PRD-1",
+            "reason": "Verified test audit entry",
+        })
+        owner_logs = asyncio.run(audit_router.list_audit_logs(current_user={"user_id": "USR-000001", "role": "OWNER_ADMIN"}))
+        auditor_logs = asyncio.run(audit_router.list_audit_logs(current_user={"user_id": "USR-AUD-1", "role": "AUDITOR"}))
+        self.assertGreaterEqual(len(owner_logs), 1)
+        self.assertEqual(len(auditor_logs), len(owner_logs))
+
+        for denied_role in ("PA", "FIELD_SALESMAN", "ACCOUNTS", "PRODUCTION"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(audit_router.list_audit_logs(current_user={"user_id": "USR-DENY", "role": denied_role}))
+            self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_workspace_hydration_ignores_expected_rbac_403_and_surfaces_real_storage_errors(self):
+        """Workspace hydration must NOT produce false PARTIAL_SYNC errors for non-owner RBAC 403s, while still reporting real storage failures."""
+        import app.routers.workspace as workspace_router
+
+        pa_ws = asyncio.run(workspace_router.load_workspace(current_user={"user_id": "USR-PA-1", "role": "PA"}))
+        self.assertEqual(pa_ws["_sync_errors"], [])
+        self.assertEqual(pa_ws["audit_logs"], [])
+        self.assertIsNotNone(pa_ws["dashboard"])
+
+        auditor_ws = asyncio.run(workspace_router.load_workspace(current_user={"user_id": "USR-AUD-1", "role": "AUDITOR"}))
+        self.assertEqual(auditor_ws["_sync_errors"], [])
+        self.assertIsNotNone(auditor_ws["dashboard"])
+        self.assertIsInstance(auditor_ws["audit_logs"], list)
+
+        # Real storage failure must still be surfaced loudly in _sync_errors
+        with patch.object(workspace_router.products_router, "list_products", side_effect=RuntimeError("Sheets 503 outage")):
+            broken_ws = asyncio.run(workspace_router.load_workspace(current_user={"user_id": "USR-000001", "role": "OWNER_ADMIN"}))
+        self.assertIn("products", broken_ws["_failed_resources"])
+        self.assertTrue(any(e["resource"] == "products" and "503" in e["message"] for e in broken_ws["_sync_errors"]))
+
     def test_end_to_end_controlled_acceptance_and_trial_balance_reconciliation(self):
         """Execute complete 7-stage Kawad Swad ERP workflow with zero inventory and trial balance variance."""
         # Stop outer simulator cleanly because run_acceptance_and_reconciliation manages its own lifecycle

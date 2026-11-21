@@ -17,7 +17,7 @@ has been packaged into a clean source archive at:
 ================================================================================
 B. MAJOR ENGINEERING CHANGES IMPLEMENTED
 ================================================================================
-1. PRODUCTION CODE DEFECTS FIXED (17 TOTAL VERIFIED FIXES):
+1. PRODUCTION CODE DEFECTS FIXED (23 TOTAL VERIFIED FIXES):
    - P1.8-001 (CRITICAL): Hardened duplicate-ID preflight lookup in
      backend/app/sheets.py and backend/app/apps_script_bridge.py to enforce
      fresh=True, authoritative Row-1 ID-header verification via
@@ -48,47 +48,91 @@ B. MAJOR ENGINEERING CHANGES IMPLEMENTED
      backend/app/routers/purchasing.py.
    - P1.8-014: Added post-write fresh readback verification and invoice
      line_key conflict guards in backend/app/routers/production.py.
-   - P1.8-015 (NEW — Master Execution): Fixed post_packaging_batch_journal in
+   - P1.8-015: Fixed post_packaging_batch_journal in
      backend/app/accounting/postings.py to guard the Bulk Papad WIP credit line
      (account 1230) with `if r_bulk > Decimal("0"):`, preventing a real
      production crash (`ValueError: Line 2: Line must have a non-zero debit or
      credit amount`) whenever packaging batches are posted while bulk overhead
      valuation is pending under CA policy (bulk_cost=0, material_cost>0).
-   - P1.8-016 (NEW — Master Execution): Fixed get_latest_purchase_rate in
+   - P1.8-016: Fixed get_latest_purchase_rate in
      backend/app/calculations/costing.py to accept confirmed MILLING_OUTPUT
      landed flour receipts alongside supplier PURCHASE_RECEIPT observations
      for downstream papad batch costing, while continuing to exclude
      PRODUCTION_CONSUMPTION, MILLING_CONSUMPTION, OPENING_VERIFICATION, and
      stock adjustments.
-   - P1.8-017 (NEW — Master Execution): Hardened backend/app/auth.py (AUTH-03
-     fail-closed is_account_active / is_account_deactivated on None/blank/
-     unrecognized values), backend/app/sheets.py (AuthUsers & RevokedTokens in
-     NO_CACHE_TABS fail closed on 429 even with fresh=False), and
-     backend/app/main.py (_sanitize_diagnostic_error now redacts
-     SALES_APPS_SCRIPT_SHARED_SECRET and SALES_APPS_SCRIPT_WEBAPP_URL).
+   - P1.8-017: Hardened backend/app/auth.py (AUTH-03 fail-closed
+     is_account_active / is_account_deactivated on None/blank/unrecognized
+     values), backend/app/sheets.py (AuthUsers & RevokedTokens in NO_CACHE_TABS
+     fail closed on 429 even with fresh=False), and backend/app/main.py
+     (_sanitize_diagnostic_error redacts SALES_APPS_SCRIPT_SHARED_SECRET and
+     SALES_APPS_SCRIPT_WEBAPP_URL).
+   - P1.8-018 (CRITICAL — Workspace Hydration RBAC): Fixed
+     backend/app/routers/workspace.py so expected HTTP 403 RBAC boundaries for
+     non-owner roles (PA, AUDITOR, ACCOUNTS, FIELD_SALESMAN, PRODUCTION, etc.)
+     no longer poison `_sync_errors` / `_failed_resources` with false
+     PARTIAL_SYNC storage error banners on login, while still failing loudly on
+     genuine storage/503/429/network outages; enabled role-scoped dashboard
+     hydration for all authenticated roles and gated audit_logs to
+     OWNER_ADMIN + AUDITOR.
+   - P1.8-019 (HIGH — Audit Trail Constitution Parity): Updated
+     backend/app/routers/audit.py (`GET /api/audit-logs`) to authorize
+     OWNER_ADMIN and read-only AUDITOR per Master Policy Constitution v1.2 SOP,
+     while keeping PA and all other roles strictly forbidden (403) and
+     `POST /api/audit-logs` permanently disabled (410 Gone).
+   - P1.8-020 (CRITICAL — Frontend-to-Backend Payload & Retry Idempotency):
+     Fixed `adjustRawMaterialStock` and `adjustFinishedGoodsStock` in
+     src/services/api.ts to normalize payloads to backend
+     `StockAdjustmentRequest` (`item_type`, `item_id`, `quantity_change`,
+     `unit`, `adjustment_type`, `reason`) preventing guaranteed HTTP 422
+     validation failures; forwarded stable `idempotencyKey` headers on
+     `recordSupplierPayment`, `applySupplierAdvance`, `updateV2Policy`, and
+     `postV2GovernedAction`.
+   - P1.8-021 (HIGH — POL-013 No Fabricated Records & QualityView RBAC):
+     Removed hardcoded fabricated sample customer/product/lot defaults
+     ("Balaji Kirana Store", "Agarwal Traders", "LOT-202610-001", hardcoded
+     3-SKU map) from src/views/QualityView.tsx, wired live products/customers
+     from StoreContext, and enforced backend-aligned RBAC visibility including
+     read-only AUDITOR mode; removed hardcoded Rs 500 cash defaults and added
+     stable retry nonce + 504 handling to ClosingView review workflow.
+   - P1.8-022 (HIGH — Canonical V2 Role Dashboards & IST Business Dates):
+     Fixed src/views/DashboardView.tsx to use IST (Asia/Kolkata) business dates
+     instead of UTC, route all canonical v2 workspaces (`field_salesman`,
+     `production`, `packaging`, `quality`, `store`, `accounts`, `auditor`,
+     `hr`), add a dedicated read-only Internal Auditor dashboard, and remove
+     hardcoded "100% Balanced" / forbidden "Payroll & Wages" cards from the
+     Accounts dashboard.
+   - P1.8-023 (MEDIUM-HIGH — Confidentiality & Deployment Config Parity):
+     Removed confidential `salary` and `audit` views from legacy accountant
+     workspace/designation configs (`src/utils/workspaces.ts`,
+     `src/utils/permissions.ts`), aligned `ProductsView.tsx` with `PROCUREMENT`
+     catalogue write permissions, added read-only AUDITOR guard to
+     `CustomersView.tsx`, and synced `render.yaml` with `SALES_APPS_SCRIPT_*`
+     `sync: false` env placeholders (zero secrets).
 
 2. END-TO-END WORKFLOW, TEST HARNESS & REGRESSION COVERAGE:
    - Modernized all legacy backend test suites and the standalone 7-stage
      acceptance suite (backend/tests/verify_acceptance_and_reconciliation.py) to
      run against real V2.1 Single-Write-Owner routers via
      LocalAppsScriptSimulator + Request injection without weakening any guard.
-   - Added backend/tests/test_master_execution_verification.py locking in all
-     new production fixes and executing the complete 7-stage business
-     acceptance & double-entry trial balance reconciliation inside unittest
-     discovery.
+   - Added backend/tests/test_master_execution_verification.py (8 tests) and
+     expanded scripts/test_phase1_6_frontend_contracts.ts (17 tests) locking in
+     all production fixes, RBAC boundaries, payload schemas, idempotency
+     forwarding, POL-013 compliance, and full 7-stage reconciliation.
 
-3. FRONTEND & API CONTRACT AUDIT:
-   - Static audit confirmed 100% alignment between all 175 frontend /api/* call
-     sites and all 206 backend FastAPI routes.
-   - Confirmed zero demo/seed/mock business data, zero localStorage business
-     persistence, zero window.alert/window.open, zero dead empty handlers.
+3. DEEP STATIC & CONTRACT AUDITS:
+   - Backend Action Registry Audit: 127 registered actions in
+     GOVERNED_ACTION_REGISTRY across all 134 governed write call sites ->
+     0 unregistered actions, 0 tab allowlist mismatches.
+   - Backend Bare Import Audit: 0 bare module imports across backend/app.
+   - Frontend-to-Backend Route Audit: 100% of apiRequest calls match exact
+     backend HTTP methods & paths; 0 raw fetch() calls outside api.ts;
+     0 window.alert/confirm/open/prompt calls; 0 localStorage business records.
 
 4. DOCUMENTATION OVERHAUL:
    - Rewrote README.md to accurately match the actual FastAPI + Google Sheets +
-     Apps Script Single-Write-Owner + React/TypeScript/Tailwind ERP (removed
-     obsolete localStorage/seed-data and xlsx references).
+     Apps Script Single-Write-Owner + React/TypeScript/Tailwind ERP.
    - Added docs/SYSTEM_ARCHITECTURE_AND_OPERATIONS.md and synced .env.example
-     with backend/app/config.py.
+     and render.yaml with backend/app/config.py.
 
 ================================================================================
 C. MODULE STATUS MATRIX
@@ -97,7 +141,7 @@ Module                          | Status
 --------------------------------|----------------------------------------------
 Authentication & RBAC           | Repaired, Integrated, Locally Verified
 Users & Approvals               | Repaired, Integrated, Locally Verified
-Dashboard & Reports             | Integrated, Locally Verified
+Dashboard & Reports             | Repaired, Integrated, Locally Verified
 Products & Customers            | Repaired, Integrated, Locally Verified
 Sales, Billing & Credit Ledger  | Repaired, Integrated, Locally Verified
 Finished Stock & Van Loading    | Repaired, Integrated, Locally Verified
@@ -105,11 +149,11 @@ Purchasing & Supplier Payments  | Repaired, Integrated, Locally Verified
 Raw Materials & Dal Milling     | Repaired, Integrated, Locally Verified
 Production & Packaging          | Repaired, Integrated, Locally Verified
 Double-Entry Accounting         | Repaired, Integrated, Locally Verified
-Expenses & Daily Closing        | Integrated, Locally Verified
+Expenses & Daily Closing        | Repaired, Integrated, Locally Verified
 Shop Visits                     | Integrated, Locally Verified
 Workforce, Attendance & Payroll | Repaired, Integrated, Locally Verified
 Quality & Lot Traceability      | Repaired, Integrated, Locally Verified
-Audit Log & System Health       | Hardened, Integrated, Locally Verified
+Audit Log & System Health       | Repaired, Hardened, Locally Verified
 Live Google Sheets Integration  | Blocked (External DB-003 & DB-007)
 Live Apps Script Gateway        | Blocked (External DB-008 WebAppBridge.gs)
 
@@ -120,7 +164,7 @@ D. VERIFICATION & TEST REPORT
    - Backend Bytecode Compilation:
      python3 -m compileall -q backend/app backend/scripts backend/tests -> PASS
    - Full Backend Unittest Discovery (53 test files):
-     575 discovered -> 574 PASSED, 0 FAILED, 0 ERRORS, 1 SKIPPED (pre-existing
+     577 discovered -> 576 PASSED, 0 FAILED, 0 ERRORS, 1 SKIPPED (pre-existing
      uvicorn subprocess test when uvicorn package is absent in container)
    - Standalone 7-Stage End-to-End Business Acceptance & Reconciliation:
      Raw Material Purchase -> Dal Milling -> Bulk Papad Production -> Packaging
@@ -130,11 +174,12 @@ D. VERIFICATION & TEST REPORT
      Rs 0.00 variance) -> PASS
    - Frontend TypeScript Check (npm run lint / tsc --noEmit) -> PASS (0 errors)
    - Frontend Contract Suite (scripts/test_phase1_6_frontend_contracts.ts):
-     14/14 PASSED
+     17/17 PASSED
    - Frontend Production Build (npm run build / tsc && vite build):
-     2,477 modules transformed, clean bundle generated -> PASS
-   - Frontend/Backend Route Alignment Audit:
-     206 backend routes vs 175 frontend /api/* call sites -> 100% matched
+     Clean production bundle generated -> PASS
+   - Action Registry & Route Alignment Audits:
+     134 governed write call sites / 127 actions -> 0 mismatches;
+     All frontend apiRequest routes matched 100% against FastAPI backend.
 
 2. FAILED AND FIXED DURING THIS MISSION:
    - post_packaging_batch_journal zero-bulk-cost GL line ValueError -> FIXED
@@ -142,6 +187,11 @@ D. VERIFICATION & TEST REPORT
    - test_sheets_quota_handling.py AuthUsers NO_CACHE_TABS 429 test -> FIXED
    - test_phase1_6_targeted_repairs.py AUTH-03 fail-closed None test -> FIXED
    - verify_acceptance_and_reconciliation.py pre-v2.1 signatures -> FIXED
+   - workspace.py false PARTIAL_SYNC errors on expected RBAC 403s -> FIXED
+   - api.ts StockAdjustmentRequest 422 payload mismatch & dropped
+     idempotencyKey headers -> FIXED
+   - QualityView.tsx fabricated sample defaults & missing AUDITOR guard -> FIXED
+   - DashboardView.tsx dead canonical v2 workspace branches & UTC date -> FIXED
 
 3. FAILED AND UNRESOLVED:
    - NONE (0 local failures, 0 local errors).
@@ -184,6 +234,9 @@ F. SECURITY SUMMARY
   missing Google Sheets configuration.
 - Diagnostic payloads redact spreadsheet IDs, service account paths/emails,
   PEM keys, JWT secret, Apps Script shared secret, and Apps Script WebApp URL.
+- Strict RBAC parity enforced across backend routers and frontend workspaces
+  (confidential salary/payroll restricted to OWNER_ADMIN; AuditLog restricted
+  to OWNER_ADMIN and read-only AUDITOR).
 - Remaining security risk: Remote Apps Script WebAppBridge.gs lock/auth logic
   cannot be audited until source code is supplied (DB-008).
 

@@ -1,8 +1,8 @@
 import asyncio
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user
-from app.permissions import is_manager
+from app.permissions import is_manager, is_owner, role_v2_of
 from app.routers import sales as sales_router
 from app.routers import stock as stock_router
 from app.routers import products as products_router
@@ -23,81 +23,70 @@ router = APIRouter(prefix="/api/workspace", tags=["Workspace"])
 async def load_workspace(current_user: dict = Depends(get_current_user)):
     """Fast concurrent read for the signed-in screen so workspace hydrates immediately."""
     manager = is_manager(current_user)
+    can_view_audit = is_owner(current_user) or role_v2_of(current_user) == "AUDITOR"
 
-    tasks = [
-        products_router.list_products(current_user),
-        customers_router.list_customers(current_user),
-        sales_router.list_sales(current_user),
-        sales_router.list_payments(current_user),
-        stock_router.get_stock_summary(current_user),
-        stock_router.list_stock_transactions(250, current_user),
-        expenses_router.list_expenses(current_user),
-        visits_router.list_shop_visits(current_user),
-        closing_router.list_daily_closings(current_user),
-        salary_router.list_salary_records(current_user),
-        stock_router.list_stock_discrepancies(current_user),
+    named_tasks = [
+        ("products", products_router.list_products(current_user)),
+        ("customers", customers_router.list_customers(current_user)),
+        ("sales", sales_router.list_sales(current_user)),
+        ("payments", sales_router.list_payments(current_user)),
+        ("stock", stock_router.get_stock_summary(current_user)),
+        ("stock_transactions", stock_router.list_stock_transactions(250, current_user)),
+        ("expenses", expenses_router.list_expenses(current_user)),
+        ("visits", visits_router.list_shop_visits(current_user)),
+        ("closings", closing_router.list_daily_closings(current_user)),
+        ("salary", salary_router.list_salary_records(current_user)),
+        ("stock_discrepancies", stock_router.list_stock_discrepancies(current_user)),
+        ("dashboard", dashboard_router.get_dashboard_metrics(current_user)),
     ]
 
     if manager:
-        tasks.extend([
-            dashboard_router.get_dashboard_metrics(current_user),
-            users_router.list_users(current_user),
-            audit_router.list_audit_logs(250, None, current_user),
-            approvals_router.list_approval_requests(current_user),
-        ])
+        named_tasks.append(("users", users_router.list_users(current_user)))
+        named_tasks.append(("approval_requests", approvals_router.list_approval_requests(current_user)))
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    if can_view_audit:
+        named_tasks.append(("audit_logs", audit_router.list_audit_logs(250, None, current_user)))
 
-    resource_names = [
-        "products", "customers", "sales", "payments", "stock",
-        "stock_transactions", "expenses", "visits", "closings",
-        "salary", "stock_discrepancies",
-    ]
-    if manager:
-        resource_names.extend(["dashboard", "users", "audit_logs", "approval_requests"])
+    results = await asyncio.gather(*(coro for _, coro in named_tasks), return_exceptions=True)
 
     sync_errors = []
-    for index, result in enumerate(results):
+    values: dict = {
+        "products": [],
+        "customers": [],
+        "sales": [],
+        "payments": [],
+        "stock": None,
+        "stock_transactions": [],
+        "expenses": [],
+        "visits": [],
+        "closings": [],
+        "salary": [],
+        "stock_discrepancies": [],
+        "dashboard": None,
+        "users": [],
+        "audit_logs": [],
+        "approval_requests": [],
+    }
+
+    for (resource, _), result in zip(named_tasks, results):
+        if isinstance(result, HTTPException) and result.status_code == 403:
+            # Expected least-privilege RBAC boundary for this role: do not pollute _sync_errors
+            # or trigger a false PARTIAL_SYNC storage error banner.
+            values[resource] = None if resource in {"stock", "dashboard"} else []
+            continue
         if isinstance(result, BaseException):
             sync_errors.append({
-                "resource": resource_names[index],
+                "resource": resource,
                 "message": str(result) or result.__class__.__name__,
             })
-
-    def _safe_val(idx: int):
-        if idx < len(results):
-            val = results[idx]
-            if not isinstance(val, BaseException):
-                return val
-        return None
+            values[resource] = None
+            continue
+        values[resource] = result
 
     failed_resources = [e["resource"] for e in sync_errors]
 
-    payload = {
+    return {
         "_sync_errors": sync_errors,
         "_failed_resources": failed_resources,
-        "products": _safe_val(0),
-        "customers": _safe_val(1),
-        "sales": _safe_val(2),
-        "payments": _safe_val(3),
-        "stock": _safe_val(4),
-        "stock_transactions": _safe_val(5),
-        "expenses": _safe_val(6),
-        "visits": _safe_val(7),
-        "closings": _safe_val(8),
-        "salary": _safe_val(9),
-        "stock_discrepancies": _safe_val(10),
+        **values,
     }
-
-    if manager:
-        payload["dashboard"] = _safe_val(11)
-        payload["users"] = _safe_val(12)
-        payload["audit_logs"] = _safe_val(13)
-        payload["approval_requests"] = _safe_val(14)
-    else:
-        payload["dashboard"] = None
-        payload["users"] = []
-        payload["audit_logs"] = []
-        payload["approval_requests"] = []
-
-    return payload

@@ -50,7 +50,7 @@ This document reflects the actual verified implementation of the Kawad Swad ERP 
 | `workspace.py` | `/api/workspace` | Role-scoped self-service employee/salesman workspace |
 | `quality.py` | `/api/quality` | Product lots, lot movements, QC checks & status transitions |
 | `dashboard.py` | `/api/dashboard` | Live ledger-derived KPIs, alerts, operational summaries |
-| `audit.py` | `/api/audit` | Read-only AuditLog queries (Owner-restricted) |
+| `audit.py` | `/api/audit-logs` | Read-only AuditLog queries (Owner & read-only Auditor; POST disabled `410`) |
 | `v2_erp.py` | `/api/v2` | Schema governance status, CA policy registry, write-block diagnostics |
 | `main.py` | `/health`, `/api/health*` | Liveness, authenticated diagnostics (secret-redacted), tab/schema verification, Owner backup export |
 

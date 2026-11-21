@@ -32,7 +32,7 @@ export const ProductsView: React.FC = () => {
   } = useStore();
 
   const userRole = String(currentUser?.role || '').toUpperCase();
-  const isManager = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT'].includes(userRole);
+  const isManager = ['OWNER', 'OWNER_ADMIN', 'ADMIN', 'PA', 'PERSONAL_ASSISTANT', 'PROCUREMENT', 'PURCHASE'].includes(userRole);
 
   const [filter, setFilter] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');

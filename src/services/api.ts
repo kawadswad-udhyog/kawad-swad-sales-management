@@ -1771,23 +1771,27 @@ export async function getSupplierPayments(): Promise<SupplierPayment[]> {
   return apiRequest<SupplierPayment[]>('/api/purchasing/payments');
 }
 
-export async function recordSupplierPayment(payload: {
-  supplier_id: string;
-  bill_id?: string;
-  payment_date: string;
-  payment_mode: 'CASH' | 'BANK' | 'UPI' | 'NEFT';
-  payment_method?: string;
-  amount: number;
-  reference_no?: string;
-  reference_number?: string;
-  idempotency_key?: string;
-  notes?: string;
-}): Promise<SupplierPayment> {
+export async function recordSupplierPayment(
+  payload: {
+    supplier_id: string;
+    bill_id?: string;
+    payment_date: string;
+    payment_mode: 'CASH' | 'BANK' | 'UPI' | 'NEFT';
+    payment_method?: string;
+    amount: number;
+    reference_no?: string;
+    reference_number?: string;
+    idempotency_key?: string;
+    notes?: string;
+  },
+  idempotencyKey?: string
+): Promise<SupplierPayment> {
   const methodMap: Record<string, string> = {
     BANK: 'BANK_TRANSFER',
     NEFT: 'NEFT',
   };
   const externalRef = (payload.reference_number || payload.reference_no || '').trim();
+  const effectiveIdempKey = idempotencyKey || payload.idempotency_key;
   const normalized = {
     supplier_id: payload.supplier_id,
     bill_id: (payload.bill_id || '').trim(),
@@ -1799,12 +1803,13 @@ export async function recordSupplierPayment(payload: {
       'BANK_TRANSFER',
     amount: Number(payload.amount || 0),
     reference_number: externalRef,
-    idempotency_key: payload.idempotency_key,
+    idempotency_key: effectiveIdempKey,
     notes: payload.notes || '',
   };
   return apiRequest<SupplierPayment>('/api/purchasing/payments', {
     method: 'POST',
     body: JSON.stringify(normalized),
+    idempotencyKey: effectiveIdempKey,
   });
 }
 
@@ -1815,7 +1820,8 @@ export async function applySupplierAdvance(
     amount?: number;
     idempotency_key?: string;
     notes?: string;
-  }
+  },
+  idempotencyKey?: string
 ): Promise<{
   ok: boolean;
   payment: SupplierPayment;
@@ -1824,9 +1830,11 @@ export async function applySupplierAdvance(
   remaining_advance: number;
   is_replay?: boolean;
 }> {
+  const effectiveIdempKey = idempotencyKey || payload.idempotency_key;
   return apiRequest(`/api/purchasing/payments/${encodeURIComponent(paymentId)}/apply`, {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, idempotency_key: effectiveIdempKey }),
+    idempotencyKey: effectiveIdempKey,
   });
 }
 
@@ -2076,30 +2084,58 @@ export async function executeDalMilling(payload: {
 }
 
 export async function adjustRawMaterialStock(payload: {
-  material_id: string;
-  adjusted_quantity: number;
+  material_id?: string;
+  item_id?: string;
+  adjusted_quantity?: number;
+  quantity_change?: number;
+  unit?: string;
+  adjustment_type?: 'OPENING_BALANCE' | 'ADJUSTMENT' | 'RECONCILIATION';
   reason: string;
+  reference_id?: string;
   authorized_by?: string;
   idempotency_key?: string;
-}, idempotencyKey?: string): Promise<{ ok: boolean; status: string; balance: number }> {
+}, idempotencyKey?: string): Promise<{ status: string; txn_id: string; material_id: string; quantity_change: number }> {
+  const normalized = {
+    item_type: 'RAW_MATERIAL',
+    item_id: (payload.item_id || payload.material_id || '').trim(),
+    adjustment_type: payload.adjustment_type || 'ADJUSTMENT',
+    quantity_change: Number(payload.quantity_change ?? payload.adjusted_quantity ?? 0),
+    unit: payload.unit || 'kg',
+    reason: payload.reason,
+    reference_id: payload.reference_id || '',
+  };
   return apiRequest('/api/production/raw-materials/adjustment', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
     idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
 
 export async function adjustFinishedGoodsStock(payload: {
-  product_id: string;
-  adjusted_packets: number;
+  product_id?: string;
+  item_id?: string;
+  adjusted_packets?: number;
+  quantity_change?: number;
+  unit?: string;
+  adjustment_type?: 'OPENING_BALANCE' | 'ADJUSTMENT' | 'RECONCILIATION';
   reason: string;
+  reference_id?: string;
   location?: string;
   authorized_by?: string;
   idempotency_key?: string;
-}, idempotencyKey?: string): Promise<{ ok: boolean; status: string; balance: number }> {
+}, idempotencyKey?: string): Promise<{ status: string; movement_id: string; product_id: string; quantity_change: number }> {
+  const normalized = {
+    item_type: 'FINISHED_GOODS',
+    item_id: (payload.item_id || payload.product_id || '').trim(),
+    adjustment_type: payload.adjustment_type || 'ADJUSTMENT',
+    quantity_change: Number(payload.quantity_change ?? payload.adjusted_packets ?? 0),
+    unit: payload.unit || 'PACKET',
+    reason: payload.reason,
+    reference_id: payload.reference_id || '',
+  };
   return apiRequest('/api/production/finished-goods/adjustment', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalized),
     idempotencyKey: idempotencyKey || payload.idempotency_key,
   });
 }
@@ -2298,6 +2334,7 @@ export async function updateV2Policy(
       {
         method: 'PUT',
         body: JSON.stringify(payload),
+        idempotencyKey: payload.nonce,
         timeoutMs: 30000,
       }
     );
@@ -2360,6 +2397,7 @@ export async function postV2GovernedAction<T = Record<string, any>>(
     return await apiRequest<T>(clean, {
       method: 'POST',
       body: JSON.stringify(payload),
+      idempotencyKey: payload.nonce,
       timeoutMs: 30000,
     });
   } catch (err: unknown) {

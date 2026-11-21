@@ -62,7 +62,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     ? { id: activeWorkspaceId }
     : getWorkspaceForRole(role);
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
   const currentMonthStr = todayStr.slice(0, 7);
 
   const safeSales = Array.isArray(sales) ? sales : [];
@@ -103,7 +103,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // ==========================================================================
   // 1. SALESMAN DASHBOARD (Mobile-first, large tap targets)
   // ==========================================================================
-  if (workspaceConfig.id === 'salesman') {
+  if (['salesman', 'field_salesman'].includes(workspaceConfig.id)) {
     const todayVisits = safeVisits.filter(
       (v) =>
         String(v?.visit_datetime || '').slice(0, 10) === todayStr &&
@@ -322,7 +322,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // ==========================================================================
   // 3. FACTORY WORKSPACE (Production, Packaging, Materials, Quality)
   // ==========================================================================
-  if (workspaceConfig.id === 'factory') {
+  if (['factory', 'production', 'packaging', 'quality', 'store', 'labour_supervisor'].includes(workspaceConfig.id)) {
     return (
       <div className="space-y-6 max-w-5xl mx-auto">
         <div className="bg-slate-900 text-white rounded-2xl p-6 sm:p-7 shadow-xs">
@@ -419,7 +419,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // ==========================================================================
   // 4. ACCOUNTING WORKSPACE (Finance, Ledger, Payments)
   // ==========================================================================
-  if (workspaceConfig.id === 'accountant') {
+  if (['accountant', 'accounts'].includes(workspaceConfig.id)) {
     return (
       <div className="space-y-6 max-w-5xl mx-auto">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200">
@@ -459,15 +459,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           />
           <SummaryCard
             title="Receivables"
-            value="Balanced"
-            subtext="Customer credit ledgers"
+            value="Open Ledger"
+            subtext="Review customer credit ledgers"
             icon={<Scale size={16} />}
             onClick={() => onNavigate('accounting')}
           />
           <SummaryCard
             title="Trial Balance"
-            value="100% Balanced"
-            subtext="Debits equal credits"
+            value="Verify Live"
+            subtext="Run live debit/credit reconciliation"
             icon={<CheckCircle2 size={16} />}
             onClick={() => onNavigate('accounting')}
           />
@@ -486,10 +486,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               onClick={() => onNavigate('accounting')}
             />
             <QuickAction
-              title="Customer Receivables"
-              description="View credit balances, outstanding payments and ageing"
-              icon={<Users size={20} />}
-              onClick={() => onNavigate('customers')}
+              title="Supplier Bills & Payments"
+              description="Record vendor invoices, payments, and advance allocations"
+              icon={<Truck size={20} />}
+              onClick={() => onNavigate('purchasing')}
             />
             <QuickAction
               title="Process Expenses"
@@ -498,10 +498,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               onClick={() => onNavigate('expenses')}
             />
             <QuickAction
-              title="Payroll & Wages"
-              description="Monthly salary runs, advances and workforce disbursements"
-              icon={<Coins size={20} />}
-              onClick={() => onNavigate('salary')}
+              title="Marketplace Settlements"
+              description="Reconcile Amazon, Flipkart and channel payouts"
+              icon={<ShoppingCart size={20} />}
+              onClick={() => onNavigate('channels')}
             />
             <QuickAction
               title="Daily Cash Handover"
@@ -522,9 +522,114 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }
 
   // ==========================================================================
-  // 5. EMPLOYEE / FREELANCER / MARKETING DASHBOARD (My Work)
+  // 4b. INTERNAL AUDITOR WORKSPACE (Strictly Read-Only Inspection)
   // ==========================================================================
-  if (['employee', 'freelancer', 'marketing', 'ecommerce'].includes(workspaceConfig.id)) {
+  if (workspaceConfig.id === 'auditor') {
+    return (
+      <div className="space-y-6 max-w-5xl mx-auto">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200">
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-slate-600">
+              Internal Audit (Read-Only)
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight m-0">
+              Compliance, Ledger & Audit Trail
+            </h1>
+            <p className="text-xs text-slate-500 mt-1 mb-0">
+              Read-only inspection across financial reports, stock ledgers, quality lots, CA policies, and audit trails.
+            </p>
+          </div>
+          <button
+            onClick={() => onNavigate('audit')}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+          >
+            Open Audit Log
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+          <SummaryCard
+            title="Today Sales"
+            value={`₹${todayRevenue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
+            subtext={`${todaySales.length} issued bills today`}
+            icon={<TrendingUp size={16} />}
+            onClick={() => onNavigate('reports')}
+          />
+          <SummaryCard
+            title="Revenue (MTD)"
+            value={`₹${monthRevenue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
+            subtext={`${monthSales.length} billed orders`}
+            icon={<FileText size={16} />}
+            onClick={() => onNavigate('reports')}
+          />
+          <SummaryCard
+            title="Active Products"
+            value={safeProducts.filter((p) => p.active).length}
+            subtext={`${safeStockItems.length} stock records tracked`}
+            icon={<Boxes size={16} />}
+            onClick={() => onNavigate('stock')}
+          />
+          <SummaryCard
+            title="Pending Expenses"
+            value={pendingExpenses}
+            subtext="Awaiting management review"
+            icon={<Receipt size={16} />}
+            onClick={() => onNavigate('accounting')}
+          />
+        </div>
+
+        <div>
+          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
+            Read-Only Audit Modules
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <QuickAction
+              title="Financial & Management Reports"
+              description="Inspect Trial Balance, P&L, Stock Status, and Receivables"
+              icon={<FileText size={20} />}
+              primary
+              onClick={() => onNavigate('reports')}
+            />
+            <QuickAction
+              title="General Ledger & Vouchers"
+              description="Verify double-entry journals and account balances (read-only)"
+              icon={<Scale size={20} />}
+              onClick={() => onNavigate('accounting')}
+            />
+            <QuickAction
+              title="System Audit Trail"
+              description="Inspect immutable audit events across all ERP operations"
+              icon={<ShieldAlert size={20} />}
+              onClick={() => onNavigate('audit')}
+            />
+            <QuickAction
+              title="Stock & Discrepancy Ledgers"
+              description="Audit company warehouse and salesman stock movements"
+              icon={<Boxes size={20} />}
+              onClick={() => onNavigate('stock')}
+            />
+            <QuickAction
+              title="Quality & Lot Traceability"
+              description="Inspect QC logs, lot holds, customer returns, and recalls"
+              icon={<ShieldCheck size={20} />}
+              onClick={() => onNavigate('quality')}
+            />
+            <QuickAction
+              title="Control & CA Policies"
+              description="Review schema governance, reconciliation status, and open decisions"
+              icon={<Lock size={20} />}
+              onClick={() => onNavigate('control_policies')}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // 5. EMPLOYEE / FREELANCER / MARKETING / HR DASHBOARD (My Work)
+  // ==========================================================================
+  if (['employee', 'freelancer', 'marketing', 'ecommerce', 'hr'].includes(workspaceConfig.id)) {
     return (
       <div className="space-y-6 max-w-4xl mx-auto">
         <div className="bg-emerald-900 text-white rounded-2xl p-6 sm:p-7 shadow-xs">

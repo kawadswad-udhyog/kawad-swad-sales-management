@@ -50,12 +50,26 @@ import {
   CancelButton,
 } from '../components/common/FormComponents';
 
+import { useStore } from '../context/StoreContext';
+import { resolveCanonical12Role } from '../utils/permissions';
+
 type QualityTab = 'checks' | 'lots' | 'returns' | 'complaints';
 
 const UNKNOWN_OUTCOME_MSG =
   'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.';
 
+function getIstToday(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+}
+
 export const QualityView: React.FC = () => {
+  const { currentUser, products, customers } = useStore();
+  const canonicalRole = resolveCanonical12Role(currentUser?.role);
+  const isAuditor = canonicalRole === 'AUDITOR';
+  const canSubmitCheck = ['OWNER_ADMIN', 'QUALITY', 'PRODUCTION'].includes(canonicalRole);
+  const canManageQuality = ['OWNER_ADMIN', 'QUALITY'].includes(canonicalRole);
+  const canCloseComplaint = canonicalRole === 'OWNER_ADMIN';
+
   const [activeTab, setActiveTab] = useState<QualityTab>('lots');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,55 +117,55 @@ export const QualityView: React.FC = () => {
   const [complaintNonce, setComplaintNonce] = useState('');
   const [resolveNonce, setResolveNonce] = useState('');
 
-  // Form states
+  // Clean form states (POL-013: no fabricated dummy records pre-filled)
   const [newCheck, setNewCheck] = useState({
     check_type: 'FINISHED_GOODS' as 'RAW_MATERIAL' | 'IN_PROCESS' | 'FINISHED_GOODS',
     entity_type: 'LOT',
-    entity_id: 'LOT-202610-001',
-    item_name: 'Kawad Special Mung Papad (500g)',
+    entity_id: '',
+    item_name: '',
     decision: 'PASS' as 'PASS' | 'FAIL' | 'HOLD',
     defect_details: '',
     corrective_action: '',
-    notes: 'Standard thickness, moisture within 11.2% limit.',
+    notes: '',
   });
 
   const [newLot, setNewLot] = useState({
-    product_id: 'PRD-PAPAD-500',
-    product_name: 'Kawad Special Mung Papad (500g)',
-    initial_quantity: 500,
+    product_id: '',
+    product_name: '',
+    initial_quantity: 0,
     unit: 'packet',
-    expiry_date: new Date(Date.now() + 180 * 24 * 3600 * 1000).toISOString().split('T')[0],
-    notes: 'Freshly packed from today morning shift.',
+    expiry_date: '',
+    notes: '',
   });
 
   const [newReturn, setNewReturn] = useState({
     sale_id: '',
-    customer_id: 'CUST-001',
-    customer_name: 'Balaji Kirana Store',
-    return_date: new Date().toISOString().split('T')[0],
+    customer_id: '',
+    customer_name: '',
+    return_date: getIstToday(),
     disposition: 'PENDING_INSPECTION' as 'SCRAP' | 'RESTOCK' | 'PENDING_INSPECTION',
-    notes: 'Outer shipper box seal was crushed during transit.',
+    notes: '',
     items: [
-      { product_id: 'PRD-PAPAD-500', sku: 'KS-PAP-500', product_name: 'Kawad Special Mung Papad (500g)', quantity: 20, unit: 'packet', unit_price: 110, reason: 'Transit crush damage' },
+      { product_id: '', sku: '', product_name: '', quantity: 1, unit: 'packet', unit_price: 0, reason: '' },
     ],
   });
 
   const [newComplaint, setNewComplaint] = useState({
     report_type: 'COMPLAINT' as 'COMPLAINT' | 'RECALL',
-    product_id: 'PRD-PAPAD-500',
+    product_id: '',
     lot_id: '',
     customer_id: '',
-    customer_name: 'Agarwal Traders',
-    quantity_affected: 15,
+    customer_name: '',
+    quantity_affected: 0,
     severity: 'MEDIUM' as 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL',
-    description: 'Uneven roasted color reported by retailer.',
+    description: '',
     notes: '',
   });
 
   const [resolveForm, setResolveForm] = useState({
-    investigation: 'Checked production thermal roller temps; zone 2 heater thermostat was fluctuating by 12°C.',
-    corrective_action: 'Calibrated temperature sensor and replaced SSR relay on baking line.',
-    notes: 'Closed after test batch inspection passed.',
+    investigation: '',
+    corrective_action: '',
+    notes: '',
   });
 
   const loadData = useCallback(async () => {
@@ -363,7 +377,7 @@ export const QualityView: React.FC = () => {
             <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
             Refresh
           </button>
-          {activeTab === 'lots' && (
+          {activeTab === 'lots' && canManageQuality && (
             <button
               onClick={() => setShowLotModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
@@ -371,7 +385,7 @@ export const QualityView: React.FC = () => {
               <Plus size={14} /> New Batch Lot
             </button>
           )}
-          {activeTab === 'checks' && (
+          {activeTab === 'checks' && canSubmitCheck && (
             <button
               onClick={() => setShowCheckModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
@@ -379,7 +393,7 @@ export const QualityView: React.FC = () => {
               <Plus size={14} /> Record QC Check
             </button>
           )}
-          {activeTab === 'returns' && (
+          {activeTab === 'returns' && canManageQuality && (
             <button
               onClick={() => setShowReturnModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 shadow-xs transition-colors"
@@ -387,7 +401,7 @@ export const QualityView: React.FC = () => {
               <Plus size={14} /> Log Customer Return
             </button>
           )}
-          {activeTab === 'complaints' && (
+          {activeTab === 'complaints' && canManageQuality && (
             <button
               onClick={() => setShowComplaintModal(true)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-red-700 text-white hover:bg-red-800 shadow-xs transition-colors"
@@ -397,6 +411,13 @@ export const QualityView: React.FC = () => {
           )}
         </div>
       </div>
+
+      {isAuditor && (
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 flex items-center gap-2">
+          <ShieldAlert size={16} className="text-slate-500 shrink-0" />
+          <span>Read-Only Audit Mode: Quality records, lot traceability, returns, and complaints are viewable for inspection only.</span>
+        </div>
+      )}
 
       {/* Notifications */}
       {error && (
@@ -532,7 +553,7 @@ export const QualityView: React.FC = () => {
                         )}
                       </td>
                       <td className="px-4 py-3 text-center space-x-1.5 whitespace-nowrap">
-                        {l.quality_status !== 'RELEASED' && (
+                        {canManageQuality && l.quality_status !== 'RELEASED' && (
                           <button
                             type="button"
                             onClick={() => handleOpenLotTransition(l.lot_id, 'RELEASED')}
@@ -541,7 +562,7 @@ export const QualityView: React.FC = () => {
                             Release
                           </button>
                         )}
-                        {l.quality_status !== 'ON_HOLD' && (
+                        {canManageQuality && l.quality_status !== 'ON_HOLD' && (
                           <button
                             type="button"
                             onClick={() => handleOpenLotTransition(l.lot_id, 'ON_HOLD')}
@@ -550,7 +571,7 @@ export const QualityView: React.FC = () => {
                             Hold
                           </button>
                         )}
-                        {l.quality_status !== 'REJECTED' && (
+                        {canManageQuality && l.quality_status !== 'REJECTED' && (
                           <button
                             type="button"
                             onClick={() => handleOpenLotTransition(l.lot_id, 'REJECTED')}
@@ -785,7 +806,7 @@ export const QualityView: React.FC = () => {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-center">
-                      {comp.status !== 'CLOSED' && (
+                      {canCloseComplaint && comp.status !== 'CLOSED' && (
                         <button
                           onClick={() => setShowResolveModal(comp)}
                           className="text-2xs font-semibold px-2 py-1 rounded-sm bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100"
@@ -879,24 +900,37 @@ export const QualityView: React.FC = () => {
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateLot} className="space-y-4">
-            <FormField label="Product Catalogue Item" required helpText="Retail SKUs restricted to 200g, 500g, 1000g">
-              <SelectInput
-                value={newLot.product_id}
-                onChange={(e) => {
-                  const id = e.target.value;
-                  const map: Record<string, string> = {
-                    'PRD-PAPAD-200': 'Kawad Masala Papad (200g)',
-                    'PRD-PAPAD-500': 'Kawad Special Mung Papad (500g)',
-                    'PRD-PAPAD-1000': 'Kawad Family Pack Papad (1000g)',
-                  };
-                  setNewLot({ ...newLot, product_id: id, product_name: map[id] || 'Kawad Papad SKU' });
-                }}
-                options={[
-                  { value: 'PRD-PAPAD-200', label: 'Kawad Masala Papad (200g)' },
-                  { value: 'PRD-PAPAD-500', label: 'Kawad Special Mung Papad (500g)' },
-                  { value: 'PRD-PAPAD-1000', label: 'Kawad Family Pack Papad (1000g)' },
-                ]}
-              />
+            <FormField label="Product Catalogue Item" required helpText="Select an active product from the live catalogue">
+              {products.length > 0 ? (
+                <SelectInput
+                  value={newLot.product_id}
+                  required
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    const match = products.find((p) => p.product_id === id);
+                    setNewLot({
+                      ...newLot,
+                      product_id: id,
+                      product_name: match ? match.product_name : '',
+                    });
+                  }}
+                  options={[
+                    { value: '', label: 'Select a product…' },
+                    ...products.map((p) => ({
+                      value: p.product_id,
+                      label: `${p.product_name} (${p.sku})`,
+                    })),
+                  ]}
+                />
+              ) : (
+                <TextInput
+                  type="text"
+                  required
+                  value={newLot.product_id}
+                  onChange={(e) => setNewLot({ ...newLot, product_id: e.target.value, product_name: e.target.value })}
+                  placeholder="Enter Product ID (e.g. PRD-000001)"
+                />
+              )}
             </FormField>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -936,14 +970,77 @@ export const QualityView: React.FC = () => {
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateReturn} className="space-y-4">
-            <FormField label="Customer / Shop Name" required helpText="Entity returning the stock">
-              <TextInput
-                type="text"
-                required
-                value={newReturn.customer_name}
-                onChange={(e) => setNewReturn({ ...newReturn, customer_name: e.target.value })}
-                placeholder="e.g. Balaji Kirana Store"
-              />
+            <FormField label="Customer / Shop" required helpText="Select returning customer from live directory">
+              {customers.length > 0 ? (
+                <SelectInput
+                  value={newReturn.customer_id}
+                  required
+                  onChange={(e) => {
+                    const cid = e.target.value;
+                    const match = customers.find((c) => c.customer_id === cid);
+                    setNewReturn({
+                      ...newReturn,
+                      customer_id: cid,
+                      customer_name: match ? match.shop_name : '',
+                    });
+                  }}
+                  options={[
+                    { value: '', label: 'Select customer…' },
+                    ...customers.map((c) => ({
+                      value: c.customer_id,
+                      label: `${c.shop_name} (${c.customer_id})`,
+                    })),
+                  ]}
+                />
+              ) : (
+                <TextInput
+                  type="text"
+                  required
+                  value={newReturn.customer_name}
+                  onChange={(e) => setNewReturn({ ...newReturn, customer_name: e.target.value })}
+                  placeholder="Enter customer / shop name"
+                />
+              )}
+            </FormField>
+
+            <FormField label="Returned Product" required helpText="Select returned SKU from live catalogue">
+              {products.length > 0 ? (
+                <SelectInput
+                  value={newReturn.items[0].product_id}
+                  required
+                  onChange={(e) => {
+                    const pid = e.target.value;
+                    const match = products.find((p) => p.product_id === pid);
+                    const updated = [...newReturn.items];
+                    updated[0] = {
+                      ...updated[0],
+                      product_id: pid,
+                      sku: match?.sku || '',
+                      product_name: match?.product_name || '',
+                    };
+                    setNewReturn({ ...newReturn, items: updated });
+                  }}
+                  options={[
+                    { value: '', label: 'Select product…' },
+                    ...products.map((p) => ({
+                      value: p.product_id,
+                      label: `${p.product_name} (${p.sku})`,
+                    })),
+                  ]}
+                />
+              ) : (
+                <TextInput
+                  type="text"
+                  required
+                  value={newReturn.items[0].product_id}
+                  onChange={(e) => {
+                    const updated = [...newReturn.items];
+                    updated[0] = { ...updated[0], product_id: e.target.value, sku: e.target.value, product_name: e.target.value };
+                    setNewReturn({ ...newReturn, items: updated });
+                  }}
+                  placeholder="Enter Product ID"
+                />
+              )}
             </FormField>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -974,12 +1071,18 @@ export const QualityView: React.FC = () => {
               </FormField>
             </div>
 
-            <FormField label="Return Reason" helpText="Customer feedback or reason for return">
+            <FormField label="Return Reason" required helpText="Customer feedback or reason for return">
               <TextInput
                 type="text"
-                value={newReturn.notes}
-                onChange={(e) => setNewReturn({ ...newReturn, notes: e.target.value })}
-                placeholder="e.g. Outer carton was crushed during transit"
+                required
+                value={newReturn.items[0].reason}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  const updated = [...newReturn.items];
+                  updated[0].reason = val;
+                  setNewReturn({ ...newReturn, notes: val, items: updated });
+                }}
+                placeholder="e.g. Outer carton damaged during transit"
               />
             </FormField>
 

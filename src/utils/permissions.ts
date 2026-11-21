@@ -195,7 +195,7 @@ export const DESIGNATIONS: Record<string, DesignationConfig> = {
     category: 'OFFICE_STAFF',
     defaultRole: 'ACCOUNTANT',
     department: 'Accounts & Finance',
-    allowedViews: ['dashboard', 'accounting', 'expenses', 'sales', 'salary', 'reports', 'audit'],
+    allowedViews: ['dashboard', 'accounting', 'expenses', 'sales', 'purchasing', 'channels', 'reports', 'closing'],
     canEditProduction: false,
     canEditOrders: true,
     canBuyMaterials: true,

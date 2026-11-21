@@ -41,3 +41,9 @@ services:
         value: "8"
       - key: WEB_CONCURRENCY
         value: "1"
+      - key: SALES_APPS_SCRIPT_ENABLED
+        value: "true"
+      - key: SALES_APPS_SCRIPT_WEBAPP_URL
+        sync: false
+      - key: SALES_APPS_SCRIPT_SHARED_SECRET
+        sync: false
