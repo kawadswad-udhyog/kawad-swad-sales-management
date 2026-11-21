@@ -41,6 +41,7 @@ import app.schema_registry as schema_reg
 from app.action_registry import GOVERNED_ACTION_REGISTRY, GovernedActionSpec
 from app.sheets import ID_PREFIXES, REQUIRED_TABS, db
 from app.timeutil import now_iso
+from app.accounting.transaction_coordinator import tx_coordinator
 
 
 TEST_SIM_URL = "https://script.google.com/macros/s/local-test-sim/exec"
@@ -167,6 +168,7 @@ class LocalAppsScriptSimulator:
     def start(self) -> "LocalAppsScriptSimulator":
         if self._active:
             return self
+        tx_coordinator.reset_store()
         if self.reconcile_core_tables:
             for tab in schema_reg.CONFLICTING_CORE_SCHEMA_TABS:
                 canonical = schema_reg.get_expected_canonical_reconciliation_headers(tab)
@@ -222,6 +224,7 @@ class LocalAppsScriptSimulator:
         self._patches = []
         if self.reconcile_core_tables:
             schema_reg.clear_runtime_core_schema_reconciliations()
+        tx_coordinator.reset_store()
         self._active = False
 
     def __enter__(self) -> "LocalAppsScriptSimulator":

@@ -317,6 +317,30 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
   return res;
 }
 
+export type TransactionLifecycleState =
+  | 'INITIATED'
+  | 'VALIDATING'
+  | 'PENDING'
+  | 'EXECUTING'
+  | 'COMMITTED'
+  | 'FAILED'
+  | 'UNKNOWN'
+  | 'RECOVERY_REQUIRED'
+  | 'RECONCILED';
+
+export type TransactionFailureCategory =
+  | 'VALIDATION_ERROR'
+  | 'AUTHORIZATION_ERROR'
+  | 'DUPLICATE_REQUEST'
+  | 'IDEMPOTENCY_CONFLICT'
+  | 'DEPENDENCY_UNAVAILABLE'
+  | 'WRITE_REJECTED'
+  | 'WRITE_FAILED_CONFIRMED'
+  | 'WRITE_OUTCOME_UNKNOWN'
+  | 'VERIFICATION_FAILED'
+  | 'RECOVERY_REQUIRED'
+  | 'INTERNAL_ERROR';
+
 export class ApiHttpError extends Error {
   status: number;
   category: ApiFailureCategory;
@@ -326,6 +350,11 @@ export class ApiHttpError extends Error {
   correlationId?: string;
   retryable?: boolean;
   workflowStatus?: WorkflowState;
+  transactionId?: string;
+  transactionState?: TransactionLifecycleState;
+  failureCategory?: TransactionFailureCategory;
+  nonce?: string;
+  recoveryDecision?: string;
 
   constructor(
     status: number,
@@ -338,6 +367,11 @@ export class ApiHttpError extends Error {
       correlationId?: string;
       retryable?: boolean;
       workflowStatus?: WorkflowState;
+      transactionId?: string;
+      transactionState?: TransactionLifecycleState;
+      failureCategory?: TransactionFailureCategory;
+      nonce?: string;
+      recoveryDecision?: string;
     }
   ) {
     super(message);
@@ -350,6 +384,11 @@ export class ApiHttpError extends Error {
     this.correlationId = extra?.correlationId;
     this.retryable = extra?.retryable;
     this.workflowStatus = extra?.workflowStatus;
+    this.transactionId = extra?.transactionId;
+    this.transactionState = extra?.transactionState;
+    this.failureCategory = extra?.failureCategory;
+    this.nonce = extra?.nonce;
+    this.recoveryDecision = extra?.recoveryDecision;
   }
 }
 
@@ -367,6 +406,11 @@ export interface NormalizedApiErrorPayload {
   correlationId?: string;
   retryable?: boolean;
   workflowStatus?: WorkflowState;
+  transactionId?: string;
+  transactionState?: TransactionLifecycleState;
+  failureCategory?: TransactionFailureCategory;
+  nonce?: string;
+  recoveryDecision?: string;
 }
 
 export function normalizeApiErrorPayload(
@@ -381,10 +425,19 @@ export function normalizeApiErrorPayload(
   }
   const detailObj =
     parsedJson.detail && typeof parsedJson.detail === 'object'
-      ? (parsedJson.detail as V2ErrorDetail)
+      ? (parsedJson.detail as Record<string, any>)
       : null;
   const errorCode = detailObj?.error_code || parsedJson.error_code;
   const correlationId = detailObj?.correlation_id || parsedJson.correlation_id;
+  const transactionId = detailObj?.transaction_id || parsedJson.transaction_id;
+  const rawTxState = String(detailObj?.transaction_state || parsedJson.transaction_state || '')
+    .trim()
+    .toUpperCase();
+  const rawFailCat = String(detailObj?.failure_category || parsedJson.failure_category || '')
+    .trim()
+    .toUpperCase();
+  const nonce = detailObj?.nonce || detailObj?.idempotency_key || parsedJson.nonce;
+  const recoveryDecision = detailObj?.recovery_decision || parsedJson.recovery_decision;
   const rawRetryable = detailObj?.retryable ?? parsedJson.retryable;
   const backendStatus = String(detailObj?.status || parsedJson.status || '')
     .trim()
@@ -401,8 +454,23 @@ export function normalizeApiErrorPayload(
     workflowStatus = 'PENDING_UNKNOWN';
   }
 
+  const isRecoveryReq =
+    backendStatus === 'RECOVERY_REQUIRED' ||
+    rawTxState === 'RECOVERY_REQUIRED' ||
+    rawFailCat === 'RECOVERY_REQUIRED';
+
+  const transactionState = (rawTxState ||
+    (isRecoveryReq
+      ? 'RECOVERY_REQUIRED'
+      : backendStatus === 'PENDING_UNKNOWN' || httpStatus === 504
+      ? 'UNKNOWN'
+      : undefined)) as TransactionLifecycleState | undefined;
+
+  const failureCategory = (rawFailCat ||
+    (isRecoveryReq ? 'RECOVERY_REQUIRED' : undefined)) as TransactionFailureCategory | undefined;
+
   const retryable =
-    workflowStatus === 'BLOCKED_PENDING_OWNER_SETUP'
+    workflowStatus === 'BLOCKED_PENDING_OWNER_SETUP' || isRecoveryReq
       ? false
       : typeof rawRetryable === 'boolean'
       ? rawRetryable
@@ -422,7 +490,23 @@ export function normalizeApiErrorPayload(
     correlationId: correlationId ? String(correlationId) : undefined,
     retryable,
     workflowStatus,
+    transactionId: transactionId ? String(transactionId) : undefined,
+    transactionState,
+    failureCategory,
+    nonce: nonce ? String(nonce) : undefined,
+    recoveryDecision: recoveryDecision ? String(recoveryDecision) : undefined,
   };
+}
+
+export function isRecoveryRequiredError(err: unknown): boolean {
+  if (err instanceof ApiHttpError) {
+    return (
+      err.transactionState === 'RECOVERY_REQUIRED' ||
+      err.failureCategory === 'RECOVERY_REQUIRED' ||
+      Boolean(err.errorCode && err.errorCode.toUpperCase().includes('RECOVERY_REQUIRED'))
+    );
+  }
+  return false;
 }
 
 export function isBlockedOwnerSetupError(err: unknown): boolean {
@@ -488,12 +572,24 @@ export const UNKNOWN_OUTCOME_STANDARD_MSG =
 export interface UnknownOutcomeState {
   nonce: string;
   correlationId?: string;
+  transactionId?: string;
+  transactionState?: TransactionLifecycleState;
   message: string;
   actionLabel?: string;
+  recoveryRequired?: boolean;
 }
 
 export interface TransactionStatusResponse {
-  status: 'CONFIRMED_RECORDED' | 'NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE' | 'UNKNOWN_STORAGE_UNAVAILABLE';
+  status:
+    | 'CONFIRMED_RECORDED'
+    | 'NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE'
+    | 'UNKNOWN_STORAGE_UNAVAILABLE'
+    | 'RECOVERY_REQUIRED'
+    | 'RECONCILED'
+    | 'IN_PROGRESS';
+  transaction_id?: string | null;
+  transaction_state?: TransactionLifecycleState | null;
+  failure_category?: TransactionFailureCategory | null;
   nonce: string;
   correlation_id?: string | null;
   allocated_id?: string | null;
@@ -507,6 +603,7 @@ export interface TransactionStatusResponse {
     entity_id?: string;
   } | null;
   safe_to_retry_same_nonce: boolean;
+  recovery_decision?: string | null;
   checked_at: string;
   message: string;
 }
@@ -514,12 +611,14 @@ export interface TransactionStatusResponse {
 export class ApiOutcomeUnknownError extends Error {
   nonce?: string;
   correlationId?: string;
+  transactionId?: string;
 
-  constructor(message: string, nonce?: string, correlationId?: string) {
+  constructor(message: string, nonce?: string, correlationId?: string, transactionId?: string) {
     super(message);
     this.name = 'ApiOutcomeUnknownError';
     this.nonce = nonce;
     this.correlationId = correlationId;
+    this.transactionId = transactionId;
   }
 }
 
@@ -532,9 +631,13 @@ export function createSubmissionNonce(prefix = 'NONCE'): string {
 
 export function isUnknownOutcomeError(err: unknown): boolean {
   if (err instanceof ApiOutcomeUnknownError) return true;
+  if (isRecoveryRequiredError(err)) return true;
   if (
     err instanceof ApiHttpError &&
-    (err.status === 504 || err.workflowStatus === 'PENDING_UNKNOWN' || err.errorCode === 'PENDING_UNKNOWN')
+    (err.status === 504 ||
+      err.workflowStatus === 'PENDING_UNKNOWN' ||
+      err.errorCode === 'PENDING_UNKNOWN' ||
+      err.transactionState === 'UNKNOWN')
   ) {
     return true;
   }
@@ -556,21 +659,31 @@ export function extractUnknownOutcomeInfo(
   actionLabel?: string
 ): UnknownOutcomeState | null {
   if (!isUnknownOutcomeError(err)) return null;
+  const recoveryRequired = isRecoveryRequiredError(err);
   const nonce =
     (err instanceof ApiOutcomeUnknownError && err.nonce) ||
+    (err instanceof ApiHttpError && err.nonce) ||
     fallbackNonce ||
     '';
   const correlationId =
     (err instanceof ApiOutcomeUnknownError && err.correlationId) ||
     (err instanceof ApiHttpError && err.correlationId) ||
     undefined;
+  const transactionId =
+    (err instanceof ApiOutcomeUnknownError && err.transactionId) ||
+    (err instanceof ApiHttpError && err.transactionId) ||
+    undefined;
   const rawMsg = err instanceof Error && err.message ? err.message : UNKNOWN_OUTCOME_STANDARD_MSG;
-  const message = rawMsg.toLowerCase().includes('outcome unknown')
-    ? rawMsg
-    : UNKNOWN_OUTCOME_STANDARD_MSG;
+  const message =
+    recoveryRequired || rawMsg.toLowerCase().includes('outcome unknown')
+      ? rawMsg
+      : UNKNOWN_OUTCOME_STANDARD_MSG;
   return {
     nonce,
     correlationId,
+    transactionId,
+    transactionState: recoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
+    recoveryRequired,
     message,
     actionLabel,
   };
@@ -602,8 +715,17 @@ export interface BackendHealthResponse {
   };
 }
 
+// Synchronous in-flight mutation deduplication guard (blocks millisecond double-clicks
+// across all views before React state re-renders, without affecting read-only GET queries).
+const inflightMutationKeys = new Set<string>();
+
+export function getInflightMutationCount(): number {
+  return inflightMutationKeys.size;
+}
+
 /**
- * Robust API Request Executor with Dual-Path Resilience & Detailed Diagnostic Logging.
+ * Robust API Request Executor with Read-Only Dual-Path Resilience, Synchronous Mutation
+ * Deduplication, and Fail-Closed Transaction Safety.
  */
 export async function apiRequest<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -611,6 +733,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   const token = getAuthToken();
   const timeoutMs = options.timeoutMs ?? 35000;
   const method = (options.method || 'GET').toUpperCase();
+  const isReadOnlyMethod = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+  const isAuthOrHealth = path.includes('/auth/') || path.includes('/health');
 
   const { targetUrl, isProxied, error: urlConstructionErr } = constructApiUrl(baseUrl, path);
 
@@ -626,6 +750,30 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   const resolvedIdempotencyKey = resolveRequestIdempotencyKey(path, method, options, headers);
   if (resolvedIdempotencyKey && !headers['X-KS-Idempotency-Key']) {
     headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
+  }
+
+  const flightKey =
+    !isReadOnlyMethod && !isAuthOrHealth && resolvedIdempotencyKey
+      ? `${method}:${path}:${resolvedIdempotencyKey}`
+      : '';
+  if (flightKey) {
+    if (inflightMutationKeys.has(flightKey)) {
+      throw new ApiHttpError(
+        409,
+        'This transaction is already submitting. Duplicate click blocked to prevent double submission.',
+        'HTTP_ERROR',
+        targetUrl,
+        false,
+        {
+          errorCode: 'CONCURRENT_DUPLICATE_REQUEST',
+          retryable: true,
+          transactionState: 'PENDING',
+          failureCategory: 'DUPLICATE_REQUEST',
+          nonce: resolvedIdempotencyKey,
+        }
+      );
+    }
+    inflightMutationKeys.add(flightKey);
   }
 
   const controller = new AbortController();
@@ -679,23 +827,25 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
 
       if (isCrossDomain && (isTypeError || isNetworkError)) {
         console.warn(
-          `%c[ERP API: CORS Violation Detected]%c Direct cross-origin request to ${targetUrl} was blocked by the browser. Origin '${window.location.origin}' may not be in backend SALES_CORS_ORIGINS. Falling back to local Vite proxy.`,
+          `%c[ERP API: CORS Violation Detected]%c Direct cross-origin request to ${targetUrl} was blocked by the browser. Origin '${window.location.origin}' may not be in backend SALES_CORS_ORIGINS.`,
           'color: #ef4444; font-weight: bold;',
           'color: inherit;'
         );
       } else {
         console.warn(
-          `[ERP API: Primary Fetch Failed] ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}. Attempting proxy fallback…`
+          `[ERP API: Primary Fetch Failed] ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}.`
         );
       }
 
       // 2. Dual-path fallback:
-      // If external direct URL failed, fall back to local Vite proxy relative path
-      // If local path failed and we have no baseUrl, attempt direct Render backend
+      // STRICT TRANSACTION SAFETY RULE (Mission 51B-1):
+      // Automatic fallback retry is ONLY allowed for idempotent read-only methods (GET/HEAD/OPTIONS).
+      // Mutating requests (POST/PUT/PATCH/DELETE) MUST NEVER auto-retry blindly on network errors
+      // because the primary request may already have reached the backend and committed.
       const cleanPath = path.startsWith('/') ? path : `/${path}`;
-      if (!isProxied && (baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
+      if (isReadOnlyMethod && !isProxied && (baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
         try {
-          console.log(`[ERP API Recovery] Retrying via Vite proxy relative path: '${cleanPath}'`);
+          console.log(`[ERP API Recovery] Retrying read-only request via Vite proxy relative path: '${cleanPath}'`);
           res = await fetch(cleanPath, {
             ...options,
             headers,
@@ -707,11 +857,6 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           console.error('[ERP API Recovery Failed] Proxy fallback also failed:', fallbackErr);
           throw primaryFetchError;
         }
-      } else if (isProxied && (!baseUrl || baseUrl === '')) {
-        // On production, relative URLs must go through the Render rewrite. Do not
-        // silently jump to a hard-coded development service: that can authenticate
-        // against the wrong database and split production data across environments.
-        throw primaryFetchError;
       } else {
         throw primaryFetchError;
       }
@@ -798,12 +943,22 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       let correlationId: string | undefined;
       let retryable: boolean | undefined;
       let workflowStatus: WorkflowState | undefined;
+      let transactionId: string | undefined;
+      let transactionState: TransactionLifecycleState | undefined;
+      let failureCategory: TransactionFailureCategory | undefined;
+      let responseNonce: string | undefined;
+      let recoveryDecision: string | undefined;
       if (parsedJson && typeof parsedJson === 'object') {
         const normalized = normalizeApiErrorPayload(parsedJson, res.status);
         errorCode = normalized.errorCode;
         correlationId = normalized.correlationId;
         retryable = normalized.retryable;
         workflowStatus = normalized.workflowStatus;
+        transactionId = normalized.transactionId;
+        transactionState = normalized.transactionState;
+        failureCategory = normalized.failureCategory;
+        responseNonce = normalized.nonce;
+        recoveryDecision = normalized.recoveryDecision;
         errorMsg = normalized.errorMsg;
       }
 
@@ -872,18 +1027,13 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         console.error(`%c[ERP API Error: HTTP ${res.status}]%c ${errorMsg}`, 'color: #ef4444; font-weight: bold;', 'color: inherit;');
       }
       console.groupEnd();
-      if (res.status === 504 && method !== 'GET') {
-        const outcomeNonce =
-          (parsedJson?.detail && typeof parsedJson.detail === 'object'
-            ? (parsedJson.detail.nonce || parsedJson.detail.idempotency_key)
-            : undefined) ||
-          parsedJson?.nonce ||
-          resolvedIdempotencyKey ||
-          undefined;
+      const effectiveNonce = responseNonce || resolvedIdempotencyKey || undefined;
+      if (res.status === 504 && !isReadOnlyMethod) {
         throw new ApiOutcomeUnknownError(
           UNKNOWN_OUTCOME_STANDARD_MSG,
-          outcomeNonce,
-          correlationId
+          effectiveNonce,
+          correlationId,
+          transactionId
         );
       }
       throw new ApiHttpError(res.status, errorMsg, category, targetUrl, isRenderNoServer, {
@@ -891,6 +1041,11 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         correlationId,
         retryable,
         workflowStatus,
+        transactionId,
+        transactionState,
+        failureCategory,
+        nonce: effectiveNonce,
+        recoveryDecision,
       });
     }
 
@@ -993,7 +1148,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
 
     if (err instanceof Error) {
       if (err.name === 'AbortError') {
-        if (method !== 'GET') {
+        if (!isReadOnlyMethod && !isAuthOrHealth) {
           throw new ApiOutcomeUnknownError(
             UNKNOWN_OUTCOME_STANDARD_MSG,
             resolvedIdempotencyKey || undefined
@@ -1009,6 +1164,14 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         );
       }
       if (category === 'BACKEND_UNREACHABLE_OR_TIMEOUT') {
+        // For business mutations, a dropped connection after fetch dispatch has an UNKNOWN outcome
+        // (the backend may already have received and committed the request). Preserve the nonce!
+        if (!isReadOnlyMethod && !isAuthOrHealth && resolvedIdempotencyKey) {
+          throw new ApiOutcomeUnknownError(
+            UNKNOWN_OUTCOME_STANDARD_MSG,
+            resolvedIdempotencyKey
+          );
+        }
         throw new Error(
           'Unable to reach backend API server. Service is offline or unreachable.'
         );
@@ -1016,6 +1179,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       throw err;
     }
     throw new Error('An unexpected network or client error occurred.');
+  } finally {
+    if (flightKey) {
+      inflightMutationKeys.delete(flightKey);
+    }
   }
 }
 

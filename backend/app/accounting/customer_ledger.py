@@ -223,6 +223,11 @@ def reset_cross_process_state() -> None:
                 os.remove(state_file)
         except Exception as exc:
             logging.warning("Error resetting cross-process state: %s", exc)
+    try:
+        from app.accounting.transaction_coordinator import tx_coordinator
+        tx_coordinator.reset_store()
+    except Exception as exc:
+        logging.warning("Error resetting transaction coordinator state: %s", exc)
 
 
 

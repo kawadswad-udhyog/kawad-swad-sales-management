@@ -1,0 +1,1116 @@
+# KAWAD SWAD ERP
+# MISSION 51B-1
+# CRITICAL TRANSACTION & WRITE SAFETY REPAIR
+
+## MISSION AUTHORITY
+
+You are the lead backend and transaction-integrity engineer responsible for repairing the Kawad Swad ERP.
+
+This mission follows Mission 51 Independent Audit and its consolidated Master Defect Register.
+
+This is an IMPLEMENTATION MISSION.
+
+You are authorized to:
+- Inspect the complete repository.
+- Identify critical transaction and write-safety defects.
+- Implement repairs within the defined scope.
+- Modify backend code.
+- Modify frontend code only when strictly necessary to support transaction safety and clear transaction state.
+- Add and modify tests.
+- Run available test suites.
+- Perform static analysis and source-level verification.
+- Produce a complete source package for independent audit.
+
+You are NOT authorized to:
+- Push code to GitHub.
+- Deploy to Render.
+- Modify the live Google Sheet.
+- Execute writes against the live Apps Script deployment.
+- Modify live business records.
+- Restore historic business records.
+- Populate the clean database with old data.
+- Change credentials or production secrets.
+- Make irreversible production changes.
+
+The user will manually inspect the result and decide whether it proceeds to GitHub and deployment.
+
+---
+
+# 1. MISSION OBJECTIVE
+
+Repair critical transaction-safety weaknesses throughout the ERP so that business operations follow a reliable transaction lifecycle.
+
+The system must prevent or safely handle:
+
+1. Duplicate transaction execution.
+2. Partial transaction completion.
+3. Concurrent duplicate requests.
+4. Lost responses after successful writes.
+5. Retry-induced duplicate records.
+6. Incorrect transaction recovery.
+7. Incomplete multi-step operations.
+8. Incorrect transaction status reporting.
+9. Unverified transaction completion.
+10. Uncontrolled writes when dependencies are unavailable.
+11. Inconsistent transaction identifiers.
+12. Failed operations leaving unexplained side effects.
+
+The objective is NOT to add complexity for its own sake.
+
+Build the smallest reliable transaction architecture consistent with the existing ERP design.
+
+---
+
+# 2. NON-NEGOTIABLE SYSTEM CONSTITUTION
+
+These rules must be preserved throughout this mission.
+
+## A. Authoritative database
+
+Google Sheets remains the authoritative business database.
+
+The Apps Script Single Write Owner remains the governed write gateway.
+
+Do not make any of the following authoritative:
+
+- MongoDB
+- Browser localStorage
+- React state
+- Python memory
+- Local cache
+- Temporary JSON files
+- In-memory transaction queues
+
+Caches may be used for performance, but they must never become the source of truth.
+
+## B. Clean database
+
+The current target system is a clean empty database.
+
+Do not restore old business records.
+
+Historical backups may only be used for reference or structural evidence.
+
+Do not manufacture test business records inside production Sheets.
+
+## C. Preserve existing governance
+
+Preserve:
+- Governed action registry.
+- Schema validation.
+- Role restrictions.
+- Audit logging.
+- Idempotency mechanisms.
+- Nonce handling.
+- Payload hashing.
+- Read-back verification.
+- Transaction recovery mechanisms.
+- Fail-closed behavior.
+
+Do not bypass the Apps Script bridge to simplify implementation.
+
+## D. No silent failure
+
+Every mutation must result in a clear and truthful transaction state.
+
+Never display success merely because:
+- The API request was sent.
+- The HTTP request returned.
+- The frontend received a response.
+- A primary record exists.
+- A cached record was updated.
+
+Success must be based on evidence of the required business operation being completed.
+
+---
+
+# 3. FIRST STEP: SOURCE INVENTORY
+
+Before modifying any code, map the existing transaction architecture.
+
+Inspect:
+
+### Backend
+- Transaction-related services
+- Apps Script bridge
+- Action registry
+- Nonce/idempotency services
+- Transaction recovery logic
+- ID allocation
+- Audit logging
+- Mutation endpoints
+- Business-operation orchestration
+- Retry logic
+- Error handling
+- Async/background tasks
+- Cache invalidation
+
+### Frontend
+- Mutation API calls
+- Duplicate-submit protection
+- Loading states
+- Retry buttons
+- Success and failure handling
+- Transaction status display
+- Optimistic updates
+- Pending state
+- Error recovery
+- Form reset behavior
+
+### Write gateway
+Inspect Python-side code available in this repository for:
+- Action validation
+- Payload normalization
+- Signature validation
+- Nonce
+- Payload hash
+- Transaction identification
+- Request timeout
+- Response verification
+- Read-back
+- Recovery
+- Audit logging
+
+The actual deployed Apps Script source may not be available.
+
+If Apps Script source is absent:
+- Do not invent its behavior.
+- Identify every guarantee that depends on the external gateway.
+- Mark such guarantees UNVERIFIED.
+- Do not claim distributed locking, atomicity, or concurrency safety has been proven.
+
+Produce an internal baseline before implementing.
+
+---
+
+# 4. REQUIRED TRANSACTION STATE MODEL
+
+Evaluate the existing transaction lifecycle.
+
+Implement or improve the state model so the backend can distinguish:
+
+- INITIATED
+- VALIDATING
+- PENDING
+- EXECUTING
+- COMMITTED
+- FAILED
+- UNKNOWN
+- RECOVERY_REQUIRED
+- RECONCILED
+
+Do not implement redundant states if an equivalent robust model already exists.
+
+## State rules
+
+### INITIATED
+Request received and assigned a transaction identity.
+
+### VALIDATING
+Authorization, payload, business constraints, schema, and idempotency checks are in progress.
+
+### PENDING
+Operation is accepted but its durable completion has not been confirmed.
+
+### EXECUTING
+Mutation is in progress.
+
+### COMMITTED
+Required write effects have been verified.
+
+### FAILED
+Operation is confirmed not to have committed and cannot continue.
+
+### UNKNOWN
+The system cannot determine whether the operation committed.
+
+### RECOVERY_REQUIRED
+The operation has unresolved side effects or requires recovery/reconciliation.
+
+### RECONCILED
+The transaction's actual effects have been inspected and its state has been resolved.
+
+Do not classify an ambiguous timeout as FAILED if the operation may already have committed.
+
+An ambiguous result must remain UNKNOWN or RECOVERY_REQUIRED until verified.
+
+---
+
+# 5. IDEMPOTENCY REPAIR
+
+Audit every mutation endpoint and transaction orchestration path.
+
+Determine whether repeated requests can create:
+- Duplicate sales
+- Duplicate payments
+- Duplicate purchase orders
+- Duplicate receipts
+- Duplicate expenses
+- Duplicate production batches
+- Duplicate packaging batches
+- Duplicate stock movements
+- Duplicate journals
+- Duplicate approvals
+- Duplicate transfers
+- Duplicate returns
+
+## Required implementation
+
+Where applicable, ensure mutation requests use a stable idempotency identity.
+
+Idempotency must be based on the complete transaction identity and normalized operation payload.
+
+A request with:
+- Same idempotency key
+- Same operation
+- Same normalized payload
+
+must return or recover the original transaction result without repeating the business operation.
+
+A request with:
+- Same key
+- Different operation
+
+must be rejected.
+
+A request with:
+- Same key
+- Different normalized payload
+
+must be rejected as an idempotency conflict.
+
+Do not use only:
+- Total debit
+- Total amount
+- Record count
+- Primary row presence
+- Timestamp
+- Random frontend-generated key that changes on retry
+
+as sufficient proof that two operations are identical.
+
+## Payload fingerprint
+
+Inspect the existing hashing approach.
+
+Ensure the fingerprint is derived from deterministic normalized content.
+
+Normalization must be deterministic for:
+- Object key ordering
+- Dates
+- Numeric values
+- Empty values
+- Nulls
+- Strings
+- Arrays
+- Relevant operation fields
+
+Do not exclude meaningful business fields from the fingerprint.
+
+Do not include irrelevant volatile values that would make a legitimate retry appear to be a new operation.
+
+---
+
+# 6. CONCURRENCY AND DUPLICATE SUBMISSION
+
+Inspect protection against concurrent requests.
+
+Example failure:
+
+Two identical payment requests arrive within milliseconds.
+
+Both requests:
+1. Check that payment does not exist.
+2. Pass the duplicate check.
+3. Create a payment.
+
+The final system contains two payments.
+
+Repair this class of failure within the limits of the architecture.
+
+Evaluate:
+
+- Concurrent idempotency requests
+- Simultaneous ID allocation
+- Duplicate reference creation
+- Double-click submission
+- Multiple browser tabs
+- Retries from different clients
+- Multiple backend instances
+- Process restarts
+- Lock expiration
+- Stale locks
+- Race conditions during recovery
+
+Do not claim global concurrency safety if the lock is only:
+- Python process-local
+- In-memory
+- Per-worker
+- Per-container
+
+If distributed safety depends on Apps Script or Google Sheets capabilities, explicitly identify and test the dependency where possible.
+
+Use the strongest practical protection that is supported by the actual architecture.
+
+---
+
+# 7. TRANSACTION COMPLETENESS AND PARTIAL FAILURE
+
+Identify business operations involving multiple writes or dependent side effects.
+
+Examples include:
+
+- Sale + sale items + stock deduction + payment + accounting
+- Payment + cash ledger + receivable reduction
+- Purchase + supplier + PO items
+- Goods receipt + stock increase + supplier liability
+- Production + raw material consumption + finished stock
+- Packaging + packaging material consumption + finished goods
+- Stock transfer + source deduction + destination increase
+- Return + stock disposition + refund + accounting
+- Expense + cash/bank movement + journal
+- Daily closing + reconciliation + remittance
+- Approval + operational execution
+
+For every multi-step operation, map its complete lifecycle.
+
+Create a transaction dependency map:
+
+| Step | Operation | Required | Verification | Failure Recovery |
+|------|-----------|----------|-----------------|
+
+Identify which operations are:
+- Atomic
+- Compensatable
+- Recoverable
+- Irreversible
+- Currently unsafe
+
+## Repair requirements
+
+Do not assume Sheets can perform a database-style atomic transaction across multiple tabs.
+
+Where full atomicity is not supported, implement or strengthen a transaction orchestration pattern using the architecture's supported capabilities.
+
+Potential design elements, only when appropriate:
+- Transaction ID
+- Idempotency key
+- Durable transaction intent
+- State transitions
+- Operation step tracking
+- Read-back verification
+- Compensating action
+- Recovery procedure
+- Reconciliation status
+
+Do not blindly add a new transaction framework if the existing one already provides these capabilities.
+
+Prefer repairing the existing architecture over introducing competing frameworks.
+
+---
+
+# 8. WRITE GATEWAY FAILURE HANDLING
+
+Inspect the Apps Script bridge communication lifecycle.
+
+Test and handle:
+
+- Connection failure before request transmission
+- Timeout while request is transmitting
+- Timeout after gateway may have committed
+- Invalid gateway response
+- Malformed JSON response
+- HTTP success with business-level failure
+- HTTP error after possible mutation
+- Read-back failure
+- Schema validation failure
+- ID allocation failure
+- Audit log failure
+- Partial side effects
+- Retry after timeout
+- Backend restart during operation
+
+## Critical rule
+
+A timeout does not necessarily mean a write failed.
+
+If the mutation may have committed:
+1. Preserve transaction identity.
+2. Do not blindly replay.
+3. Attempt safe recovery.
+4. Inspect authoritative data.
+5. Determine whether the operation committed.
+6. Retry only if retry safety is established.
+7. Otherwise mark UNKNOWN or RECOVERY_REQUIRED.
+
+---
+
+# 9. ID ALLOCATION SAFETY
+
+Audit all ID generation and allocation methods.
+
+Check:
+- Sales IDs
+- Payment IDs
+- Purchase IDs
+- Production IDs
+- Packaging IDs
+- Stock movement IDs
+- Journal IDs
+- Expense IDs
+- Return IDs
+- Transfer IDs
+- User-generated reference IDs
+
+Verify:
+- IDs cannot silently collide.
+- Allocation survives backend restart.
+- Concurrent allocation is addressed.
+- Failed transactions do not cause unsafe ID reuse.
+- ID allocations can be reconciled.
+- IDs are not derived from fragile row counts.
+- Deleted or blank rows do not corrupt sequence logic.
+- ID reservation and transaction execution are distinguishable where required.
+
+Do not reset counters or renumber existing business records.
+
+---
+
+# 10. READ-BACK VERIFICATION
+
+Review the current verification logic.
+
+A successful transaction must verify the required outcome, not only the existence of its primary record.
+
+For each operation, define its completion criteria.
+
+Example:
+
+## Sale
+
+Depending on sale type, verify:
+- Sale header exists.
+- Sale items exist.
+- Total equals line totals.
+- Inventory movement exists.
+- Stock impact is correct.
+- Payment records match actual payment state.
+- Required accounting side effects exist or are explicitly pending.
+- Transaction is not duplicated.
+
+## Payment
+
+Verify:
+- Payment identity.
+- Customer/vendor relationship.
+- Amount.
+- Payment method.
+- Reference.
+- Ledger effect.
+- Outstanding balance impact.
+- Duplicate status.
+
+## Stock movement
+
+Verify:
+- Source
+- Destination
+- Product
+- Quantity
+- Lot, where applicable
+- Movement identity
+- Source ledger entry
+- Destination ledger entry
+- Reconciliation
+
+Read-back verification must not create duplicate side effects.
+
+Use targeted authoritative reads where possible.
+
+Avoid excessive full-sheet reads that would create quota pressure.
+
+---
+
+# 11. RECOVERY ENGINE
+
+Audit transaction recovery.
+
+A recovery system must not blindly repeat mutations.
+
+It should classify transactions based on actual evidence.
+
+Example:
+
+| Evidence | Decision |
+|---|---|
+| No durable intent and no side effects | Safe to start |
+| Intent exists, no business effects | Resume or safely abort |
+| All required effects verified | COMMITTED |
+| Some effects verified | RECOVERY_REQUIRED |
+| Timeout and outcome unknown | UNKNOWN |
+| Duplicate effects detected | RECOVERY_REQUIRED |
+| Source record exists, downstream effects missing | RECOVERY_REQUIRED |
+| Reversal/compensation verified | RECONCILED |
+
+Repair recovery logic if needed.
+
+Recovery must:
+- Be idempotent.
+- Be safe after restart.
+- Avoid duplicate business effects.
+- Avoid silent transaction deletion.
+- Preserve audit history.
+- Avoid restoring old business records.
+
+If automated recovery could cause damage, stop and require controlled manual reconciliation.
+
+---
+
+# 12. AUDIT LOGGING
+
+Review transaction audit events.
+
+Critical events should be recorded with:
+- Transaction ID
+- Operation
+- Initiating user
+- Timestamp
+- Idempotency identity
+- Payload fingerprint
+- State transition
+- Attempt number
+- Outcome
+- Failure category
+- Recovery decision
+- Correlation ID
+- Reference IDs
+
+Never log:
+- Passwords
+- Tokens
+- Secrets
+- Full authentication headers
+- Sensitive confidential data unnecessarily
+
+Audit logs should distinguish:
+- Request received
+- Validation passed
+- Mutation attempted
+- Mutation verified
+- Failure
+- Recovery started
+- Recovery completed
+- Manual reconciliation required
+
+Logging failure must not silently create a false success state.
+
+Determine whether audit-log failure should block each class of mutation and document the policy.
+
+---
+
+# 13. FRONTEND TRANSACTION SAFETY
+
+Inspect the frontend mutation lifecycle.
+
+Repair, where appropriate:
+
+## Duplicate submit
+
+Prevent accidental repeated submission.
+
+Button disabling alone is not sufficient protection.
+
+## Retry
+
+A retry of the same logical operation must preserve its idempotency identity.
+
+Do not generate a fresh idempotency key merely because the user clicked Retry.
+
+## Unknown outcome
+
+If the backend returns UNKNOWN:
+- Do not display "Failed" as a certainty.
+- Do not immediately offer a dangerous new transaction.
+- Show that the outcome is being verified.
+- Allow status refresh or safe recovery.
+
+## Optimistic updates
+
+Audit optimistic frontend changes.
+
+If used:
+- Clearly distinguish pending from committed data.
+- Roll back or reconcile when appropriate.
+- Never represent optimistic state as verified business truth.
+
+## Form behavior
+
+Ensure forms are not reset before confirmed transaction completion.
+
+## Transaction state
+
+Frontend must clearly distinguish:
+- Submitting
+- Processing
+- Completed
+- Failed
+- Outcome unknown
+- Recovery required
+
+Do not add excessive popups or confusing technical language.
+
+Use simple language suitable for ordinary ERP users.
+
+---
+
+# 14. RETRY AND BACKOFF
+
+Audit retry mechanisms across:
+- HTTP clients
+- Apps Script bridge
+- Mutation endpoints
+- Read-back
+- Frontend retry buttons
+- Recovery processes
+
+Ensure:
+- Retry is bounded.
+- Backoff is controlled.
+- Retries do not create new transactions.
+- Mutation retries require idempotency.
+- Non-idempotent requests are not automatically replayed.
+- Retry storms are prevented.
+- Rate limiting is respected.
+- Failed dependencies do not cause uncontrolled cascading retries.
+
+Avoid retrying a write when its outcome is unknown until reconciliation or idempotent replay safety is established.
+
+---
+
+# 15. TRANSACTION FAILURE CLASSIFICATION
+
+Introduce or improve consistent error classifications.
+
+At minimum, distinguish:
+
+- VALIDATION_ERROR
+- AUTHORIZATION_ERROR
+- DUPLICATE_REQUEST
+- IDEMPOTENCY_CONFLICT
+- DEPENDENCY_UNAVAILABLE
+- WRITE_REJECTED
+- WRITE_FAILED_CONFIRMED
+- WRITE_OUTCOME_UNKNOWN
+- VERIFICATION_FAILED
+- RECOVERY_REQUIRED
+- INTERNAL_ERROR
+
+Do not leak internal stack traces, secrets, or confidential data to the frontend.
+
+Errors must be actionable for ordinary users.
+
+---
+
+# 16. TESTING REQUIREMENTS
+
+Create or strengthen automated tests for critical transaction behavior.
+
+## A. Idempotency tests
+
+- Same key, same payload, repeated request
+- Same key, different payload
+- Same key, different operation
+- Same request after backend restart simulation
+- Same request after timeout simulation
+- Same request from concurrent calls
+
+## B. Concurrency tests
+
+- Double-submit
+- Concurrent duplicate payments
+- Concurrent sale creation
+- Concurrent ID allocation
+- Concurrent transaction recovery
+- Two requests from different simulated workers
+
+Clearly distinguish process-local concurrency tests from true distributed tests.
+
+## C. Failure injection
+
+Simulate:
+- Gateway timeout before write
+- Timeout after write
+- Gateway returns malformed response
+- Read-back failure
+- Primary write succeeds, secondary write fails
+- Audit log failure
+- ID allocation failure
+- Backend restart between steps
+- Dependency unavailable
+- Recovery process interrupted
+
+## D. Recovery tests
+
+- Pending transaction with no effects
+- Pending transaction with partial effects
+- Fully committed transaction with lost response
+- Duplicate side effects
+- Unresolved transaction
+- Reconciliation after restart
+
+## E. Frontend tests
+
+Where testing infrastructure exists:
+- Duplicate click
+- Retry preserving transaction identity
+- Unknown outcome UI
+- Form preservation
+- Confirmed success only
+- Failure state recovery
+
+## F. Regression
+
+Run the existing test suite.
+
+Do not weaken or delete tests to make the suite pass.
+
+Do not change expected results merely to match broken behavior.
+
+Any test modification must be justified.
+
+---
+
+# 17. TEST ENVIRONMENT SAFETY
+
+All tests must be isolated.
+
+Use:
+- Mock gateway
+- Mock Sheets
+- Temporary test data
+- Test-specific transaction IDs
+- Test database or isolated test environment
+
+Never use live business records as test fixtures.
+
+Never run destructive cleanup against production.
+
+If a test requires actual Google Sheets or Apps Script access:
+- Do not execute it.
+- Mark it BLOCKED_PENDING_STAGING.
+- Explain what environment is required.
+
+---
+
+# 18. PERFORMANCE AND QUOTA PROTECTION
+
+Repairs must not create excessive Google Sheets API calls.
+
+Evaluate:
+- Full-sheet scans
+- Repeated read-back calls
+- Transaction polling
+- Recovery polling
+- Retry storms
+- Cache invalidation
+- Concurrent requests
+
+Prefer:
+- Targeted verification
+- Bounded polling
+- Batch reads where safe
+- Request coalescing where appropriate
+- Rate limiting
+- Backoff
+
+Do not trade integrity for speed.
+
+Do not trade reliability for excessive repeated reads.
+
+---
+
+# 19. CODE QUALITY RULES
+
+- Follow existing project architecture.
+- Do not duplicate transaction frameworks.
+- Do not introduce unnecessary dependencies.
+- Keep business rules out of UI components.
+- Avoid circular imports.
+- Avoid giant catch-all functions.
+- Avoid swallowing exceptions.
+- Avoid fake success responses.
+- Avoid silent fallback to stale data.
+- Avoid unbounded retries.
+- Avoid arbitrary sleeps as concurrency protection.
+- Avoid process-local locks as the sole distributed safety mechanism.
+- Avoid destructive schema changes.
+- Avoid changing unrelated business rules.
+
+Document any architectural change.
+
+---
+
+# 20. REQUIRED DELIVERABLES
+
+Produce the following.
+
+## Deliverable A: Transaction Architecture Before/After
+
+Explain:
+- Current architecture
+- Existing safety mechanisms
+- Weaknesses
+- Changes implemented
+- Remaining limitations
+
+## Deliverable B: Critical Transaction Repair Register
+
+Table:
+
+| ID | Defect | Severity | Repair | Files Changed | Test Evidence | Status |
+|----|---------|----------|--------|---------------|--------|
+
+Every identified in-scope defect must be accounted for.
+
+## Deliverable C: Transaction Lifecycle Map
+
+Document how a transaction moves from:
+Request
+→ Validation
+→ Idempotency
+→ Authorization
+→ Intent
+→ Execution
+→ Verification
+→ Commit
+→ Audit
+→ Recovery
+
+Adapt the sequence to the actual implementation.
+
+## Deliverable D: Operation Safety Matrix
+
+For each critical business operation:
+
+| Operation | Idempotent | Concurrent Safe | Partial Failure Recovery | Verified | Remaining Risk |
+|-----------|-------------|----------------|-------------------------|----------| |
+
+Include at least:
+- Sales
+- Payments
+- Purchases
+- Goods receipts
+- Production
+- Packaging
+- Stock movements
+- Transfers
+- Returns
+- Expenses
+- Daily closing
+- Journals
+- Approvals
+
+Do not mark a property PASS without evidence.
+
+## Deliverable E: Failure Injection Report
+
+Document every test scenario.
+
+| Scenario | Expected | Actual | Result | Evidence |
+|-----------|----------|--------|--------|
+
+## Deliverable F: Test Report
+
+Report:
+- Total tests
+- Passed
+- Failed
+- Skipped
+- Warnings
+- Runtime
+- Coverage, if available
+- Test commands
+- Frontend tests/build results
+- Blocked external tests
+
+Do not fabricate test results.
+
+## Deliverable G: Unresolved Risks
+
+Clearly separate:
+- Fixed
+- Partially fixed
+- Not fixed
+- Blocked by missing Apps Script source
+- Requires staging
+- Requires live validation
+
+## Deliverable H: Change Manifest
+
+List:
+- Every modified file
+- Every created file
+- Every removed file
+- Reason for change
+
+No unexplained deletions.
+
+## Deliverable I: Independent Verification Package
+
+Package the complete source code after repairs.
+
+The package must:
+- Include all necessary source files.
+- Exclude secrets.
+- Exclude credentials.
+- Exclude environment-specific private configuration.
+- Exclude business data.
+- Exclude test-generated data.
+- Include tests.
+- Include reports.
+- Include a change manifest.
+- Include a mission README.
+- Include test instructions.
+
+---
+
+# 21. MISSION SCOPE BOUNDARIES
+
+This mission focuses on transaction and write safety.
+
+Do not attempt to fully repair these separate missions:
+
+- Mission 51B-2: Database Schema & Contract Integrity
+- Mission 51B-3: Security & Authorization
+- Mission 51B-4: Accounting Integrity & Period Locks
+- Mission 51B-5: Food Safety & Lot Traceability
+- Mission 51B-6: Sales, Procurement & Inventory Lifecycle
+- Mission 51B-7: Workforce & Payroll Integrity
+- Mission 51B-8: Reports & Reconciliation
+- Mission 51B-9: Frontend, CI & Deployment Hardening
+- Mission 51B-10: Full Independent Re-audit & Acceptance
+
+If a defect belongs to another mission:
+1. Document it.
+2. Do not expand this mission to repair it.
+3. Preserve it in the defect register.
+4. Identify dependencies.
+
+Do not use this mission as permission for broad ERP rewrites.
+
+---
+
+# 22. COMPLETION GATES
+
+Mission 51B-1 cannot be declared complete simply because code was changed or tests passed.
+
+## Gate 1: Code
+
+All critical in-scope repairs implemented.
+
+## Gate 2: Tests
+
+All new critical transaction tests pass.
+
+## Gate 3: Regression
+
+Existing tests remain intact and pass, except for documented external blockers.
+
+## Gate 4: Failure Safety
+
+Ambiguous write outcomes do not cause blind retries or false failure/success.
+
+## Gate 5: Idempotency
+
+Repeated logical operations do not create duplicate business effects under tested conditions.
+
+## Gate 6: Recovery
+
+Interrupted and partially completed transactions are handled deterministically or safely quarantined for reconciliation.
+
+## Gate 7: Evidence
+
+Every PASS has test or source evidence.
+
+## Gate 8: Package
+
+Complete source package created and verified.
+
+## Gate 9: Scope
+
+No unrelated mission work or production changes occurred.
+
+If any critical gate fails, report:
+
+# MISSION 51B-1: FAILED OR CONDITIONAL
+
+Do not disguise a partial pass as completion.
+
+---
+
+# 23. FINAL RESPONSE FORMAT
+
+After implementation, return:
+
+## Mission Status
+PASS / CONDITIONAL / FAILED
+
+## Executive Summary
+What was repaired and why it matters.
+
+## Critical Defects Repaired
+List each repair.
+
+## Architecture Changes
+Explain significant design changes.
+
+## Files Changed
+Created, modified, deleted.
+
+## Tests
+Exact test counts and results.
+
+## Failure Injection
+Results of critical scenarios.
+
+## Remaining Critical Risks
+Anything still unsafe.
+
+## Blocked Validation
+Apps Script, Google Sheets, staging, deployment, or other unavailable dependencies.
+
+## Scope Compliance
+Confirm unrelated missions were not implemented.
+
+## Source Package
+Provide the downloadable complete source archive.
+
+## Audit Package
+Provide the repair register, evidence, and testing report.
+
+## Next Mission
+Recommend Mission 51B-2 only after Mission 51B-1 is independently audited.
+
+---
+
+# 24. FINAL INSTRUCTION
+
+Do not merely describe how transaction safety could be improved.
+
+Inspect the actual source code and implement the repairs.
+
+Do not claim features exist because you added a test for them.
+
+Do not claim atomicity if the external gateway does not support it.
+
+Do not claim distributed concurrency safety based only on local locks.
+
+Do not claim production validation when only mock tests were performed.
+
+Do not alter live systems.
+
+Do not push to GitHub or deploy.
+
+Repair the system, test it rigorously, package the result, and deliver evidence so an independent audit can determine whether Mission 51B-1 is truly complete.
+
+This mission is complete only when the system's transaction behavior is safer, the source changes are verified, the tests support the claims, and the package is ready for independent review.

@@ -836,19 +836,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const p = products.find((x) => x.product_id === product_id);
     if (!p) return;
     const nextState = !p.active;
-    // Optimistic toggle in local state for instant UI response
-    setProducts((prev) =>
-      prev.map((item) => (item.product_id === product_id ? { ...item, active: nextState } : item))
-    );
-    try {
-      await updateProduct(product_id, { active: nextState }, idempotencyKey);
-    } catch (err) {
-      // Revert if API fails
-      setProducts((prev) =>
-        prev.map((item) => (item.product_id === product_id ? { ...item, active: p.active } : item))
-      );
-      throw err;
-    }
+    // Wait for verified server confirmation before updating local product state (no optimistic mutation)
+    await updateProduct(product_id, { active: nextState }, idempotencyKey);
   };
 
   // Customers CRUD with backend

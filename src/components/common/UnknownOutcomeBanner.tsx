@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   checkV2TransactionStatus,
   TransactionStatusResponse,
@@ -12,11 +12,15 @@ interface UnknownOutcomeBannerProps {
   onDismiss?: () => void;
 }
 
+const STATUS_CHECK_COOLDOWN_MS = 2000;
+
 /**
- * Reusable 504 / PENDING_UNKNOWN recovery banner.
- * Displays "Outcome unknown / checking transaction status", retains the exact client nonce &
- * correlation_id, warns that form inputs are NOT SAVED yet, and enables read-only verification
- * via GET /api/v2/transactions/status/{nonce} before retrying safely with the SAME nonce.
+ * Reusable 504 / PENDING_UNKNOWN / RECOVERY_REQUIRED transaction safety banner.
+ * - Retains exact client nonce & correlation_id without clearing user inputs.
+ * - Blocks retrying until GET /api/v2/transactions/status/{nonce} confirms
+ *   `NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE` (`safe_to_retry_same_nonce === true`).
+ * - Permanently disables automatic retry for `CONFIRMED_RECORDED`, `RECONCILED`,
+ *   and `RECOVERY_REQUIRED` (quarantined partial/duplicate effects).
  */
 export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
   outcome,
@@ -27,17 +31,27 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
   const [checking, setChecking] = useState(false);
   const [statusResult, setStatusResult] = useState<TransactionStatusResponse | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
+  const [cooldownActive, setCooldownActive] = useState(false);
+
+  // Reset local verification result when a new outcome/nonce arrives
+  useEffect(() => {
+    setStatusResult(null);
+    setCheckError(null);
+  }, [outcome?.nonce, outcome?.correlationId, outcome?.recoveryRequired]);
 
   if (!outcome) return null;
 
   const handleCheckStatus = async () => {
-    if (!outcome.nonce || checking) return;
+    if (!outcome.nonce || checking || cooldownActive) return;
     setChecking(true);
     setCheckError(null);
     try {
       const res = await checkV2TransactionStatus(outcome.nonce, outcome.correlationId);
       setStatusResult(res);
-      if (res.status === 'CONFIRMED_RECORDED' && onConfirmedRecorded) {
+      if (
+        (res.status === 'CONFIRMED_RECORDED' || res.status === 'RECONCILED') &&
+        onConfirmedRecorded
+      ) {
         onConfirmedRecorded(res);
       }
     } catch (err: unknown) {
@@ -48,38 +62,74 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
       );
     } finally {
       setChecking(false);
+      setCooldownActive(true);
+      setTimeout(() => setCooldownActive(false), STATUS_CHECK_COOLDOWN_MS);
     }
   };
 
-  const isConfirmed = statusResult?.status === 'CONFIRMED_RECORDED';
-  const isSafeRetry = statusResult?.status === 'NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE';
+  const isConfirmed =
+    statusResult?.status === 'CONFIRMED_RECORDED' || statusResult?.status === 'RECONCILED';
+  const isRecoveryRequired =
+    Boolean(outcome.recoveryRequired) || statusResult?.status === 'RECOVERY_REQUIRED';
+  const isInProgress = statusResult?.status === 'IN_PROGRESS';
+  const isSafeRetry =
+    !isRecoveryRequired &&
+    statusResult?.status === 'NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE' &&
+    statusResult?.safe_to_retry_same_nonce === true;
+
+  const palette = isConfirmed
+    ? { bg: '#ecfdf5', border: '#6ee7b7', text: '#065f46' }
+    : isRecoveryRequired
+    ? { bg: '#fef2f2', border: '#f87171', text: '#991b1b' }
+    : { bg: '#fffbeb', border: '#f59e0b', text: '#92400e' };
+
+  const heading = isConfirmed
+    ? statusResult?.status === 'RECONCILED'
+      ? 'Transaction Reconciled by Administrator'
+      : 'Transaction Confirmed Recorded in Google Sheets'
+    : isRecoveryRequired
+    ? 'Recovery Required — Automatic Retry Disabled'
+    : isInProgress
+    ? 'Transaction Still Processing on Server'
+    : isSafeRetry
+    ? 'Verified Not Recorded — Safe to Retry with Same Nonce'
+    : 'Outcome Unknown — Check Transaction Status Before Retrying';
 
   return (
     <div
       role="alert"
       style={{
-        background: isConfirmed ? '#ecfdf5' : '#fffbeb',
-        border: `1px solid ${isConfirmed ? '#6ee7b7' : '#f59e0b'}`,
+        background: palette.bg,
+        border: `1px solid ${palette.border}`,
         borderRadius: 10,
         padding: '12px 14px',
         marginBottom: 14,
-        color: isConfirmed ? '#065f46' : '#92400e',
+        color: palette.text,
         fontSize: 13,
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>
-            {isConfirmed
-              ? 'Transaction Confirmed Recorded in Google Sheets'
-              : 'Outcome unknown / checking transaction status (NOT SAVED CONFIRMED)'}
+            {heading}
             {outcome.actionLabel ? ` — ${outcome.actionLabel}` : ''}
           </div>
           <div style={{ lineHeight: 1.45 }}>
             {statusResult ? statusResult.message : outcome.message}
           </div>
+          {!isConfirmed && !isRecoveryRequired && !isSafeRetry && (
+            <div style={{ marginTop: 4, fontSize: 12, opacity: 0.9 }}>
+              Click &ldquo;Check Transaction Status&rdquo; first so the system can verify whether the write committed before enabling retry.
+            </div>
+          )}
           <div style={{ marginTop: 6, fontSize: 11, fontFamily: 'monospace', opacity: 0.9 }}>
             Preserved Nonce: <strong>{outcome.nonce || 'N/A'}</strong>
+            {outcome.transactionId ? (
+              <>
+                {' '}
+                | Tx ID: <strong>{outcome.transactionId}</strong>
+              </>
+            ) : null}
             {outcome.correlationId ? (
               <>
                 {' '}
@@ -130,38 +180,50 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
           <button
             type="button"
             onClick={handleCheckStatus}
-            disabled={checking}
+            disabled={checking || cooldownActive}
             style={{
               padding: '6px 12px',
               borderRadius: 6,
-              border: '1px solid #d97706',
+              border: `1px solid ${isRecoveryRequired ? '#dc2626' : '#d97706'}`,
               background: '#ffffff',
-              color: '#92400e',
+              color: isRecoveryRequired ? '#991b1b' : '#92400e',
               fontWeight: 600,
               fontSize: 12,
-              cursor: checking ? 'wait' : 'pointer',
+              cursor: checking || cooldownActive ? 'wait' : 'pointer',
+              opacity: cooldownActive && !checking ? 0.7 : 1,
             }}
           >
-            {checking ? 'Checking Transaction Status…' : 'Check Transaction Status'}
+            {checking
+              ? 'Checking Transaction Status…'
+              : cooldownActive
+              ? 'Please Wait…'
+              : 'Check Transaction Status'}
           </button>
         )}
 
-        {onRetry && !isConfirmed && (
+        {onRetry && !isConfirmed && !isRecoveryRequired && (
           <button
             type="button"
-            onClick={onRetry}
+            onClick={isSafeRetry ? onRetry : undefined}
+            disabled={!isSafeRetry}
+            title={
+              isSafeRetry
+                ? 'Verified safe to retry with the same preserved nonce'
+                : 'Check transaction status first to confirm this write was not already recorded'
+            }
             style={{
               padding: '6px 12px',
               borderRadius: 6,
               border: 'none',
-              background: isSafeRetry ? '#166534' : '#b45309',
+              background: isSafeRetry ? '#166534' : '#9ca3af',
               color: '#ffffff',
               fontWeight: 600,
               fontSize: 12,
-              cursor: 'pointer',
+              cursor: isSafeRetry ? 'pointer' : 'not-allowed',
+              opacity: isSafeRetry ? 1 : 0.75,
             }}
           >
-            Retry Safely (Same Nonce)
+            {isSafeRetry ? 'Retry Safely (Same Nonce)' : 'Verify Status Before Retrying'}
           </button>
         )}
       </div>

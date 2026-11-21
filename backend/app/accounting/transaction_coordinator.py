@@ -1,31 +1,59 @@
 # backend/app/accounting/transaction_coordinator.py
 """
 Kawad Swad ERP - Transactional Financial Authorization & Concurrency Coordinator
-Provides ACID transactional guarantees for:
-1. Approval reservation (atomic Compare-And-Swap across threads & processes).
-2. Approval consumption (verifies sale ownership and unconsumed status).
-3. Approval release (releases reservation on early sale failures).
-4. Customer credit reservations (serializes concurrent credit exposure checks).
-5. Sale idempotency locks (prevents duplicate simultaneous creation).
+Provides host-local cross-process ACID transactional guarantees for:
+1. Governed transaction lifecycle tracking, idempotency conflict detection,
+   stale-lock detection, step tracking, and recovery state persistence.
+2. Approval reservation (atomic Compare-And-Swap across threads & OS processes).
+3. Approval consumption (verifies sale ownership and unconsumed status).
+4. Approval release (releases reservation on early sale failures).
+5. Customer credit reservations (serializes concurrent credit exposure checks).
+6. Sale idempotency locks (prevents duplicate simultaneous creation).
 
-Storage Engine Architecture:
-- PostgreSQL Target: If DATABASE_URL is configured, utilizes PostgreSQL with row-level locks
-  (SELECT ... FOR UPDATE).
-- SQLite Transaction Engine: When external PostgreSQL is not configured, provides strict ACID
-  guarantees using SQLite with Write-Ahead Logging (WAL) and BEGIN IMMEDIATE transactions.
-  Works across multiple threads and separate OS worker processes on the host.
+Storage Engine Architecture & Scope Honesty:
+- Authoritative Business Database: Google Sheets via Apps Script Single Write Owner.
+  This coordinator NEVER replaces Google Sheets as the business source of truth.
+- Local Coordination Engine: SQLite with Write-Ahead Logging (WAL) and BEGIN IMMEDIATE
+  transactions. Provides strong cross-thread and cross-process ACID coordination on
+  the active backend host (`WEB_CONCURRENCY=1` on Render).
+- Distributed Boundary: Multi-host / multi-container distributed locking and cross-tab
+  sheet atomicity remain dependent on the external Apps Script LockService (`DB-008`,
+  UNVERIFIED in this repository).
 """
 
+import json
 import os
 import sqlite3
 import threading
 import logging
-from datetime import datetime
-from typing import Tuple, Optional, Dict, Any
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Tuple, Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = os.environ.get("TRANSACTION_DB_PATH", "/tmp/kawad_swad_tx_coord.db")
+DEFAULT_TX_LEASE_SECONDS = int(os.environ.get("SALES_TX_LEASE_SECONDS", "90") or "90")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_iso(dt: Optional[datetime] = None) -> str:
+    return (dt or _utc_now()).isoformat()
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
 
 
 class TransactionCoordinator:
@@ -87,6 +115,30 @@ class TransactionCoordinator:
                     created_at TEXT NOT NULL
                 );
                 """)
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS governed_transactions (
+                    nonce TEXT PRIMARY KEY,
+                    transaction_id TEXT NOT NULL,
+                    correlation_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target_tab TEXT NOT NULL,
+                    actor_user_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    lifecycle_state TEXT NOT NULL,
+                    bridge_status TEXT NOT NULL,
+                    failure_category TEXT,
+                    error_code TEXT,
+                    allocated_id TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    steps_json TEXT,
+                    result_snapshot_json TEXT,
+                    message TEXT,
+                    recovery_decision TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    lease_expires_at TEXT
+                );
+                """)
                 conn.execute("COMMIT;")
             except Exception as e:
                 conn.execute("ROLLBACK;")
@@ -94,6 +146,354 @@ class TransactionCoordinator:
                 raise
             finally:
                 conn.close()
+
+    @staticmethod
+    def _row_to_tx_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["steps"] = json.loads(d.get("steps_json") or "[]")
+        except Exception:
+            d["steps"] = []
+        try:
+            d["result_snapshot"] = json.loads(d.get("result_snapshot_json") or "null")
+        except Exception:
+            d["result_snapshot"] = None
+        return d
+
+    def begin_governed_transaction(
+        self,
+        *,
+        nonce: str,
+        action: str,
+        target_tab: str,
+        actor_user_id: str,
+        payload_hash: str,
+        correlation_id: str,
+        lease_seconds: int = DEFAULT_TX_LEASE_SECONDS,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Atomically register or inspect a governed transaction intent by `nonce`.
+
+        Outcomes:
+        - ("ACQUIRED", tx_dict): Fresh transaction claimed in EXECUTING state.
+        - ("RETRY_ACQUIRED", tx_dict): Prior confirmed-not-committed (FAILED/PENDING) attempt
+          safely re-acquired with incremented attempt_count.
+        - ("ALREADY_COMMITTED", tx_dict): Same nonce + action + payload already COMMITTED/RECONCILED.
+        - ("IN_PROGRESS", tx_dict): Active unexpired execution already in flight (concurrent duplicate).
+        - ("RECOVERY_CHECK_REQUIRED", tx_dict): Prior state is UNKNOWN / RECOVERY_REQUIRED or
+          stale expired EXECUTING lease; caller MUST inspect authoritative Google Sheets
+          evidence before deciding whether to return committed, quarantine, or retry.
+        - ("ACTION_CONFLICT", tx_dict): Same nonce reused for a different action/target_tab.
+        - ("PAYLOAD_CONFLICT", tx_dict): Same nonce + action reused with a different payload_hash.
+        """
+        clean_nonce = str(nonce or "").strip()
+        clean_action = str(action or "").strip().upper()
+        clean_tab = str(target_tab or "").strip()
+        clean_actor = str(actor_user_id or "").strip()
+        clean_hash = str(payload_hash or "").strip()
+        clean_corr = str(correlation_id or "").strip()
+
+        now_dt = _utc_now()
+        now_s = _utc_iso(now_dt)
+        lease_exp_s = _utc_iso(now_dt + timedelta(seconds=max(5, int(lease_seconds))))
+
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                existing = cur.fetchone()
+
+                if existing is not None:
+                    ex_dict = self._row_to_tx_dict(existing) or {}
+                    ex_action = str(ex_dict.get("action") or "").strip().upper()
+                    ex_tab = str(ex_dict.get("target_tab") or "").strip()
+                    ex_hash = str(ex_dict.get("payload_hash") or "").strip()
+                    ex_state = str(ex_dict.get("lifecycle_state") or "").strip().upper()
+
+                    if ex_action != clean_action or ex_tab != clean_tab:
+                        conn.execute("COMMIT;")
+                        return "ACTION_CONFLICT", ex_dict
+
+                    if ex_hash != clean_hash:
+                        # Strictly reject payload mismatch for COMMITTED, RECONCILED, EXECUTING,
+                        # UNKNOWN, RECOVERY_REQUIRED, PENDING, or any attempt that received an ID.
+                        # Only a definitively confirmed pre-commit FAILED attempt (zero allocated_id)
+                        # may be corrected and retried under the same deterministic reference nonce.
+                        if ex_state != "FAILED" or bool(ex_dict.get("allocated_id")):
+                            conn.execute("COMMIT;")
+                            return "PAYLOAD_CONFLICT", ex_dict
+
+                    if ex_state in {"COMMITTED", "RECONCILED"}:
+                        conn.execute("COMMIT;")
+                        return "ALREADY_COMMITTED", ex_dict
+
+                    if ex_state in {"INITIATED", "VALIDATING", "EXECUTING"}:
+                        lease_dt = _parse_iso(ex_dict.get("lease_expires_at"))
+                        if lease_dt is not None and now_dt < lease_dt:
+                            conn.execute("COMMIT;")
+                            return "IN_PROGRESS", ex_dict
+                        # Lease expired (worker crash/restart while executing) -> transition to UNKNOWN
+                        steps = list(ex_dict.get("steps") or [])
+                        steps.append({
+                            "step": "STALE_LEASE_DETECTED",
+                            "at": now_s,
+                            "correlation_id": clean_corr,
+                        })
+                        cur.execute(
+                            """
+                            UPDATE governed_transactions
+                            SET lifecycle_state = 'UNKNOWN',
+                                bridge_status = 'PENDING_UNKNOWN',
+                                failure_category = 'WRITE_OUTCOME_UNKNOWN',
+                                error_code = 'STALE_EXECUTION_LEASE',
+                                steps_json = ?,
+                                updated_at = ?,
+                                lease_expires_at = NULL
+                            WHERE nonce = ?
+                            """,
+                            (json.dumps(steps), now_s, clean_nonce),
+                        )
+                        cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                        updated = self._row_to_tx_dict(cur.fetchone()) or ex_dict
+                        conn.execute("COMMIT;")
+                        return "RECOVERY_CHECK_REQUIRED", updated
+
+                    if ex_state in {"UNKNOWN", "RECOVERY_REQUIRED"}:
+                        conn.execute("COMMIT;")
+                        return "RECOVERY_CHECK_REQUIRED", ex_dict
+
+                    # Confirmed-not-committed (FAILED or PENDING) -> safe to re-acquire with same nonce
+                    next_attempt = int(ex_dict.get("attempt_count") or 1) + 1
+                    steps = list(ex_dict.get("steps") or [])
+                    steps.append({
+                        "step": "RETRY_STARTED" if ex_hash == clean_hash else "RETRY_STARTED_AFTER_CONFIRMED_FAILURE",
+                        "attempt": next_attempt,
+                        "at": now_s,
+                        "correlation_id": clean_corr,
+                    })
+                    cur.execute(
+                        """
+                        UPDATE governed_transactions
+                        SET correlation_id = ?,
+                            payload_hash = ?,
+                            lifecycle_state = 'EXECUTING',
+                            bridge_status = 'PENDING_UNKNOWN',
+                            failure_category = NULL,
+                            error_code = NULL,
+                            attempt_count = ?,
+                            steps_json = ?,
+                            updated_at = ?,
+                            lease_expires_at = ?
+                        WHERE nonce = ?
+                        """,
+                        (clean_corr, clean_hash, next_attempt, json.dumps(steps), now_s, lease_exp_s, clean_nonce),
+                    )
+                    cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                    updated = self._row_to_tx_dict(cur.fetchone()) or ex_dict
+                    conn.execute("COMMIT;")
+                    return "RETRY_ACQUIRED", updated
+
+                # Brand-new governed transaction intent
+                tx_id = f"TXN-{uuid.uuid4().hex[:14].upper()}"
+                initial_steps = [
+                    {"step": "INITIATED", "at": now_s, "correlation_id": clean_corr},
+                    {"step": "VALIDATING", "at": now_s, "correlation_id": clean_corr},
+                    {"step": "EXECUTING", "attempt": 1, "at": now_s, "correlation_id": clean_corr},
+                ]
+                cur.execute(
+                    """
+                    INSERT INTO governed_transactions (
+                        nonce, transaction_id, correlation_id, action, target_tab,
+                        actor_user_id, payload_hash, lifecycle_state, bridge_status,
+                        attempt_count, steps_json, created_at, updated_at, lease_expires_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'EXECUTING', 'PENDING_UNKNOWN', 1, ?, ?, ?, ?)
+                    """,
+                    (
+                        clean_nonce,
+                        tx_id,
+                        clean_corr,
+                        clean_action,
+                        clean_tab,
+                        clean_actor,
+                        clean_hash,
+                        json.dumps(initial_steps),
+                        now_s,
+                        now_s,
+                        lease_exp_s,
+                    ),
+                )
+                cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                created = self._row_to_tx_dict(cur.fetchone()) or {}
+                conn.execute("COMMIT;")
+                return "ACQUIRED", created
+            except Exception as e:
+                conn.execute("ROLLBACK;")
+                logger.error("Error in begin_governed_transaction(%s): %s", clean_nonce, e)
+                raise
+            finally:
+                conn.close()
+
+    def transition_governed_transaction(
+        self,
+        *,
+        nonce: str,
+        lifecycle_state: str,
+        bridge_status: str,
+        failure_category: Optional[str] = None,
+        error_code: Optional[str] = None,
+        allocated_id: Optional[str] = None,
+        message: Optional[str] = None,
+        recovery_decision: Optional[str] = None,
+        result_snapshot: Optional[Dict[str, Any]] = None,
+        step_event: Optional[Dict[str, Any]] = None,
+        clear_lease: bool = True,
+        lease_seconds: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically record a transaction lifecycle transition and optional step/snapshot."""
+        clean_nonce = str(nonce or "").strip()
+        now_dt = _utc_now()
+        now_s = _utc_iso(now_dt)
+
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                row = cur.fetchone()
+                if row is None:
+                    conn.execute("COMMIT;")
+                    return None
+
+                ex = self._row_to_tx_dict(row) or {}
+                steps = list(ex.get("steps") or [])
+                if step_event:
+                    steps.append({"at": now_s, **step_event})
+                else:
+                    steps.append({"step": lifecycle_state, "at": now_s})
+
+                new_alloc = allocated_id if allocated_id is not None else ex.get("allocated_id")
+                new_snapshot_json = (
+                    json.dumps(result_snapshot, default=str)
+                    if result_snapshot is not None
+                    else ex.get("result_snapshot_json")
+                )
+                if clear_lease:
+                    new_lease = None
+                elif lease_seconds is not None:
+                    new_lease = _utc_iso(now_dt + timedelta(seconds=max(5, int(lease_seconds))))
+                else:
+                    new_lease = ex.get("lease_expires_at")
+
+                cur.execute(
+                    """
+                    UPDATE governed_transactions
+                    SET lifecycle_state = ?,
+                        bridge_status = ?,
+                        failure_category = ?,
+                        error_code = ?,
+                        allocated_id = ?,
+                        steps_json = ?,
+                        result_snapshot_json = ?,
+                        message = ?,
+                        recovery_decision = ?,
+                        updated_at = ?,
+                        lease_expires_at = ?
+                    WHERE nonce = ?
+                    """,
+                    (
+                        str(lifecycle_state).strip().upper(),
+                        str(bridge_status).strip().upper(),
+                        failure_category,
+                        error_code,
+                        new_alloc,
+                        json.dumps(steps[-40:]),
+                        new_snapshot_json,
+                        message if message is not None else ex.get("message"),
+                        recovery_decision if recovery_decision is not None else ex.get("recovery_decision"),
+                        now_s,
+                        new_lease,
+                        clean_nonce,
+                    ),
+                )
+                cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                updated = self._row_to_tx_dict(cur.fetchone())
+                conn.execute("COMMIT;")
+                return updated
+            except Exception as e:
+                conn.execute("ROLLBACK;")
+                logger.error("Error in transition_governed_transaction(%s): %s", clean_nonce, e)
+                return None
+            finally:
+                conn.close()
+
+    def get_governed_transaction(self, nonce: str) -> Optional[Dict[str, Any]]:
+        clean_nonce = str(nonce or "").strip()
+        if not clean_nonce:
+            return None
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                return self._row_to_tx_dict(cur.fetchone())
+            except Exception as e:
+                logger.error("Error in get_governed_transaction(%s): %s", clean_nonce, e)
+                return None
+            finally:
+                conn.close()
+
+    def list_unresolved_transactions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT * FROM governed_transactions
+                    WHERE lifecycle_state IN ('UNKNOWN', 'RECOVERY_REQUIRED', 'PENDING', 'EXECUTING')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (max(1, int(limit)),),
+                )
+                return [self._row_to_tx_dict(r) for r in cur.fetchall() if r is not None]
+            except Exception as e:
+                logger.error("Error in list_unresolved_transactions: %s", e)
+                return []
+            finally:
+                conn.close()
+
+    def mark_transaction_reconciled(
+        self,
+        *,
+        nonce: str,
+        actor_user_id: str,
+        resolution_notes: str,
+        final_allocated_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Mark an UNKNOWN or RECOVERY_REQUIRED transaction RECONCILED after manual/verified inspection."""
+        return self.transition_governed_transaction(
+            nonce=nonce,
+            lifecycle_state="RECONCILED",
+            bridge_status="CONFIRMED",
+            failure_category=None,
+            error_code=None,
+            allocated_id=final_allocated_id,
+            message=resolution_notes,
+            recovery_decision="RECONCILED_BY_OPERATOR",
+            step_event={
+                "step": "RECONCILED",
+                "actor": actor_user_id,
+                "notes": resolution_notes[:300],
+            },
+            clear_lease=True,
+        )
 
     def reserve_approval(
         self,
@@ -109,7 +509,7 @@ class TransactionCoordinator:
         clean_app = str(approval_id).strip()
         clean_sale = str(sale_id).strip()
         clean_cid = str(customer_id).strip()
-        now = datetime.utcnow().isoformat()
+        now = _utc_iso()
 
         with self._thread_lock:
             conn = self._get_connection()
@@ -178,7 +578,7 @@ class TransactionCoordinator:
         """
         clean_app = str(approval_id).strip()
         clean_sale = str(sale_id).strip()
-        now = datetime.utcnow().isoformat()
+        now = _utc_iso()
 
         with self._thread_lock:
             conn = self._get_connection()
@@ -246,7 +646,7 @@ class TransactionCoordinator:
         """
         clean_app = str(approval_id).strip()
         clean_sale = str(sale_id).strip()
-        now = datetime.utcnow().isoformat()
+        now = _utc_iso()
 
         with self._thread_lock:
             conn = self._get_connection()
@@ -309,7 +709,7 @@ class TransactionCoordinator:
         """
         clean_cid = str(customer_id).strip()
         clean_sale = str(sale_id).strip()
-        now = datetime.utcnow().isoformat()
+        now = _utc_iso()
 
         with self._thread_lock:
             conn = self._get_connection()
@@ -368,8 +768,9 @@ class TransactionCoordinator:
                     (clean_cid, clean_sale),
                 )
                 conn.execute("COMMIT;")
-            except Exception:
+            except Exception as e:
                 conn.execute("ROLLBACK;")
+                logger.error("Error in release_customer_credit(%s, %s): %s", clean_cid, clean_sale, e)
             finally:
                 conn.close()
 
@@ -385,8 +786,9 @@ class TransactionCoordinator:
                     (clean_cid, clean_sale),
                 )
                 conn.execute("COMMIT;")
-            except Exception:
+            except Exception as e:
                 conn.execute("ROLLBACK;")
+                logger.error("Error in finalize_customer_credit(%s, %s): %s", clean_cid, clean_sale, e)
             finally:
                 conn.close()
 
@@ -398,7 +800,7 @@ class TransactionCoordinator:
         """
         clean_key = str(idempotency_key).strip()
         clean_sale = str(sale_id).strip()
-        now = datetime.utcnow().isoformat()
+        now = _utc_iso()
 
         with self._thread_lock:
             conn = self._get_connection()
@@ -453,8 +855,9 @@ class TransactionCoordinator:
                     (clean_key, clean_sale),
                 )
                 conn.execute("COMMIT;")
-            except Exception:
+            except Exception as e:
                 conn.execute("ROLLBACK;")
+                logger.error("Error in complete_idempotency_lock(%s): %s", clean_key, e)
             finally:
                 conn.close()
 
@@ -469,8 +872,9 @@ class TransactionCoordinator:
                     (clean_key,),
                 )
                 conn.execute("COMMIT;")
-            except Exception:
+            except Exception as e:
                 conn.execute("ROLLBACK;")
+                logger.error("Error in release_idempotency_lock(%s): %s", clean_key, e)
             finally:
                 conn.close()
 
@@ -483,9 +887,11 @@ class TransactionCoordinator:
                 conn.execute("DELETE FROM approval_reservations;")
                 conn.execute("DELETE FROM credit_reservations;")
                 conn.execute("DELETE FROM idempotency_locks;")
+                conn.execute("DELETE FROM governed_transactions;")
                 conn.execute("COMMIT;")
-            except Exception:
+            except Exception as e:
                 conn.execute("ROLLBACK;")
+                logger.error("Error in reset_store: %s", e)
             finally:
                 conn.close()
 

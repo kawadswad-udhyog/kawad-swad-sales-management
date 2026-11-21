@@ -1846,30 +1846,32 @@ class SheetsDatabase:
         return highest
 
     def generate_id(self, tab_name: str) -> str:
-        """Allocate PREFIX-000001 from the highest existing value, claimed before use.
+        """Allocate PREFIX-000001 from the highest existing value, claimed under host-local CrossProcessLock.
 
         Under Blueprint v2.1 Single-Write-Owner, runtime ID allocation happens inside Apps Script.
         """
         self._assert_direct_mutation_allowed("generate_id", tab_name)
+        from app.accounting.customer_ledger import CrossProcessLock
         prefix = ID_PREFIXES.get(tab_name, "ID")
-        for _ in range(12):
-            candidate = f"{prefix}-{self._max_sequence(tab_name, prefix) + 1:06d}"
-            nonce = uuid.uuid4().hex
-            claim = {
-                "allocation_id": f"ALC-{nonce[:12]}",
-                "tab_name": tab_name,
-                "allocated_id": candidate,
-                "nonce": nonce,
-                "created_at": now_iso(),
-            }
-            if not self.append_record("IdAllocations", claim, raise_on_error=True):
-                raise RuntimeError("Could not record an id allocation.")
-            claims = [
-                row for row in self.get_records("IdAllocations", fresh=True)
-                if str(row.get("tab_name")) == tab_name and str(row.get("allocated_id")) == candidate
-            ]
-            if claims and str(claims[0].get("nonce")) == nonce:
-                return candidate
+        with CrossProcessLock("id_alloc", tab_name):
+            for _ in range(12):
+                candidate = f"{prefix}-{self._max_sequence(tab_name, prefix) + 1:06d}"
+                nonce = uuid.uuid4().hex
+                claim = {
+                    "allocation_id": f"ALC-{nonce[:12]}",
+                    "tab_name": tab_name,
+                    "allocated_id": candidate,
+                    "nonce": nonce,
+                    "created_at": now_iso(),
+                }
+                if not self.append_record("IdAllocations", claim, raise_on_error=True):
+                    raise RuntimeError("Could not record an id allocation.")
+                claims = [
+                    row for row in self.get_records("IdAllocations", fresh=True)
+                    if str(row.get("tab_name")) == tab_name and str(row.get("allocated_id")) == candidate
+                ]
+                if claims and str(claims[0].get("nonce")) == nonce:
+                    return candidate
         raise RuntimeError(f"Could not allocate a unique id for {tab_name}.")
 
     def get_next_id(self, tab_name: str) -> str:
@@ -1878,35 +1880,124 @@ class SheetsDatabase:
 
     def allocate_bill_number(self) -> str:
         self._assert_direct_mutation_allowed("allocate_bill_number", "Sales")
+        from app.accounting.customer_ledger import CrossProcessLock
         from app.timeutil import business_month
         month = business_month()
         prefix = f"KS-BILL-{month}"
         pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$")
-        highest = 0
-        for row in self.get_records("Sales", fresh=True):
-            match = pattern.match(str(row.get("bill_number", "")).strip())
-            if match:
-                highest = max(highest, int(match.group(1)))
-        for _ in range(12):
-            candidate = f"{prefix}-{highest + 1:05d}"
-            nonce = uuid.uuid4().hex
-            claim = {
-                "allocation_id": f"ALC-{nonce[:12]}",
-                "tab_name": "BillNumbers",
-                "allocated_id": candidate,
-                "nonce": nonce,
-                "created_at": now_iso(),
-            }
-            if not self.append_record("IdAllocations", claim, raise_on_error=True):
-                raise RuntimeError("Could not allocate a bill number.")
-            claims = [
-                row for row in self.get_records("IdAllocations", fresh=True)
-                if str(row.get("allocated_id")) == candidate
-            ]
-            if claims and str(claims[0].get("nonce")) == nonce:
-                return candidate
-            highest += 1
+        with CrossProcessLock("id_alloc", f"BillNumbers_{month}"):
+            highest = 0
+            for row in self.get_records("Sales", fresh=True):
+                match = pattern.match(str(row.get("bill_number", "")).strip())
+                if match:
+                    highest = max(highest, int(match.group(1)))
+            try:
+                for row in self.get_records("IdAllocations", fresh=True):
+                    if str(row.get("tab_name", "")).strip() == "BillNumbers":
+                        match = pattern.match(str(row.get("allocated_id", "")).strip())
+                        if match:
+                            highest = max(highest, int(match.group(1)))
+            except Exception as exc:
+                logger.warning("BillNumbers IdAllocations scan fallback: %s", exc)
+            for _ in range(12):
+                candidate = f"{prefix}-{highest + 1:05d}"
+                nonce = uuid.uuid4().hex
+                claim = {
+                    "allocation_id": f"ALC-{nonce[:12]}",
+                    "tab_name": "BillNumbers",
+                    "allocated_id": candidate,
+                    "nonce": nonce,
+                    "created_at": now_iso(),
+                }
+                if not self.append_record("IdAllocations", claim, raise_on_error=True):
+                    raise RuntimeError("Could not allocate a bill number.")
+                claims = [
+                    row for row in self.get_records("IdAllocations", fresh=True)
+                    if str(row.get("allocated_id")) == candidate
+                ]
+                if claims and str(claims[0].get("nonce")) == nonce:
+                    return candidate
+                highest += 1
         raise RuntimeError("Could not allocate a unique bill number.")
+
+    def log_transaction_audit(
+        self,
+        *,
+        actor: str,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+        transaction_id: str = "",
+        correlation_id: str = "",
+        nonce: str = "",
+        lifecycle_state: str = "",
+        failure_category: str = "",
+        error_code: str = "",
+        attempt_number: int = 1,
+        reason: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Record a structured, secret-redacted transaction lifecycle audit entry.
+        Returns True if recorded successfully, False if persistence failed (never silently masks failure).
+        """
+        from app.transaction_safety import sanitize_audit_metadata
+        safe_meta = sanitize_audit_metadata(metadata or {})
+        safe_reason = str(sanitize_audit_metadata(reason or ""))[:400]
+        structured_payload = json.dumps(
+            {
+                "transaction_id": transaction_id,
+                "correlation_id": correlation_id,
+                "nonce": nonce,
+                "lifecycle_state": lifecycle_state,
+                "failure_category": failure_category,
+                "error_code": error_code,
+                "attempt_number": attempt_number,
+                "metadata": safe_meta,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
+        logger.info(
+            "TX_AUDIT tx=%s corr=%s nonce=%s actor=%s action=%s entity=%s:%s state=%s cat=%s code=%s attempt=%s reason=%s",
+            transaction_id,
+            correlation_id,
+            nonce,
+            actor,
+            action,
+            entity_type,
+            entity_id,
+            lifecycle_state,
+            failure_category,
+            error_code,
+            attempt_number,
+            safe_reason,
+        )
+        # In connected Single-Write-Owner runtime, AuditLog sheet mutations happen via Apps Script;
+        # structured server-side telemetry is emitted above without bypassing the bridge.
+        if (self.is_connected and self.spreadsheet) or not self.allow_in_memory_fallback:
+            return True
+        try:
+            audit_id = f"AUD-{uuid.uuid4().hex[:12].upper()}"
+            record = {
+                "audit_id": audit_id,
+                "event_datetime": now_iso(),
+                "actor_user_id": actor,
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "field_changed": lifecycle_state,
+                "old_value": "",
+                "new_value": structured_payload,
+                "reason": safe_reason,
+                "approved_by_user_id": "",
+                "related_record_id": nonce or correlation_id or transaction_id,
+            }
+            return bool(self.append_record("AuditLog", record, raise_on_error=False))
+        except Exception as exc:
+            logger.error("Structured transaction audit write failed for nonce=%s: %s", nonce, exc)
+            return False
 
     def log_audit(self, actor: str, action: str, entity_type: str, entity_id: str,
                   field_changed: str = "", old_val: str = "", new_val: str = "",

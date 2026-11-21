@@ -20,6 +20,7 @@ from app.accounting.customer_ledger import (
     get_approval_lock,
     CrossProcessLock,
 )
+from app.accounting.transaction_coordinator import tx_coordinator
 
 logger = logging.getLogger("kawad_swad.sales")
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
@@ -566,7 +567,51 @@ async def create_sale(req: SaleCreate, request: Request, current_user: dict = De
             db.log_audit(user_id, "ISSUE_BILL", "Sales", sale_id, reason=f"Issued bill {bill_number} for ₹{bill_total:.2f} to {customer_name}")
 
             from app.accounting.postings import post_sale_journal
-            post_sale_journal(saved_sale, cogs, user_id)
+            try:
+                post_sale_journal(saved_sale, cogs, user_id)
+            except Exception as j_exc:
+                primary_nonce = str(bridge_res.get("nonce") or clean_key or "").strip()
+                if primary_nonce:
+                    tx_coordinator.transition_governed_transaction(
+                        nonce=primary_nonce,
+                        lifecycle_state="RECOVERY_REQUIRED",
+                        bridge_status="RECOVERY_REQUIRED",
+                        failure_category="RECOVERY_REQUIRED",
+                        error_code="SECONDARY_JOURNAL_POSTING_FAILED",
+                        allocated_id=sale_id,
+                        message=f"Sale '{sale_id}' committed, but secondary accounting journal posting failed: {j_exc}",
+                        recovery_decision="QUARANTINED_SECONDARY_JOURNAL_FAILURE",
+                        step_event={"step": "SECONDARY_JOURNAL_FAILED", "sale_id": sale_id, "error": str(j_exc)[:200]},
+                    )
+                db.log_transaction_audit(
+                    actor=user_id,
+                    action="CREATE_SALE",
+                    entity_type="Sales",
+                    entity_id=sale_id,
+                    transaction_id=str(bridge_res.get("transaction_id") or ""),
+                    correlation_id=str(bridge_res.get("correlation_id") or ""),
+                    nonce=primary_nonce,
+                    lifecycle_state="RECOVERY_REQUIRED",
+                    failure_category="RECOVERY_REQUIRED",
+                    error_code="SECONDARY_JOURNAL_POSTING_FAILED",
+                    reason=f"Primary sale '{sale_id}' committed, secondary post_sale_journal failed.",
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "status": "RECOVERY_REQUIRED",
+                        "transaction_state": "RECOVERY_REQUIRED",
+                        "failure_category": "RECOVERY_REQUIRED",
+                        "error_code": "SECONDARY_JOURNAL_POSTING_FAILED",
+                        "allocated_id": sale_id,
+                        "nonce": primary_nonce,
+                        "retryable": False,
+                        "message": (
+                            f"Sale '{sale_id}' was recorded, but secondary accounting journal posting did not complete. "
+                            "Do NOT resubmit the sale; Owner reconciliation is required."
+                        ),
+                    },
+                )
 
             items = [_to_item(row) for row in _items_for(sale_id)] or [_to_item({**itm, "sale_id": sale_id}) for itm in children_bundle["sale_items"]]
             res_sale = _to_sale(saved_sale, items, clean_key)
@@ -1083,24 +1128,48 @@ async def record_sale_payment(
             raise HTTPException(status_code=400, detail="Cannot record payment for a cancelled bill.")
 
         bill_total = round(float(sale.get("bill_total", 0) or 0), 2)
+        all_payments = db.get_records("Payments", fresh=True)
         payments = [
-            p for p in db.get_records("Payments", fresh=True)
+            p for p in all_payments
             if str(p.get("sale_id", "")).strip() == sale_id and str(p.get("payment_status", "")).upper() != "REFUNDED"
         ]
         total_paid_so_far = round(sum(float(p.get("amount", 0) or 0) for p in payments), 2)
         remaining_balance = round(bill_total - total_paid_so_far, 2)
 
         clean_key = _clean(getattr(payload, "idempotency_key", None))
+        req_method = str(payload.payment_method or "CASH").upper()
         if clean_key:
-            for p in payments:
+            for p in all_payments:
                 p_notes = str(p.get("notes", ""))
                 p_key = _clean(p.get("idempotency_key"))
                 if p_key == clean_key or f"[idemp:{clean_key}]" in p_notes:
+                    existing_sale_id = str(p.get("sale_id", "")).strip()
                     existing_amt = round(float(p.get("amount", 0) or 0), 2)
-                    if abs(existing_amt - round(payload.amount, 2)) > 0.05:
+                    existing_method = str(p.get("payment_method", "")).strip().upper()
+                    if existing_sale_id != sale_id:
                         raise HTTPException(
                             status_code=409,
-                            detail=f"Conflict: Idempotency key '{clean_key}' already used with amount ₹{existing_amt:.2f}, conflicting with ₹{payload.amount:.2f}."
+                            detail={
+                                "status": "REJECTED",
+                                "error_code": "IDEMPOTENCY_PAYLOAD_CONFLICT",
+                                "failure_category": "IDEMPOTENCY_CONFLICT",
+                                "message": f"Conflict: Idempotency key '{clean_key}' already used on sale '{existing_sale_id}', not '{sale_id}'.",
+                                "retryable": False,
+                            },
+                        )
+                    if abs(existing_amt - round(payload.amount, 2)) > 0.05 or (existing_method and existing_method != req_method):
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "status": "REJECTED",
+                                "error_code": "IDEMPOTENCY_PAYLOAD_CONFLICT",
+                                "failure_category": "IDEMPOTENCY_CONFLICT",
+                                "message": (
+                                    f"Conflict: Idempotency key '{clean_key}' already used with amount ₹{existing_amt:.2f} "
+                                    f"({existing_method}), conflicting with ₹{payload.amount:.2f} ({req_method})."
+                                ),
+                                "retryable": False,
+                            },
                         )
                     return {
                         "ok": True,
@@ -1190,7 +1259,51 @@ async def record_sale_payment(
         )
 
         from app.accounting.postings import post_payment_collection_journal
-        journal_res = post_payment_collection_journal(saved_payment, actor=username)
+        try:
+            journal_res = post_payment_collection_journal(saved_payment, actor=username)
+        except Exception as j_exc:
+            primary_nonce = str(bridge_res.get("nonce") or clean_key or "").strip()
+            if primary_nonce:
+                tx_coordinator.transition_governed_transaction(
+                    nonce=primary_nonce,
+                    lifecycle_state="RECOVERY_REQUIRED",
+                    bridge_status="RECOVERY_REQUIRED",
+                    failure_category="RECOVERY_REQUIRED",
+                    error_code="SECONDARY_JOURNAL_POSTING_FAILED",
+                    allocated_id=payment_id,
+                    message=f"Payment '{payment_id}' committed, but secondary journal posting failed: {j_exc}",
+                    recovery_decision="QUARANTINED_SECONDARY_JOURNAL_FAILURE",
+                    step_event={"step": "SECONDARY_JOURNAL_FAILED", "payment_id": payment_id, "error": str(j_exc)[:200]},
+                )
+            db.log_transaction_audit(
+                actor=user_id,
+                action="RECORD_SALE_PAYMENT",
+                entity_type="Payments",
+                entity_id=payment_id,
+                transaction_id=str(bridge_res.get("transaction_id") or ""),
+                correlation_id=str(bridge_res.get("correlation_id") or ""),
+                nonce=primary_nonce,
+                lifecycle_state="RECOVERY_REQUIRED",
+                failure_category="RECOVERY_REQUIRED",
+                error_code="SECONDARY_JOURNAL_POSTING_FAILED",
+                reason=f"Primary payment '{payment_id}' committed, secondary payment journal posting failed.",
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "RECOVERY_REQUIRED",
+                    "transaction_state": "RECOVERY_REQUIRED",
+                    "failure_category": "RECOVERY_REQUIRED",
+                    "error_code": "SECONDARY_JOURNAL_POSTING_FAILED",
+                    "allocated_id": payment_id,
+                    "nonce": primary_nonce,
+                    "retryable": False,
+                    "message": (
+                        f"Payment '{payment_id}' was recorded, but secondary accounting journal posting failed. "
+                        "Do NOT re-submit the payment; Owner reconciliation is required."
+                    ),
+                },
+            )
 
         return {
             "ok": True,

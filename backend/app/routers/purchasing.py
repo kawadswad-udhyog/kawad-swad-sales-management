@@ -993,6 +993,7 @@ async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, 
         if existing_pay is not None and str(existing_pay.get("payment_id", "")).strip():
             existing_pid = str(existing_pay.get("payment_id", "")).strip()
             pay_row["payment_id"] = existing_pid
+            recovery_nonce = f"{clean_idemp_key}::APPLY_ADVANCE::{existing_pid}" if clean_idemp_key else None
             bridge_res = apps_script_bridge.delegate_governed_write(
                 action="APPLY_SUPPLIER_ADVANCE",
                 target_tab="SupplierPayments",
@@ -1003,8 +1004,8 @@ async def record_supplier_payment(req: SupplierPaymentCreate, request: Request, 
                 },
                 actor_user_id=actor,
                 actor_role=actor_role,
-                nonce=clean_idemp_key or None,
-                request=request,
+                nonce=recovery_nonce,
+                request=None if recovery_nonce else request,
                 id_field="payment_id",
                 invalidate_tabs=["SupplierPayments", "SupplierBills"],
             )

@@ -1376,13 +1376,14 @@ async def record_dal_milling_batch(req: DalMillingCreate, request: Request, user
                 "created_at": now(),
                 "notes": (req.notes or "").strip(),
             }
+            recovery_nonce = f"{clean_idemp_key}::RECOVER::{existing_batch_id}" if clean_idemp_key else None
             bridge_res = apps_script_bridge.delegate_governed_write(
                 action="RECOVER_MILLING_BATCH",
                 target_tab="RawMaterialLedger",
                 payload={"leg2_row": leg2_row, "milling_batch_row": milling_batch_row},
                 actor_user_id=actor,
                 actor_role=actor_role,
-                nonce=clean_idemp_key,
+                nonce=recovery_nonce,
                 request=None,
                 id_field="raw_material_txn_id",
                 invalidate_tabs=["RawMaterialLedger", "MillingBatches", "RawMaterials"],

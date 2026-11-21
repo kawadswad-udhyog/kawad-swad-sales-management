@@ -301,22 +301,35 @@ def _handle_bridge_result(res: BridgeResult) -> Dict[str, Any]:
     if res.status == "CONFIRMED":
         return {
             "status": "CONFIRMED",
+            "transaction_id": res.transaction_id,
+            "transaction_state": res.transaction_state or "COMMITTED",
             "correlation_id": res.correlation_id,
             "nonce": res.nonce,
+            "payload_hash": res.payload_hash,
             "allocated_id": res.allocated_id,
             "record": res.record,
             "message": res.message,
+            "attempt_number": res.attempt_number,
+            "is_replay": res.is_replay,
+            "audit_logged": res.audit_logged,
+            "recovery_decision": res.recovery_decision,
         }
     raise HTTPException(
         status_code=res.http_status,
         detail={
             "status": res.status,
+            "transaction_id": res.transaction_id,
+            "transaction_state": res.transaction_state,
+            "failure_category": res.failure_category,
             "error_code": res.error_code or "GOVERNED_WRITE_NOT_CONFIRMED",
             "message": res.message,
             "correlation_id": res.correlation_id,
             "nonce": res.nonce,
+            "payload_hash": res.payload_hash,
             "retryable": res.retryable,
             "allocated_id": res.allocated_id,
+            "attempt_number": res.attempt_number,
+            "recovery_decision": res.recovery_decision,
         },
     )
 
@@ -1338,6 +1351,108 @@ async def get_v2_transaction_status(
         correlation_id=correlation_id,
         actor_is_owner=is_owner(current_user),
     )
+
+
+class TransactionReconcileRequest(BaseModel):
+    resolution_notes: str = Field(..., min_length=5, max_length=500)
+    final_allocated_id: Optional[str] = None
+
+
+@router.get("/transactions/unresolved")
+async def list_v2_unresolved_transactions(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(get_current_user),
+):
+    """Owner-only listing of UNKNOWN / RECOVERY_REQUIRED / PENDING transactions awaiting resolution."""
+    if not is_owner(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": "FORBIDDEN",
+                "error_code": "OWNER_ADMIN_REQUIRED",
+                "failure_category": "AUTHORIZATION_ERROR",
+                "message": "Only OWNER_ADMIN may inspect unresolved transaction recovery queue.",
+                "retryable": False,
+            },
+        )
+    from app.accounting.transaction_coordinator import tx_coordinator
+    items = tx_coordinator.list_unresolved_transactions(limit=limit)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/transactions/{nonce}/reconcile")
+async def reconcile_v2_transaction(
+    nonce: str,
+    req: TransactionReconcileRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Owner-only controlled reconciliation of UNKNOWN or RECOVERY_REQUIRED transactions
+    after verifying authoritative Google Sheets state. Records an explicit audit event.
+    """
+    if not is_owner(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": "FORBIDDEN",
+                "error_code": "OWNER_ADMIN_REQUIRED",
+                "failure_category": "AUTHORIZATION_ERROR",
+                "message": "Only OWNER_ADMIN may reconcile quarantined or unknown transactions.",
+                "retryable": False,
+            },
+        )
+    clean_nonce = str(nonce or "").strip()
+    if len(clean_nonce) < 4 or len(clean_nonce) > 128:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "status": "REJECTED",
+                "error_code": "INVALID_TRANSACTION_NONCE",
+                "failure_category": "VALIDATION_ERROR",
+                "message": "Transaction nonce must be between 4 and 128 characters.",
+                "retryable": False,
+            },
+        )
+    from app.accounting.transaction_coordinator import tx_coordinator
+    existing = tx_coordinator.get_governed_transaction(clean_nonce)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "status": "REJECTED",
+                "error_code": "TRANSACTION_NOT_FOUND",
+                "failure_category": "VALIDATION_ERROR",
+                "message": f"No tracked transaction found for nonce '{clean_nonce}'.",
+                "retryable": False,
+            },
+        )
+    actor_id = str(current_user.get("user_id") or "")
+    updated = tx_coordinator.mark_transaction_reconciled(
+        nonce=clean_nonce,
+        actor_user_id=actor_id,
+        resolution_notes=req.resolution_notes.strip(),
+        final_allocated_id=str(req.final_allocated_id or "").strip() or None,
+    )
+    db.log_transaction_audit(
+        actor=actor_id,
+        action="RECONCILE_TRANSACTION",
+        entity_type=str(existing.get("target_tab") or "Transactions"),
+        entity_id=str((updated or {}).get("allocated_id") or clean_nonce),
+        transaction_id=str(existing.get("transaction_id") or ""),
+        correlation_id=str(existing.get("correlation_id") or ""),
+        nonce=clean_nonce,
+        lifecycle_state="RECONCILED",
+        reason=req.resolution_notes.strip(),
+    )
+    return {
+        "status": "RECONCILED",
+        "transaction_id": (updated or {}).get("transaction_id"),
+        "transaction_state": "RECONCILED",
+        "nonce": clean_nonce,
+        "allocated_id": (updated or {}).get("allocated_id"),
+        "recovery_decision": "RECONCILED_BY_OPERATOR",
+        "message": "Transaction marked RECONCILED and logged in audit trail.",
+    }
 
 
 # ---------------------------------------------------------------------------
