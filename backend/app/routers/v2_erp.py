@@ -46,6 +46,7 @@ from app.schema_registry import (
     LOT_QUALITY_STATES,
     PENDING_OWNER_MAPPING_TABS,
     SCHEMA_HEADER_VARIANCES,
+    SECURITY_NO_CACHE_TABS,
     TAB_RECONCILIATION_CONFLICTS,
     VALID_RETAIL_PACK_WEIGHTS_G,
     assert_ca_policy_approved,
@@ -1234,6 +1235,13 @@ async def create_v2_sales_invoice(req: GovernedSalesInvoiceRequest, current_user
                     detail=f"Invoice blocked: Lot '{ref}' has quality_status='{lot.get('quality_status')}'. Only RELEASED lots may be billed.",
                 )
 
+    target_salesman_id = (req.salesman_user_id or actor_id).strip()
+    if v2_role == "FIELD_SALESMAN" and target_salesman_id != actor_id:
+        raise HTTPException(
+            status_code=403,
+            detail="A field salesman can only record a sales invoice against their own user id.",
+        )
+
     res = apps_script_bridge.execute_governed_write(
         action="CREATE_SALES_INVOICE",
         target_tab="Sales",
@@ -1241,7 +1249,7 @@ async def create_v2_sales_invoice(req: GovernedSalesInvoiceRequest, current_user
             "customer_id": req.customer_id.strip(),
             "customer_name": (req.customer_name or "").strip(),
             "sale_date": req.sale_date or now_iso()[:10],
-            "salesman_user_id": (req.salesman_user_id or actor_id).strip(),
+            "salesman_user_id": target_salesman_id,
             "so_id": (req.so_id or "").strip(),
             "items": req.items,
             "payment_method": req.payment_method,
@@ -1343,7 +1351,27 @@ async def list_v2_audit_logs(
     current_user: dict = Depends(get_current_user),
 ):
     require_module_action(current_user, "control", "view")
-    return _safe_query_tab("AuditLog", fresh=True, search=search, page=page, page_size=page_size)
+    page_data = _safe_query_tab("AuditLog", fresh=True, search=search, page=page, page_size=page_size)
+    if not is_owner(current_user) and isinstance(page_data, dict) and isinstance(page_data.get("items"), list):
+        restricted_tabs = CONFIDENTIAL_TABS_NO_CACHE | SECURITY_NO_CACHE_TABS
+        redacted_items = []
+        for item in page_data["items"]:
+            if not isinstance(item, dict):
+                continue
+            entity_type = str(item.get("entity_type") or "").strip()
+            if entity_type in restricted_tabs:
+                redacted_items.append({
+                    "audit_id": item.get("audit_id", ""),
+                    "event_datetime": item.get("event_datetime", ""),
+                    "action": item.get("action", ""),
+                    "entity_type": "REDACTED_CONFIDENTIAL",
+                    "entity_id": "REDACTED_CONFIDENTIAL",
+                    "reason": "REDACTED_CONFIDENTIAL",
+                })
+            else:
+                redacted_items.append(item)
+        page_data = {**page_data, "items": redacted_items}
+    return page_data
 
 
 @router.get("/control/exceptions")

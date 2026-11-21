@@ -1271,6 +1271,8 @@ async def create_sales_order(req: SaleCreate, request: Request, current_user: di
     _reject_auditor(current_user)
     user_id, actor_role = require_roles(current_user, SALES_WRITE_ROLES)
     salesman_id = _clean(req.salesman_user_id) or user_id
+    if is_salesman(current_user) and salesman_id != user_id:
+        raise HTTPException(status_code=403, detail="A salesman can only create a sales order against their own user id.")
     customer_id = _clean(req.customer_id)
 
     customers = db.get_records("Customers", fresh=True)

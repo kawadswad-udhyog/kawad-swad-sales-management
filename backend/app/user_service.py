@@ -8,8 +8,8 @@ from typing import Optional, Dict, Any, List, Tuple
 from fastapi import HTTPException, status
 
 from app.sheets import db
-from app.auth import hash_password, revoke_all_user_sessions, _USER_REVOKED_AT
-from app.permissions import canonical_role
+from app.auth import hash_password, is_account_active, revoke_all_user_sessions, _USER_REVOKED_AT
+from app.permissions import KNOWN_SYSTEM_ROLES, canonical_role, is_recognized_role
 
 logger = logging.getLogger("kawad_swad.users")
 
@@ -79,8 +79,8 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
             is_active = False
             sync_warning = "No login account found in AuthUsers sheet"
         else:
-            u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
-            a_active = str(matched_auth.get("active", "true")).lower() in {"true", "1", "yes"}
+            u_active = is_account_active(u.get("active"))
+            a_active = is_account_active(matched_auth.get("active"))
             is_active = u_active and a_active
             sync_warning = "" if u_active == a_active else "Status mismatch between profile and credentials"
 
@@ -88,7 +88,7 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
             "user_id": uid,
             "full_name": str(u.get("full_name") or ""),
             "username": real_username,
-            "role": str((matched_auth.get("role") if matched_auth else None) or u.get("role") or "SALESMAN"),
+            "role": str((matched_auth.get("role") if matched_auth else None) or u.get("role") or "").strip(),
             "mobile": str(u.get("mobile") or ""),
             "email": str(u.get("email") or ""),
             "active": is_active,
@@ -107,7 +107,7 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
                     "user_id": uid,
                     "full_name": f"[Auth Only] {uname}",
                     "username": uname,
-                    "role": str(a.get("role") or "SALESMAN"),
+                    "role": str(a.get("role") or "").strip(),
                     "mobile": "",
                     "email": "",
                     "active": False,
@@ -120,13 +120,7 @@ def get_all_users_with_auth() -> List[Dict[str, Any]]:
     return result
 
 
-VALID_ROLES = {
-    "OWNER", "OWNER_ADMIN", "ADMIN", "PA", "PERSONAL_ASSISTANT",
-    "SALESMAN", "FIELD_SALESMAN", "PRODUCTION", "DISPATCH",
-    "FACTORY_WORKER", "PRODUCTION_WORKER", "WORKER",
-    "FREELANCER", "ACCOUNTANT", "SOCIAL_MEDIA_ECOMMERCE_MANAGER",
-    "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"
-}
+VALID_ROLES = set(KNOWN_SYSTEM_ROLES)
 VALID_BOOLEANS = {"true", "false", "1", "0", "yes", "no"}
 PLACEHOLDER_NAMES = {"your full name", "test user", "placeholder", "dummy", "admin", "owner", ""}
 
@@ -545,9 +539,9 @@ def audit_user_reconciliation() -> Dict[str, Any]:
                         "notes": f"Users role '{u_role}' and AuthUsers role '{a_role}' map to the same canonical role '{c_u}'.",
                     })
 
-            # Check status mismatches
-            u_active = str(u.get("active", "true")).lower() in {"true", "1", "yes"}
-            a_active = str(a.get("active", "true")).lower() in {"true", "1", "yes"}
+            # Check status mismatches (fail-closed active evaluation)
+            u_active = is_account_active(u.get("active"))
+            a_active = is_account_active(a.get("active"))
             if u_active != a_active:
                 status_mismatches.append({
                     "user_id": uid,
@@ -840,7 +834,7 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str, nonce: str 
     """
     username = str(payload.get("username") or "").strip()
     full_name = str(payload.get("full_name") or "").strip()
-    role = str(payload.get("role") or "SALESMAN").upper()
+    role = str(payload.get("role") or "").strip().upper()
     mobile = str(payload.get("mobile") or "").strip()
     email = str(payload.get("email") or "").strip()
     notes = str(payload.get("notes") or "").strip()
@@ -850,6 +844,8 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str, nonce: str 
         raise HTTPException(status_code=422, detail="Username is required.")
     if not full_name:
         raise HTTPException(status_code=422, detail="Full name is required.")
+    if not role or not is_recognized_role(role, custom_roles=db.get_records("CustomRoles", fresh=True) or []):
+        raise HTTPException(status_code=422, detail=f"Invalid or missing role '{role or '<blank>'}'.")
 
     # Idempotent check: if user already exists with both profile and credentials, return existing
     auth_records = db.get_records("AuthUsers", fresh=True) or []
@@ -865,7 +861,7 @@ def execute_create_user(payload: Dict[str, Any], actor_user_id: str, nonce: str 
                 "role": existing_auth.get("role"),
                 "mobile": existing_user.get("mobile", ""),
                 "email": existing_user.get("email", ""),
-                "active": str(existing_auth.get("active", "true")).lower() in {"true", "1", "yes"},
+                "active": is_account_active(existing_auth.get("active")),
                 "created_at": existing_user.get("created_at", ""),
                 "notes": existing_user.get("notes", ""),
                 "idempotent": True,
@@ -961,8 +957,13 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
             detail=f"Ambiguous identity: Multiple authentication records ({len(matching_auth)}) exist with user_id '{user_id}'. Account changes are frozen until duplicates are resolved by Owner.",
         )
 
-    old_role = str(target.get("role") or "").upper()
-    new_role = str(payload.get("role") or old_role).upper()
+    old_role = str(target.get("role") or "").strip().upper()
+    if "role" in payload and payload["role"] is not None:
+        new_role = str(payload.get("role") or "").strip().upper()
+        if not new_role or not is_recognized_role(new_role, custom_roles=db.get_records("CustomRoles", fresh=True) or []):
+            raise HTTPException(status_code=422, detail=f"Invalid or missing role '{new_role or '<blank>'}'.")
+    else:
+        new_role = old_role
 
     user_updates: Dict[str, Any] = {}
     if "full_name" in payload and payload["full_name"] is not None:
@@ -978,13 +979,13 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
 
     if not user_updates:
         merged = dict(target)
-        merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
+        merged["active"] = is_account_active(merged.get("active"))
         return merged
 
     all_matched = all(str(target.get(k, "")).strip() == str(v).strip() for k, v in user_updates.items())
     if all_matched:
         merged = dict(target)
-        merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
+        merged["active"] = is_account_active(merged.get("active"))
         merged["idempotent"] = True
         return merged
 
@@ -1027,7 +1028,7 @@ def execute_update_user(user_id: str, payload: Dict[str, Any], actor_user_id: st
 
     merged = dict(target)
     merged.update(user_updates)
-    merged["active"] = str(merged.get("active", "true")).lower() in {"true", "1", "yes"}
+    merged["active"] = is_account_active(merged.get("active"))
     merged["bridge_status"] = bridge_res.get("status")
     return merged
 
@@ -1055,8 +1056,8 @@ def execute_set_user_status(user_id: str, active: bool, actor_user_id: str, reas
     target_a = matching_a[0] if matching_a else None
 
     if target_u and target_a:
-        u_act = str(target_u.get("active", "true")).lower() in {"true", "1", "yes"}
-        a_act = str(target_a.get("active", "true")).lower() in {"true", "1", "yes"}
+        u_act = is_account_active(target_u.get("active"))
+        a_act = is_account_active(target_a.get("active"))
         if u_act == active and a_act == active:
             return {"ok": True, "user_id": user_id, "active": active, "idempotent": True}
 
@@ -1108,7 +1109,7 @@ def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, 
     if not target_auth:
         raise HTTPException(status_code=404, detail="Login account was not found in AuthUsers.")
 
-    current_active_status = str(target_auth.get("active", "true")).lower()
+    current_active_status = "true" if is_account_active(target_auth.get("active")) else "false"
     revoke_ts = datetime.now(timezone.utc).isoformat()
 
     from app.apps_script_bridge import apps_script_bridge

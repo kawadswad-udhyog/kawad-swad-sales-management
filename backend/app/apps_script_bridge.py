@@ -48,6 +48,7 @@ from app.config import (
 from app.schema_registry import (
     COLLIDING_LEGACY_PREFIX_TABS,
     CONFIDENTIAL_TABS_NO_CACHE,
+    SECURITY_NO_CACHE_TABS,
     get_allowed_id_prefixes_for_tab,
     get_locked_prefix_for_tab,
     get_schema_write_block_reason,
@@ -1726,7 +1727,7 @@ class AppsScriptBridge:
                 or (audit_match or {}).get("entity_id")
                 or ""
             ).strip() or None
-            is_confidential_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE
+            is_confidential_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE or tab_name in SECURITY_NO_CACHE_TABS
             safe_audit: Optional[Dict[str, Any]] = None
             if audit_match:
                 safe_audit = {

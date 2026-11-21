@@ -13,10 +13,12 @@ from app.auth import (
     create_access_token,
     get_current_user,
     hash_password,
+    is_account_active,
     is_account_deactivated,
     password_needs_reset,
     revoke_token,
     require_sheets_connection,
+    _validate_authoritative_role,
     _USER_REVOKED_AT,
     security,
 )
@@ -47,17 +49,23 @@ class ChangePasswordRequest(BaseModel):
 def _token_for(row: dict) -> TokenResponse:
     raw_user_id = str(row.get("user_id") or "").strip()
     raw_username = str(row.get("username") or "").strip()
-    user_id = raw_user_id or raw_username or "user"
-    username = raw_username or raw_user_id or user_id
-    role = ui_role(str(row.get("role") or "FIELD_SALESMAN"))
+    user_id = raw_user_id or raw_username
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account identity is incomplete in AuthUsers. Access denied.",
+        )
+    username = raw_username or user_id
+    authoritative_role = _validate_authoritative_role(row.get("role"), user_id)
+    role = ui_role(authoritative_role)
     full_name = str(row.get("full_name") or raw_username or user_id)
-    must_change = str(row.get("must_change_password", "false")).lower() == "true"
+    must_change = str(row.get("must_change_password", "false")).strip().lower() == "true"
     token = create_access_token({
         "sub": user_id,
         "user_id": user_id,
         "username": username,
         "full_name": full_name,
-        "role": str(row.get("role") or role),
+        "role": authoritative_role,
         "must_change_password": must_change,
     })
     return TokenResponse(
@@ -89,7 +97,7 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
         )
 
     try:
-        auth_records = db.get_records("AuthUsers", fresh=False)
+        auth_records = db.get_records("AuthUsers", fresh=True)
     except Exception as exc:
         err_str = str(exc).lower()
         if "429" in err_str or "quota" in err_str:
@@ -101,17 +109,38 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not verify login credentials with Google Sheets.",
         )
+    if not isinstance(auth_records, list):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication store returned malformed data. Access denied.",
+        )
     if not auth_records:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No login accounts exist yet. The owner must create the first account with the local reset/bootstrap script. Passwordless login is disabled.",
         )
-    match = None
+
+    matching_accounts = []
     for auth in auth_records:
-        if str(auth.get("username", "")).strip().lower() != username:
-            continue
-        if is_account_deactivated(auth.get("active", "true")):
-            raise HTTPException(status_code=403, detail="Account is deactivated")
+        if not isinstance(auth, dict):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication store contains malformed records. Access denied.",
+            )
+        if str(auth.get("username", "")).strip().lower() == username:
+            matching_accounts.append(auth)
+
+    if len(matching_accounts) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Ambiguous login identity detected in AuthUsers. Sign-in blocked until resolved by Owner.",
+        )
+
+    match = None
+    if matching_accounts:
+        auth = matching_accounts[0]
+        if not is_account_active(auth.get("active")):
+            raise HTTPException(status_code=403, detail="Account is deactivated or inactive")
         stored = str(auth.get("password_hash", ""))
         if password_needs_reset(stored):
             raise HTTPException(
@@ -120,15 +149,18 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
             )
         if verify_password(req.password, stored):
             match = auth
-            break
-        # Record failed attempt
-        past_attempts.append(now_ts)
-        _LOGIN_ATTEMPTS[username] = past_attempts
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+        else:
+            past_attempts.append(now_ts)
+            _LOGIN_ATTEMPTS[username] = past_attempts
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
     if not match:
         past_attempts.append(now_ts)
         _LOGIN_ATTEMPTS[username] = past_attempts
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Validate authoritative role BEFORE minting token (AUTH-02: never default missing/invalid role).
+    token_resp = _token_for(match)
 
     # Clear failed attempts on successful login
     _LOGIN_ATTEMPTS.pop(username, None)
@@ -141,7 +173,7 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
         entity_id=str(match.get("user_id")),
         reason="User successfully authenticated",
     )
-    return _token_for(match)
+    return token_resp
 
 
 @router.post("/api/auth/logout")

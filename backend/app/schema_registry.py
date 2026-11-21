@@ -468,6 +468,23 @@ CONFIDENTIAL_TABS_NO_CACHE: Set[str] = {
     "Employees",
 }
 
+# Identity, role, and revocation tables that MUST NEVER be served from stale cache (AUTH-04).
+SECURITY_NO_CACHE_TABS: Set[str] = {
+    "AuthUsers",
+    "RevokedTokens",
+    "CustomRoles",
+}
+
+# Credential/secret fields that MUST NEVER be exposed in any HTTP response, including to OWNER_ADMIN.
+NEVER_EXPOSE_CREDENTIAL_FIELDS: Set[str] = {
+    "password_hash",
+    "pin_hash",
+    "password",
+    "secret",
+    "access_token",
+    "refresh_token",
+}
+
 CONFIDENTIAL_PERSONAL_FIELDS: Set[str] = {
     "bank_details_reference",
     "bank_details",

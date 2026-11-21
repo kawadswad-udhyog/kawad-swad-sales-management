@@ -22,6 +22,7 @@ from app.schema_registry import (
     ACCOUNTS_ADVANCE_DISBURSEMENT_ALLOWED_FIELDS,
     CONFIDENTIAL_PERSONAL_FIELDS,
     CONFIDENTIAL_TABS_NO_CACHE,
+    NEVER_EXPOSE_CREDENTIAL_FIELDS,
 )
 
 # Exact 12 Blueprint v2.1 Roles
@@ -119,6 +120,74 @@ CANONICAL_ROLE_MAP: Dict[str, str] = {
     "HR": "HR",
     "AUDITOR": "AUDITOR",
 }
+
+# Complete set of recognized built-in canonical + legacy system role tokens.
+# Any role outside this set requires an explicitly active CustomRoles entry.
+KNOWN_SYSTEM_ROLES: Set[str] = (
+    set(TWELVE_ROLES)
+    | set(CANONICAL_ROLE_V2_MAP.keys())
+    | set(CANONICAL_ROLE_MAP.keys())
+)
+
+_EXPLICIT_ACTIVE_VALUES: Set[str] = {"true", "1", "yes", "active"}
+
+
+def is_active_custom_role(row: Any) -> bool:
+    """
+    Fail-closed custom role active check.
+    Rejects non-dict rows, blank role_name, soft-deleted rows, and any explicit
+    non-active status value (only explicit truthy active values are accepted when set).
+    """
+    if not isinstance(row, dict):
+        return False
+    role_name = str(row.get("role_name") or "").strip().upper()
+    if not role_name:
+        return False
+    if str(row.get("deleted") or "").strip().lower() in {"true", "1", "yes"}:
+        return False
+    if "active" in row:
+        active_val = row.get("active")
+        if isinstance(active_val, bool):
+            return active_val
+        if isinstance(active_val, int):
+            return active_val == 1
+        if active_val is not None:
+            active_str = str(active_val).strip().lower()
+            if active_str != "" and active_str not in _EXPLICIT_ACTIVE_VALUES:
+                return False
+    return True
+
+
+def is_recognized_role(role: Any, custom_roles: Optional[List[dict]] = None) -> bool:
+    """
+    Fail-closed role validator.
+    Returns True ONLY for a recognized canonical/legacy system role or an explicitly
+    active, non-colliding CustomRoles entry. Blank, None, and unknown roles return False.
+    """
+    clean = str(role or "").strip().upper()
+    if not clean:
+        return False
+    if clean in KNOWN_SYSTEM_ROLES:
+        return True
+    if custom_roles:
+        for cr in custom_roles:
+            if not is_active_custom_role(cr):
+                continue
+            cr_name = str(cr.get("role_name") or "").strip().upper()
+            if cr_name and cr_name not in KNOWN_SYSTEM_ROLES and cr_name == clean:
+                return True
+    return False
+
+
+def resolve_authorized_role(raw_role: Any, custom_roles: Optional[List[dict]] = None) -> Optional[str]:
+    """
+    Resolve an authoritative role string without any implicit default assignment.
+    Returns None when role is missing, blank, or unrecognized.
+    """
+    clean = str(raw_role or "").strip().upper()
+    if not is_recognized_role(clean, custom_roles=custom_roles):
+        return None
+    return CANONICAL_ROLE_V2_MAP.get(clean, clean)
 
 # Protected permissions that ONLY OWNER_ADMIN can hold; custom roles cannot grant these
 OWNER_ONLY_PERMISSIONS: Set[Tuple[str, str]] = {
@@ -379,11 +448,11 @@ def require_production_access(user: dict) -> tuple[str, str]:
 def require_roles(user: dict, allowed_roles: Iterable[str], detail: Optional[str] = None) -> tuple[str, str]:
     """Fail-closed exact v2 role enforcement."""
     v2_role = role_v2_of(user)
-    normalized_allowed = {canonical_role_v2(r) for r in allowed_roles}
-    if v2_role not in normalized_allowed and not is_owner(user):
+    normalized_allowed = {canonical_role_v2(r) for r in allowed_roles if str(r or "").strip()}
+    if not v2_role or (v2_role not in normalized_allowed and not is_owner(user)):
         raise HTTPException(
             status_code=403,
-            detail=detail or f"Role '{v2_role}' is not authorized for this resource.",
+            detail=detail or f"Role '{v2_role or 'UNASSIGNED'}' is not authorized for this resource.",
         )
     return str((user or {}).get("user_id", "")), v2_role
 
@@ -392,7 +461,12 @@ def has_permission(user: dict, module: str, action: str, custom_roles: Optional[
     """
     Default-deny permission evaluation.
     OWNER_ADMIN always passes; protected owner-only permissions are never bypassed.
+    Blank or unrecognized roles are always denied.
     """
+    raw_role = raw_role_of(user)
+    if not raw_role:
+        return False
+
     if is_owner(user):
         return True
 
@@ -401,28 +475,42 @@ def has_permission(user: dict, module: str, action: str, custom_roles: Optional[
 
     v2_role = role_v2_of(user)
     c_role = role_of(user)
-    raw_role = raw_role_of(user)
 
     for candidate in (v2_role, c_role, raw_role):
+        if not candidate:
+            continue
         matrix = V2_ROLE_PERMISSIONS.get(candidate) or DEFAULT_ROLE_PERMISSIONS.get(candidate)
         if matrix:
             module_perms = matrix.get(module, [])
             if action in module_perms or "*" in module_perms:
                 return True
 
-    if custom_roles:
+    if custom_roles and raw_role not in KNOWN_SYSTEM_ROLES:
+        owner_protected_modules = {m for m, _ in OWNER_ONLY_PERMISSIONS} | {"security"}
         for cr in custom_roles:
-            cr_name = str(cr.get("role_name", "")).strip().upper()
+            if not is_active_custom_role(cr):
+                continue
+            cr_name = str(cr.get("role_name") or "").strip().upper()
+            if not cr_name or cr_name in KNOWN_SYSTEM_ROLES:
+                continue
             if cr_name in {v2_role, c_role, raw_role}:
-                perms_data = cr.get("permissions") or {}
+                perms_data = cr.get("permissions")
+                if perms_data is None:
+                    perms_data = cr.get("permissions_json") or {}
                 if isinstance(perms_data, str):
                     try:
                         import json
                         perms_data = json.loads(perms_data)
                     except Exception:
                         perms_data = {}
+                if not isinstance(perms_data, dict):
+                    continue
                 actions = perms_data.get(module, [])
-                if action in actions or "*" in actions:
+                if not isinstance(actions, list):
+                    continue
+                if action in actions:
+                    return True
+                if "*" in actions and module not in owner_protected_modules:
                     return True
 
     return False
@@ -432,16 +520,32 @@ def require_module_action(user: dict, module: str, action: str, custom_roles: Op
     if not has_permission(user, module, action, custom_roles=custom_roles):
         raise HTTPException(
             status_code=403,
-            detail=f"Permission denied for '{module}:{action}' under role '{role_v2_of(user)}'.",
+            detail=f"Permission denied for '{module}:{action}' under role '{role_v2_of(user) or 'UNASSIGNED'}'.",
         )
     return str((user or {}).get("user_id", "")), role_v2_of(user)
 
 
 def validate_custom_role_permissions(permissions: Dict[str, List[str]]) -> None:
-    """Ensures custom roles do NOT grant Owner-only or confidential payroll/bank permissions."""
+    """Ensures custom roles do NOT grant Owner-only, security, wildcard, or confidential payroll/bank permissions."""
+    if not isinstance(permissions, dict):
+        raise HTTPException(status_code=422, detail="Custom role permissions must be a module-to-actions mapping.")
     for module, actions in permissions.items():
+        clean_mod = str(module or "").strip().lower()
+        if clean_mod in {"*", "security"}:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Custom roles cannot be granted access to protected module: '{module}'.",
+            )
+        if not isinstance(actions, list):
+            raise HTTPException(status_code=422, detail=f"Actions for module '{module}' must be a list.")
         for action in actions:
-            if (module, action) in OWNER_ONLY_PERMISSIONS:
+            clean_act = str(action or "").strip().lower()
+            if clean_act == "*":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Custom roles cannot use wildcard '*' permissions on module '{module}'.",
+                )
+            if (clean_mod, clean_act) in OWNER_ONLY_PERMISSIONS:
                 raise HTTPException(
                     status_code=403,
                     detail=f"Custom roles cannot be granted Owner-only permission: '{module}:{action}'.",
@@ -467,28 +571,33 @@ def filter_confidential_record(
     Enforce field-level confidentiality on server responses.
     Returns None if the user has zero row-level access to a confidential table.
     Otherwise returns a copy with restricted keys absent (never merely UI-hidden).
+    Credential/secret fields (password_hash, pin_hash, etc.) are ALWAYS stripped for every role.
     """
+    stripped_creds = {
+        k: v for k, v in record.items()
+        if str(k).strip().lower() not in NEVER_EXPOSE_CREDENTIAL_FIELDS
+    }
     if is_owner(user):
-        return dict(record)
+        return stripped_creds
 
     v2_role = role_v2_of(user)
     if tab_name in CONFIDENTIAL_TABS_NO_CACHE:
         if tab_name in {"EmployeeAdvances", "WorkforcePayments"} and v2_role == "ACCOUNTS" and workflow_context == "APPROVED_ADVANCE_DISBURSEMENT":
             return {
-                k: v for k, v in record.items()
+                k: v for k, v in stripped_creds.items()
                 if str(k).strip().lower() in ACCOUNTS_ADVANCE_DISBURSEMENT_ALLOWED_FIELDS
             }
         if tab_name in {"Employees", "LabourMaster"}:
             # Non-owners (including PA, HR) never receive bank details or personal IDs
             return {
-                k: v for k, v in record.items()
+                k: v for k, v in stripped_creds.items()
                 if str(k).strip().lower() not in CONFIDENTIAL_PERSONAL_FIELDS
             }
         # SalaryStructures, SalaryPayments, PayrollRuns, PayrollItems, SalaryReceipts: absent for PA and all non-owners
         return None
 
     return {
-        k: v for k, v in record.items()
+        k: v for k, v in stripped_creds.items()
         if str(k).strip().lower() not in CONFIDENTIAL_PERSONAL_FIELDS
     }
 
@@ -532,7 +641,9 @@ def ui_role(role: str) -> str:
         return "FREELANCER"
     if value in {"SOCIAL_MEDIA_ECOMMERCE_MANAGER", "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"}:
         return "SOCIAL_MEDIA_ECOMMERCE_MANAGER"
-    return CANONICAL_ROLE_V2_MAP.get(value, value or "FIELD_SALESMAN")
+    if not value:
+        return ""
+    return CANONICAL_ROLE_V2_MAP.get(value, value)
 
 
 def is_employee(user: dict) -> bool:
@@ -554,4 +665,4 @@ def is_social_media_manager(user: dict) -> bool:
 def portal_experience_for(user: dict) -> str:
     if is_owner(user):
         return "OWNER_ADMIN"
-    return role_v2_of(user) or "EMPLOYEE"
+    return role_v2_of(user)

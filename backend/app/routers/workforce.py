@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.apps_script_bridge import apps_script_bridge
 from app.sheets import db
-from app.auth import get_current_user, require_sheets_connection
+from app.auth import get_current_user, is_account_active, require_sheets_connection
 from app.permissions import (
     is_owner, is_manager, require_manager, require_owner, require_roles,
     role_of, role_v2_of, is_employee, EMPLOYEE_ROLES,
@@ -486,7 +486,7 @@ async def list_employees(current_user: dict = Depends(get_current_user)):
             "user_id": uid,
             "username": auth.get("username") or u.get("username") or uid,
             "full_name": u.get("full_name") or "",
-            "role": auth.get("role") or u.get("role") or "FIELD_SALESMAN",
+            "role": str(auth.get("role") or u.get("role") or "").strip(),
             "employment_type": u.get("employment_type") or "FIXED_EMPLOYEE",
             "designation": u.get("designation") or u.get("role") or "",
             "department": u.get("department") or "",
@@ -494,7 +494,7 @@ async def list_employees(current_user: dict = Depends(get_current_user)):
             "joining_date": u.get("joining_date") or "",
             "employment_status": u.get("employment_status") or "ACTIVE",
             "salary_frequency": u.get("salary_frequency") or "MONTHLY",
-            "active": str(u.get("active", "true")).lower() in {"true", "1", "yes"},
+            "active": is_account_active(auth.get("active")) if auth else is_account_active(u.get("active")),
             "created_at": u.get("created_at") or "",
             "notes": u.get("notes") or "" if is_owner(current_user) else "",
         }

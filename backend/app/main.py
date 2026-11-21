@@ -336,15 +336,28 @@ def health_schema_compatibility(refresh: bool = False, current_user: dict = Depe
 @app.get("/api/health/backup", tags=["System"])
 def health_backup(current_user: dict = Depends(auth.get_current_user)):
     from app.permissions import require_owner
+    from app.schema_registry import NEVER_EXPOSE_CREDENTIAL_FIELDS
     from app.timeutil import now_iso
     from app.sheets import REQUIRED_TABS
     require_owner(current_user)
     snapshot = {}
     for tab in REQUIRED_TABS:
         try:
-            snapshot[tab] = db.get_records(tab, fresh=False)
+            rows = db.get_records(tab, fresh=False)
+            if isinstance(rows, list):
+                snapshot[tab] = [
+                    {
+                        k: v for k, v in row.items()
+                        if str(k).strip().lower() not in NEVER_EXPOSE_CREDENTIAL_FIELDS
+                    }
+                    if isinstance(row, dict)
+                    else row
+                    for row in rows
+                ]
+            else:
+                snapshot[tab] = rows
         except Exception as e:
-            snapshot[tab] = {"error": str(e)}
+            snapshot[tab] = {"error": _sanitize_diagnostic_error(str(e)) or "Tab read failed"}
     return {
         "timestamp": now_iso(),
         "exported_by": current_user.get("user_id"),

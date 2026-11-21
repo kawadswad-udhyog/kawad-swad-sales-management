@@ -7,7 +7,15 @@ from app.apps_script_bridge import apps_script_bridge
 from app.models import UserProfile, UserCreate, UserUpdate, UserStatusUpdate, CustomRoleCreate, CustomRoleResponse
 from app.sheets import db
 from app.auth import get_current_user, require_sheets_connection
-from app.permissions import is_manager, is_owner, require_manager, require_owner, role_v2_of
+from app.permissions import (
+    KNOWN_SYSTEM_ROLES,
+    is_active_custom_role,
+    is_manager,
+    is_owner,
+    require_manager,
+    require_owner,
+    role_v2_of,
+)
 from app.user_service import (
     get_all_users_with_auth,
     validate_unique_username,
@@ -28,15 +36,23 @@ class PasswordResetRequest(BaseModel):
 
 
 def _get_target_user_role(user_id: str) -> str:
-    """Helper to check target user's current role."""
+    """
+    Resolve target user's authoritative role across AuthUsers and Users without silent defaults.
+    If either sheet classifies the account as an Owner, return 'OWNER_ADMIN' so PA cannot bypass
+    Owner protection via stale or blank Users.role.
+    """
+    clean_uid = user_id.strip()
+    auth_users = db.get_records("AuthUsers", fresh=True) or []
     users = db.get_records("Users", fresh=True) or []
-    target = next((u for u in users if str(u.get("user_id") or "").strip() == user_id.strip()), None)
-    if not target:
-        auth_users = db.get_records("AuthUsers", fresh=True) or []
-        target = next((u for u in auth_users if str(u.get("user_id") or "").strip() == user_id.strip()), None)
-    if not target:
+    auth_target = next((a for a in auth_users if str(a.get("user_id") or "").strip() == clean_uid), None)
+    user_target = next((u for u in users if str(u.get("user_id") or "").strip() == clean_uid), None)
+    if not auth_target and not user_target:
         raise HTTPException(status_code=404, detail="Employee record not found.")
-    return str(target.get("role") or "SALESMAN").upper()
+    auth_role = str((auth_target or {}).get("role") or "").strip().upper()
+    user_role = str((user_target or {}).get("role") or "").strip().upper()
+    if auth_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} or user_role in {"OWNER", "OWNER_ADMIN", "ADMIN"}:
+        return "OWNER_ADMIN"
+    return auth_role or user_role
 
 
 @router.get("", response_model=List[UserProfile])
@@ -65,7 +81,9 @@ async def list_users(current_user: dict = Depends(get_current_user)):
 async def create_user(req: UserCreate, current_user: dict = Depends(get_current_user), request: Request = None):
     """Owner creates employee directly. PA creates a PENDING approval request."""
     require_manager(current_user)
-    requested_role = str(req.role or "SALESMAN").upper()
+    requested_role = str(req.role or "").strip().upper()
+    if not requested_role:
+        raise HTTPException(status_code=422, detail="An explicit valid role is required.")
 
     # Rule: PA cannot create an Owner account
     if requested_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
@@ -136,12 +154,12 @@ async def update_user(user_id: str, req: UserUpdate, current_user: dict = Depend
     require_manager(current_user)
     target_role = _get_target_user_role(user_id)
 
-    # Rule: PA cannot edit or change role of an Owner account
-    if target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
-        raise HTTPException(status_code=403, detail="PA cannot edit or change the role of an Owner account.")
+    # Rule: PA cannot edit or change role of an Owner or unassigned/corrupted account
+    if (not target_role or target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"}) and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="PA cannot edit or change the role of an Owner or unassigned account.")
 
     # Rule: PA cannot promote any user to Owner
-    if req.role and str(req.role).upper() in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
+    if req.role and str(req.role).strip().upper() in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
         raise HTTPException(status_code=403, detail="PA cannot promote an employee to Owner.")
 
     actor_id = str(current_user.get("user_id") or "")
@@ -192,9 +210,9 @@ async def set_user_status(user_id: str, req: UserStatusUpdate, current_user: dic
     require_manager(current_user)
     target_role = _get_target_user_role(user_id)
 
-    # Rule: PA cannot deactivate or modify status of an Owner account
-    if target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
-        raise HTTPException(status_code=403, detail="PA cannot deactivate or modify an Owner account.")
+    # Rule: PA cannot deactivate or modify status of an Owner or unassigned/corrupted account
+    if (not target_role or target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"}) and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="PA cannot deactivate or modify an Owner or unassigned account.")
 
     actor_id = str(current_user.get("user_id") or "")
     actor_name = str(current_user.get("full_name") or actor_id)
@@ -231,9 +249,9 @@ async def reset_password(user_id: str, req: PasswordResetRequest, current_user: 
     require_manager(current_user)
     target_role = _get_target_user_role(user_id)
 
-    # Rule: PA cannot reset password for an Owner account
-    if target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"} and not is_owner(current_user):
-        raise HTTPException(status_code=403, detail="PA cannot reset the password of an Owner account.")
+    # Rule: PA cannot reset password for an Owner or unassigned/corrupted account
+    if (not target_role or target_role in {"OWNER", "OWNER_ADMIN", "ADMIN"}) and not is_owner(current_user):
+        raise HTTPException(status_code=403, detail="PA cannot reset the password of an Owner or unassigned account.")
 
     actor_id = str(current_user.get("user_id") or "")
     actor_name = str(current_user.get("full_name") or actor_id)
@@ -279,12 +297,7 @@ async def get_user_references(user_id: str, current_user: dict = Depends(get_cur
 
 
 def _is_active_custom_role(row: dict) -> bool:
-    if str(row.get("deleted", "")).strip().lower() in {"true", "1", "yes"}:
-        return False
-    active_raw = str(row.get("active", "true")).strip().lower()
-    if active_raw in {"false", "0", "no"}:
-        return False
-    return True
+    return is_active_custom_role(row)
 
 
 @router.get("/roles")
@@ -306,8 +319,6 @@ async def list_roles(current_user: dict = Depends(get_current_user)):
     # Custom roles (exclude soft-deleted/inactive rows)
     custom_records = [cr for cr in (db.get_records("CustomRoles", fresh=True) or []) if _is_active_custom_role(cr)]
     for cr in custom_records:
-        if str(cr.get("deleted", "")).strip().lower() == "true" or str(cr.get("active", "true")).strip().lower() == "false":
-            continue
         raw_p = cr.get("permissions_json") or "{}"
         try:
             import json
@@ -330,17 +341,17 @@ async def list_roles(current_user: dict = Depends(get_current_user)):
 async def create_or_update_custom_role(req: CustomRoleCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Owner creates or updates custom role with module-based permissions via Apps Script."""
     require_owner(current_user)
-    from app.permissions import validate_custom_role_permissions, OWNERS
+    from app.permissions import validate_custom_role_permissions
     import json
 
     clean_name = str(req.role_name or "").strip().upper()
     if not clean_name or len(clean_name) < 2:
         raise HTTPException(422, "Role name must be at least 2 characters.")
 
-    if clean_name in OWNERS or clean_name in {"PA", "SALESMAN", "FACTORY_WORKER"}:
-        raise HTTPException(400, f"Cannot override system role '{clean_name}'.")
+    if clean_name in KNOWN_SYSTEM_ROLES:
+        raise HTTPException(400, f"Cannot override built-in system role '{clean_name}'.")
 
-    # Validate that custom role does not grant Owner-level permissions
+    # Validate that custom role does not grant Owner-level or wildcard permissions
     validate_custom_role_permissions(req.permissions)
 
     actor_id = str(current_user.get("user_id") or "")
@@ -412,8 +423,8 @@ async def delete_custom_role(role_name: str, request: Request, current_user: dic
     if not existing:
         raise HTTPException(404, f"Custom role '{clean_name}' not found.")
 
-    users = db.get_records("Users") or []
-    auth_users = db.get_records("AuthUsers") or []
+    users = db.get_records("Users", fresh=True) or []
+    auth_users = db.get_records("AuthUsers", fresh=True) or []
     assigned_count = sum(1 for u in users if str(u.get("role", "")).upper() == clean_name) + \
                      sum(1 for a in auth_users if str(a.get("role", "")).upper() == clean_name)
     if assigned_count > 0:

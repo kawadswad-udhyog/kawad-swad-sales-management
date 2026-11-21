@@ -15,6 +15,7 @@ from app.permissions import (
     is_manager,
     is_salesman,
     is_factory_worker,
+    is_recognized_role,
     require_owner,
     require_manager,
 )
@@ -38,11 +39,29 @@ class RevocationVerificationError(RuntimeError):
     pass
 
 
+_EXPLICIT_ACTIVE_STRINGS: Set[str] = {"true", "1", "yes", "active"}
+
+
+def is_account_active(active_value: Any) -> bool:
+    """
+    Fail-closed account active-status predicate (AUTH-03).
+    Returns True ONLY for explicit active representations (bool True, int 1, or
+    case-insensitive string in {'true', '1', 'yes', 'active'}).
+    Missing, None, blank, False, 0, 'false', 'inactive', 'suspended', or any
+    malformed/unrecognized value fails closed (returns False).
+    """
+    if isinstance(active_value, bool):
+        return active_value
+    if isinstance(active_value, int):
+        return active_value == 1
+    if isinstance(active_value, str):
+        return active_value.strip().lower() in _EXPLICIT_ACTIVE_STRINGS
+    return False
+
+
 def is_account_deactivated(active_value: Any) -> bool:
-    """Consistent account deactivation predicate shared by login and token verification."""
-    if active_value is None:
-        return False
-    return str(active_value).strip().lower() in {"false", "0", "no", ""}
+    """Consistent fail-closed account deactivation predicate shared by login and token verification."""
+    return not is_account_active(active_value)
 
 
 def hash_password(password: str) -> str:
@@ -281,27 +300,87 @@ def is_token_revoked(token: str, payload: Dict[str, Any], *, fresh: bool = True)
     return revoked
 
 
-def _auth_row_for(user_id: str, *, fresh: bool = False) -> Tuple[Optional[dict], bool]:
-    """Lookup AuthUsers row. Returns (row, error_occurred_flag)."""
+def _auth_row_for(user_id: str, *, fresh: bool = True) -> Tuple[Optional[dict], Optional[str]]:
+    """
+    Lookup authoritative AuthUsers row.
+    Returns (row, error_code) where error_code is None on unambiguous lookup (row or not found),
+    or a fail-closed code ('AUTH_STORE_UNAVAILABLE', 'AUTH_DATA_MALFORMED', 'AMBIGUOUS_IDENTITY')
+    when identity cannot be safely verified.
+    """
     from app.sheets import db
     clean_id = str(user_id or "").strip().lower()
     if not clean_id:
-        return None, False
+        return None, None
     try:
         records = db.get_records("AuthUsers", fresh=fresh)
-    except Exception:
-        # Sheet read failed or quota exceeded
-        return None, True
+    except Exception as exc:
+        logger.error(
+            "AuthUsers lookup failed for user=%s (%s); denying access fail-closed.",
+            clean_id,
+            type(exc).__name__,
+        )
+        return None, "AUTH_STORE_UNAVAILABLE"
     if not isinstance(records, list):
-        return None, True
+        logger.error("Malformed AuthUsers response type=%s; denying access fail-closed.", type(records).__name__)
+        return None, "AUTH_DATA_MALFORMED"
+
+    matches = []
     for row in records:
         if not isinstance(row, dict):
-            continue
+            logger.error("Malformed row entry in AuthUsers (type=%s); denying access fail-closed.", type(row).__name__)
+            return None, "AUTH_DATA_MALFORMED"
         r_uid = str(row.get("user_id", "")).strip().lower()
         r_uname = str(row.get("username", "")).strip().lower()
         if (r_uid and r_uid == clean_id) or (r_uname and r_uname == clean_id):
-            return row, False
-    return None, False
+            matches.append(row)
+
+    if len(matches) > 1:
+        logger.error("Ambiguous AuthUsers identity for user=%s (%d matching rows); denying access fail-closed.", clean_id, len(matches))
+        return None, "AMBIGUOUS_IDENTITY"
+    return (matches[0] if matches else None), None
+
+
+def _validate_authoritative_role(raw_role: Any, user_id: str) -> str:
+    """
+    Validate that the authoritative AuthUsers role is non-empty and belongs to either
+    a recognized canonical/legacy system role or an active CustomRoles entry.
+    Fails closed (403 on missing/unknown role, 503 if CustomRoles cannot be read).
+    """
+    clean_role = str(raw_role or "").strip()
+    if not clean_role:
+        logger.warning("Authorization rejected for user=%s: missing/blank role in AuthUsers.", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account role is missing or unassigned. Access denied.",
+        )
+    if is_recognized_role(clean_role):
+        return clean_role
+
+    from app.sheets import db
+    try:
+        custom_roles = db.get_records("CustomRoles", fresh=True)
+    except Exception as exc:
+        logger.error(
+            "CustomRoles lookup failed while validating role for user=%s (%s); denying access fail-closed.",
+            user_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to verify custom role authorization state. Please retry.",
+        )
+    if not isinstance(custom_roles, list):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Custom role authorization store returned malformed data. Access denied.",
+        )
+    if not is_recognized_role(clean_role, custom_roles=custom_roles):
+        logger.warning("Authorization rejected for user=%s: unrecognized or inactive role '%s'.", user_id, clean_role)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account role is not recognized or has been disabled. Access denied.",
+        )
+    return clean_role
 
 
 async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
@@ -325,9 +404,15 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     payload = dict(payload)
     payload["user_id"] = user_id
 
-    row, sheet_error = _auth_row_for(user_id, fresh=False)
-    if sheet_error:
-        # User System Audit Rule: Do NOT fall back to stale JWT permissions when Sheets cannot be read!
+    # Always read fresh AuthUsers state (AUTH-04); never fall back to cached rows or JWT claims.
+    row, auth_error = _auth_row_for(user_id, fresh=True)
+    if auth_error == "AMBIGUOUS_IDENTITY":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account identity is ambiguous in AuthUsers. Access denied until resolved by Owner.",
+        )
+    if auth_error:
+        # Fail closed: NEVER fall back to stale JWT permissions when AuthUsers cannot be verified.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google Sheets is currently unreachable. Cannot verify current account permissions. Please retry.",
@@ -338,10 +423,12 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             detail="User account no longer exists. Session revoked.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if is_account_deactivated(row.get("active", "true")):
+    # Fail-closed active validation (AUTH-03): missing, blank, or malformed active status denies access.
+    if not is_account_active(row.get("active")):
+        logger.warning("Session rejected for user=%s: account is inactive or has invalid active status.", user_id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Account is deactivated. Session revoked.",
+            detail="Account is deactivated or inactive. Session revoked.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -389,11 +476,18 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    # Ensure authoritative permissions and details always come from sheet record
-    payload["role"] = row.get("role") or payload.get("role")
-    payload["full_name"] = row.get("full_name") or payload.get("full_name")
-    payload["username"] = row.get("username") or payload.get("username")
-    payload["must_change_password"] = str(row.get("must_change_password", "false")).lower() == "true"
+    # Authoritative role validation (AUTH-01 / AUTH-02):
+    # Role MUST come exclusively from AuthUsers; NEVER fall back to JWT role claim or implicit default.
+    authoritative_role = _validate_authoritative_role(row.get("role"), user_id)
+    authoritative_uid = str(row.get("user_id") or user_id).strip()
+    authoritative_username = str(row.get("username") or "").strip()
+    authoritative_full_name = str(row.get("full_name") or authoritative_username or authoritative_uid).strip()
+
+    payload["user_id"] = authoritative_uid
+    payload["role"] = authoritative_role
+    payload["full_name"] = authoritative_full_name
+    payload["username"] = authoritative_username
+    payload["must_change_password"] = str(row.get("must_change_password", "false")).strip().lower() == "true"
     return payload
 
 

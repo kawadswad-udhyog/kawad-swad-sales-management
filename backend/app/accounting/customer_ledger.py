@@ -773,14 +773,20 @@ def validate_credit_approval_request(
             detail=f"Approval request '{clean_app_id}' has invalid type '{app_type}' for credit exception.",
         )
 
-    # 4. Decider (active Owner) check
+    # 4. Decider (active Owner) check — fail closed on missing/malformed active status or demoted AuthUsers record
+    from app.auth import is_account_active
+
     decided_by = str(appr.get("decided_by") or appr.get("approved_by") or "").strip()
     if not decided_by:
         raise HTTPException(status_code=400, detail=f"Approval request '{clean_app_id}' lacks authorized Owner identity.")
     users = db.get_records("Users", fresh=True) or []
     decider = next((u for u in users if str(u.get("user_id", "")).strip() == decided_by), None)
-    if not decider or not is_owner(decider) or str(decider.get("active", "true")).lower() in {"false", "0", "no", "inactive"}:
+    if not decider or not is_owner(decider) or not is_account_active(decider.get("active")):
         raise HTTPException(status_code=400, detail=f"Approver '{decided_by}' is not an active Owner.")
+    auth_users = db.get_records("AuthUsers", fresh=True) or []
+    auth_decider = next((a for a in auth_users if str(a.get("user_id", "")).strip() == decided_by), None)
+    if auth_decider is not None and (not is_owner(auth_decider) or not is_account_active(auth_decider.get("active"))):
+        raise HTTPException(status_code=400, detail=f"Approver '{decided_by}' is not an active Owner in AuthUsers.")
 
     # Parse payload_json if present
     payload = {}

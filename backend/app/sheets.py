@@ -20,6 +20,7 @@ from app.config import (
 )
 from app.schema_registry import (
     CONFIDENTIAL_TABS_NO_CACHE,
+    SECURITY_NO_CACHE_TABS,
     is_forbidden_scratch_tab,
 )
 from app.timeutil import now_iso
@@ -1277,8 +1278,8 @@ class SheetsDatabase:
             raise RuntimeError(
                 f"Access denied: legacy scratch tab '{tab_name}' is forbidden and must never be recreated or queried."
             )
-        is_confidential_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE
-        effective_fresh = bool(fresh or is_confidential_tab)
+        is_no_cache_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE or tab_name in SECURITY_NO_CACHE_TABS
+        effective_fresh = bool(fresh or is_no_cache_tab)
 
         # If disconnected but configured, attempt single-flight self-healing reconnect with bounded backoff
         if not (self.is_connected and self.spreadsheet) and SALES_GOOGLE_SPREADSHEET_ID:
@@ -1303,7 +1304,7 @@ class SheetsDatabase:
         import time
         now = time.monotonic()
         with self._lock:
-            cached = None if is_confidential_tab else self._records_cache.get(tab_name)
+            cached = None if is_no_cache_tab else self._records_cache.get(tab_name)
         if not effective_fresh:
             if cached and now - cached[0] < self._records_cache_ttl_seconds:
                 return [dict(row) for row in cached[1]]
@@ -1318,7 +1319,7 @@ class SheetsDatabase:
             if not leader:
                 event.wait(timeout=30)
                 with self._lock:
-                    cached = None if is_confidential_tab else self._records_cache.get(tab_name)
+                    cached = None if is_no_cache_tab else self._records_cache.get(tab_name)
                     if cached:
                         return [dict(row) for row in cached[1]]
 
@@ -1330,8 +1331,8 @@ class SheetsDatabase:
                 worksheet = self._get_worksheet(tab_name)
                 safe_records = self._safe_read_worksheet_records(worksheet, tab_name)
                 with self._lock:
-                    if is_confidential_tab:
-                        # Guarantee confidential payroll/bank/personal tables are NEVER held in shared cache
+                    if is_no_cache_tab:
+                        # Guarantee confidential HR/payroll and security identity/revocation tables are NEVER held in shared cache
                         self._records_cache.pop(tab_name, None)
                     else:
                         self._records_cache[tab_name] = (time.monotonic(), safe_records)
