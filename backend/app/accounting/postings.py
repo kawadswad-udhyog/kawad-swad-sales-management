@@ -384,12 +384,14 @@ def post_packaging_batch_journal(
             "debit_amount": r_finished,
             "notes": finished_note,
         },
-        {
+    ]
+
+    if r_bulk > Decimal("0"):
+        lines.append({
             "account_code": "1230",
             "credit_amount": r_bulk,
             "notes": bulk_note,
-        },
-    ]
+        })
 
     if r_mat > Decimal("0"):
         lines.append({

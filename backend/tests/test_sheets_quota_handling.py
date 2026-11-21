@@ -31,11 +31,15 @@ class TestSheetsQuotaHandling(unittest.TestCase):
         db._worksheets.clear()
 
     def test_stale_cache_served_on_429_quota_exceeded_for_non_fresh_read(self):
-        """When Google Sheets throws 429 Quota Exceeded and fresh=False, get_records serves cached data to prevent crash."""
-        # 1. Prime cache with existing AuthUsers
+        """When Google Sheets throws 429 Quota Exceeded and fresh=False, get_records serves cached data for non-confidential operational tabs, while security-critical NO_CACHE_TABS (AuthUsers) still fail closed."""
+        # 1. Prime cache with a cacheable operational tab (Products) AND a no-cache security tab (AuthUsers)
+        db._records_cache["Products"] = (
+            time.monotonic() - 100,  # expired cache
+            [{"product_id": "PRD-1", "product_name": "Moong Papad 200g", "active": "true"}],
+        )
         db._records_cache["AuthUsers"] = (
-            time.monotonic() - 100, # expired cache
-            [{"auth_id": "AUTH-1", "user_id": "USR-1", "username": "ankit", "role": "OWNER", "active": "true"}]
+            time.monotonic() - 100,
+            [{"auth_id": "AUTH-1", "user_id": "USR-1", "username": "ankit", "role": "OWNER", "active": "true"}],
         )
 
         # 2. Mock worksheet that raises a 429 Quota Exceeded APIError
@@ -49,10 +53,15 @@ class TestSheetsQuotaHandling(unittest.TestCase):
 
         db.spreadsheet = QuotaMockSpreadsheet()
 
-        # 3. Reading AuthUsers with fresh=False should catch 429 and return cached record
-        records = db.get_records("AuthUsers", fresh=False)
+        # 3. Reading cacheable Products with fresh=False should catch 429 and return stale cached record
+        records = db.get_records("Products", fresh=False)
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["username"], "ankit")
+        self.assertEqual(records[0]["product_id"], "PRD-1")
+
+        # 4. Reading security-critical AuthUsers must STILL fail closed on 429 even when fresh=False
+        with self.assertRaises(RuntimeError) as ctx:
+            db.get_records("AuthUsers", fresh=False)
+        self.assertIn("quota", str(ctx.exception).lower())
 
     def test_fresh_read_rejects_stale_cache_on_429_quota_error(self):
         """When fresh=True is requested, stale cache must NOT be returned on 429 quota error to prevent hiding connectivity issues."""

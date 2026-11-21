@@ -166,13 +166,19 @@ def _sanitize_diagnostic_error(err: Optional[str]) -> Optional[str]:
     from app.config import (
         SALES_GOOGLE_SPREADSHEET_ID,
         SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
+        SALES_APPS_SCRIPT_SHARED_SECRET,
+        SALES_APPS_SCRIPT_WEBAPP_URL,
     )
 
     msg = str(err)
     for sensitive in (
         SALES_GOOGLE_SPREADSHEET_ID,
         SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
+        SALES_APPS_SCRIPT_SHARED_SECRET,
+        SALES_APPS_SCRIPT_WEBAPP_URL,
         os.getenv("SALES_JWT_SECRET", "").strip(),
+        os.getenv("SALES_APPS_SCRIPT_SHARED_SECRET", "").strip(),
+        os.getenv("SALES_APPS_SCRIPT_WEBAPP_URL", "").strip(),
     ):
         if sensitive and len(sensitive) > 3:
             msg = msg.replace(sensitive, "[REDACTED]")

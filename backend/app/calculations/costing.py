@@ -39,11 +39,14 @@ def get_latest_purchase_rate(
     if purchase_ledger:
         candidates = []
         for entry in purchase_ledger:
-            # Only accepted supplier receipts establish a purchase rate. Milling
-            # transfers, production consumption, opening verification and stock
-            # adjustments must never become new purchase-rate observations.
+            # Only accepted supplier receipts (PURCHASE_RECEIPT) and confirmed
+            # internal milling flour receipts (MILLING_OUTPUT, derived from
+            # confirmed dal purchase rate + milling expenses / yield) establish
+            # a landed material rate. Consumption (PRODUCTION_CONSUMPTION,
+            # MILLING_CONSUMPTION), opening verification, and stock adjustments
+            # must never become rate observations.
             movement_type = str(entry.get("movement_type", "")).strip().upper()
-            if movement_type != "PURCHASE_RECEIPT":
+            if movement_type not in {"PURCHASE_RECEIPT", "MILLING_OUTPUT"}:
                 continue
 
             # Match material

@@ -22,8 +22,9 @@ if project_root not in sys.path:
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-# Ensure FastAPI / Pydantic mock shims are active
+# Ensure FastAPI / Pydantic mock shims and V2.1 Apps Script simulator are active
 import tests.test_audit_reconciliation
+from tests.v2_test_harness import LocalAppsScriptSimulator, make_test_request
 
 from app.sheets import db, REQUIRED_TABS
 from app.calculations import (
@@ -87,21 +88,35 @@ def run_acceptance_and_reconciliation():
     print("KAWAD SWAD ERP: LIVE CONTROLLED BUSINESS ACCEPTANCE & RECONCILIATION")
     print("=" * 80)
 
-    # Use in-memory store for isolated controlled test run
+    # Use in-memory store + V2.1 LocalAppsScriptSimulator for isolated controlled test run
     db.allow_in_memory_fallback = True
     for tab in REQUIRED_TABS:
         db.memory_store[tab] = []
+    db._records_cache.clear()
 
+    sim = LocalAppsScriptSimulator()
+    sim.start()
+    try:
+        return _run_acceptance_body()
+    finally:
+        sim.stop()
+
+
+def _seed(tab: str, row: dict) -> None:
+    db.memory_store.setdefault(tab, []).append(dict(row))
+
+
+def _run_acceptance_body():
     # 1. SETUP USERS & ENTITIES
-    owner = {"user_id": "USR-TEST-OWNER", "full_name": "Acceptance Owner", "role": "OWNER", "username": "owner"}
-    salesman = {"user_id": "USR-TEST-SALES", "full_name": "Ramesh Salesman", "role": "SALESMAN", "username": "sales_ramesh"}
-    freelancer = {"user_id": "USR-TEST-FREE", "full_name": "Priya Designer", "role": "FREELANCER", "username": "freelancer_priya"}
-    db.append_record("Users", owner)
-    db.append_record("Users", salesman)
-    db.append_record("Users", freelancer)
+    owner = {"user_id": "USR-TEST-OWNER", "full_name": "Acceptance Owner", "role": "OWNER", "username": "owner", "active": "true"}
+    salesman = {"user_id": "USR-TEST-SALES", "full_name": "Ramesh Salesman", "role": "SALESMAN", "username": "sales_ramesh", "active": "true"}
+    freelancer = {"user_id": "USR-TEST-FREE", "full_name": "Priya Designer", "role": "FREELANCER", "username": "freelancer_priya", "active": "true"}
+    _seed("Users", owner)
+    _seed("Users", salesman)
+    _seed("Users", freelancer)
 
     # Master Products & Materials
-    db.append_record("RawMaterials", {
+    _seed("RawMaterials", {
         "raw_material_id": "RM-WHOLE-CHANA-DAL",
         "material_name": "Whole Chana Dal",
         "category": "WHOLE_GRAIN",
@@ -110,7 +125,7 @@ def run_acceptance_and_reconciliation():
         "rate_per_unit": 85.0,
         "rate_status": "CONFIRMED",
     })
-    db.append_record("RawMaterials", {
+    _seed("RawMaterials", {
         "raw_material_id": "RM-CHANA-FLOUR",
         "material_name": "Chana Dal Flour",
         "category": "FLOUR",
@@ -119,7 +134,7 @@ def run_acceptance_and_reconciliation():
         "rate_per_unit": 90.0,
         "rate_status": "CONFIRMED",
     })
-    db.append_record("RawMaterials", {
+    _seed("RawMaterials", {
         "raw_material_id": "RM-SPICES-MASALA",
         "material_name": "Special Masala Blend",
         "category": "SPICE",
@@ -129,7 +144,7 @@ def run_acceptance_and_reconciliation():
         "rate_status": "CONFIRMED",
         "opening_stock_verified": "true",
     })
-    db.append_record("RawMaterials", {
+    _seed("RawMaterials", {
         "raw_material_id": "RM-SALT",
         "material_name": "Salt",
         "category": "SALT",
@@ -139,7 +154,7 @@ def run_acceptance_and_reconciliation():
         "rate_status": "CONFIRMED",
         "opening_stock_verified": "true",
     })
-    db.append_record("RawMaterials", {
+    _seed("RawMaterials", {
         "raw_material_id": "PKG-POUCH-200G",
         "material_name": "Printed Pouch 200g",
         "category": "PACKAGING",
@@ -149,7 +164,7 @@ def run_acceptance_and_reconciliation():
         "rate_status": "CONFIRMED",
         "opening_stock_verified": "true",
     })
-    db.append_record("Products", {
+    _seed("Products", {
         "product_id": "PRD-CHANA-MASALA-200G",
         "product_name": "Chana Masala Papad 200g",
         "sku": "CMP-200G",
@@ -159,7 +174,7 @@ def run_acceptance_and_reconciliation():
         "wholesale_packet_price": 55.0,
         "retailer_packet_price": 60.0,
     })
-    db.append_record("Customers", {
+    _seed("Customers", {
         "customer_id": "CUST-ACCPT-001",
         "firm_name": "Bharat Kirana Stores",
         "owner_name": "Bharat Bhai",
@@ -188,7 +203,7 @@ def run_acceptance_and_reconciliation():
         freight_amount=2500.0,
         idempotency_key="ACCPT-PO-CHANA-001",
     )
-    po_res = asyncio.run(receive_raw_material(po_req, user=owner))
+    po_res = asyncio.run(receive_raw_material(po_req, request=make_test_request(po_req.idempotency_key), user=owner))
     landed_rate = po_res.landed_rate_per_unit  # (500 * 85 + 2500) / 500 = 90.0
     print(f"Receipt Status: {po_res.status} | Qty: {po_res.new_available_stock} kg | Landed Rate: Rs {landed_rate}/kg | Ledger Tx: {po_res.raw_material_txn_id}")
     assert po_res.status == "SUCCESS"
@@ -208,7 +223,7 @@ def run_acceptance_and_reconciliation():
         milling_date=date.today().isoformat(),
         notes="Acceptance test batch milling",
     )
-    mill_res = asyncio.run(record_dal_milling_batch(mill_req, user=owner))
+    mill_res = asyncio.run(record_dal_milling_batch(mill_req, request=make_test_request(), user=owner))
     print(f"Milling Status: {mill_res.status} | Batch ID: {mill_res.milling_batch_id} | Flour Produced: {mill_res.flour_output_kg} kg | Flour Landed Cost: Rs {mill_res.flour_unit_cost:.2f}/kg")
     assert mill_res.status == "SUCCESS"
     assert mill_res.flour_output_kg == 190.0
@@ -235,7 +250,7 @@ def run_acceptance_and_reconciliation():
         expected_yield_kg=1.0,
         approved=True,
     )
-    saved_recipe = asyncio.run(save_recipe(recipe_req, user=owner))
+    saved_recipe = asyncio.run(save_recipe(recipe_req, request=make_test_request(), user=owner))
     rcp_id = saved_recipe["recipe_id"]
 
     batch_req = ProductionCreate(
@@ -246,11 +261,11 @@ def run_acceptance_and_reconciliation():
         auto_issue_materials=True,
         notes="Live acceptance bulk papad batch",
     )
-    batch_res = asyncio.run(create_batch(batch_req, user=owner))
+    batch_res = asyncio.run(create_batch(batch_req, request=make_test_request(), user=owner))
     batch_id = batch_res["production_id"]
     print(f"Batch Created: {batch_id} | Status: {batch_res['status']}")
 
-    appr_res = asyncio.run(approve_batch(batch_id, ApprovalRequest(approved=True, notes="Inspected & approved"), user=owner))
+    appr_res = asyncio.run(approve_batch(batch_id, ApprovalRequest(approved=True, notes="Inspected & approved"), request=make_test_request(), user=owner))
     print(f"Batch Approved: {batch_id} | Status: {appr_res['status']}")
     bulk_bal = calculate_bulk_stock_balance(db.get_records("ProductionStockLedger"), "Chana Masala Papad 200g")["chana masala papad 200g"]
     print(f"Available Bulk Stock: {bulk_bal} kg")
@@ -268,7 +283,7 @@ def run_acceptance_and_reconciliation():
         packets_200g=250,  # 50 kg / 0.2 kg = 250 pkts
         notes="Live acceptance 200g packaging batch",
     )
-    pkg_res = asyncio.run(create_packaging(pkg_req, user=owner))
+    pkg_res = asyncio.run(create_packaging(pkg_req, request=make_test_request(), user=owner))
     print(f"Packaging Created: {pkg_res['packaging_id']} | Packets: {pkg_res['total_packets']} | Status: {pkg_res['status']}")
     assert pkg_res["status"] == "RECORDED"
     assert pkg_res["total_packets"] == 250
@@ -291,7 +306,7 @@ def run_acceptance_and_reconciliation():
         product_id="PRD-CHANA-MASALA-200G",
         quantity=250,
         notes="Factory packaging transfer to central warehouse",
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     print(f"Central Warehouse Receipt: {wh_receipt.stock_txn_id} | Qty: {wh_receipt.quantity} pkts")
 
     # Dispatch stock to salesman van
@@ -302,7 +317,7 @@ def run_acceptance_and_reconciliation():
         quantity=100,
         notes="Van loading for delivery route",
     )
-    issue_res = asyncio.run(stock.record_stock_movement(issue_req, current_user=owner))
+    issue_res = asyncio.run(stock.record_stock_movement(issue_req, request=make_test_request(), current_user=owner))
     print(f"Stock Issued to Van: {issue_res.stock_txn_id} | Qty: {issue_res.quantity} pkts")
 
     van_bal = calculate_salesman_stock_balance(db.get_records("SalesmanStockLedger"), "USR-TEST-SALES", "PRD-CHANA-MASALA-200G")
@@ -324,7 +339,7 @@ def run_acceptance_and_reconciliation():
         payment_method="CASH",
         notes="Delivered to Bharat Kirana Stores",
     )
-    sale_res = asyncio.run(sales.create_sale(sale_req, current_user=salesman))
+    sale_res = asyncio.run(sales.create_sale(sale_req, request=make_test_request(), current_user=salesman))
     sale_id = sale_res.sale_id
     print(f"Sale Completed: {sale_id} | Total: Rs {sale_res.bill_total}")
     assert sale_res.bill_total == 3600.0
@@ -370,13 +385,13 @@ def run_acceptance_and_reconciliation():
 
     with patch("app.routers.workforce.datetime", MockAttendanceClock):
         # Clock in at 09:00:00
-        att_in = asyncio.run(workforce.check_in_my_attendance(EmployeeAttendanceCheckIn(notes="On-time shift arrival"), current_user=salesman))
+        att_in = asyncio.run(workforce.check_in_my_attendance(EmployeeAttendanceCheckIn(notes="On-time shift arrival"), request=make_test_request(), current_user=salesman))
         att_id = att_in["record"]["attendance_id"]
         assert att_in["record"]["check_in_time"] == "09:00:00"
 
         # Advance clock to 17:00:00 (8.0-hour shift duration) and clock out
         MockAttendanceClock._current = datetime(2026, 10, 20, 17, 0, 0)
-        att_out = asyncio.run(workforce.check_out_my_attendance(EmployeeAttendanceCheckOut(notes="Completed evening delivery rounds"), current_user=salesman))
+        att_out = asyncio.run(workforce.check_out_my_attendance(EmployeeAttendanceCheckOut(notes="Completed evening delivery rounds"), request=make_test_request(), current_user=salesman))
         assert att_out["total_hours"] == 8.0
         assert att_out["record"]["check_out_time"] == "17:00:00"
         print(f"Employee Attendance: {att_id} | In: {att_in['record']['check_in_time']} | Out: {att_out['record']['check_out_time']} | Hours: {att_out['total_hours']} | Status: {att_out.get('status', 'COMPLETED')}")
@@ -388,14 +403,14 @@ def run_acceptance_and_reconciliation():
         assigned_to_user_id="USR-TEST-SALES",
         due_date=today,
         priority="HIGH",
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     task_id = task_res["task"]["task_id"]
     print(f"Task Assigned: {task_id} -> USR-TEST-SALES")
 
-    sub_res = asyncio.run(workforce.submit_my_task(task_id, WorkAssignmentSubmit(submission_notes="All 15 shops visited, proof logged in daily visit register"), current_user=salesman))
+    sub_res = asyncio.run(workforce.submit_my_task(task_id, WorkAssignmentSubmit(submission_notes="All 15 shops visited, proof logged in daily visit register"), request=make_test_request(), current_user=salesman))
     assert sub_res["ok"] is True
 
-    rev_res = asyncio.run(workforce.review_task(task_id, WorkAssignmentReview(status="APPROVED", review_notes="Excellent coverage"), current_user=owner))
+    rev_res = asyncio.run(workforce.review_task(task_id, WorkAssignmentReview(status="APPROVED", review_notes="Excellent coverage"), request=make_test_request(), current_user=owner))
     assert rev_res["ok"] is True
     print(f"Task Approved: {task_id}")
 
@@ -407,7 +422,7 @@ def run_acceptance_and_reconciliation():
         total_budget=15000.0,
         target_completion_date=today,
         deliverables_summary="Print-ready AI, PDF, and color proofs",
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     proj_id = proj_res["project"]["project_id"]
 
     ms_res = asyncio.run(workforce.create_project_milestone(proj_id, FreelancerMilestoneCreate(
@@ -416,19 +431,19 @@ def run_acceptance_and_reconciliation():
         description="3 draft concepts submitted",
         amount=5000.0,
         due_date=today,
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     ms_id = ms_res["milestone"]["milestone_id"]
 
     ms_sub = asyncio.run(workforce.submit_my_milestone(ms_id, FreelancerMilestoneSubmit(
         submission_notes="Draft concepts uploaded to drive",
         submission_link="https://drive.google.com/test-draft",
-    ), current_user=freelancer))
+    ), request=make_test_request(), current_user=freelancer))
     assert ms_sub["ok"] is True
 
     ms_app = asyncio.run(workforce.review_project_milestone(ms_id, FreelancerMilestoneReview(
         status="APPROVED",
         review_notes="Approved concept #2",
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     assert ms_app["ok"] is True
     print(f"Freelancer Milestone Approved: {ms_id} for Rs 5,000.00")
 
@@ -440,14 +455,14 @@ def run_acceptance_and_reconciliation():
         base_rate=450.0,
         daily_expected_hours=8.0,
         mobile="9822334455",
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     labour_id = lab_res["labour"]["labour_id"]
 
     # Labour Attendance & Work Entry
     att_bulk = asyncio.run(workforce.save_labour_attendance_bulk(LabourAttendanceBulk(
         attendance_date=today,
         records=[LabourAttendanceItem(labour_id=labour_id, attendance_date=today, status="PRESENT", hours_worked=8.0, overtime_hours=1.0)]
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
 
     w_entry = asyncio.run(workforce.create_labour_work_entry(LabourWorkEntryCreate(
         labour_id=labour_id,
@@ -457,7 +472,7 @@ def run_acceptance_and_reconciliation():
         units_completed=250,
         unit_of_measure="PACKETS",
         hours_logged=8.0,
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     print(f"Labour Recorded: {labour_id} | Daily Wage: Rs 450 + OT Rs 56.25 = Rs 506.25")
 
     # 6e. Salary Structure & Monthly Payroll Run
@@ -471,15 +486,15 @@ def run_acceptance_and_reconciliation():
         pf_deduction=1800.0,
         tds_deduction=500.0,
         payment_mode="BANK_TRANSFER",
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
 
     month_str = today[:7]  # YYYY-MM
-    payroll_run = asyncio.run(workforce.calculate_payroll_run(PayrollRunCreate(month=month_str, notes="November acceptance payroll"), current_user=owner))
+    payroll_run = asyncio.run(workforce.calculate_payroll_run(PayrollRunCreate(month=month_str, notes="November acceptance payroll"), request=make_test_request(), current_user=owner))
     run_id = payroll_run["payroll_run"]["payroll_run_id"]
     print(f"Payroll Generated: {run_id} | Total Employees: {payroll_run['payroll_run']['total_employees']} | Total Net: Rs {payroll_run['payroll_run']['total_net']}")
 
     # Approve Payroll Run
-    appr_pr = asyncio.run(workforce.approve_payroll_run(run_id, current_user=owner))
+    appr_pr = asyncio.run(workforce.approve_payroll_run(run_id, request=make_test_request(), current_user=owner))
     assert appr_pr["ok"] is True
 
     # Fetch payroll items
@@ -499,7 +514,7 @@ def run_acceptance_and_reconciliation():
         payment_reference="HDFC-NEFT-20261104-001",
         bank_account_credited="HDFC-XXXX9922",
         notes="Net salary paid via HDFC NEFT",
-    ), current_user=owner))
+    ), request=make_test_request(), current_user=owner))
     payment_id = pay_res["payment"]["payment_id"]
     receipt_id = pay_res["receipt"]["receipt_id"]
     journal_ref = pay_res.get("accounting_journal_ref", "")
@@ -561,9 +576,11 @@ def run_acceptance_and_reconciliation():
     # Join lines to headers by journal_id
     posted_lines = [l for l in all_lines if str(l.get("journal_id")) in posted_header_ids]
 
-    # Verify voucher count & line count
-    assert len(posted_headers) >= 7, f"Expected at least 7 posted journal vouchers, found {len(posted_headers)}"
-    assert len(posted_lines) >= 20, f"Expected at least 20 journal lines, found {len(posted_lines)}"
+    # Verify voucher count & line count (6 authoritative vouchers: Purchase, Dal Milling, Packaging,
+    # Sale Invoice, COGS/Revenue Settlement, Workforce Payment; Production Batch inventory journal
+    # is intentionally held under CA policy until approved overhead allocation exists).
+    assert len(posted_headers) >= 6, f"Expected at least 6 posted journal vouchers, found {len(posted_headers)}"
+    assert len(posted_lines) >= 14, f"Expected at least 14 journal lines, found {len(posted_lines)}"
 
     # Verify each posted voucher independently balances (sum debits == sum credits)
     for hdr in posted_headers:

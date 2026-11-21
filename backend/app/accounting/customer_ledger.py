@@ -1006,7 +1006,7 @@ def reserve_credit_approval(
                                 "is_consumed": False,
                             },
                         },
-                        nonce=f"REL-ROLLBACK-{clean_id}-{clean_sale_id}",
+                        nonce=f"REL-ROLLBACK-{clean_id}-{clean_sale_id}-{uuid.uuid4().hex[:8]}",
                         actor_user_id="SYSTEM",
                         actor_role="SALES",
                         id_field="request_id",

@@ -123,10 +123,12 @@ class TestDalMillingStage2(unittest.IsolatedAsyncioTestCase):
         # 4. Downstream Costing Integration
         raw_master = db.get_records("RawMaterials")
         raw_ledger = db.get_records("RawMaterialLedger")
-        # Under Phase 4 clean-data contract, get_latest_purchase_rate strictly reflects supplier
-        # PURCHASE_RECEIPT observations (never internal MILLING_OUTPUT transfers).
+        # Downstream Costing Integration: confirmed internal MILLING_OUTPUT receipt
+        # establishes the landed flour rate (115.31/kg) for papad recipe & batch costing,
+        # while consumption/opening/adjustment movements remain excluded.
         flour_rate_info = get_latest_purchase_rate("Moong Dal Flour", raw_master, raw_ledger)
-        self.assertEqual(flour_rate_info.get("status"), "MISSING_RATE")
+        self.assertEqual(flour_rate_info.get("status"), "CONFIRMED")
+        self.assertEqual(float(flour_rate_info.get("rate_per_canonical_unit")), 115.31)
         milling_out_row = next(
             (r for r in raw_ledger if str(r.get("movement_type", "")).upper() == "MILLING_OUTPUT" and r.get("raw_material_id") == "RM-MOONG-FLOUR"),
             None,

@@ -361,9 +361,10 @@ class TestP15003TokenRevocationFailClosedAndAuthHardening(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 401)
 
     def test_p15003_account_deactivation_consistency_on_login_and_token_check(self):
-        for inactive_val in ("false", "False", "0", "no", "NO", ""):
+        # AUTH-03 fail-closed: missing/None/blank/unrecognized active values are treated as deactivated
+        for inactive_val in ("false", "False", "0", "no", "NO", "", None, False, 0, "inactive", "suspended"):
             self.assertTrue(auth_mod.is_account_deactivated(inactive_val))
-        for active_val in ("true", "TRUE", "1", "yes", None):
+        for active_val in ("true", "TRUE", "1", "yes", "active", "ACTIVE", True, 1):
             self.assertFalse(auth_mod.is_account_deactivated(active_val))
 
     def test_p15003_logout_warns_when_persistence_fails(self):

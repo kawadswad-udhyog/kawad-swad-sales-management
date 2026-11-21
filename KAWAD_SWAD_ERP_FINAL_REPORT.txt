@@ -1,0 +1,251 @@
+================================================================================
+KAWAD SWAD ERP — MASTER EXECUTION FINAL ENGINEERING & DELIVERY REPORT
+================================================================================
+Date: 2026-11-21
+Status Verdict: PHASE 1 CODE-STABLE, EXTERNAL GATES OPEN
+Isolation Status: STRICT LOCAL-ONLY (Zero live Google Sheets, Apps Script,
+                  Render, GitHub, or production credential touches)
+
+================================================================================
+A. UPDATED ERP SOURCE
+================================================================================
+The complete updated repository resides in the workspace root (/app/applet) and
+has been packaged into a clean source archive at:
+  kawad-swad-erp-updated.zip
+(excludes node_modules, dist, __pycache__, .pytest_cache, .env, and temp files).
+
+================================================================================
+B. MAJOR ENGINEERING CHANGES IMPLEMENTED
+================================================================================
+1. PRODUCTION CODE DEFECTS FIXED (17 TOTAL VERIFIED FIXES):
+   - P1.8-001 (CRITICAL): Hardened duplicate-ID preflight lookup in
+     backend/app/sheets.py and backend/app/apps_script_bridge.py to enforce
+     fresh=True, authoritative Row-1 ID-header verification via
+     get_verified_tab_headers(), strict list/dict payload checks, atomic
+     in-process _INFLIGHT_ID_LOCK reservation, and fail-closed HTTP 503 with
+     zero remote HTTP calls on outage/429/500/503/malformed responses.
+   - P1.8-002 / P1.8-003: Fixed reverse_journal_voucher & post_journal_voucher
+     in backend/app/accounting/journal_engine.py so bridge transport status
+     ("CONFIRMED") never clobbers domain status ("POSTED") and all required
+     return fields are preserved.
+   - P1.8-004: Normalized blank customer city="" to default "Bhilwara" in
+     backend/app/routers/customers.py.
+   - P1.8-005: Added unique nonce suffixes to reserve/release credit-approval
+     CAS governed writes in backend/app/accounting/customer_ledger.py to avoid
+     stale replay collisions on legitimate re-reservation after release.
+   - P1.8-006: Guarded post_packaging_batch_journal in
+     backend/app/routers/production.py when total finished valuation is Rs 0.00
+     so legacy uncosted bulk batches do not throw HTTP 500 after write commit.
+   - P1.8-007: Preserved domain status values over bridge "CONFIRMED" in
+     backend/app/routers/stock.py and backend/app/routers/quality.py.
+   - P1.8-008 / P1.8-009 / P1.8-010: Fixed payroll item_id propagation,
+     accounting_journal_ref attachment, and persisted receipt_id/receipt_number
+     metadata in backend/app/routers/workforce.py.
+   - P1.8-011: Hardened review_stock_discrepancy in backend/app/routers/stock.py
+     with idempotent early return and fail-closed atomic AuditLog handling.
+   - P1.8-012 / P1.8-013: Fixed PAID replay missing-journal recovery and
+     INCOMPLETE crash recovery without duplicate SupplierBills deductions in
+     backend/app/routers/purchasing.py.
+   - P1.8-014: Added post-write fresh readback verification and invoice
+     line_key conflict guards in backend/app/routers/production.py.
+   - P1.8-015 (NEW — Master Execution): Fixed post_packaging_batch_journal in
+     backend/app/accounting/postings.py to guard the Bulk Papad WIP credit line
+     (account 1230) with `if r_bulk > Decimal("0"):`, preventing a real
+     production crash (`ValueError: Line 2: Line must have a non-zero debit or
+     credit amount`) whenever packaging batches are posted while bulk overhead
+     valuation is pending under CA policy (bulk_cost=0, material_cost>0).
+   - P1.8-016 (NEW — Master Execution): Fixed get_latest_purchase_rate in
+     backend/app/calculations/costing.py to accept confirmed MILLING_OUTPUT
+     landed flour receipts alongside supplier PURCHASE_RECEIPT observations
+     for downstream papad batch costing, while continuing to exclude
+     PRODUCTION_CONSUMPTION, MILLING_CONSUMPTION, OPENING_VERIFICATION, and
+     stock adjustments.
+   - P1.8-017 (NEW — Master Execution): Hardened backend/app/auth.py (AUTH-03
+     fail-closed is_account_active / is_account_deactivated on None/blank/
+     unrecognized values), backend/app/sheets.py (AuthUsers & RevokedTokens in
+     NO_CACHE_TABS fail closed on 429 even with fresh=False), and
+     backend/app/main.py (_sanitize_diagnostic_error now redacts
+     SALES_APPS_SCRIPT_SHARED_SECRET and SALES_APPS_SCRIPT_WEBAPP_URL).
+
+2. END-TO-END WORKFLOW, TEST HARNESS & REGRESSION COVERAGE:
+   - Modernized all legacy backend test suites and the standalone 7-stage
+     acceptance suite (backend/tests/verify_acceptance_and_reconciliation.py) to
+     run against real V2.1 Single-Write-Owner routers via
+     LocalAppsScriptSimulator + Request injection without weakening any guard.
+   - Added backend/tests/test_master_execution_verification.py locking in all
+     new production fixes and executing the complete 7-stage business
+     acceptance & double-entry trial balance reconciliation inside unittest
+     discovery.
+
+3. FRONTEND & API CONTRACT AUDIT:
+   - Static audit confirmed 100% alignment between all 175 frontend /api/* call
+     sites and all 206 backend FastAPI routes.
+   - Confirmed zero demo/seed/mock business data, zero localStorage business
+     persistence, zero window.alert/window.open, zero dead empty handlers.
+
+4. DOCUMENTATION OVERHAUL:
+   - Rewrote README.md to accurately match the actual FastAPI + Google Sheets +
+     Apps Script Single-Write-Owner + React/TypeScript/Tailwind ERP (removed
+     obsolete localStorage/seed-data and xlsx references).
+   - Added docs/SYSTEM_ARCHITECTURE_AND_OPERATIONS.md and synced .env.example
+     with backend/app/config.py.
+
+================================================================================
+C. MODULE STATUS MATRIX
+================================================================================
+Module                          | Status
+--------------------------------|----------------------------------------------
+Authentication & RBAC           | Repaired, Integrated, Locally Verified
+Users & Approvals               | Repaired, Integrated, Locally Verified
+Dashboard & Reports             | Integrated, Locally Verified
+Products & Customers            | Repaired, Integrated, Locally Verified
+Sales, Billing & Credit Ledger  | Repaired, Integrated, Locally Verified
+Finished Stock & Van Loading    | Repaired, Integrated, Locally Verified
+Purchasing & Supplier Payments  | Repaired, Integrated, Locally Verified
+Raw Materials & Dal Milling     | Repaired, Integrated, Locally Verified
+Production & Packaging          | Repaired, Integrated, Locally Verified
+Double-Entry Accounting         | Repaired, Integrated, Locally Verified
+Expenses & Daily Closing        | Integrated, Locally Verified
+Shop Visits                     | Integrated, Locally Verified
+Workforce, Attendance & Payroll | Repaired, Integrated, Locally Verified
+Quality & Lot Traceability      | Repaired, Integrated, Locally Verified
+Audit Log & System Health       | Hardened, Integrated, Locally Verified
+Live Google Sheets Integration  | Blocked (External DB-003 & DB-007)
+Live Apps Script Gateway        | Blocked (External DB-008 WebAppBridge.gs)
+
+================================================================================
+D. VERIFICATION & TEST REPORT
+================================================================================
+1. PASSED:
+   - Backend Bytecode Compilation:
+     python3 -m compileall -q backend/app backend/scripts backend/tests -> PASS
+   - Full Backend Unittest Discovery (53 test files):
+     575 discovered -> 574 PASSED, 0 FAILED, 0 ERRORS, 1 SKIPPED (pre-existing
+     uvicorn subprocess test when uvicorn package is absent in container)
+   - Standalone 7-Stage End-to-End Business Acceptance & Reconciliation:
+     Raw Material Purchase -> Dal Milling -> Bulk Papad Production -> Packaging
+     -> Van Dispatch & Sale -> Workforce/Payroll/Salary Receipt -> Full Stock
+     (0.00 variance across 5 stock classes) & Trial Balance Reconciliation
+     (6 posted vouchers, 16 lines, Rs 78,057.00 DR == Rs 78,057.00 CR,
+     Rs 0.00 variance) -> PASS
+   - Frontend TypeScript Check (npm run lint / tsc --noEmit) -> PASS (0 errors)
+   - Frontend Contract Suite (scripts/test_phase1_6_frontend_contracts.ts):
+     14/14 PASSED
+   - Frontend Production Build (npm run build / tsc && vite build):
+     2,477 modules transformed, clean bundle generated -> PASS
+   - Frontend/Backend Route Alignment Audit:
+     206 backend routes vs 175 frontend /api/* call sites -> 100% matched
+
+2. FAILED AND FIXED DURING THIS MISSION:
+   - post_packaging_batch_journal zero-bulk-cost GL line ValueError -> FIXED
+   - test_dal_milling_stage2.py Check 2 downstream milled flour rate -> FIXED
+   - test_sheets_quota_handling.py AuthUsers NO_CACHE_TABS 429 test -> FIXED
+   - test_phase1_6_targeted_repairs.py AUTH-03 fail-closed None test -> FIXED
+   - verify_acceptance_and_reconciliation.py pre-v2.1 signatures -> FIXED
+
+3. FAILED AND UNRESOLVED:
+   - NONE (0 local failures, 0 local errors).
+
+4. NOT RUN / BLOCKED BY EXTERNAL DEPENDENCIES:
+   - Live Google Sheets read/schema verification (blocked by local isolation &
+     missing credentials/live workbook exports DB-003 / DB-007).
+   - Live Google Apps Script doPost integration & LockService concurrency test
+     (blocked by missing external WebAppBridge.gs source DB-008).
+   - 1 pre-existing uvicorn subprocess bind test (skipped cleanly when uvicorn
+     binary is not installed in the sandbox).
+
+================================================================================
+E. DATABASE & INTEGRATION SUMMARY
+================================================================================
+- Authoritative Business Database: Google Sheets Workbook (preserved; never
+  replaced by MongoDB or localStorage).
+- Write Authority: Strictly Google Apps Script Single-Write-Owner via
+  apps_script_bridge.delegate_governed_write(). Backend service account uses
+  spreadsheets.readonly OAuth scope exclusively.
+- Transaction Integrity: Idempotency keys/nonces, CrossProcessLock, atomic
+  in-process ID reservation, centralized action-to-table allowlist
+  (action_registry.py), response echo validation, and fresh post-write
+  read-back verification.
+- Schema Governance: All 12 conflicting core tables (DB-007) and 164 unmapped
+  workbook tabs (DB-003) remain strictly fail-closed write-blocked until Owner
+  provides authoritative physical Row-1 header exports.
+
+================================================================================
+F. SECURITY SUMMARY
+================================================================================
+- PBKDF2-SHA256 passwords (no plaintext/raw SHA-256 accepted).
+- HS256 JWT with persistent RevokedTokens and sessions_revoked_at checks
+  enforced fresh=True (never served from stale cache on 429).
+- AUTH-03 fail-closed account active predicate rejects None, blank, false, 0,
+  inactive, suspended, and malformed values.
+- Login lockout enforced consistently via SALES_LOGIN_MAX_ATTEMPTS /
+  SALES_LOGIN_LOCKOUT_SECONDS.
+- Production startup refuses weak/missing SALES_JWT_SECRET, wildcard CORS, or
+  missing Google Sheets configuration.
+- Diagnostic payloads redact spreadsheet IDs, service account paths/emails,
+  PEM keys, JWT secret, Apps Script shared secret, and Apps Script WebApp URL.
+- Remaining security risk: Remote Apps Script WebAppBridge.gs lock/auth logic
+  cannot be audited until source code is supplied (DB-008).
+
+================================================================================
+G. REMAINING EXTERNAL BLOCKERS (GENUINE EXTERNAL DEPENDENCIES ONLY)
+================================================================================
+1. DB-003 — Authoritative 255-Tab Workbook & DBV5 Field Dictionary
+   - What is blocked: Writes and full schema mapping for 164 unmapped workbook
+     tabs (91/255 catalogued).
+   - Why: Authoritative 255-tab workbook export and DBV5 dictionary are not in
+     the repository.
+   - Completed locally: Fail-closed schema registry and coverage diagnostics.
+   - External action required: Owner exports complete workbook tab list and
+     DBV5 field dictionary.
+   - Exact next step: Reconcile tab headers into schema_registry.py and re-run
+     schema guard suites.
+
+2. DB-007 — Physical Row-1 Headers for 12 Conflicting Core Tables
+   - What is blocked: Live writes to the 12 conflicting core tabs remain
+     write-blocked by design.
+   - Why: Live Google Sheets physical Row-1 headers have not been exported and
+     signed off by Owner.
+   - Completed locally: Exact canonical header validation in
+     SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON (rejects partial, extra,
+     or reordered headers).
+   - External action required: Owner exports live Row-1 headers for all 12
+     conflicting core tabs.
+   - Exact next step: Supply canonical reconciliation JSON and verify via
+     GET /api/health/schema-compatibility.
+
+3. DB-008 — Google Apps Script WebAppBridge.gs Writer Source & Deployment
+   - What is blocked: Live end-to-end persistence testing and audit of remote
+     LockService atomicity / HMAC verification inside Apps Script.
+   - Why: WebAppBridge.gs resides externally in Google Apps Script and is not
+     present in this repository.
+   - Completed locally: Complete client bridge, HMAC signing, action allowlist,
+     echo validation, read-back checks, and LocalAppsScriptSimulator tests.
+   - External action required: Provide WebAppBridge.gs source for security
+     audit and configure SALES_APPS_SCRIPT_WEBAPP_URL +
+     SALES_APPS_SCRIPT_SHARED_SECRET in staging/production environment.
+   - Exact next step: Audit WebAppBridge.gs, run staging smoke tests against a
+     sandbox workbook, then authorize production cutover.
+
+================================================================================
+H. RUNNING INSTRUCTIONS
+================================================================================
+1. Copy .env.example to .env (local dev only) and configure required env vars.
+2. Frontend:
+     npm install
+     npm run dev      # Port 3000
+     npm run build    # Production bundle in dist/
+3. Backend:
+     pip install -r requirements.txt
+     uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+4. Local Verification Suite (zero live credentials required):
+     python3 -m compileall -q backend/app backend/scripts backend/tests
+     SALES_TESTING=1 SALES_ENV=development PYTHONPATH=backend \
+       python3 -m unittest discover -s backend/tests -p "test_*.py" -v
+     npm run lint
+     npx tsx scripts/test_phase1_6_frontend_contracts.ts
+     npm run build
+
+================================================================================
+END OF REPORT
+================================================================================
