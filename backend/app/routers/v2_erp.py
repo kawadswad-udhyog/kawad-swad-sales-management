@@ -1376,7 +1376,20 @@ async def list_v2_unresolved_transactions(
             },
         )
     from app.accounting.transaction_coordinator import tx_coordinator
-    items = tx_coordinator.list_unresolved_transactions(limit=limit)
+    from app.transaction_safety import CoordinatorDurabilityError
+    try:
+        items = tx_coordinator.list_unresolved_transactions(limit=limit)
+    except CoordinatorDurabilityError as dur_exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "REJECTED",
+                "error_code": dur_exc.error_code,
+                "failure_category": "DEPENDENCY_UNAVAILABLE",
+                "message": str(dur_exc),
+                "retryable": False,
+            },
+        )
     return {"items": items, "total": len(items)}
 
 
@@ -1414,7 +1427,20 @@ async def reconcile_v2_transaction(
             },
         )
     from app.accounting.transaction_coordinator import tx_coordinator
-    existing = tx_coordinator.get_governed_transaction(clean_nonce)
+    from app.transaction_safety import CoordinatorDurabilityError, InvalidStateTransitionError
+    try:
+        existing = tx_coordinator.get_governed_transaction(clean_nonce)
+    except CoordinatorDurabilityError as dur_exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "REJECTED",
+                "error_code": dur_exc.error_code,
+                "failure_category": "DEPENDENCY_UNAVAILABLE",
+                "message": str(dur_exc),
+                "retryable": False,
+            },
+        )
     if existing is None:
         raise HTTPException(
             status_code=404,
@@ -1427,12 +1453,36 @@ async def reconcile_v2_transaction(
             },
         )
     actor_id = str(current_user.get("user_id") or "")
-    updated = tx_coordinator.mark_transaction_reconciled(
-        nonce=clean_nonce,
-        actor_user_id=actor_id,
-        resolution_notes=req.resolution_notes.strip(),
-        final_allocated_id=str(req.final_allocated_id or "").strip() or None,
-    )
+    try:
+        updated = tx_coordinator.mark_transaction_reconciled(
+            nonce=clean_nonce,
+            actor_user_id=actor_id,
+            resolution_notes=req.resolution_notes.strip(),
+            final_allocated_id=str(req.final_allocated_id or "").strip() or None,
+        )
+    except InvalidStateTransitionError as st_exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "REJECTED",
+                "error_code": st_exc.code,
+                "failure_category": "IDEMPOTENCY_CONFLICT",
+                "transaction_state": st_exc.current_state,
+                "message": str(st_exc),
+                "retryable": False,
+            },
+        )
+    except CoordinatorDurabilityError as dur_exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "REJECTED",
+                "error_code": dur_exc.error_code,
+                "failure_category": "DEPENDENCY_UNAVAILABLE",
+                "message": str(dur_exc),
+                "retryable": False,
+            },
+        )
     db.log_transaction_audit(
         actor=actor_id,
         action="RECONCILE_TRANSACTION",

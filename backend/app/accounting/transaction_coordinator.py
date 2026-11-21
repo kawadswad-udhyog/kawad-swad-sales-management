@@ -28,11 +28,23 @@ import threading
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Iterable, Tuple, Optional, Dict, Any, List, Union
+
+from app.transaction_safety import (
+    CoordinatorDurabilityError,
+    CoordinatorDurabilityMode,
+    InvalidStateTransitionError,
+    LEGAL_TRANSITION_MATRIX,
+    TERMINAL_STATES,
+    TransactionState,
+    TransitionAuthority,
+    validate_coordinator_durability,
+    validate_state_transition,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = os.environ.get("TRANSACTION_DB_PATH", "/tmp/kawad_swad_tx_coord.db")
+DEFAULT_DB_PATH = os.environ.get("TRANSACTION_DB_PATH", "").strip()
 DEFAULT_TX_LEASE_SECONDS = int(os.environ.get("SALES_TX_LEASE_SECONDS", "90") or "90")
 
 
@@ -60,25 +72,123 @@ class TransactionCoordinator:
     _instance = None
     _init_lock = threading.Lock()
 
-    def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or os.environ.get("TRANSACTION_DB_PATH", DEFAULT_DB_PATH)
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        *,
+        env: Optional[str] = None,
+        testing: Optional[bool] = None,
+        allow_volatile_in_test: Optional[bool] = None,
+        instance_count: Optional[int] = None,
+        auto_recover_stale_leases: bool = True,
+        defer_durability_error: bool = False,
+    ):
         self._thread_lock = threading.RLock()
+        self._durability_error: Optional[CoordinatorDurabilityError] = None
+        self._durability_info: Dict[str, Any] = {}
+        self._env_override = env
+        self._testing_override = testing
+        self._allow_volatile_override = allow_volatile_in_test
+        self._instance_count_override = instance_count
+
+        try:
+            info = validate_coordinator_durability(
+                db_path=db_path,
+                env=env,
+                testing=testing,
+                allow_volatile_in_test=allow_volatile_in_test,
+                instance_count=instance_count,
+                create_dir_in_nonprod=False,
+            )
+            self._durability_info = info
+            self.db_path = info["db_path"]
+        except CoordinatorDurabilityError as exc:
+            self._durability_error = exc
+            self._durability_info = {
+                "mode": exc.mode.value,
+                "db_path": exc.db_path,
+                "error_code": exc.error_code,
+                "error": str(exc),
+                "persistent": False,
+                "single_host_only": True,
+            }
+            self.db_path = exc.db_path or ""
+            if not defer_durability_error:
+                raise
+            logger.critical("TransactionCoordinator durability validation failed: %s", exc)
+            return
+
         self._init_sqlite()
+        if auto_recover_stale_leases:
+            try:
+                recovered = self.recover_stale_leases_on_startup()
+                if recovered:
+                    logger.warning(
+                        "TransactionCoordinator startup recovery transitioned %d stale lease(s) to UNKNOWN.",
+                        len(recovered),
+                    )
+            except Exception as exc:
+                logger.error("Error during startup stale-lease recovery: %s", exc)
 
     @classmethod
     def get_instance(cls, db_path: Optional[str] = None) -> "TransactionCoordinator":
         with cls._init_lock:
             if cls._instance is None:
-                cls._instance = cls(db_path=db_path)
+                cls._instance = cls(db_path=db_path, defer_durability_error=True)
             return cls._instance
 
+    def durability_status(self) -> Dict[str, Any]:
+        """Return current coordinator durability classification and availability."""
+        return dict(self._durability_info)
+
+    def assert_writable_coordinator(self) -> None:
+        """
+        Fail-closed check before any governed transaction mutation.
+        Verifies both startup durability configuration and live filesystem availability.
+        """
+        if self._durability_error is not None:
+            raise self._durability_error
+        if not self.db_path:
+            raise CoordinatorDurabilityError(
+                "Transaction coordinator database path is empty.",
+                error_code="COORDINATOR_PATH_UNCONFIGURED",
+                mode=CoordinatorDurabilityMode.MISCONFIGURED,
+                db_path="",
+            )
+        if self.db_path != ":memory:" and not self.db_path.lower().startswith("file::memory:"):
+            parent_dir = os.path.dirname(os.path.abspath(self.db_path))
+            if not parent_dir or not os.path.isdir(parent_dir):
+                raise CoordinatorDurabilityError(
+                    f"Transaction coordinator directory '{parent_dir}' is unavailable.",
+                    error_code="COORDINATOR_DIRECTORY_UNAVAILABLE",
+                    mode=CoordinatorDurabilityMode.UNAVAILABLE,
+                    db_path=self.db_path,
+                )
+            if not os.access(parent_dir, os.R_OK | os.W_OK | os.X_OK):
+                raise CoordinatorDurabilityError(
+                    f"Transaction coordinator directory '{parent_dir}' is not writable.",
+                    error_code="COORDINATOR_DIRECTORY_NOT_WRITABLE",
+                    mode=CoordinatorDurabilityMode.UNAVAILABLE,
+                    db_path=self.db_path,
+                )
+
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=15.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=15000;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
+        self.assert_writable_coordinator()
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=15.0, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=15000;")
+            conn.execute("PRAGMA synchronous=FULL;")
+            conn.execute("PRAGMA foreign_keys=ON;")
+            return conn
+        except sqlite3.Error as exc:
+            raise CoordinatorDurabilityError(
+                f"Transaction coordinator SQLite connection failed at '{self.db_path}': {exc}",
+                error_code="COORDINATOR_STORAGE_ERROR",
+                mode=CoordinatorDurabilityMode.UNAVAILABLE,
+                db_path=self.db_path,
+            ) from exc
 
     def _init_sqlite(self):
         with self._thread_lock:
@@ -125,11 +235,15 @@ class TransactionCoordinator:
                     actor_user_id TEXT NOT NULL,
                     payload_hash TEXT NOT NULL,
                     lifecycle_state TEXT NOT NULL,
+                    previous_state TEXT,
+                    last_authority TEXT,
                     bridge_status TEXT NOT NULL,
                     failure_category TEXT,
                     error_code TEXT,
                     allocated_id TEXT,
                     attempt_count INTEGER NOT NULL DEFAULT 1,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    lease_owner TEXT,
                     steps_json TEXT,
                     result_snapshot_json TEXT,
                     message TEXT,
@@ -138,6 +252,23 @@ class TransactionCoordinator:
                     updated_at TEXT NOT NULL,
                     lease_expires_at TEXT
                 );
+                """)
+                # Non-destructive schema migration for existing SQLite coordinator files
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(governed_transactions);")
+                existing_cols = {str(r["name"]) for r in cur.fetchall()}
+                migrations = [
+                    ("previous_state", "ALTER TABLE governed_transactions ADD COLUMN previous_state TEXT;"),
+                    ("last_authority", "ALTER TABLE governed_transactions ADD COLUMN last_authority TEXT;"),
+                    ("version", "ALTER TABLE governed_transactions ADD COLUMN version INTEGER NOT NULL DEFAULT 1;"),
+                    ("lease_owner", "ALTER TABLE governed_transactions ADD COLUMN lease_owner TEXT;"),
+                ]
+                for col_name, ddl in migrations:
+                    if col_name not in existing_cols:
+                        conn.execute(ddl)
+                conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_gov_tx_state_updated
+                ON governed_transactions (lifecycle_state, updated_at);
                 """)
                 conn.execute("COMMIT;")
             except Exception as e:
@@ -160,7 +291,173 @@ class TransactionCoordinator:
             d["result_snapshot"] = json.loads(d.get("result_snapshot_json") or "null")
         except Exception:
             d["result_snapshot"] = None
+        if d.get("version") is None:
+            d["version"] = 1
         return d
+
+    def recover_stale_leases_on_startup(self) -> List[Dict[str, Any]]:
+        """
+        Scan for in-flight transactions (INITIATED / VALIDATING / EXECUTING) whose lease
+        expired prior to restart and atomically CAS-transition them to UNKNOWN under
+        RECOVERY authority so they cannot remain stuck in EXECUTING.
+        """
+        now_dt = _utc_now()
+        now_s = _utc_iso(now_dt)
+        transitioned: List[Dict[str, Any]] = []
+
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT * FROM governed_transactions
+                    WHERE lifecycle_state IN ('INITIATED', 'VALIDATING', 'EXECUTING')
+                    """
+                )
+                candidates = cur.fetchall()
+                for row in candidates:
+                    ex = self._row_to_tx_dict(row) or {}
+                    lease_dt = _parse_iso(ex.get("lease_expires_at"))
+                    if lease_dt is not None and now_dt < lease_dt:
+                        continue
+                    nonce = str(ex.get("nonce") or "").strip()
+                    src_state = str(ex.get("lifecycle_state") or "").strip().upper()
+                    ver = int(ex.get("version") or 1)
+                    validate_state_transition(
+                        src_state,
+                        TransactionState.UNKNOWN,
+                        TransitionAuthority.RECOVERY,
+                        nonce=nonce,
+                        reason="Stale execution lease expired before coordinator startup.",
+                        evidence={"lease_expires_at": ex.get("lease_expires_at"), "detected_at": now_s},
+                    )
+                    steps = list(ex.get("steps") or [])
+                    steps.append({
+                        "step": "STALE_LEASE_RECOVERED_ON_STARTUP",
+                        "from_state": src_state,
+                        "to_state": TransactionState.UNKNOWN.value,
+                        "authority": TransitionAuthority.RECOVERY.value,
+                        "at": now_s,
+                    })
+                    cur.execute(
+                        """
+                        UPDATE governed_transactions
+                        SET lifecycle_state = 'UNKNOWN',
+                            previous_state = ?,
+                            last_authority = 'RECOVERY',
+                            bridge_status = 'PENDING_UNKNOWN',
+                            failure_category = 'WRITE_OUTCOME_UNKNOWN',
+                            error_code = 'STALE_EXECUTION_LEASE',
+                            steps_json = ?,
+                            updated_at = ?,
+                            lease_expires_at = NULL,
+                            lease_owner = NULL,
+                            version = version + 1
+                        WHERE nonce = ? AND lifecycle_state = ? AND version = ?
+                        """,
+                        (src_state, json.dumps(steps[-40:]), now_s, nonce, src_state, ver),
+                    )
+                    if cur.rowcount == 1:
+                        cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (nonce,))
+                        updated = self._row_to_tx_dict(cur.fetchone())
+                        if updated:
+                            transitioned.append(updated)
+                conn.execute("COMMIT;")
+                return transitioned
+            except Exception as exc:
+                conn.execute("ROLLBACK;")
+                logger.error("Error in recover_stale_leases_on_startup: %s", exc)
+                raise
+            finally:
+                conn.close()
+
+    def register_external_recovery_intent(
+        self,
+        *,
+        nonce: str,
+        action: str,
+        target_tab: str,
+        actor_user_id: str,
+        payload_hash: str,
+        correlation_id: str,
+        allocated_id: Optional[str] = None,
+        reason: str = "Authoritative Google Sheets evidence found after local coordinator loss.",
+    ) -> Dict[str, Any]:
+        """
+        Atomically register an existing external Sheets transaction in UNKNOWN state when the
+        local coordinator DB was lost/replaced, enabling evidence-based recovery without
+        allowing a blind duplicate write.
+        """
+        clean_nonce = str(nonce or "").strip()
+        clean_action = str(action or "").strip().upper()
+        clean_tab = str(target_tab or "").strip()
+        clean_actor = str(actor_user_id or "").strip()
+        clean_hash = str(payload_hash or "").strip()
+        clean_corr = str(correlation_id or "").strip()
+        now_s = _utc_iso()
+
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                existing = cur.fetchone()
+                if existing is not None:
+                    res = self._row_to_tx_dict(existing) or {}
+                    conn.execute("COMMIT;")
+                    return res
+
+                tx_id = f"TXN-{uuid.uuid4().hex[:14].upper()}"
+                steps = [{
+                    "step": "EXTERNAL_RECOVERY_REGISTERED",
+                    "to_state": TransactionState.UNKNOWN.value,
+                    "authority": TransitionAuthority.RECOVERY.value,
+                    "allocated_id": allocated_id,
+                    "reason": reason,
+                    "at": now_s,
+                    "correlation_id": clean_corr,
+                }]
+                cur.execute(
+                    """
+                    INSERT INTO governed_transactions (
+                        nonce, transaction_id, correlation_id, action, target_tab,
+                        actor_user_id, payload_hash, lifecycle_state, previous_state,
+                        last_authority, bridge_status, failure_category, error_code,
+                        allocated_id, attempt_count, version, lease_owner, steps_json,
+                        message, recovery_decision, created_at, updated_at, lease_expires_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'UNKNOWN', NULL, 'RECOVERY', 'PENDING_UNKNOWN',
+                            'WRITE_OUTCOME_UNKNOWN', 'COORDINATOR_LOSS_SHEETS_EVIDENCE_FOUND',
+                            ?, 1, 1, NULL, ?, ?, 'INSPECTING_SHEETS_AFTER_COORDINATOR_LOSS', ?, ?, NULL)
+                    """,
+                    (
+                        clean_nonce,
+                        tx_id,
+                        clean_corr,
+                        clean_action,
+                        clean_tab,
+                        clean_actor,
+                        clean_hash,
+                        allocated_id,
+                        json.dumps(steps),
+                        reason,
+                        now_s,
+                        now_s,
+                    ),
+                )
+                cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
+                created = self._row_to_tx_dict(cur.fetchone()) or {}
+                conn.execute("COMMIT;")
+                return created
+            except Exception as exc:
+                conn.execute("ROLLBACK;")
+                logger.error("Error in register_external_recovery_intent(%s): %s", clean_nonce, exc)
+                raise
+            finally:
+                conn.close()
 
     def begin_governed_transaction(
         self,
@@ -177,9 +474,9 @@ class TransactionCoordinator:
         Atomically register or inspect a governed transaction intent by `nonce`.
 
         Outcomes:
-        - ("ACQUIRED", tx_dict): Fresh transaction claimed in EXECUTING state.
+        - ("ACQUIRED", tx_dict): Fresh transaction claimed in EXECUTING state with lease_owner.
         - ("RETRY_ACQUIRED", tx_dict): Prior confirmed-not-committed (FAILED/PENDING) attempt
-          safely re-acquired with incremented attempt_count.
+          safely re-acquired via RETRY authority with incremented attempt_count & version.
         - ("ALREADY_COMMITTED", tx_dict): Same nonce + action + payload already COMMITTED/RECONCILED.
         - ("IN_PROGRESS", tx_dict): Active unexpired execution already in flight (concurrent duplicate).
         - ("RECOVERY_CHECK_REQUIRED", tx_dict): Prior state is UNKNOWN / RECOVERY_REQUIRED or
@@ -213,6 +510,7 @@ class TransactionCoordinator:
                     ex_tab = str(ex_dict.get("target_tab") or "").strip()
                     ex_hash = str(ex_dict.get("payload_hash") or "").strip()
                     ex_state = str(ex_dict.get("lifecycle_state") or "").strip().upper()
+                    ex_ver = int(ex_dict.get("version") or 1)
 
                     if ex_action != clean_action or ex_tab != clean_tab:
                         conn.execute("COMMIT;")
@@ -223,23 +521,38 @@ class TransactionCoordinator:
                         # UNKNOWN, RECOVERY_REQUIRED, PENDING, or any attempt that received an ID.
                         # Only a definitively confirmed pre-commit FAILED attempt (zero allocated_id)
                         # may be corrected and retried under the same deterministic reference nonce.
-                        if ex_state != "FAILED" or bool(ex_dict.get("allocated_id")):
+                        if ex_state != TransactionState.FAILED.value or bool(ex_dict.get("allocated_id")):
                             conn.execute("COMMIT;")
                             return "PAYLOAD_CONFLICT", ex_dict
 
-                    if ex_state in {"COMMITTED", "RECONCILED"}:
+                    if ex_state in {TransactionState.COMMITTED.value, TransactionState.RECONCILED.value}:
                         conn.execute("COMMIT;")
                         return "ALREADY_COMMITTED", ex_dict
 
-                    if ex_state in {"INITIATED", "VALIDATING", "EXECUTING"}:
+                    if ex_state in {
+                        TransactionState.INITIATED.value,
+                        TransactionState.VALIDATING.value,
+                        TransactionState.EXECUTING.value,
+                    }:
                         lease_dt = _parse_iso(ex_dict.get("lease_expires_at"))
                         if lease_dt is not None and now_dt < lease_dt:
                             conn.execute("COMMIT;")
                             return "IN_PROGRESS", ex_dict
-                        # Lease expired (worker crash/restart while executing) -> transition to UNKNOWN
+                        # Lease expired (worker crash/restart while executing) -> atomic CAS transition to UNKNOWN
+                        validate_state_transition(
+                            ex_state,
+                            TransactionState.UNKNOWN,
+                            TransitionAuthority.RECOVERY,
+                            nonce=clean_nonce,
+                            reason="Execution lease expired before completion.",
+                            evidence={"expired_at": ex_dict.get("lease_expires_at"), "detected_at": now_s},
+                        )
                         steps = list(ex_dict.get("steps") or [])
                         steps.append({
                             "step": "STALE_LEASE_DETECTED",
+                            "from_state": ex_state,
+                            "to_state": TransactionState.UNKNOWN.value,
+                            "authority": TransitionAuthority.RECOVERY.value,
                             "at": now_s,
                             "correlation_id": clean_corr,
                         })
@@ -247,30 +560,54 @@ class TransactionCoordinator:
                             """
                             UPDATE governed_transactions
                             SET lifecycle_state = 'UNKNOWN',
+                                previous_state = ?,
+                                last_authority = 'RECOVERY',
                                 bridge_status = 'PENDING_UNKNOWN',
                                 failure_category = 'WRITE_OUTCOME_UNKNOWN',
                                 error_code = 'STALE_EXECUTION_LEASE',
                                 steps_json = ?,
                                 updated_at = ?,
-                                lease_expires_at = NULL
-                            WHERE nonce = ?
+                                lease_expires_at = NULL,
+                                lease_owner = NULL,
+                                version = version + 1
+                            WHERE nonce = ? AND lifecycle_state = ? AND version = ?
                             """,
-                            (json.dumps(steps), now_s, clean_nonce),
+                            (ex_state, json.dumps(steps[-40:]), now_s, clean_nonce, ex_state, ex_ver),
                         )
+                        if cur.rowcount != 1:
+                            conn.execute("ROLLBACK;")
+                            raise InvalidStateTransitionError(
+                                f"Concurrent state change prevented stale-lease transition for nonce '{clean_nonce}'.",
+                                code="CAS_ATOMIC_CONFLICT",
+                                nonce=clean_nonce,
+                                current_state=ex_state,
+                                target_state=TransactionState.UNKNOWN.value,
+                                authority=TransitionAuthority.RECOVERY.value,
+                            )
                         cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
                         updated = self._row_to_tx_dict(cur.fetchone()) or ex_dict
                         conn.execute("COMMIT;")
                         return "RECOVERY_CHECK_REQUIRED", updated
 
-                    if ex_state in {"UNKNOWN", "RECOVERY_REQUIRED"}:
+                    if ex_state in {TransactionState.UNKNOWN.value, TransactionState.RECOVERY_REQUIRED.value}:
                         conn.execute("COMMIT;")
                         return "RECOVERY_CHECK_REQUIRED", ex_dict
 
-                    # Confirmed-not-committed (FAILED or PENDING) -> safe to re-acquire with same nonce
+                    # Confirmed-not-committed (FAILED or PENDING) -> explicit controlled RETRY via legal matrix + CAS
+                    validate_state_transition(
+                        ex_state,
+                        TransactionState.EXECUTING,
+                        TransitionAuthority.RETRY,
+                        nonce=clean_nonce,
+                        reason="Controlled same-nonce retry after confirmed-absent/failed state.",
+                    )
                     next_attempt = int(ex_dict.get("attempt_count") or 1) + 1
                     steps = list(ex_dict.get("steps") or [])
                     steps.append({
                         "step": "RETRY_STARTED" if ex_hash == clean_hash else "RETRY_STARTED_AFTER_CONFIRMED_FAILURE",
+                        "from_state": ex_state,
+                        "to_state": TransactionState.EXECUTING.value,
+                        "authority": TransitionAuthority.RETRY.value,
                         "attempt": next_attempt,
                         "at": now_s,
                         "correlation_id": clean_corr,
@@ -281,17 +618,43 @@ class TransactionCoordinator:
                         SET correlation_id = ?,
                             payload_hash = ?,
                             lifecycle_state = 'EXECUTING',
+                            previous_state = ?,
+                            last_authority = 'RETRY',
                             bridge_status = 'PENDING_UNKNOWN',
                             failure_category = NULL,
                             error_code = NULL,
                             attempt_count = ?,
                             steps_json = ?,
                             updated_at = ?,
-                            lease_expires_at = ?
-                        WHERE nonce = ?
+                            lease_expires_at = ?,
+                            lease_owner = ?,
+                            version = version + 1
+                        WHERE nonce = ? AND lifecycle_state = ? AND version = ?
                         """,
-                        (clean_corr, clean_hash, next_attempt, json.dumps(steps), now_s, lease_exp_s, clean_nonce),
+                        (
+                            clean_corr,
+                            clean_hash,
+                            ex_state,
+                            next_attempt,
+                            json.dumps(steps[-40:]),
+                            now_s,
+                            lease_exp_s,
+                            clean_corr,
+                            clean_nonce,
+                            ex_state,
+                            ex_ver,
+                        ),
                     )
+                    if cur.rowcount != 1:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Concurrent state change prevented retry acquisition for nonce '{clean_nonce}'.",
+                            code="CAS_ATOMIC_CONFLICT",
+                            nonce=clean_nonce,
+                            current_state=ex_state,
+                            target_state=TransactionState.EXECUTING.value,
+                            authority=TransitionAuthority.RETRY.value,
+                        )
                     cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
                     updated = self._row_to_tx_dict(cur.fetchone()) or ex_dict
                     conn.execute("COMMIT;")
@@ -302,16 +665,26 @@ class TransactionCoordinator:
                 initial_steps = [
                     {"step": "INITIATED", "at": now_s, "correlation_id": clean_corr},
                     {"step": "VALIDATING", "at": now_s, "correlation_id": clean_corr},
-                    {"step": "EXECUTING", "attempt": 1, "at": now_s, "correlation_id": clean_corr},
+                    {
+                        "step": "EXECUTING",
+                        "from_state": "VALIDATING",
+                        "to_state": "EXECUTING",
+                        "authority": TransitionAuthority.ORDINARY.value,
+                        "attempt": 1,
+                        "at": now_s,
+                        "correlation_id": clean_corr,
+                    },
                 ]
                 cur.execute(
                     """
                     INSERT INTO governed_transactions (
                         nonce, transaction_id, correlation_id, action, target_tab,
-                        actor_user_id, payload_hash, lifecycle_state, bridge_status,
-                        attempt_count, steps_json, created_at, updated_at, lease_expires_at
+                        actor_user_id, payload_hash, lifecycle_state, previous_state,
+                        last_authority, bridge_status, attempt_count, version, lease_owner,
+                        steps_json, created_at, updated_at, lease_expires_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'EXECUTING', 'PENDING_UNKNOWN', 1, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'EXECUTING', 'VALIDATING', 'ORDINARY',
+                            'PENDING_UNKNOWN', 1, 1, ?, ?, ?, ?, ?)
                     """,
                     (
                         clean_nonce,
@@ -321,6 +694,7 @@ class TransactionCoordinator:
                         clean_tab,
                         clean_actor,
                         clean_hash,
+                        clean_corr,
                         json.dumps(initial_steps),
                         now_s,
                         now_s,
@@ -342,7 +716,7 @@ class TransactionCoordinator:
         self,
         *,
         nonce: str,
-        lifecycle_state: str,
+        lifecycle_state: Union[TransactionState, str],
         bridge_status: str,
         failure_category: Optional[str] = None,
         error_code: Optional[str] = None,
@@ -353,11 +727,55 @@ class TransactionCoordinator:
         step_event: Optional[Dict[str, Any]] = None,
         clear_lease: bool = True,
         lease_seconds: Optional[int] = None,
+        authority: Union[TransitionAuthority, str] = TransitionAuthority.ORDINARY,
+        expected_from_state: Optional[Union[TransactionState, str, Iterable[Union[TransactionState, str]]]] = None,
+        expected_version: Optional[int] = None,
+        expected_correlation_id: Optional[str] = None,
+        expected_attempt: Optional[int] = None,
+        actor: Optional[str] = None,
+        reason: Optional[str] = None,
+        evidence: Optional[Any] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Atomically record a transaction lifecycle transition and optional step/snapshot."""
+        """
+        Atomically enforce the authoritative transaction state-transition matrix using
+        Compare-And-Swap (CAS) inside a SQLite `BEGIN IMMEDIATE` transaction.
+
+        Guarantees:
+        - Terminal states (`COMMITTED`, `RECONCILED`) cannot be overwritten by ordinary
+          execution, stale workers, or illegal transitions.
+        - `RECOVERY_REQUIRED` cannot be bypassed by ordinary retries or execution.
+        - Stale workers (mismatched correlation_id, attempt_count, version, or expired lease)
+          are rejected atomically without mutating any transaction metadata or step history.
+        - Every rejection rolls back cleanly and raises `InvalidStateTransitionError`.
+        """
         clean_nonce = str(nonce or "").strip()
+        target_state_str = (
+            lifecycle_state.value
+            if isinstance(lifecycle_state, TransactionState)
+            else str(lifecycle_state or "").strip().upper()
+        )
+        auth_enum = (
+            authority
+            if isinstance(authority, TransitionAuthority)
+            else TransitionAuthority(str(authority or TransitionAuthority.ORDINARY.value).strip().upper())
+        )
         now_dt = _utc_now()
         now_s = _utc_iso(now_dt)
+
+        expected_states_set: Optional[set] = None
+        if expected_from_state is not None:
+            if isinstance(expected_from_state, (TransactionState, str)):
+                raw_s = (
+                    expected_from_state.value
+                    if isinstance(expected_from_state, TransactionState)
+                    else str(expected_from_state).strip().upper()
+                )
+                expected_states_set = {raw_s}
+            else:
+                expected_states_set = {
+                    (s.value if isinstance(s, TransactionState) else str(s).strip().upper())
+                    for s in expected_from_state
+                }
 
         with self._thread_lock:
             conn = self._get_connection()
@@ -371,11 +789,124 @@ class TransactionCoordinator:
                     return None
 
                 ex = self._row_to_tx_dict(row) or {}
+                current_state = str(ex.get("lifecycle_state") or "").strip().upper()
+                current_ver = int(ex.get("version") or 1)
+                current_corr = str(ex.get("correlation_id") or "").strip()
+                current_attempt = int(ex.get("attempt_count") or 1)
+                current_lease_owner = str(ex.get("lease_owner") or "").strip()
+
+                # 1. Explicit expected_from_state CAS check
+                if expected_states_set is not None and current_state not in expected_states_set:
+                    conn.execute("ROLLBACK;")
+                    raise InvalidStateTransitionError(
+                        f"CAS expected-state mismatch for nonce '{clean_nonce}': "
+                        f"expected {sorted(expected_states_set)}, found '{current_state}'.",
+                        code="CAS_STATE_MISMATCH",
+                        nonce=clean_nonce,
+                        current_state=current_state,
+                        target_state=target_state_str,
+                        authority=auth_enum.value,
+                    )
+
+                # 2. Explicit optimistic version CAS check
+                if expected_version is not None and current_ver != int(expected_version):
+                    conn.execute("ROLLBACK;")
+                    raise InvalidStateTransitionError(
+                        f"CAS version mismatch for nonce '{clean_nonce}': "
+                        f"expected version {expected_version}, found {current_ver}.",
+                        code="CAS_VERSION_MISMATCH",
+                        nonce=clean_nonce,
+                        current_state=current_state,
+                        target_state=target_state_str,
+                        authority=auth_enum.value,
+                    )
+
+                # 3. Authoritative transition-matrix & terminal-state validation
+                effective_reason = reason if reason is not None else message
+                effective_evidence = (
+                    evidence
+                    if evidence is not None
+                    else (step_event if step_event is not None else recovery_decision)
+                )
+                effective_actor = (
+                    actor
+                    if actor is not None
+                    else (step_event.get("actor") if isinstance(step_event, dict) else None)
+                )
+                rule = validate_state_transition(
+                    current_state,
+                    target_state_str,
+                    auth_enum,
+                    nonce=clean_nonce,
+                    reason=effective_reason,
+                    evidence=effective_evidence,
+                    actor=effective_actor,
+                )
+
+                # 4. Stale worker / attempt / lease ownership validation
+                clean_exp_corr = str(expected_correlation_id or "").strip() if expected_correlation_id is not None else None
+                if clean_exp_corr is not None and current_corr != clean_exp_corr:
+                    conn.execute("ROLLBACK;")
+                    raise InvalidStateTransitionError(
+                        f"Stale worker rejected for nonce '{clean_nonce}': "
+                        f"correlation_id '{clean_exp_corr}' does not match active '{current_corr}'.",
+                        code="STALE_WORKER_CORRELATION_MISMATCH",
+                        nonce=clean_nonce,
+                        current_state=current_state,
+                        target_state=target_state_str,
+                        authority=auth_enum.value,
+                    )
+                if expected_attempt is not None and current_attempt != int(expected_attempt):
+                    conn.execute("ROLLBACK;")
+                    raise InvalidStateTransitionError(
+                        f"Stale worker rejected for nonce '{clean_nonce}': "
+                        f"attempt {expected_attempt} does not match active attempt {current_attempt}.",
+                        code="STALE_WORKER_ATTEMPT_MISMATCH",
+                        nonce=clean_nonce,
+                        current_state=current_state,
+                        target_state=target_state_str,
+                        authority=auth_enum.value,
+                    )
+                if rule.requires_lease_owner and auth_enum == TransitionAuthority.ORDINARY:
+                    if clean_exp_corr is not None and current_lease_owner and current_lease_owner != clean_exp_corr:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Stale lease owner '{clean_exp_corr}' rejected for nonce '{clean_nonce}' "
+                            f"(active lease_owner='{current_lease_owner}').",
+                            code="STALE_LEASE_OWNER",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    lease_dt = _parse_iso(ex.get("lease_expires_at"))
+                    if clean_exp_corr is not None and lease_dt is not None and now_dt >= lease_dt:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Expired execution lease for nonce '{clean_nonce}' (expired at {ex.get('lease_expires_at')}).",
+                            code="STALE_LEASE_EXPIRED",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+
+                # 5. Build auditable transition step preserving previous_state, authority, actor, reason
                 steps = list(ex.get("steps") or [])
+                step_entry: Dict[str, Any] = {
+                    "step": target_state_str,
+                    "from_state": current_state,
+                    "to_state": target_state_str,
+                    "authority": auth_enum.value,
+                    "at": now_s,
+                }
+                if effective_actor:
+                    step_entry["actor"] = str(effective_actor).strip()
+                if effective_reason:
+                    step_entry["reason"] = str(effective_reason).strip()[:240]
                 if step_event:
-                    steps.append({"at": now_s, **step_event})
-                else:
-                    steps.append({"step": lifecycle_state, "at": now_s})
+                    step_entry.update(step_event)
+                steps.append(step_entry)
 
                 new_alloc = allocated_id if allocated_id is not None else ex.get("allocated_id")
                 new_snapshot_json = (
@@ -383,17 +914,31 @@ class TransactionCoordinator:
                     if result_snapshot is not None
                     else ex.get("result_snapshot_json")
                 )
-                if clear_lease:
+                if clear_lease or rule.destination_is_terminal:
                     new_lease = None
+                    new_lease_owner = None
                 elif lease_seconds is not None:
                     new_lease = _utc_iso(now_dt + timedelta(seconds=max(5, int(lease_seconds))))
+                    new_lease_owner = current_lease_owner or current_corr
                 else:
                     new_lease = ex.get("lease_expires_at")
+                    new_lease_owner = current_lease_owner or None
 
-                cur.execute(
-                    """
+                # 6. Single atomic CAS UPDATE guarding nonce + lifecycle_state + version (+ worker identity)
+                where_clauses = ["nonce = ?", "lifecycle_state = ?", "version = ?"]
+                where_params: List[Any] = [clean_nonce, current_state, current_ver]
+                if clean_exp_corr is not None:
+                    where_clauses.append("correlation_id = ?")
+                    where_params.append(clean_exp_corr)
+                if expected_attempt is not None:
+                    where_clauses.append("attempt_count = ?")
+                    where_params.append(int(expected_attempt))
+
+                sql = f"""
                     UPDATE governed_transactions
                     SET lifecycle_state = ?,
+                        previous_state = ?,
+                        last_authority = ?,
                         bridge_status = ?,
                         failure_category = ?,
                         error_code = ?,
@@ -403,32 +948,63 @@ class TransactionCoordinator:
                         message = ?,
                         recovery_decision = ?,
                         updated_at = ?,
-                        lease_expires_at = ?
-                    WHERE nonce = ?
-                    """,
-                    (
-                        str(lifecycle_state).strip().upper(),
-                        str(bridge_status).strip().upper(),
-                        failure_category,
-                        error_code,
-                        new_alloc,
-                        json.dumps(steps[-40:]),
-                        new_snapshot_json,
-                        message if message is not None else ex.get("message"),
-                        recovery_decision if recovery_decision is not None else ex.get("recovery_decision"),
-                        now_s,
-                        new_lease,
-                        clean_nonce,
-                    ),
-                )
+                        lease_expires_at = ?,
+                        lease_owner = ?,
+                        version = version + 1
+                    WHERE {' AND '.join(where_clauses)}
+                """
+                params = [
+                    target_state_str,
+                    current_state,
+                    auth_enum.value,
+                    str(bridge_status).strip().upper(),
+                    failure_category,
+                    error_code,
+                    new_alloc,
+                    json.dumps(steps[-40:]),
+                    new_snapshot_json,
+                    message if message is not None else ex.get("message"),
+                    recovery_decision if recovery_decision is not None else ex.get("recovery_decision"),
+                    now_s,
+                    new_lease,
+                    new_lease_owner,
+                    *where_params,
+                ]
+                cur.execute(sql, params)
+                if cur.rowcount != 1:
+                    conn.execute("ROLLBACK;")
+                    raise InvalidStateTransitionError(
+                        f"Atomic CAS update failed for nonce '{clean_nonce}' ({current_state} -> {target_state_str}).",
+                        code="CAS_ATOMIC_CONFLICT",
+                        nonce=clean_nonce,
+                        current_state=current_state,
+                        target_state=target_state_str,
+                        authority=auth_enum.value,
+                    )
+
                 cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
                 updated = self._row_to_tx_dict(cur.fetchone())
                 conn.execute("COMMIT;")
                 return updated
+            except InvalidStateTransitionError:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                raise
+            except CoordinatorDurabilityError:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                raise
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in transition_governed_transaction(%s): %s", clean_nonce, e)
-                return None
+                raise
             finally:
                 conn.close()
 
@@ -442,6 +1018,8 @@ class TransactionCoordinator:
                 cur = conn.cursor()
                 cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
                 return self._row_to_tx_dict(cur.fetchone())
+            except CoordinatorDurabilityError:
+                raise
             except Exception as e:
                 logger.error("Error in get_governed_transaction(%s): %s", clean_nonce, e)
                 return None
@@ -463,6 +1041,8 @@ class TransactionCoordinator:
                     (max(1, int(limit)),),
                 )
                 return [self._row_to_tx_dict(r) for r in cur.fetchall() if r is not None]
+            except CoordinatorDurabilityError:
+                raise
             except Exception as e:
                 logger.error("Error in list_unresolved_transactions: %s", e)
                 return []
@@ -477,16 +1057,29 @@ class TransactionCoordinator:
         resolution_notes: str,
         final_allocated_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Mark an UNKNOWN or RECOVERY_REQUIRED transaction RECONCILED after manual/verified inspection."""
+        """
+        Mark a PENDING, UNKNOWN, or RECOVERY_REQUIRED transaction RECONCILED under
+        RECONCILIATION authority after verified operator inspection.
+        Cannot overwrite COMMITTED or already-RECONCILED transactions.
+        """
         return self.transition_governed_transaction(
             nonce=nonce,
-            lifecycle_state="RECONCILED",
+            lifecycle_state=TransactionState.RECONCILED,
             bridge_status="CONFIRMED",
             failure_category=None,
             error_code=None,
             allocated_id=final_allocated_id,
             message=resolution_notes,
             recovery_decision="RECONCILED_BY_OPERATOR",
+            authority=TransitionAuthority.RECONCILIATION,
+            expected_from_state=(
+                TransactionState.UNKNOWN,
+                TransactionState.RECOVERY_REQUIRED,
+                TransactionState.PENDING,
+            ),
+            actor=actor_user_id,
+            reason=resolution_notes,
+            evidence={"reconciled_by": actor_user_id, "final_allocated_id": final_allocated_id},
             step_event={
                 "step": "RECONCILED",
                 "actor": actor_user_id,

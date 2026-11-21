@@ -26,6 +26,13 @@ services:
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # TX-AUDIT-02: Persistent Render disk required for host-local SQLite WAL transaction coordinator.
+    # Single-instance architecture ONLY (WEB_CONCURRENCY=1, SALES_INSTANCE_COUNT=1):
+    # Do NOT scale to multiple containers until distributed coordination / verified Apps Script LockService (DB-008) is deployed.
+    disk:
+      name: kawad-swad-tx-coord-disk
+      mountPath: /var/data/kawad_swad
+      sizeGB: 1
     envVars:
       - key: SALES_GOOGLE_SPREADSHEET_ID
         sync: false
@@ -41,6 +48,16 @@ services:
         value: "8"
       - key: WEB_CONCURRENCY
         value: "1"
+      - key: SALES_INSTANCE_COUNT
+        value: "1"
+      - key: TRANSACTION_DB_PATH
+        value: /var/data/kawad_swad/kawad_swad_tx_coord.db
+      - key: KS_ERP_LOCK_DIR
+        value: /var/data/kawad_swad/locks
+      - key: KS_ERP_STATE_DIR
+        value: /var/data/kawad_swad/state
+      - key: SALES_TX_LEASE_SECONDS
+        value: "90"
       - key: SALES_APPS_SCRIPT_ENABLED
         value: "true"
       - key: SALES_APPS_SCRIPT_WEBAPP_URL

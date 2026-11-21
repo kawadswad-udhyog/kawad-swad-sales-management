@@ -82,6 +82,7 @@ def jwt_secret() -> str:
 def assert_runtime_config() -> None:
     _ = jwt_secret()
     origins = [o.strip() for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
+    testing = os.getenv("SALES_TESTING", "").strip() == "1"
     if SALES_ENV == "production":
         if not origins or "*" in origins:
             raise RuntimeError(
@@ -100,4 +101,9 @@ def assert_runtime_config() -> None:
                 "Neither SALES_GOOGLE_SERVICE_ACCOUNT_FILE nor SALES_GOOGLE_SERVICE_ACCOUNT_JSON is configured or accessible in production. "
                 "Production deployment must fail-closed to prevent data loss."
             )
+        # TX-AUDIT-02: Production MUST fail closed if transaction coordinator persistence
+        # is missing, volatile (/tmp), unmounted, unwritable, or horizontally scaled (>1 instance).
+        from app.transaction_safety import validate_coordinator_durability
+        validate_coordinator_durability(env=SALES_ENV, testing=testing)
+
 

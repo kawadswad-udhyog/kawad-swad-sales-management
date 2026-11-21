@@ -60,8 +60,11 @@ from app.schema_registry import (
 from app.sheets import db
 from app.timeutil import now_iso
 from app.transaction_safety import (
+    CoordinatorDurabilityError,
     FailureCategory,
+    InvalidStateTransitionError,
     TransactionState,
+    TransitionAuthority,
     classify_gateway_exception,
     compute_deterministic_payload_hash,
     map_http_status_to_failure_category,
@@ -1335,7 +1338,29 @@ class AppsScriptBridge:
         except Exception as exc:
             read_errors.append(f"AuditLog: {exc}")
 
+        existing_state = str(existing_tx.get("lifecycle_state") or "").strip().upper()
+
         if read_errors:
+            if existing_state == TransactionState.RECOVERY_REQUIRED.value:
+                return BridgeResult(
+                    status="RECOVERY_REQUIRED",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    allocated_id=existing_tx.get("allocated_id"),
+                    error_code="RECOVERY_STORAGE_UNAVAILABLE",
+                    message=(
+                        "Transaction remains quarantined in RECOVERY_REQUIRED while authoritative "
+                        "Google Sheets status tables are unreachable. Automatic retry is blocked."
+                    ),
+                    retryable=False,
+                    http_status=409,
+                    payload_hash=payload_hash,
+                    transaction_id=tx_id,
+                    transaction_state=TransactionState.RECOVERY_REQUIRED.value,
+                    failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                    attempt_number=attempt_no,
+                    recovery_decision="QUARANTINED_STORAGE_UNAVAILABLE",
+                )
             tx_coordinator.transition_governed_transaction(
                 nonce=clean_nonce,
                 lifecycle_state=TransactionState.UNKNOWN.value,
@@ -1346,6 +1371,11 @@ class AppsScriptBridge:
                 recovery_decision="DEFER_STORAGE_UNAVAILABLE",
                 step_event={"step": "RECOVERY_DEFERRED_STORAGE_ERROR", "errors": read_errors[:3]},
                 clear_lease=True,
+                authority=TransitionAuthority.RECOVERY,
+                expected_from_state=TransactionState.UNKNOWN,
+                actor="SYSTEM_RECOVERY",
+                reason="Recovery inspection blocked: authoritative Sheets status tables unreachable.",
+                evidence={"errors": read_errors[:3]},
             )
             audit_ok = self._record_tx_audit(
                 actor_user_id=actor_user_id,
@@ -1420,6 +1450,11 @@ class AppsScriptBridge:
                     result_snapshot=verified_record if isinstance(verified_record, dict) else None,
                     step_event={"step": "RECOVERY_AUTO_CONFIRMED", "allocated_id": final_alloc_id},
                     clear_lease=True,
+                    authority=TransitionAuthority.RECOVERY,
+                    expected_from_state=(TransactionState.UNKNOWN, TransactionState.RECOVERY_REQUIRED),
+                    actor="SYSTEM_RECOVERY",
+                    reason="Verified complete commit in authoritative Google Sheets during recovery.",
+                    evidence={"allocated_id": final_alloc_id, "alloc_match": bool(alloc_match), "audit_match": bool(audit_match)},
                 )
                 audit_ok = self._record_tx_audit(
                     actor_user_id=actor_user_id,
@@ -1452,18 +1487,24 @@ class AppsScriptBridge:
                     recovery_decision="AUTO_CONFIRMED_FROM_SHEETS",
                 )
             except _PartialSideEffectFailure as partial_exc:
-                tx_coordinator.transition_governed_transaction(
-                    nonce=clean_nonce,
-                    lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
-                    bridge_status="RECOVERY_REQUIRED",
-                    failure_category=FailureCategory.RECOVERY_REQUIRED.value,
-                    error_code="PARTIAL_SIDE_EFFECT_RECOVERY_REQUIRED",
-                    allocated_id=candidate_id,
-                    message=str(partial_exc),
-                    recovery_decision="QUARANTINED_PARTIAL_SIDE_EFFECT",
-                    step_event={"step": "RECOVERY_QUARANTINED_PARTIAL", "detail": str(partial_exc)[:240]},
-                    clear_lease=True,
-                )
+                if existing_state != TransactionState.RECOVERY_REQUIRED.value:
+                    tx_coordinator.transition_governed_transaction(
+                        nonce=clean_nonce,
+                        lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
+                        bridge_status="RECOVERY_REQUIRED",
+                        failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                        error_code="PARTIAL_SIDE_EFFECT_RECOVERY_REQUIRED",
+                        allocated_id=candidate_id,
+                        message=str(partial_exc),
+                        recovery_decision="QUARANTINED_PARTIAL_SIDE_EFFECT",
+                        step_event={"step": "RECOVERY_QUARANTINED_PARTIAL", "detail": str(partial_exc)[:240]},
+                        clear_lease=True,
+                        authority=TransitionAuthority.RECOVERY,
+                        expected_from_state=TransactionState.UNKNOWN,
+                        actor="SYSTEM_RECOVERY",
+                        reason=str(partial_exc),
+                        evidence={"detail": str(partial_exc)[:240], "allocated_id": candidate_id},
+                    )
                 audit_ok = self._record_tx_audit(
                     actor_user_id=actor_user_id,
                     action=spec.action,
@@ -1506,18 +1547,24 @@ class AppsScriptBridge:
                         f"Orphan allocation/audit record detected for nonce '{clean_nonce}' "
                         f"(allocated_id={candidate_id}), but target state verification failed: {rb_exc}"
                     )
-                    tx_coordinator.transition_governed_transaction(
-                        nonce=clean_nonce,
-                        lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
-                        bridge_status="RECOVERY_REQUIRED",
-                        failure_category=FailureCategory.RECOVERY_REQUIRED.value,
-                        error_code="ORPHAN_ALLOCATION_RECOVERY_REQUIRED",
-                        allocated_id=candidate_id,
-                        message=quarantine_msg,
-                        recovery_decision="QUARANTINED_ORPHAN_ALLOCATION",
-                        step_event={"step": "RECOVERY_QUARANTINED_ORPHAN", "detail": str(rb_exc)[:240]},
-                        clear_lease=True,
-                    )
+                    if existing_state != TransactionState.RECOVERY_REQUIRED.value:
+                        tx_coordinator.transition_governed_transaction(
+                            nonce=clean_nonce,
+                            lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
+                            bridge_status="RECOVERY_REQUIRED",
+                            failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                            error_code="ORPHAN_ALLOCATION_RECOVERY_REQUIRED",
+                            allocated_id=candidate_id,
+                            message=quarantine_msg,
+                            recovery_decision="QUARANTINED_ORPHAN_ALLOCATION",
+                            step_event={"step": "RECOVERY_QUARANTINED_ORPHAN", "detail": str(rb_exc)[:240]},
+                            clear_lease=True,
+                            authority=TransitionAuthority.RECOVERY,
+                            expected_from_state=TransactionState.UNKNOWN,
+                            actor="SYSTEM_RECOVERY",
+                            reason=quarantine_msg,
+                            evidence={"detail": str(rb_exc)[:240], "allocated_id": candidate_id},
+                        )
                     audit_ok = self._record_tx_audit(
                         actor_user_id=actor_user_id,
                         action=spec.action,
@@ -1572,7 +1619,7 @@ class AppsScriptBridge:
                     )
 
         # If previously explicitly quarantined as RECOVERY_REQUIRED with no verified recovery, keep blocked
-        if str(existing_tx.get("lifecycle_state") or "").upper() == TransactionState.RECOVERY_REQUIRED.value:
+        if existing_state == TransactionState.RECOVERY_REQUIRED.value:
             return BridgeResult(
                 status="RECOVERY_REQUIRED",
                 correlation_id=corr_id,
@@ -1604,7 +1651,32 @@ class AppsScriptBridge:
             recovery_decision="CONFIRMED_ABSENT_SAFE_TO_RETRY",
             step_event={"step": "RECOVERY_CONFIRMED_ABSENT_RETRY_ALLOWED"},
             clear_lease=True,
+            authority=TransitionAuthority.RECOVERY,
+            expected_from_state=TransactionState.UNKNOWN,
+            actor="SYSTEM_RECOVERY",
+            reason="Recovery inspection confirmed zero side effects in authoritative Google Sheets.",
+            evidence={"alloc_match": False, "audit_match": False},
         )
+        return None
+
+    def _find_existing_sheets_allocation_for_nonce(self, clean_nonce: str) -> Optional[Dict[str, Any]]:
+        """
+        Post-coordinator-loss safeguard (TX-AUDIT-02):
+        When a nonce is not present in the local SQLite coordinator (e.g., after local DB wipe
+        or replacement), inspect authoritative Google Sheets `IdAllocations` before transmitting
+        any gateway POST so previously allocated/committed transactions recover cleanly without
+        blindly duplicating writes.
+        """
+        if not clean_nonce:
+            return None
+        try:
+            alloc_rows = db.get_records("IdAllocations", fresh=True)
+            if isinstance(alloc_rows, list):
+                for row in alloc_rows:
+                    if isinstance(row, dict) and str(row.get("nonce", "")).strip() == clean_nonce:
+                        return row
+        except Exception as exc:
+            logger.debug("Pre-write IdAllocations nonce check skipped due to read error (%s): %s", clean_nonce, exc)
         return None
 
     def execute_governed_write(
@@ -1757,10 +1829,35 @@ class AppsScriptBridge:
             payload=payload,
         )
 
-        # Fast-path idempotency / conflict / recovery inspection BEFORE preflight duplicate-ID check
-        # so replays of already-committed writes (even with client-supplied IDs) return clean replays
-        # and conflicting nonces reject immediately with HTTP 409 IDEMPOTENCY_CONFLICT.
-        prior_tx = tx_coordinator.get_governed_transaction(clean_nonce)
+        # Fast-path coordinator durability + idempotency / conflict / recovery inspection
+        # BEFORE preflight duplicate-ID check so:
+        # - Missing/unwritable coordinator fails closed immediately with HTTP 503 (TX-AUDIT-02).
+        # - Replays of already-committed writes return clean replays without duplicate writes.
+        # - Conflicting nonces reject immediately with HTTP 409 IDEMPOTENCY_CONFLICT.
+        try:
+            tx_coordinator.assert_writable_coordinator()
+            prior_tx = tx_coordinator.get_governed_transaction(clean_nonce)
+        except CoordinatorDurabilityError as dur_exc:
+            logger.critical(
+                "Governed write blocked — coordinator unavailable/misconfigured (%s): %s",
+                dur_exc.error_code,
+                dur_exc,
+            )
+            return BridgeResult(
+                status="REJECTED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                error_code=dur_exc.error_code,
+                message=(
+                    f"Write blocked fail-closed: transaction coordinator is unavailable or misconfigured "
+                    f"({dur_exc.error_code}). Form data was NOT SAVED."
+                ),
+                retryable=False,
+                http_status=503,
+                payload_hash=payload_hash,
+                transaction_state=TransactionState.FAILED.value,
+                failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+            )
         if prior_tx is not None:
             prior_action = str(prior_tx.get("action") or "").strip().upper()
             prior_tab = str(prior_tx.get("target_tab") or "").strip()
@@ -1892,31 +1989,81 @@ class AppsScriptBridge:
                 failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
             )
 
-        # Atomic host-local cross-process transaction intent acquisition & duplicate/conflict gate
-        gate_status, tx_rec = tx_coordinator.begin_governed_transaction(
-            nonce=clean_nonce,
-            action=clean_action,
-            target_tab=clean_tab,
-            actor_user_id=actor_user_id,
-            payload_hash=payload_hash,
-            correlation_id=corr_id,
-        )
-
-        if gate_status == "RECOVERY_CHECK_REQUIRED":
-            recovery_res = self.recover_transaction(
-                nonce=clean_nonce,
-                spec=spec,
-                payload=payload,
-                corr_id=corr_id,
-                payload_hash=payload_hash,
-                actor_user_id=actor_user_id,
-                actor_role=actor_role,
-                existing_tx=tx_rec,
-                requested_inv=requested_inv,
+        # Fail-closed coordinator durability & availability gate (TX-AUDIT-02)
+        try:
+            tx_coordinator.assert_writable_coordinator()
+            prior_tx = tx_coordinator.get_governed_transaction(clean_nonce)
+        except CoordinatorDurabilityError as dur_exc:
+            logger.critical(
+                "Governed write blocked — coordinator unavailable/misconfigured (%s): %s",
+                dur_exc.error_code,
+                dur_exc,
             )
-            if recovery_res is not None:
-                return recovery_res
-            # Recovery verified zero effects in Sheets and moved state to PENDING -> acquire retry slot
+            return BridgeResult(
+                status="REJECTED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                error_code=dur_exc.error_code,
+                message=(
+                    f"Write blocked fail-closed: transaction coordinator is unavailable or misconfigured "
+                    f"({dur_exc.error_code}). Form data was NOT SAVED."
+                ),
+                retryable=False,
+                http_status=503,
+                payload_hash=payload_hash,
+                transaction_state=TransactionState.FAILED.value,
+                failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+            )
+
+        # Post-coordinator-loss safeguard: if nonce is missing locally, inspect authoritative
+        # Google Sheets IdAllocations before acquiring a fresh execution slot or calling gateway.
+        if prior_tx is None:
+            existing_alloc = self._find_existing_sheets_allocation_for_nonce(clean_nonce)
+            if existing_alloc is not None:
+                ext_alloc_id = str(existing_alloc.get("allocated_id") or "").strip() or None
+                try:
+                    ext_tx = tx_coordinator.register_external_recovery_intent(
+                        nonce=clean_nonce,
+                        action=clean_action,
+                        target_tab=clean_tab,
+                        actor_user_id=actor_user_id,
+                        payload_hash=payload_hash,
+                        correlation_id=corr_id,
+                        allocated_id=ext_alloc_id,
+                        reason=(
+                            "Authoritative Google Sheets IdAllocations already holds this nonce "
+                            "(detected after local coordinator restart/loss)."
+                        ),
+                    )
+                    ext_recovery_res = self.recover_transaction(
+                        nonce=clean_nonce,
+                        spec=spec,
+                        payload=payload,
+                        corr_id=corr_id,
+                        payload_hash=payload_hash,
+                        actor_user_id=actor_user_id,
+                        actor_role=actor_role,
+                        existing_tx=ext_tx,
+                        requested_inv=requested_inv,
+                    )
+                    if ext_recovery_res is not None:
+                        return ext_recovery_res
+                except CoordinatorDurabilityError as dur_exc:
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code=dur_exc.error_code,
+                        message=f"Write blocked fail-closed during post-loss recovery ({dur_exc.error_code}).",
+                        retryable=False,
+                        http_status=503,
+                        payload_hash=payload_hash,
+                        transaction_state=TransactionState.FAILED.value,
+                        failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+                    )
+
+        # Atomic host-local cross-process transaction intent acquisition & duplicate/conflict gate
+        try:
             gate_status, tx_rec = tx_coordinator.begin_governed_transaction(
                 nonce=clean_nonce,
                 action=clean_action,
@@ -1924,6 +2071,62 @@ class AppsScriptBridge:
                 actor_user_id=actor_user_id,
                 payload_hash=payload_hash,
                 correlation_id=corr_id,
+            )
+
+            if gate_status == "RECOVERY_CHECK_REQUIRED":
+                recovery_res = self.recover_transaction(
+                    nonce=clean_nonce,
+                    spec=spec,
+                    payload=payload,
+                    corr_id=corr_id,
+                    payload_hash=payload_hash,
+                    actor_user_id=actor_user_id,
+                    actor_role=actor_role,
+                    existing_tx=tx_rec,
+                    requested_inv=requested_inv,
+                )
+                if recovery_res is not None:
+                    return recovery_res
+                # Recovery verified zero effects in Sheets and moved state to PENDING -> acquire retry slot
+                gate_status, tx_rec = tx_coordinator.begin_governed_transaction(
+                    nonce=clean_nonce,
+                    action=clean_action,
+                    target_tab=clean_tab,
+                    actor_user_id=actor_user_id,
+                    payload_hash=payload_hash,
+                    correlation_id=corr_id,
+                )
+        except CoordinatorDurabilityError as dur_exc:
+            return BridgeResult(
+                status="REJECTED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                error_code=dur_exc.error_code,
+                message=(
+                    f"Write blocked fail-closed: transaction coordinator storage failed ({dur_exc.error_code}). "
+                    "Form data was NOT SAVED."
+                ),
+                retryable=False,
+                http_status=503,
+                payload_hash=payload_hash,
+                transaction_state=TransactionState.FAILED.value,
+                failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+            )
+        except InvalidStateTransitionError as st_exc:
+            latest = tx_coordinator.get_governed_transaction(clean_nonce) or {}
+            return BridgeResult(
+                status="REJECTED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                allocated_id=latest.get("allocated_id"),
+                error_code=st_exc.code,
+                message=str(st_exc),
+                retryable=False,
+                http_status=409,
+                payload_hash=payload_hash,
+                transaction_id=latest.get("transaction_id"),
+                transaction_state=str(latest.get("lifecycle_state") or TransactionState.UNKNOWN.value),
+                failure_category=FailureCategory.IDEMPOTENCY_CONFLICT.value,
             )
 
         if gate_status == "ACTION_CONFLICT":
@@ -2026,6 +2229,80 @@ class AppsScriptBridge:
         )
         opener = urllib.request.build_opener(_NoRedirectHandler)
 
+        def _build_transition_conflict_result(exc: InvalidStateTransitionError) -> BridgeResult:
+            latest = None
+            try:
+                latest = tx_coordinator.get_governed_transaction(clean_nonce)
+            except Exception:
+                latest = None
+            latest_state = str((latest or {}).get("lifecycle_state") or exc.current_state or TransactionState.UNKNOWN.value)
+            latest_alloc = (latest or {}).get("allocated_id")
+            logger.warning(
+                "Rejected stale/invalid state transition for nonce=%s corr=%s attempt=%s: %s (db_state=%s)",
+                clean_nonce,
+                corr_id,
+                attempt_no,
+                exc.code,
+                latest_state,
+            )
+            return BridgeResult(
+                status="REJECTED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                allocated_id=latest_alloc,
+                error_code=exc.code,
+                message=(
+                    f"State transition rejected ({exc.code}): authoritative transaction state is '{latest_state}'. "
+                    "Stale or illegal overwrite was blocked."
+                ),
+                retryable=False,
+                http_status=409,
+                payload_hash=payload_hash,
+                transaction_id=tx_id,
+                transaction_state=latest_state,
+                failure_category=FailureCategory.IDEMPOTENCY_CONFLICT.value,
+                attempt_number=attempt_no,
+            )
+
+        def _worker_cas_transition(
+            *,
+            lifecycle_state: TransactionState,
+            bridge_status: str,
+            failure_category: Optional[str] = None,
+            error_code: Optional[str] = None,
+            allocated_id: Optional[str] = None,
+            message: Optional[str] = None,
+            recovery_decision: Optional[str] = None,
+            result_snapshot: Optional[Dict[str, Any]] = None,
+            step_event: Optional[Dict[str, Any]] = None,
+            reason: Optional[str] = None,
+            evidence: Optional[Any] = None,
+        ) -> Optional[BridgeResult]:
+            try:
+                tx_coordinator.transition_governed_transaction(
+                    nonce=clean_nonce,
+                    lifecycle_state=lifecycle_state.value,
+                    bridge_status=bridge_status,
+                    failure_category=failure_category,
+                    error_code=error_code,
+                    allocated_id=allocated_id,
+                    message=message,
+                    recovery_decision=recovery_decision,
+                    result_snapshot=result_snapshot,
+                    step_event=step_event,
+                    clear_lease=True,
+                    authority=TransitionAuthority.ORDINARY,
+                    expected_from_state=TransactionState.EXECUTING,
+                    expected_correlation_id=corr_id,
+                    expected_attempt=attempt_no,
+                    actor=actor_user_id,
+                    reason=reason or message,
+                    evidence=evidence,
+                )
+                return None
+            except InvalidStateTransitionError as st_exc:
+                return _build_transition_conflict_result(st_exc)
+
         try:
             with opener.open(req, timeout=SALES_APPS_SCRIPT_TIMEOUT_SECONDS) as resp:
                 raw_text = resp.read().decode("utf-8", errors="replace").strip()
@@ -2041,14 +2318,15 @@ class AppsScriptBridge:
                 logger.warning("Blocked HTTP %s redirect from Apps Script bridge action=%s corr=%s", code, clean_action, corr_id)
                 err_code = f"APPS_SCRIPT_REDIRECT_BLOCKED_{code}"
                 msg = f"Apps Script endpoint attempted HTTP {code} redirect; blocked for HMAC envelope safety."
-                tx_coordinator.transition_governed_transaction(
-                    nonce=clean_nonce,
-                    lifecycle_state=TransactionState.FAILED.value,
+                conflict_res = _worker_cas_transition(
+                    lifecycle_state=TransactionState.FAILED,
                     bridge_status="REJECTED",
                     failure_category=FailureCategory.WRITE_REJECTED.value,
                     error_code=err_code,
                     message=msg,
                 )
+                if conflict_res is not None:
+                    return conflict_res
                 audit_ok = self._record_tx_audit(
                     actor_user_id=actor_user_id,
                     action=clean_action,
@@ -2082,14 +2360,15 @@ class AppsScriptBridge:
                 err_code = f"APPS_SCRIPT_HTTP_{code}"
                 fail_cat = map_http_status_to_failure_category(code, err_code).value
                 msg = f"Apps Script rejected request '{clean_action}' (HTTP {code}). Form data was NOT SAVED."
-                tx_coordinator.transition_governed_transaction(
-                    nonce=clean_nonce,
-                    lifecycle_state=TransactionState.FAILED.value,
+                conflict_res = _worker_cas_transition(
+                    lifecycle_state=TransactionState.FAILED,
                     bridge_status="REJECTED",
                     failure_category=fail_cat,
                     error_code=err_code,
                     message=msg,
                 )
+                if conflict_res is not None:
+                    return conflict_res
                 audit_ok = self._record_tx_audit(
                     actor_user_id=actor_user_id,
                     action=clean_action,
@@ -2121,14 +2400,15 @@ class AppsScriptBridge:
                 )
             logger.warning("Ambiguous Apps Script HTTP %s for action=%s corr=%s", code, clean_action, corr_id)
             msg = "Status not confirmed; do not submit a new transaction. Check transaction status before retrying with the same nonce."
-            tx_coordinator.transition_governed_transaction(
-                nonce=clean_nonce,
-                lifecycle_state=TransactionState.UNKNOWN.value,
+            conflict_res = _worker_cas_transition(
+                lifecycle_state=TransactionState.UNKNOWN,
                 bridge_status="PENDING_UNKNOWN",
                 failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
                 error_code="APPS_SCRIPT_UNKNOWN_OUTCOME",
                 message=msg,
             )
+            if conflict_res is not None:
+                return conflict_res
             audit_ok = self._record_tx_audit(
                 actor_user_id=actor_user_id,
                 action=clean_action,
@@ -2169,14 +2449,15 @@ class AppsScriptBridge:
                 err_code,
                 exc,
             )
-            tx_coordinator.transition_governed_transaction(
-                nonce=clean_nonce,
-                lifecycle_state=tx_state.value,
+            conflict_res = _worker_cas_transition(
+                lifecycle_state=tx_state,
                 bridge_status=bridge_st,
                 failure_category=fail_cat.value,
                 error_code=err_code,
                 message=user_msg,
             )
+            if conflict_res is not None:
+                return conflict_res
             audit_ok = self._record_tx_audit(
                 actor_user_id=actor_user_id,
                 action=clean_action,
@@ -2208,15 +2489,16 @@ class AppsScriptBridge:
             )
 
         def _transition_unknown(err_code: str, msg: str, alloc_id: Optional[str] = None, fail_cat: FailureCategory = FailureCategory.WRITE_OUTCOME_UNKNOWN) -> BridgeResult:
-            tx_coordinator.transition_governed_transaction(
-                nonce=clean_nonce,
-                lifecycle_state=TransactionState.UNKNOWN.value,
+            conflict_res = _worker_cas_transition(
+                lifecycle_state=TransactionState.UNKNOWN,
                 bridge_status="PENDING_UNKNOWN",
                 failure_category=fail_cat.value,
                 error_code=err_code,
                 allocated_id=alloc_id,
                 message=msg,
             )
+            if conflict_res is not None:
+                return conflict_res
             audit_ok = self._record_tx_audit(
                 actor_user_id=actor_user_id,
                 action=clean_action,
@@ -2250,14 +2532,15 @@ class AppsScriptBridge:
 
         def _transition_rejected(err_code: str, msg: str, http_code: int, retryable: bool = False) -> BridgeResult:
             fail_cat = map_http_status_to_failure_category(http_code, err_code).value
-            tx_coordinator.transition_governed_transaction(
-                nonce=clean_nonce,
-                lifecycle_state=TransactionState.FAILED.value,
+            conflict_res = _worker_cas_transition(
+                lifecycle_state=TransactionState.FAILED,
                 bridge_status="REJECTED",
                 failure_category=fail_cat,
                 error_code=err_code,
                 message=msg,
             )
+            if conflict_res is not None:
+                return conflict_res
             audit_ok = self._record_tx_audit(
                 actor_user_id=actor_user_id,
                 action=clean_action,
@@ -2434,9 +2717,8 @@ class AppsScriptBridge:
                 f"Recovery required: partial or duplicate side effects detected after write ({partial_fail}). "
                 "Do NOT retry blindly; Owner reconciliation is required."
             )
-            tx_coordinator.transition_governed_transaction(
-                nonce=clean_nonce,
-                lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
+            conflict_res = _worker_cas_transition(
+                lifecycle_state=TransactionState.RECOVERY_REQUIRED,
                 bridge_status="RECOVERY_REQUIRED",
                 failure_category=FailureCategory.RECOVERY_REQUIRED.value,
                 error_code="PARTIAL_SIDE_EFFECT_RECOVERY_REQUIRED",
@@ -2444,7 +2726,11 @@ class AppsScriptBridge:
                 message=quarantine_msg,
                 recovery_decision="QUARANTINED_PARTIAL_READBACK",
                 step_event={"step": "READBACK_PARTIAL_QUARANTINED", "detail": str(partial_fail)[:240]},
+                reason=str(partial_fail),
+                evidence={"detail": str(partial_fail)[:240], "allocated_id": allocated_id},
             )
+            if conflict_res is not None:
+                return conflict_res
             audit_ok = self._record_tx_audit(
                 actor_user_id=actor_user_id,
                 action=clean_action,
@@ -2499,9 +2785,8 @@ class AppsScriptBridge:
             db.invalidate_tab_cache(tab)
 
         confirm_msg = str(data.get("message") or "Write confirmed via Apps Script read-back.")
-        tx_coordinator.transition_governed_transaction(
-            nonce=clean_nonce,
-            lifecycle_state=TransactionState.COMMITTED.value,
+        conflict_res = _worker_cas_transition(
+            lifecycle_state=TransactionState.COMMITTED,
             bridge_status="CONFIRMED",
             failure_category=None,
             error_code=None,
@@ -2509,8 +2794,9 @@ class AppsScriptBridge:
             message=confirm_msg,
             result_snapshot=record if isinstance(record, dict) else None,
             step_event={"step": "COMMITTED_VERIFIED", "allocated_id": allocated_id},
-            clear_lease=True,
         )
+        if conflict_res is not None:
+            return conflict_res
         audit_ok = self._record_tx_audit(
             actor_user_id=actor_user_id,
             action=clean_action,

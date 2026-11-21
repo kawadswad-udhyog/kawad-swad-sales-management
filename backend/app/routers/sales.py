@@ -582,6 +582,11 @@ async def create_sale(req: SaleCreate, request: Request, current_user: dict = De
                         message=f"Sale '{sale_id}' committed, but secondary accounting journal posting failed: {j_exc}",
                         recovery_decision="QUARANTINED_SECONDARY_JOURNAL_FAILURE",
                         step_event={"step": "SECONDARY_JOURNAL_FAILED", "sale_id": sale_id, "error": str(j_exc)[:200]},
+                        authority="SECONDARY_QUARANTINE",
+                        expected_from_state="COMMITTED",
+                        actor=user_id,
+                        reason=f"Secondary accounting journal posting failed after sale '{sale_id}' commit.",
+                        evidence={"sale_id": sale_id, "error": str(j_exc)[:200]},
                     )
                 db.log_transaction_audit(
                     actor=user_id,
@@ -1274,6 +1279,11 @@ async def record_sale_payment(
                     message=f"Payment '{payment_id}' committed, but secondary journal posting failed: {j_exc}",
                     recovery_decision="QUARANTINED_SECONDARY_JOURNAL_FAILURE",
                     step_event={"step": "SECONDARY_JOURNAL_FAILED", "payment_id": payment_id, "error": str(j_exc)[:200]},
+                    authority="SECONDARY_QUARANTINE",
+                    expected_from_state="COMMITTED",
+                    actor=user_id,
+                    reason=f"Secondary payment journal posting failed after payment '{payment_id}' commit.",
+                    evidence={"payment_id": payment_id, "error": str(j_exc)[:200]},
                 )
             db.log_transaction_audit(
                 actor=user_id,

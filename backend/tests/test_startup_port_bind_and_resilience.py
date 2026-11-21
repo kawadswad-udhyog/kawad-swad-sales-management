@@ -622,6 +622,8 @@ server = ThreadingHTTPServer(("127.0.0.1", {port}), Handler)
 threading.Timer(0.05, sheets_mod.db.start_background_init).start()
 server.serve_forever()
 """
+        pers_coord_dir = os.path.join(backend_dir, f".startup_coord_test_stdlib_{os.getpid()}_{port}")
+        os.makedirs(pers_coord_dir, exist_ok=True)
         env = os.environ.copy()
         env["SALES_TESTING"] = "0"
         env["SALES_ENV"] = "production"
@@ -634,6 +636,8 @@ server.serve_forever()
             "private_key": "k",
             "client_email": "sa@p.iam.gserviceaccount.com",
         })
+        env["TRANSACTION_DB_PATH"] = os.path.join(pers_coord_dir, "tx_coord.db")
+        env["SALES_INSTANCE_COUNT"] = "1"
 
         t0 = time.monotonic()
         proc = subprocess.Popen(
@@ -724,6 +728,8 @@ server.serve_forever()
                 self.assertEqual(sales_data["rows"][0]["sale_id"], "SALE-HEALTH-1")
         finally:
             _terminate_subprocess_safely(proc)
+            import shutil
+            shutil.rmtree(pers_coord_dir, ignore_errors=True)
             self.assertIsNotNone(proc.poll(), "Subprocess was not cleaned up")
 
     @unittest.skipUnless(
@@ -783,6 +789,8 @@ sys.modules["google.oauth2.service_account"] = fake_sa_mod
 
 uvicorn.run("main:app", host="0.0.0.0", port={port}, log_level="warning")
 """
+        pers_coord_dir = os.path.join(backend_dir, f".startup_coord_test_uvicorn_{os.getpid()}_{port}")
+        os.makedirs(pers_coord_dir, exist_ok=True)
         env = os.environ.copy()
         env["SALES_TESTING"] = "0"
         env["SALES_ENV"] = "production"
@@ -796,6 +804,8 @@ uvicorn.run("main:app", host="0.0.0.0", port={port}, log_level="warning")
             "client_email": "sa@p.iam.gserviceaccount.com",
         })
         env["WEB_CONCURRENCY"] = "1"
+        env["SALES_INSTANCE_COUNT"] = "1"
+        env["TRANSACTION_DB_PATH"] = os.path.join(pers_coord_dir, "tx_coord.db")
 
         t0 = time.monotonic()
         proc = subprocess.Popen(
@@ -875,6 +885,8 @@ uvicorn.run("main:app", host="0.0.0.0", port={port}, log_level="warning")
             self.assertTrue(recovered, "Background init did not restore connected state after 6s Sheets delay")
         finally:
             _terminate_subprocess_safely(proc)
+            import shutil
+            shutil.rmtree(pers_coord_dir, ignore_errors=True)
             self.assertIsNotNone(proc.poll(), "Uvicorn subprocess was not cleaned up")
 
 
