@@ -2197,6 +2197,7 @@ class AppsScriptBridge:
 
         tx_id = str(tx_rec.get("transaction_id") or "")
         attempt_no = int(tx_rec.get("attempt_count") or 1)
+        expected_ver = int(tx_rec.get("version") or 1)
 
         envelope = {
             "action": clean_action,
@@ -2293,6 +2294,7 @@ class AppsScriptBridge:
                     clear_lease=True,
                     authority=TransitionAuthority.ORDINARY,
                     expected_from_state=TransactionState.EXECUTING,
+                    expected_version=expected_ver,
                     expected_correlation_id=corr_id,
                     expected_attempt=attempt_no,
                     actor=actor_user_id,

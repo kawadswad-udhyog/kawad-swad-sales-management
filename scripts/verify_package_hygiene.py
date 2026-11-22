@@ -44,6 +44,19 @@ REQUIRED_ROUND2_FILES = [
     "docs/MISSION_51B1_ROUND2_README.md",
 ]
 
+REQUIRED_ROUND3_FILES = REQUIRED_ROUND2_FILES + [
+    "backend/tests/test_mission51b1_round3_lease_enforcement.py",
+    "docs/MISSION_51B1_ROUND3_REPAIR_REPORT.md",
+    "docs/MISSION_51B1_ROUND3_README.md",
+]
+
+ROOT_LAYOUT_ANCHORS = (
+    "backend/app/main.py",
+    "render.yaml",
+    ".env.example",
+    "package.json",
+)
+
 FORBIDDEN_PATH_SEGMENTS = {
     ".git",
     "node_modules",
@@ -145,10 +158,11 @@ def audit_zip_archive(
     zip_path: str,
     *,
     require_round2_files: bool = True,
+    require_round3_files: bool = False,
 ) -> Tuple[bool, Dict[str, object]]:
     """
     Independently verify ZIP integrity, forbidden-file hygiene, leaked-key absence,
-    required Round 2 files, and final SHA-256 digest.
+    repository-root layout, required Round 2 / Round 3 files, and final SHA-256 digest.
     """
     if not os.path.isfile(zip_path):
         return False, {"error": f"Archive not found: {zip_path}"}
@@ -175,11 +189,21 @@ def audit_zip_archive(
 
     member_set = set(members)
     missing_required: List[str] = []
-    if require_round2_files:
-        for req in REQUIRED_ROUND2_FILES:
-            if req not in member_set:
-                missing_required.append(req)
-                violations.append(f"missing_required_file:{req}")
+    required_list = REQUIRED_ROUND3_FILES if require_round3_files else (REQUIRED_ROUND2_FILES if require_round2_files else [])
+    for req in required_list:
+        if req not in member_set:
+            missing_required.append(req)
+            violations.append(f"missing_required_file:{req}")
+
+    top_level_entries = sorted({m.split("/", 1)[0] for m in members if m})
+    is_repo_root = all(anchor in member_set for anchor in ROOT_LAYOUT_ANCHORS)
+    if require_round2_files or require_round3_files:
+        if not is_repo_root:
+            violations.append(
+                f"invalid_root_layout:expected_repository_root_anchors ({', '.join(ROOT_LAYOUT_ANCHORS)})"
+            )
+        if len(top_level_entries) == 1:
+            violations.append(f"wrapped_root_directory_detected:{top_level_entries[0]}")
 
     stat = os.stat(zip_path)
     sha256_hex = compute_sha256(zip_path)
@@ -191,8 +215,9 @@ def audit_zip_archive(
         "size_bytes": stat.st_size,
         "file_count": len(members),
         "testzip_bad_member": bad_member,
-        "sha256": sha256_hex,
+        "root_layout": "REPOSITORY_ROOT" if is_repo_root and len(top_level_entries) > 1 else "NON_STANDARD",
         "timestamp_utc": mtime_utc,
+        "sha256": sha256_hex,
         "missing_required": missing_required,
         "violations": violations,
         "status": "PASS" if not violations else "FAIL",
@@ -205,8 +230,17 @@ def main(argv: List[str]) -> int:
         print("Usage: python3 scripts/verify_package_hygiene.py <archive.zip>", file=sys.stderr)
         return 2
     zip_path = argv[1]
-    ok, report = audit_zip_archive(zip_path, require_round2_files=True)
-    for k in ("archive_name", "size_bytes", "file_count", "testzip_bad_member", "timestamp_utc", "sha256", "status"):
+    ok, report = audit_zip_archive(zip_path, require_round2_files=True, require_round3_files=True)
+    for k in (
+        "archive_name",
+        "size_bytes",
+        "file_count",
+        "testzip_bad_member",
+        "root_layout",
+        "timestamp_utc",
+        "sha256",
+        "status",
+    ):
         print(f"{k.upper()}={report.get(k)}")
     if not ok:
         print("VIOLATIONS:", file=sys.stderr)

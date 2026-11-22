@@ -105,6 +105,7 @@ def _mp_worker_race_acquire(db_path: str, nonce: str, payload_hash: str, worker_
             message=f"Committed by {worker_id}",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=tx["version"],
             expected_correlation_id=f"CORR-MP-{worker_id}",
             expected_attempt=1,
         )
@@ -240,6 +241,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Committed cleanly",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-B1",
             expected_attempt=1,
         )
@@ -276,6 +278,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Committed",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-C1",
             expected_attempt=1,
         )
@@ -303,6 +306,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Committed",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-D1",
             expected_attempt=1,
         )
@@ -342,6 +346,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Timed out",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-E1",
             expected_attempt=1,
         )
@@ -385,6 +390,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Missing child lines",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-F1",
             expected_attempt=1,
             reason="Missing JournalLines",
@@ -516,6 +522,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Fresh worker committed",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=tx3["version"],
             expected_correlation_id="CORR-FRESH-2",
             expected_attempt=2,
         )
@@ -544,10 +551,11 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Clean failure attempt 1",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-OLD-1",
             expected_attempt=1,
         )
-        self._begin("NONCE-R2-H2", corr_id="CORR-NEW-2")
+        _, tx_h2_new = self._begin("NONCE-R2-H2", corr_id="CORR-NEW-2")
         with self.assertRaises(InvalidStateTransitionError) as ctx:
             self.coord.transition_governed_transaction(
                 nonce="NONCE-R2-H2",
@@ -556,6 +564,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
                 message="Old worker clobber attempt",
                 authority=TransitionAuthority.ORDINARY,
                 expected_from_state=TransactionState.EXECUTING,
+                expected_version=tx_h2_new["version"],
                 expected_correlation_id="CORR-OLD-1",
                 expected_attempt=1,
             )
@@ -600,6 +609,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Sale committed",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-J1",
             expected_attempt=1,
         )
@@ -679,6 +689,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             result_snapshot={"journal_id": "JV-000333", "amount": 500},
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-K1",
             expected_attempt=1,
         )
@@ -719,6 +730,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Committed",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-L1",
             expected_attempt=1,
         )
@@ -752,6 +764,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             message="Committed before restart",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-M1",
             expected_attempt=1,
         )
@@ -762,6 +775,7 @@ class TestMission51B1Round2StateIntegrity(unittest.TestCase):
             bridge_status="PENDING_UNKNOWN",
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=1,
             expected_correlation_id="CORR-M2",
             expected_attempt=1,
         )
@@ -848,6 +862,7 @@ class TestMission51B1Round2DurabilityAndRestart(unittest.TestCase):
             result_snapshot={"journal_id": "JV-DUR-001"},
             authority=TransitionAuthority.ORDINARY,
             expected_from_state=TransactionState.EXECUTING,
+            expected_version=tx["version"],
             expected_correlation_id="CORR-DUR-1",
             expected_attempt=1,
         )

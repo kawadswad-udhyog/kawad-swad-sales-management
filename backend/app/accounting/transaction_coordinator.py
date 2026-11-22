@@ -809,17 +809,40 @@ class TransactionCoordinator:
                     )
 
                 # 2. Explicit optimistic version CAS check
-                if expected_version is not None and current_ver != int(expected_version):
-                    conn.execute("ROLLBACK;")
-                    raise InvalidStateTransitionError(
-                        f"CAS version mismatch for nonce '{clean_nonce}': "
-                        f"expected version {expected_version}, found {current_ver}.",
-                        code="CAS_VERSION_MISMATCH",
-                        nonce=clean_nonce,
-                        current_state=current_state,
-                        target_state=target_state_str,
-                        authority=auth_enum.value,
-                    )
+                if expected_version is not None:
+                    if isinstance(expected_version, bool):
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Invalid boolean expected_version for nonce '{clean_nonce}'.",
+                            code="MISSING_EXPECTED_VERSION",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    try:
+                        exp_ver_check = int(expected_version)
+                    except (TypeError, ValueError) as cast_exc:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Invalid expected_version '{expected_version}' for nonce '{clean_nonce}'.",
+                            code="INVALID_WORKER_IDENTITY_ARGUMENT",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        ) from cast_exc
+                    if current_ver != exp_ver_check:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"CAS version mismatch for nonce '{clean_nonce}': "
+                            f"expected version {exp_ver_check}, found {current_ver}.",
+                            code="CAS_VERSION_MISMATCH",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
 
                 # 3. Authoritative transition-matrix & terminal-state validation
                 effective_reason = reason if reason is not None else message
@@ -843,32 +866,88 @@ class TransactionCoordinator:
                     actor=effective_actor,
                 )
 
-                # 4. Stale worker / attempt / lease ownership validation
-                clean_exp_corr = str(expected_correlation_id or "").strip() if expected_correlation_id is not None else None
-                if clean_exp_corr is not None and current_corr != clean_exp_corr:
-                    conn.execute("ROLLBACK;")
-                    raise InvalidStateTransitionError(
-                        f"Stale worker rejected for nonce '{clean_nonce}': "
-                        f"correlation_id '{clean_exp_corr}' does not match active '{current_corr}'.",
-                        code="STALE_WORKER_CORRELATION_MISMATCH",
-                        nonce=clean_nonce,
-                        current_state=current_state,
-                        target_state=target_state_str,
-                        authority=auth_enum.value,
-                    )
-                if expected_attempt is not None and current_attempt != int(expected_attempt):
-                    conn.execute("ROLLBACK;")
-                    raise InvalidStateTransitionError(
-                        f"Stale worker rejected for nonce '{clean_nonce}': "
-                        f"attempt {expected_attempt} does not match active attempt {current_attempt}.",
-                        code="STALE_WORKER_ATTEMPT_MISMATCH",
-                        nonce=clean_nonce,
-                        current_state=current_state,
-                        target_state=target_state_str,
-                        authority=auth_enum.value,
-                    )
-                if rule.requires_lease_owner and auth_enum == TransitionAuthority.ORDINARY:
-                    if clean_exp_corr is not None and current_lease_owner and current_lease_owner != clean_exp_corr:
+                # 4. Unconditional worker identity, version, attempt & lease ownership validation (TX-AUDIT-04)
+                clean_exp_corr = (
+                    str(expected_correlation_id).strip()
+                    if expected_correlation_id is not None and str(expected_correlation_id).strip()
+                    else None
+                )
+                is_ordinary_lease_transition = bool(
+                    rule.requires_lease_owner and auth_enum == TransitionAuthority.ORDINARY
+                )
+                raw_lease_exp = ex.get("lease_expires_at")
+
+                if is_ordinary_lease_transition:
+                    # Mandatory caller worker identity arguments — NEVER silently defaulted or substituted
+                    if clean_exp_corr is None:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Ordinary lease-protected transition {current_state} -> {target_state_str} "
+                            f"for nonce '{clean_nonce}' requires non-empty expected_correlation_id.",
+                            code="MISSING_WORKER_CORRELATION_ID",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if expected_attempt is None or isinstance(expected_attempt, bool):
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Ordinary lease-protected transition {current_state} -> {target_state_str} "
+                            f"for nonce '{clean_nonce}' requires explicit integer expected_attempt.",
+                            code="MISSING_WORKER_ATTEMPT",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if expected_version is None or isinstance(expected_version, bool):
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Ordinary lease-protected transition {current_state} -> {target_state_str} "
+                            f"for nonce '{clean_nonce}' requires explicit integer expected_version.",
+                            code="MISSING_EXPECTED_VERSION",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    try:
+                        exp_attempt_int = int(expected_attempt)
+                        exp_ver_int = int(expected_version)
+                    except (TypeError, ValueError) as cast_exc:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Invalid worker attempt/version argument for nonce '{clean_nonce}': {cast_exc}",
+                            code="INVALID_WORKER_IDENTITY_ARGUMENT",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        ) from cast_exc
+
+                    if not current_corr or current_corr != clean_exp_corr:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Stale worker rejected for nonce '{clean_nonce}': "
+                            f"correlation_id '{clean_exp_corr}' does not match active '{current_corr}'.",
+                            code="STALE_WORKER_CORRELATION_MISMATCH",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if not current_lease_owner:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Missing active lease_owner for nonce '{clean_nonce}' during ordinary transition.",
+                            code="MISSING_ACTIVE_LEASE_OWNER",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if current_lease_owner != clean_exp_corr:
                         conn.execute("ROLLBACK;")
                         raise InvalidStateTransitionError(
                             f"Stale lease owner '{clean_exp_corr}' rejected for nonce '{clean_nonce}' "
@@ -879,12 +958,69 @@ class TransactionCoordinator:
                             target_state=target_state_str,
                             authority=auth_enum.value,
                         )
-                    lease_dt = _parse_iso(ex.get("lease_expires_at"))
-                    if clean_exp_corr is not None and lease_dt is not None and now_dt >= lease_dt:
+                    if current_attempt != exp_attempt_int:
                         conn.execute("ROLLBACK;")
                         raise InvalidStateTransitionError(
-                            f"Expired execution lease for nonce '{clean_nonce}' (expired at {ex.get('lease_expires_at')}).",
+                            f"Stale worker rejected for nonce '{clean_nonce}': "
+                            f"attempt {exp_attempt_int} does not match active attempt {current_attempt}.",
+                            code="STALE_WORKER_ATTEMPT_MISMATCH",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if current_ver != exp_ver_int:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"CAS version mismatch for nonce '{clean_nonce}': "
+                            f"expected version {exp_ver_int}, found {current_ver}.",
+                            code="CAS_VERSION_MISMATCH",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    lease_dt = _parse_iso(raw_lease_exp)
+                    if raw_lease_exp is None or not str(raw_lease_exp).strip() or lease_dt is None:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Missing or invalid execution lease expiration for nonce '{clean_nonce}'.",
+                            code="MISSING_OR_INVALID_LEASE_EXPIRATION",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if now_dt >= lease_dt:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Expired execution lease for nonce '{clean_nonce}' (expired at {raw_lease_exp}).",
                             code="STALE_LEASE_EXPIRED",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                else:
+                    # Non-ordinary authorities (RECOVERY, SECONDARY_QUARANTINE, RECONCILIATION) or
+                    # non-lease-protected transitions: still enforce any explicitly passed worker CAS fields.
+                    if clean_exp_corr is not None and current_corr != clean_exp_corr:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Stale worker rejected for nonce '{clean_nonce}': "
+                            f"correlation_id '{clean_exp_corr}' does not match active '{current_corr}'.",
+                            code="STALE_WORKER_CORRELATION_MISMATCH",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if expected_attempt is not None and current_attempt != int(expected_attempt):
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Stale worker rejected for nonce '{clean_nonce}': "
+                            f"attempt {expected_attempt} does not match active attempt {current_attempt}.",
+                            code="STALE_WORKER_ATTEMPT_MISMATCH",
                             nonce=clean_nonce,
                             current_state=current_state,
                             target_state=target_state_str,
@@ -924,15 +1060,29 @@ class TransactionCoordinator:
                     new_lease = ex.get("lease_expires_at")
                     new_lease_owner = current_lease_owner or None
 
-                # 6. Single atomic CAS UPDATE guarding nonce + lifecycle_state + version (+ worker identity)
+                # 6. Single atomic CAS UPDATE guarding nonce + lifecycle_state + version (+ unconditional worker/lease identity)
                 where_clauses = ["nonce = ?", "lifecycle_state = ?", "version = ?"]
                 where_params: List[Any] = [clean_nonce, current_state, current_ver]
-                if clean_exp_corr is not None:
-                    where_clauses.append("correlation_id = ?")
-                    where_params.append(clean_exp_corr)
-                if expected_attempt is not None:
-                    where_clauses.append("attempt_count = ?")
-                    where_params.append(int(expected_attempt))
+                if is_ordinary_lease_transition:
+                    where_clauses.extend([
+                        "correlation_id = ?",
+                        "lease_owner = ?",
+                        "attempt_count = ?",
+                        "lease_expires_at = ?",
+                    ])
+                    where_params.extend([
+                        clean_exp_corr,
+                        clean_exp_corr,
+                        int(expected_attempt),
+                        str(raw_lease_exp),
+                    ])
+                else:
+                    if clean_exp_corr is not None:
+                        where_clauses.append("correlation_id = ?")
+                        where_params.append(clean_exp_corr)
+                    if expected_attempt is not None:
+                        where_clauses.append("attempt_count = ?")
+                        where_params.append(int(expected_attempt))
 
                 sql = f"""
                     UPDATE governed_transactions

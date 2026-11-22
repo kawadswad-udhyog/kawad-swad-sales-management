@@ -985,7 +985,7 @@ class TestMission51B1TransactionSafety(unittest.TestCase):
     def test_d4_controlled_reconciliation_and_confidential_redaction(self):
         bridge = AppsScriptBridge()
         # Create a quarantined confidential SalaryPayments transaction
-        tx_coordinator.begin_governed_transaction(
+        _, tx_d4 = tx_coordinator.begin_governed_transaction(
             nonce="NONCE-D4-CONF",
             action="RECORD_SALARY_PAYMENT",
             target_tab="SalaryPayments",
@@ -1000,6 +1000,10 @@ class TestMission51B1TransactionSafety(unittest.TestCase):
             failure_category=FailureCategory.RECOVERY_REQUIRED.value,
             allocated_id="SAL-000010",
             message="Partial salary receipt",
+            expected_from_state=TransactionState.EXECUTING,
+            expected_version=tx_d4["version"],
+            expected_correlation_id="CORR-SAL",
+            expected_attempt=tx_d4["attempt_count"],
         )
 
         # Non-owner sees redacted confidential metadata and retry blocked
