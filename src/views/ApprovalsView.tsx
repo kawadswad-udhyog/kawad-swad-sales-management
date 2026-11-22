@@ -253,6 +253,7 @@ export const ApprovalsView: React.FC = () => {
         method: 'POST',
         body: JSON.stringify({ approved: true, notes: `Approved by ${currentUser?.full_name || 'Owner'}` }),
         idempotencyKey: activeNonce,
+        lockScope: 'approvals_view',
       });
       clearAfterVerifiedResolution();
       clearActionNonce(key, true);
@@ -286,6 +287,7 @@ export const ApprovalsView: React.FC = () => {
         method: 'POST',
         body: JSON.stringify({ approved: false, notes: `Rejected by ${currentUser?.full_name || 'Owner'}` }),
         idempotencyKey: activeNonce,
+        lockScope: 'approvals_view',
       });
       clearAfterVerifiedResolution();
       clearActionNonce(key, true);

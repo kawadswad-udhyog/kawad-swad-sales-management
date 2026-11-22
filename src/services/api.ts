@@ -36,18 +36,31 @@ import {
   type LockPersistenceStatus,
   PayloadFingerprintError,
   PayloadMismatchError,
+  StatusResponseValidationError,
   UnknownOutcomeLockBlockedError,
+  computeTransactionIdentityFingerprint,
+  isExemptAuthOrHealthPath,
   markTransactionTerminallyResolved,
+  normalizeEndpointPath,
+  normalizeHttpMethod,
   persistUnknownOutcome,
   recordAuthoritativeStatusCheckResult,
   registerUnknownTransactionIdentity,
+  resolveMutationTransactionScope,
+  validateAuthoritativeStatusResponse,
   verifyPayloadAgainstActiveLock,
 } from '../utils/unknownOutcomeLock';
 
 export {
   PayloadFingerprintError,
   PayloadMismatchError,
+  StatusResponseValidationError,
   UnknownOutcomeLockBlockedError,
+  computeTransactionIdentityFingerprint,
+  normalizeEndpointPath,
+  normalizeHttpMethod,
+  resolveMutationTransactionScope,
+  validateAuthoritativeStatusResponse,
 };
 
 export const DEFAULT_API_BASE_URL =
@@ -361,7 +374,8 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
   const token = getAuthToken();
   const { targetUrl } = constructApiUrl(baseUrl, path);
   const method = (options.method || 'GET').toUpperCase();
-  const isMutation = isMutationMethod(method) && !path.includes('/auth/') && !path.includes('/health');
+  const isAuthOrHealth = isExemptAuthOrHealthPath(path);
+  const isMutation = isMutationMethod(method) && !isAuthOrHealth;
   const timeoutMs = options.timeoutMs ?? 35000;
 
   const headers: Record<string, string> = {
@@ -378,20 +392,39 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
+  let effectiveScope: string | undefined;
+  let normalizedMethod = method;
+  let normalizedPath = path;
   let requestPayloadFingerprint: string | undefined;
+  let requestTransactionFingerprint: string | undefined;
   if (isMutation) {
-    const verified = verifyPayloadAgainstActiveLock({
-      scopeKey: options.lockScope,
-      nonce: resolvedIdempotencyKey,
-      rawBody: options.body,
-      method,
-      path,
-      requireVerifiedRetry: options.requireVerifiedRetry,
-    });
-    requestPayloadFingerprint = verified.payloadFingerprint;
+    const scopeResolution = resolveMutationTransactionScope(path, options.lockScope);
+    effectiveScope = scopeResolution.scopeKey;
+    normalizedPath = scopeResolution.normalizedPath;
+    for (const checkScope of scopeResolution.scopesToCheck) {
+      const verified = verifyPayloadAgainstActiveLock({
+        scopeKey: checkScope,
+        nonce: resolvedIdempotencyKey,
+        rawBody: options.body,
+        method,
+        path: normalizedPath,
+        requireVerifiedRetry: options.requireVerifiedRetry,
+      });
+      if (checkScope === effectiveScope) {
+        requestPayloadFingerprint = verified.payloadFingerprint;
+        requestTransactionFingerprint = verified.transactionFingerprint;
+        if (verified.method) normalizedMethod = verified.method;
+        if (verified.path) normalizedPath = verified.path;
+      }
+    }
   }
 
-  const flightHandle = buildMutationFlightHandle(path, method, resolvedIdempotencyKey, options.body);
+  const flightHandle = buildMutationFlightHandle(
+    normalizedPath,
+    normalizedMethod,
+    resolvedIdempotencyKey,
+    options.body
+  );
   acquireInflightMutationLock(flightHandle, targetUrl, resolvedIdempotencyKey);
 
   const controller = new AbortController();
@@ -410,9 +443,10 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
       registerUnknownTransactionIdentity({
         nonce: effectiveNonce,
         payloadFingerprint: requestPayloadFingerprint,
-        method,
-        path,
-        scopeKey: options.lockScope,
+        transactionFingerprint: requestTransactionFingerprint,
+        method: normalizedMethod,
+        path: normalizedPath,
+        scopeKey: effectiveScope,
         transactionId: params.transactionId,
         correlationId: params.correlationId,
         transactionState: params.transactionState || 'UNKNOWN',
@@ -423,9 +457,9 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     let persistenceStatus: LockPersistenceStatus | undefined;
     let persistenceFailureReason: string | undefined;
     let reloadSafe: boolean | undefined;
-    if (options.lockScope && effectiveNonce) {
+    if (effectiveScope && effectiveNonce) {
       const pRes = persistUnknownOutcome(
-        options.lockScope,
+        effectiveScope,
         {
           nonce: effectiveNonce,
           correlationId: params.correlationId,
@@ -433,10 +467,18 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
           transactionState: params.transactionState || 'UNKNOWN',
           recoveryRequired: Boolean(params.recoveryRequired),
           payloadFingerprint: requestPayloadFingerprint,
-          scopeKey: options.lockScope,
+          transactionFingerprint: requestTransactionFingerprint,
+          method: normalizedMethod,
+          path: normalizedPath,
+          scopeKey: effectiveScope,
           message: params.message,
         },
-        requestPayloadFingerprint
+        requestPayloadFingerprint,
+        {
+          method: normalizedMethod,
+          path: normalizedPath,
+          transactionFingerprint: requestTransactionFingerprint,
+        }
       );
       persistenceDegraded = pRes.degraded;
       persistenceStatus = pRes.status;
@@ -448,7 +490,10 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
       transactionState: params.transactionState || 'UNKNOWN',
       recoveryRequired: Boolean(params.recoveryRequired),
       payloadFingerprint: requestPayloadFingerprint,
-      scopeKey: options.lockScope,
+      transactionFingerprint: requestTransactionFingerprint,
+      method: normalizedMethod,
+      path: normalizedPath,
+      scopeKey: effectiveScope,
       persistenceDegraded,
       persistenceStatus,
       persistenceFailureReason,
@@ -557,7 +602,7 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     }
 
     if (isMutation && res.ok && resolvedIdempotencyKey) {
-      markTransactionTerminallyResolved(resolvedIdempotencyKey, options.lockScope);
+      markTransactionTerminallyResolved(resolvedIdempotencyKey, effectiveScope);
     }
 
     return res;
@@ -605,6 +650,10 @@ export class ApiHttpError extends Error {
   nonce?: string;
   recoveryDecision?: string;
   payloadFingerprint?: string;
+  transactionFingerprint?: string;
+  method?: string;
+  path?: string;
+  scopeKey?: string;
 
   constructor(
     status: number,
@@ -623,6 +672,10 @@ export class ApiHttpError extends Error {
       nonce?: string;
       recoveryDecision?: string;
       payloadFingerprint?: string;
+      transactionFingerprint?: string;
+      method?: string;
+      path?: string;
+      scopeKey?: string;
     }
   ) {
     super(message);
@@ -641,6 +694,10 @@ export class ApiHttpError extends Error {
     this.nonce = extra?.nonce;
     this.recoveryDecision = extra?.recoveryDecision;
     this.payloadFingerprint = extra?.payloadFingerprint;
+    this.transactionFingerprint = extra?.transactionFingerprint;
+    this.method = extra?.method;
+    this.path = extra?.path;
+    this.scopeKey = extra?.scopeKey;
   }
 }
 
@@ -833,6 +890,9 @@ export interface UnknownOutcomeState {
   actionLabel?: string;
   recoveryRequired?: boolean;
   payloadFingerprint?: string;
+  transactionFingerprint?: string;
+  method?: string;
+  path?: string;
   scopeKey?: string;
   persistenceDegraded?: boolean;
   persistenceStatus?: LockPersistenceStatus;
@@ -852,6 +912,7 @@ export interface TransactionStatusResponse {
   transaction_state?: TransactionLifecycleState | null;
   failure_category?: TransactionFailureCategory | null;
   nonce: string;
+  idempotency_key?: string;
   correlation_id?: string | null;
   allocated_id?: string | null;
   tab_name?: string | null;
@@ -876,6 +937,9 @@ export class ApiOutcomeUnknownError extends Error {
   transactionState?: TransactionLifecycleState;
   recoveryRequired?: boolean;
   payloadFingerprint?: string;
+  transactionFingerprint?: string;
+  method?: string;
+  path?: string;
   scopeKey?: string;
   persistenceDegraded?: boolean;
   persistenceStatus?: LockPersistenceStatus;
@@ -893,6 +957,9 @@ export class ApiOutcomeUnknownError extends Error {
           transactionState?: TransactionLifecycleState;
           recoveryRequired?: boolean;
           payloadFingerprint?: string;
+          transactionFingerprint?: string;
+          method?: string;
+          path?: string;
           scopeKey?: string;
           persistenceDegraded?: boolean;
           persistenceStatus?: LockPersistenceStatus;
@@ -911,6 +978,9 @@ export class ApiOutcomeUnknownError extends Error {
       this.transactionState = transactionIdOrExtra.transactionState;
       this.recoveryRequired = transactionIdOrExtra.recoveryRequired;
       this.payloadFingerprint = transactionIdOrExtra.payloadFingerprint;
+      this.transactionFingerprint = transactionIdOrExtra.transactionFingerprint;
+      this.method = transactionIdOrExtra.method;
+      this.path = transactionIdOrExtra.path;
       this.scopeKey = transactionIdOrExtra.scopeKey;
       this.persistenceDegraded = transactionIdOrExtra.persistenceDegraded;
       this.persistenceStatus = transactionIdOrExtra.persistenceStatus;
@@ -975,7 +1045,22 @@ export function extractUnknownOutcomeInfo(
     (err instanceof ApiOutcomeUnknownError && err.payloadFingerprint) ||
     (err instanceof ApiHttpError && err.payloadFingerprint) ||
     undefined;
-  const scopeKey = err instanceof ApiOutcomeUnknownError ? err.scopeKey : undefined;
+  const transactionFingerprint =
+    (err instanceof ApiOutcomeUnknownError && err.transactionFingerprint) ||
+    (err instanceof ApiHttpError && err.transactionFingerprint) ||
+    undefined;
+  const method =
+    (err instanceof ApiOutcomeUnknownError && err.method) ||
+    (err instanceof ApiHttpError && err.method) ||
+    undefined;
+  const path =
+    (err instanceof ApiOutcomeUnknownError && err.path) ||
+    (err instanceof ApiHttpError && err.path) ||
+    undefined;
+  const scopeKey =
+    (err instanceof ApiOutcomeUnknownError && err.scopeKey) ||
+    (err instanceof ApiHttpError && err.scopeKey) ||
+    undefined;
   const persistenceDegraded =
     err instanceof ApiOutcomeUnknownError ? err.persistenceDegraded : undefined;
   const persistenceStatus =
@@ -995,6 +1080,9 @@ export function extractUnknownOutcomeInfo(
     transactionState: recoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
     recoveryRequired,
     payloadFingerprint,
+    transactionFingerprint,
+    method,
+    path,
     scopeKey,
     persistenceDegraded,
     persistenceStatus,
@@ -1046,7 +1134,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   const timeoutMs = options.timeoutMs ?? 35000;
   const method = (options.method || 'GET').toUpperCase();
   const isReadOnlyMethod = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-  const isAuthOrHealth = path.includes('/auth/') || path.includes('/health');
+  const isAuthOrHealth = isExemptAuthOrHealthPath(path);
 
   const { targetUrl, isProxied, error: urlConstructionErr } = constructApiUrl(baseUrl, path);
 
@@ -1065,20 +1153,39 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
   }
 
   const isGovernedMutation = !isReadOnlyMethod && !isAuthOrHealth;
+  let effectiveScope: string | undefined;
+  let normalizedMethod = method;
+  let normalizedPath = path;
   let requestPayloadFingerprint: string | undefined;
+  let requestTransactionFingerprint: string | undefined;
   if (isGovernedMutation) {
-    const verified = verifyPayloadAgainstActiveLock({
-      scopeKey: options.lockScope,
-      nonce: resolvedIdempotencyKey,
-      rawBody: options.body,
-      method,
-      path,
-      requireVerifiedRetry: options.requireVerifiedRetry,
-    });
-    requestPayloadFingerprint = verified.payloadFingerprint;
+    const scopeResolution = resolveMutationTransactionScope(path, options.lockScope);
+    effectiveScope = scopeResolution.scopeKey;
+    normalizedPath = scopeResolution.normalizedPath;
+    for (const checkScope of scopeResolution.scopesToCheck) {
+      const verified = verifyPayloadAgainstActiveLock({
+        scopeKey: checkScope,
+        nonce: resolvedIdempotencyKey,
+        rawBody: options.body,
+        method,
+        path: normalizedPath,
+        requireVerifiedRetry: options.requireVerifiedRetry,
+      });
+      if (checkScope === effectiveScope) {
+        requestPayloadFingerprint = verified.payloadFingerprint;
+        requestTransactionFingerprint = verified.transactionFingerprint;
+        if (verified.method) normalizedMethod = verified.method;
+        if (verified.path) normalizedPath = verified.path;
+      }
+    }
   }
 
-  const flightHandle = buildMutationFlightHandle(path, method, resolvedIdempotencyKey, options.body);
+  const flightHandle = buildMutationFlightHandle(
+    normalizedPath,
+    normalizedMethod,
+    resolvedIdempotencyKey,
+    options.body
+  );
   acquireInflightMutationLock(flightHandle, targetUrl, resolvedIdempotencyKey);
 
   const registerRequestUnknownIdentity = (params: {
@@ -1094,9 +1201,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       registerUnknownTransactionIdentity({
         nonce: effectiveNonce,
         payloadFingerprint: requestPayloadFingerprint,
-        method,
-        path,
-        scopeKey: options.lockScope,
+        transactionFingerprint: requestTransactionFingerprint,
+        method: normalizedMethod,
+        path: normalizedPath,
+        scopeKey: effectiveScope,
         transactionId: params.transactionId,
         correlationId: params.correlationId,
         transactionState: params.transactionState || 'UNKNOWN',
@@ -1107,9 +1215,9 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     let persistenceStatus: LockPersistenceStatus | undefined;
     let persistenceFailureReason: string | undefined;
     let reloadSafe: boolean | undefined;
-    if (options.lockScope && effectiveNonce) {
+    if (effectiveScope && effectiveNonce) {
       const pRes = persistUnknownOutcome(
-        options.lockScope,
+        effectiveScope,
         {
           nonce: effectiveNonce,
           correlationId: params.correlationId,
@@ -1117,10 +1225,18 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           transactionState: params.transactionState || 'UNKNOWN',
           recoveryRequired: Boolean(params.recoveryRequired),
           payloadFingerprint: requestPayloadFingerprint,
-          scopeKey: options.lockScope,
+          transactionFingerprint: requestTransactionFingerprint,
+          method: normalizedMethod,
+          path: normalizedPath,
+          scopeKey: effectiveScope,
           message: params.message || UNKNOWN_OUTCOME_STANDARD_MSG,
         },
-        requestPayloadFingerprint
+        requestPayloadFingerprint,
+        {
+          method: normalizedMethod,
+          path: normalizedPath,
+          transactionFingerprint: requestTransactionFingerprint,
+        }
       );
       persistenceDegraded = pRes.degraded;
       persistenceStatus = pRes.status;
@@ -1406,7 +1522,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
             transactionState: 'UNKNOWN',
             recoveryRequired: false,
             payloadFingerprint: requestPayloadFingerprint,
-            scopeKey: options.lockScope,
+            transactionFingerprint: requestTransactionFingerprint,
+            method: normalizedMethod,
+            path: normalizedPath,
+            scopeKey: effectiveScope,
             persistenceDegraded: regMeta.persistenceDegraded,
             persistenceStatus: regMeta.persistenceStatus,
             persistenceFailureReason: regMeta.persistenceFailureReason,
@@ -1442,11 +1561,15 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         nonce: effectiveNonce,
         recoveryDecision,
         payloadFingerprint: requestPayloadFingerprint,
+        transactionFingerprint: requestTransactionFingerprint,
+        method: normalizedMethod,
+        path: normalizedPath,
+        scopeKey: effectiveScope,
       });
     }
 
     if (isGovernedMutation && resolvedIdempotencyKey) {
-      markTransactionTerminallyResolved(resolvedIdempotencyKey, options.lockScope);
+      markTransactionTerminallyResolved(resolvedIdempotencyKey, effectiveScope);
     }
 
     // Success recording
@@ -1486,7 +1609,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       err instanceof ApiOutcomeUnknownError ||
       err instanceof PayloadMismatchError ||
       err instanceof PayloadFingerprintError ||
-      err instanceof UnknownOutcomeLockBlockedError
+      err instanceof UnknownOutcomeLockBlockedError ||
+      err instanceof StatusResponseValidationError
     ) {
       throw err;
     }
@@ -1567,7 +1691,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
             {
               transactionState: 'UNKNOWN',
               payloadFingerprint: requestPayloadFingerprint,
-              scopeKey: options.lockScope,
+              transactionFingerprint: requestTransactionFingerprint,
+              method: normalizedMethod,
+              path: normalizedPath,
+              scopeKey: effectiveScope,
               persistenceDegraded: regMeta.persistenceDegraded,
               persistenceStatus: regMeta.persistenceStatus,
               persistenceFailureReason: regMeta.persistenceFailureReason,
@@ -1596,7 +1723,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           {
             transactionState: 'UNKNOWN',
             payloadFingerprint: requestPayloadFingerprint,
-            scopeKey: options.lockScope,
+            transactionFingerprint: requestTransactionFingerprint,
+            method: normalizedMethod,
+            path: normalizedPath,
+            scopeKey: effectiveScope,
             persistenceDegraded: regMeta.persistenceDegraded,
             persistenceStatus: regMeta.persistenceStatus,
             persistenceFailureReason: regMeta.persistenceFailureReason,
@@ -1623,7 +1753,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
             {
               transactionState: 'UNKNOWN',
               payloadFingerprint: requestPayloadFingerprint,
-              scopeKey: options.lockScope,
+              transactionFingerprint: requestTransactionFingerprint,
+              method: normalizedMethod,
+              path: normalizedPath,
+              scopeKey: effectiveScope,
               persistenceDegraded: regMeta.persistenceDegraded,
               persistenceStatus: regMeta.persistenceStatus,
               persistenceFailureReason: regMeta.persistenceFailureReason,
@@ -2966,8 +3099,22 @@ export async function updateV2Policy(
     if (err instanceof ApiOutcomeUnknownError) {
       throw new ApiOutcomeUnknownError(
         UNKNOWN_OUTCOME_STANDARD_MSG,
-        payload.nonce,
-        err.correlationId
+        payload.nonce || err.nonce,
+        err.correlationId,
+        {
+          transactionId: err.transactionId,
+          transactionState: err.transactionState,
+          recoveryRequired: err.recoveryRequired,
+          payloadFingerprint: err.payloadFingerprint,
+          transactionFingerprint: err.transactionFingerprint,
+          method: err.method,
+          path: err.path,
+          scopeKey: err.scopeKey,
+          persistenceDegraded: err.persistenceDegraded,
+          persistenceStatus: err.persistenceStatus,
+          persistenceFailureReason: err.persistenceFailureReason,
+          reloadSafe: err.reloadSafe,
+        }
       );
     }
     throw err;
@@ -2976,16 +3123,26 @@ export async function updateV2Policy(
 
 export async function checkV2TransactionStatus(
   nonce: string,
-  correlationId?: string
+  correlationId?: string,
+  expectedTransactionId?: string
 ): Promise<TransactionStatusResponse> {
+  const reqNonce = typeof nonce === 'string' ? nonce.trim() : '';
+  if (!reqNonce) {
+    throw new StatusResponseValidationError({
+      errorCode: 'INVALID_REQUESTED_NONCE',
+      requestedNonce: String(nonce ?? ''),
+      message: 'Cannot check transaction status: requested nonce is missing or empty.',
+    });
+  }
   const q = new URLSearchParams();
   if (correlationId) q.set('correlation_id', correlationId);
   const qs = q.toString();
-  const res = await apiRequest<TransactionStatusResponse>(
-    `/api/v2/transactions/status/${encodeURIComponent(nonce)}${qs ? `?${qs}` : ''}`
+  const res = await apiRequest<unknown>(
+    `/api/v2/transactions/status/${encodeURIComponent(reqNonce)}${qs ? `?${qs}` : ''}`
   );
-  recordAuthoritativeStatusCheckResult(nonce, res);
-  return res;
+  // TX-FINAL-F-03: Validate structure, response nonce === requested nonce, txId, and status enum fail-closed
+  const validated = recordAuthoritativeStatusCheckResult(reqNonce, res, expectedTransactionId);
+  return validated;
 }
 
 export async function fetchV2OfficialReport(
@@ -3030,8 +3187,22 @@ export async function postV2GovernedAction<T = Record<string, any>>(
     if (err instanceof ApiOutcomeUnknownError) {
       throw new ApiOutcomeUnknownError(
         UNKNOWN_OUTCOME_STANDARD_MSG,
-        payload.nonce,
-        err.correlationId
+        payload.nonce || err.nonce,
+        err.correlationId,
+        {
+          transactionId: err.transactionId,
+          transactionState: err.transactionState,
+          recoveryRequired: err.recoveryRequired,
+          payloadFingerprint: err.payloadFingerprint,
+          transactionFingerprint: err.transactionFingerprint,
+          method: err.method,
+          path: err.path,
+          scopeKey: err.scopeKey,
+          persistenceDegraded: err.persistenceDegraded,
+          persistenceStatus: err.persistenceStatus,
+          persistenceFailureReason: err.persistenceFailureReason,
+          reloadSafe: err.reloadSafe,
+        }
       );
     }
     throw err;

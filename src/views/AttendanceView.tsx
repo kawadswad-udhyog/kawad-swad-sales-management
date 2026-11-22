@@ -160,6 +160,7 @@ export const AttendanceView: React.FC = () => {
           notes,
         }),
         idempotencyKey: activeNonce,
+        lockScope: 'attendance_view',
       });
       clearAfterVerifiedResolution();
       setSingleNonce(null);
@@ -242,6 +243,7 @@ export const AttendanceView: React.FC = () => {
           records,
         }),
         idempotencyKey: activeNonce,
+        lockScope: 'attendance_view',
       });
       clearAfterVerifiedResolution();
       setBulkNonce(null);
@@ -280,6 +282,7 @@ export const AttendanceView: React.FC = () => {
           notes: editNotes,
         }),
         idempotencyKey: activeNonce,
+        lockScope: 'attendance_view',
       });
       clearAfterVerifiedResolution();
       setCorrectionNonce(null);
@@ -315,6 +318,7 @@ export const AttendanceView: React.FC = () => {
       await apiRequest(`/api/production/attendance/${encodeURIComponent(attendanceId)}`, {
         method: 'DELETE',
         idempotencyKey: activeNonce,
+        lockScope: 'attendance_view',
       });
       clearAfterVerifiedResolution();
       setDeleteNonces((prev) => {

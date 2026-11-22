@@ -570,11 +570,16 @@ async function main() {
     assert.equal(shouldBlockDraftNonceReset(res.record?.outcome), true);
 
     // Non-terminal status checks MUST NOT unlock!
-    recordAuthoritativeStatusCheckResult('SALE-DEG-1', { status: 'IN_PROGRESS', safe_to_retry_same_nonce: false });
+    recordAuthoritativeStatusCheckResult('SALE-DEG-1', {
+      nonce: 'SALE-DEG-1',
+      status: 'IN_PROGRESS',
+      safe_to_retry_same_nonce: false,
+    });
     assert.equal(isNonceTerminallyResolved('SALE-DEG-1'), false);
     assert.equal(isScopeLocked(scope), true);
 
     recordAuthoritativeStatusCheckResult('SALE-DEG-1', {
+      nonce: 'SALE-DEG-1',
       status: 'UNKNOWN_STORAGE_UNAVAILABLE',
       safe_to_retry_same_nonce: false,
     });
@@ -598,6 +603,7 @@ async function main() {
 
     // Authoritative terminal status (CONFIRMED_RECORDED) unlocks cleanly!
     recordAuthoritativeStatusCheckResult('SALE-DEG-1', {
+      nonce: 'SALE-DEG-1',
       status: 'CONFIRMED_RECORDED',
       safe_to_retry_same_nonce: false,
     });
@@ -951,6 +957,7 @@ async function main() {
 
       // Authoritative RECONCILED resolves cleanly
       recordAuthoritativeStatusCheckResult('SALE-QUAR-1', {
+        nonce: 'SALE-QUAR-1',
         status: 'RECONCILED',
         safe_to_retry_same_nonce: false,
       });

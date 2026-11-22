@@ -3,6 +3,7 @@ import {
   checkV2TransactionStatus,
   TransactionStatusResponse,
   UnknownOutcomeState,
+  validateAuthoritativeStatusResponse,
 } from '../../services/api';
 
 interface UnknownOutcomeBannerProps {
@@ -65,7 +66,17 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
     setChecking(true);
     setCheckError(null);
     try {
-      const res = await checkV2TransactionStatus(outcome.nonce, outcome.correlationId);
+      const rawRes = await checkV2TransactionStatus(
+        outcome.nonce,
+        outcome.correlationId,
+        outcome.transactionId
+      );
+      // TX-FINAL-F-03: Independently verify response nonce, txId, and status enum fail-closed
+      const res = validateAuthoritativeStatusResponse(
+        outcome.nonce,
+        rawRes,
+        outcome.transactionId
+      );
       setStatusResult(res);
       if (
         (res.status === 'CONFIRMED_RECORDED' || res.status === 'RECONCILED') &&
@@ -74,6 +85,7 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
         onConfirmedRecorded(res);
       }
     } catch (err: unknown) {
+      setStatusResult(null);
       setCheckError(
         err instanceof Error
           ? err.message
@@ -127,6 +139,7 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
       data-tx-nonce={outcome.nonce}
       data-tx-persistence-degraded={isPersistenceDegraded ? 'true' : 'false'}
       data-tx-payload-fingerprint={effectiveFingerprint || ''}
+      data-tx-transaction-fingerprint={outcome.transactionFingerprint || ''}
       style={{
         background: palette.bg,
         border: `1px solid ${palette.border}`,
@@ -204,6 +217,15 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
 
           <div style={{ marginTop: 6, fontSize: 11, fontFamily: 'monospace', opacity: 0.9 }}>
             Preserved Nonce: <strong>{outcome.nonce || 'UNAVAILABLE (DEGRADED LOCK)'}</strong>
+            {outcome.method && outcome.path ? (
+              <>
+                {' '}
+                | Request:{' '}
+                <strong>
+                  {outcome.method} {outcome.path}
+                </strong>
+              </>
+            ) : null}
             {effectiveFingerprint ? (
               <>
                 {' '}

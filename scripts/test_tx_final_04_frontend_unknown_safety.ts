@@ -53,6 +53,7 @@ import {
   setApiBaseUrl,
 } from '../src/services/api.ts';
 import {
+  __resetUnknownLockRegistriesForTest,
   clearPersistedUnknownOutcome,
   computePayloadFingerprint,
   isOutcomeLocked,
@@ -112,6 +113,8 @@ async function runTests() {
   // Test 2: Post-transmission TypeError: Failed to fetch (cross-origin AND same-origin) -> ApiOutcomeUnknownError in BOTH apiRequest & apiFetch
   {
     for (const baseUrl of ['https://api.kawadswad.test', '']) {
+      __resetUnknownLockRegistriesForTest();
+      sessionStore.clear();
       setApiBaseUrl(baseUrl);
 
       // 2a. apiRequest
@@ -159,6 +162,8 @@ async function runTests() {
 
   // Test 3: Synchronous in-flight duplicate submission blocked in apiFetch (Workforce payroll disbursement)
   {
+    __resetUnknownLockRegistriesForTest();
+    sessionStore.clear();
     setApiBaseUrl('');
     let calls = 0;
     let resolveFirst!: (v: any) => void;
@@ -242,6 +247,10 @@ async function runTests() {
     }
     assert.ok(err504 instanceof ApiOutcomeUnknownError, 'apiFetch HTTP 504 must throw ApiOutcomeUnknownError');
     assert.equal((err504 as ApiOutcomeUnknownError).nonce, 'NONCE-AF-504');
+
+    // Isolate independent HTTP 409 sub-case from the HTTP 504 lock established above
+    __resetUnknownLockRegistriesForTest();
+    sessionStore.clear();
 
     (globalThis as any).fetch = async () => ({
       ok: false,

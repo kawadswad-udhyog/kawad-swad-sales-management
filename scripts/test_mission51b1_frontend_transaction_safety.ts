@@ -38,6 +38,7 @@ import {
   normalizeApiErrorPayload,
   setApiBaseUrl,
 } from '../src/services/api.ts';
+import { __resetUnknownLockRegistriesForTest } from '../src/utils/unknownOutcomeLock.ts';
 
 async function runTests() {
   let passed = 0;
@@ -119,7 +120,8 @@ async function runTests() {
       caught instanceof ApiOutcomeUnknownError || caught instanceof Error,
       'Network failure must surface an explicit error'
     );
-    // Simulate same-origin network drop -> must throw ApiOutcomeUnknownError with preserved nonce
+    // Simulate same-origin network drop (isolated from previous cross-origin sub-case lock) -> must throw ApiOutcomeUnknownError with preserved nonce
+    __resetUnknownLockRegistriesForTest();
     setApiBaseUrl('');
     fetchCalls = 0;
     let sameOriginErr: unknown = null;
