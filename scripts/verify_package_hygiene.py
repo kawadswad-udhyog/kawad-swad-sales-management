@@ -57,15 +57,21 @@ REQUIRED_ROUND31_FILES = REQUIRED_ROUND3_FILES + [
     "docs/MISSION_51B1_ROUND31_README.md",
 ]
 
+REQUIRED_ROUND32_FILES = REQUIRED_ROUND31_FILES + [
+    "docs/MISSION_51B1_ROUND32_PACKAGING_REPORT.md",
+]
+
 ROOT_LAYOUT_ANCHORS = (
     "backend/app/main.py",
     "render.yaml",
     ".env.example",
     "package.json",
+    "README.md",
 )
 
 FORBIDDEN_PATH_SEGMENTS = {
     ".git",
+    ".aistudio",
     "node_modules",
     "__pycache__",
     ".pytest_cache",
@@ -75,6 +81,10 @@ FORBIDDEN_PATH_SEGMENTS = {
     "aistudio",
 }
 
+FORBIDDEN_DIR_PATTERNS = [
+    re.compile(r"^\.(ks_|tmp_|startup_coord_test_)", re.IGNORECASE),
+]
+
 FORBIDDEN_EXTENSIONS = (
     ".db",
     ".db-wal",
@@ -83,6 +93,7 @@ FORBIDDEN_EXTENSIONS = (
     ".sqlite3",
     ".pyc",
     ".pyo",
+    ".log",
     ".zip",
     ".tar",
     ".gz",
@@ -143,6 +154,9 @@ def check_member_hygiene(member_path: str) -> List[str]:
         if seg in FORBIDDEN_PATH_SEGMENTS:
             violations.append(f"forbidden_directory_segment:{seg} ({norm})")
             break
+        if any(pat.search(seg) for pat in FORBIDDEN_DIR_PATTERNS):
+            violations.append(f"forbidden_runtime_state_dir:{seg} ({norm})")
+            break
 
     if base in FORBIDDEN_BASENAMES:
         violations.append(f"forbidden_basename:{base} ({norm})")
@@ -167,24 +181,30 @@ def audit_zip_archive(
     require_round2_files: bool = True,
     require_round3_files: bool = False,
     require_round31_files: bool = False,
+    require_round32_files: bool = False,
 ) -> Tuple[bool, Dict[str, object]]:
     """
     Independently verify ZIP integrity, forbidden-file hygiene, leaked-key absence,
-    repository-root layout, required Round 2 / Round 3 / Round 3.1 files, and final SHA-256 digest.
+    repository-root layout, required Round 2 / 3 / 3.1 / 3.2 files, and final SHA-256 digest.
     """
     if not os.path.isfile(zip_path):
         return False, {"error": f"Archive not found: {zip_path}"}
 
     violations: List[str] = []
     members: List[str] = []
+    entry_count = 0
     bad_member = None
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         bad_member = zf.testzip()
         if bad_member is not None:
             violations.append(f"corrupt_zip_member:{bad_member}")
-        for info in zf.infolist():
+        infolist = zf.infolist()
+        entry_count = len(infolist)
+        for info in infolist:
             if info.is_dir():
+                norm_dir = _normalize_member_path(info.filename)
+                violations.extend(check_member_hygiene(norm_dir))
                 continue
             norm_name = _normalize_member_path(info.filename)
             members.append(norm_name)
@@ -197,7 +217,9 @@ def audit_zip_archive(
 
     member_set = set(members)
     missing_required: List[str] = []
-    if require_round31_files:
+    if require_round32_files:
+        required_list = REQUIRED_ROUND32_FILES
+    elif require_round31_files:
         required_list = REQUIRED_ROUND31_FILES
     elif require_round3_files:
         required_list = REQUIRED_ROUND3_FILES
@@ -213,7 +235,7 @@ def audit_zip_archive(
 
     top_level_entries = sorted({m.split("/", 1)[0] for m in members if m})
     is_repo_root = all(anchor in member_set for anchor in ROOT_LAYOUT_ANCHORS)
-    if require_round2_files or require_round3_files or require_round31_files:
+    if require_round2_files or require_round3_files or require_round31_files or require_round32_files:
         if not is_repo_root:
             violations.append(
                 f"invalid_root_layout:expected_repository_root_anchors ({', '.join(ROOT_LAYOUT_ANCHORS)})"
@@ -229,6 +251,7 @@ def audit_zip_archive(
         "archive_path": os.path.abspath(zip_path),
         "archive_name": os.path.basename(zip_path),
         "size_bytes": stat.st_size,
+        "entry_count": entry_count,
         "file_count": len(members),
         "testzip_bad_member": bad_member,
         "root_layout": "REPOSITORY_ROOT" if is_repo_root and len(top_level_entries) > 1 else "NON_STANDARD",
@@ -251,10 +274,12 @@ def main(argv: List[str]) -> int:
         require_round2_files=True,
         require_round3_files=True,
         require_round31_files=True,
+        require_round32_files=True,
     )
     for k in (
         "archive_name",
         "size_bytes",
+        "entry_count",
         "file_count",
         "testzip_bad_member",
         "root_layout",

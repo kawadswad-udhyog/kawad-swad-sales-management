@@ -31,9 +31,9 @@ def find_nonvolatile_writable_root(preferred_root: Optional[str] = None) -> str:
     if preferred_root:
         candidates.append(preferred_root)
     candidates.extend([
-        _REPO_ROOT,
         os.path.expanduser("~"),
         "/var/data",
+        _REPO_ROOT,
         os.getcwd(),
     ])
     seen = set()
