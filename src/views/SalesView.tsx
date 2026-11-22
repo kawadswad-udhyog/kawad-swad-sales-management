@@ -121,12 +121,14 @@ export const SalesView: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionIdempotencyKey, setSubmissionIdempotencyKey] = useState<string | null>(null);
 
-  // TX-FINAL-04: Persistent UNKNOWN-outcome guard & lock
+  // TX-FINAL-04 & 51B-1R-F: Persistent UNKNOWN-outcome guard, lock & payload fingerprint enforcement
   const {
     unknownOutcome,
     isOutcomeLocked,
     setUnknownOutcome,
     clearAfterVerifiedResolution,
+    fingerprintMismatchError,
+    verifyPayloadMatchesLock,
   } = useUnknownOutcomeGuard('sales_view');
   const [unknownActionType, setUnknownActionType] = useState<'create' | 'cancel'>('create');
 
@@ -441,6 +443,15 @@ export const SalesView: React.FC = () => {
       })),
     };
 
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(payload, idempotencyKey);
+      if (!fpCheck.ok) {
+        setIsSubmitting(false);
+        setNotice({ msg: fpCheck.error, error: true });
+        return;
+      }
+    }
+
     try {
       const result = await createSale(payload);
 
@@ -524,6 +535,14 @@ export const SalesView: React.FC = () => {
       createSubmissionNonce('SALECAN');
     if (!cancelSaleNonces[saleId]) {
       setCancelSaleNonces((prev) => ({ ...prev, [saleId]: activeNonce }));
+    }
+    const cancelPayload = { saleId, reason: cancelSaleReason.trim() };
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(cancelPayload, activeNonce);
+      if (!fpCheck.ok) {
+        setNotice({ msg: fpCheck.error, error: true });
+        return;
+      }
     }
     setIsCancellingSale(true);
     setNotice(null);
@@ -628,6 +647,7 @@ export const SalesView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
+        fingerprintMismatchError={fingerprintMismatchError}
         onRetry={() => {
           if (unknownActionType === 'cancel' && cancelSaleTarget) {
             executeCancelSaleSubmission(true);

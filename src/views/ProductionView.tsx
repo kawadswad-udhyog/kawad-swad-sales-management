@@ -422,7 +422,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   };
 
   const handleRecoverPackaging = async (packagingId: string) => {
-    if (busy || !packagingId) return;
+    if (busy || !packagingId || isOutcomeLocked) return;
     const activeNonce = recoverPkgNonces[packagingId] || createSubmissionNonce('PRD-PKGRCV');
     if (!recoverPkgNonces[packagingId]) {
       setRecoverPkgNonces((prev) => ({ ...prev, [packagingId]: activeNonce }));
@@ -438,7 +438,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       async () => {
         await refreshPackaging();
         await refreshRegister();
-      }
+      },
+      activeNonce
     );
     if (ok) {
       setRecoverPkgNonces((prev) => {
@@ -1001,6 +1002,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         style={{ ...btn, flex: 1, padding: '7px 10px', fontSize: 12, background: '#d97706' }}
                         disabled={busy}
                         onClick={async () => {
+                          if (isOutcomeLocked) return;
                           const rId = String(r.recipe_id);
                           const activeNonce = confirmRecipeNonces[rId] || createSubmissionNonce('PRD-RCPOK');
                           if (!confirmRecipeNonces[rId]) {
@@ -1078,6 +1080,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                     showError('Leave the rate blank when status is PENDING.');
                     return;
                   }
+                  if (isOutcomeLocked) return;
                   const activeNonce = rawMasterNonce || createSubmissionNonce('PRD-RMMST');
                   if (!rawMasterNonce) setRawMasterNonce(activeNonce);
                   const ok = await runAction(
@@ -1167,6 +1170,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               <form
                 onSubmit={async e => {
                   e.preventDefault();
+                  if (isOutcomeLocked) return;
                   const matKey = verifyingMaterial.raw_material_id || verifyingMaterial.material_id;
                   const activeNonce = verifyIdempKey || createSubmissionNonce('PRD-RMVRF');
                   if (!verifyIdempKey) setVerifyIdempKey(activeNonce);
@@ -1335,6 +1339,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
                     const selectedMat = rawMaterials.find(m => m.material_id === receiveForm.material_id);
                     const matName = selectedMat ? selectedMat.material_name : undefined;
+                    if (isOutcomeLocked) return;
                     const activeNonce = receiveNonce || createSubmissionNonce('PRD-RMRCV');
                     if (!receiveNonce) setReceiveNonce(activeNonce);
 
@@ -2008,6 +2013,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                       return;
                     }
 
+                    if (isOutcomeLocked) return;
                     const activeNonce = millingNonce || createSubmissionNonce('PRD-MILL');
                     if (!millingNonce) setMillingNonce(activeNonce);
 
@@ -2397,6 +2403,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             <form
               onSubmit={async e => {
                 e.preventDefault();
+                if (isOutcomeLocked) return;
                 const activeNonce = workerNonce || createSubmissionNonce('PRD-WRK');
                 if (!workerNonce) setWorkerNonce(activeNonce);
                 const ok = await runAction(
@@ -2475,6 +2482,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   showError('Attendance is already recorded for this worker on this date.');
                   return;
                 }
+                if (isOutcomeLocked) return;
                 const activeNonce = attNonce || createSubmissionNonce('PRD-ATT');
                 if (!attNonce) setAttNonce(activeNonce);
                 const ok = await runAction(
@@ -2605,6 +2613,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   style={{ ...btn, background: '#b45309' }}
                   disabled={busy || !editAttendanceNotes.trim()}
                   onClick={async () => {
+                    if (isOutcomeLocked) return;
                     const activeNonce = editAttNonce || createSubmissionNonce('PRD-ATTED');
                     if (!editAttNonce) setEditAttNonce(activeNonce);
                     const ok = await runAction(
@@ -2719,6 +2728,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                                   style={{ ...btn, padding: '4px 8px', fontSize: 11, background: '#dc2626' }}
                                   disabled={busy}
                                   onClick={async () => {
+                                    if (isOutcomeLocked) return;
                                     const aId = String(a.attendance_id);
                                     const activeNonce = delAttNonces[aId] || createSubmissionNonce('PRD-ATTDEL');
                                     if (!delAttNonces[aId]) {
@@ -2779,6 +2789,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                   showError('Enter at least one valid ingredient line.');
                   return;
                 }
+                if (isOutcomeLocked) return;
                 const activeNonce = recipeNonce || createSubmissionNonce('PRD-RCP');
                 if (!recipeNonce) setRecipeNonce(activeNonce);
                 const ok = await runAction(
@@ -2859,6 +2870,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             <form
               onSubmit={async e => {
                 e.preventDefault();
+                if (isOutcomeLocked) return;
                 const activeNonce = batchNonce || createSubmissionNonce('PRD-BAT');
                 if (!batchNonce) setBatchNonce(activeNonce);
                 const ok = await runAction(
@@ -3009,6 +3021,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                         title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch approval locked.' : ''}
                         onClick={async () => {
+                          if (isOutcomeLocked) return;
                           const key = `${bId}:APPROVE`;
                           const activeNonce = batchApprovalNonces[key] || createSubmissionNonce('PRD-BATAP');
                           if (!batchApprovalNonces[key]) {
@@ -3044,6 +3057,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
                         disabled={busy || !isGoogleSheetsConnected || !persistentWritesEnabled || !bId}
                         title={(!isGoogleSheetsConnected || !persistentWritesEnabled) ? 'Google Sheets disconnected. Batch rejection locked.' : ''}
                         onClick={async () => {
+                          if (isOutcomeLocked) return;
                           const key = `${bId}:REJECT`;
                           const activeNonce = batchApprovalNonces[key] || createSubmissionNonce('PRD-BATRJ');
                           if (!batchApprovalNonces[key]) {
@@ -3177,6 +3191,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             <form
               onSubmit={async e => {
                 e.preventDefault();
+                if (isOutcomeLocked) return;
                 const activeNonce = pkgNonce || createSubmissionNonce('PRD-PKG');
                 if (!pkgNonce) setPkgNonce(activeNonce);
                 const activeRef = pkgRef || 'PKG-' + Date.now();
@@ -3339,6 +3354,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
               <form
                 onSubmit={async e => {
                   e.preventDefault();
+                  if (isOutcomeLocked) return;
                   const pkgId = reviewingPackagingId;
                   const activeNonce = reviewPkgNonces[pkgId] || createSubmissionNonce('PRD-PKGAP');
                   if (!reviewPkgNonces[pkgId]) {
@@ -3537,6 +3553,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
             <form
               onSubmit={async e => {
                 e.preventDefault();
+                if (isOutcomeLocked) return;
                 const activeNonce = dispatchNonce || createSubmissionNonce('PRD-DSP');
                 if (!dispatchNonce) setDispatchNonce(activeNonce);
                 const ok = await runAction(

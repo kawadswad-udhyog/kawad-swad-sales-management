@@ -68,12 +68,14 @@ export const ClosingView: React.FC = () => {
   const [reviewNonce, setReviewNonce] = useState<string | null>(null);
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
 
-  // TX-FINAL-04: Persistent UNKNOWN-outcome lock & nonce preservation
+  // TX-FINAL-04 & 51B-1R-F: Persistent UNKNOWN-outcome lock, nonce & payload fingerprint enforcement
   const {
     unknownOutcome,
     isOutcomeLocked,
     setUnknownOutcome,
     clearAfterVerifiedResolution,
+    fingerprintMismatchError,
+    verifyPayloadMatchesLock,
   } = useUnknownOutcomeGuard('closing_view');
   const [unknownActionType, setUnknownActionType] = useState<'submit' | 'review'>('submit');
 
@@ -117,6 +119,14 @@ export const ClosingView: React.FC = () => {
       notes: notes.trim(),
       idempotency_key: activeNonce,
     };
+
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(payload, activeNonce);
+      if (!fpCheck.ok) {
+        setNotice({ msg: fpCheck.error, error: true, unknownOutcome: true });
+        return;
+      }
+    }
 
     try {
       setIsSubmitting(true);
@@ -190,6 +200,18 @@ export const ClosingView: React.FC = () => {
       (unknownActionType === 'review' ? unknownOutcome?.nonce : null) ||
       createSubmissionNonce('CLSRVW');
     if (!reviewNonce) setReviewNonce(activeNonce);
+    const reviewPayload = {
+      closing_id: closing.closing_id,
+      decision,
+      reviewNote: reviewNote.trim(),
+    };
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(reviewPayload, activeNonce);
+      if (!fpCheck.ok) {
+        setNotice({ msg: fpCheck.error, error: true, unknownOutcome: true });
+        return;
+      }
+    }
     setReviewSubmitting(true);
     try {
       await reviewDailyClosing(closing.closing_id, decision, reviewNote.trim(), activeNonce);
@@ -253,6 +275,7 @@ export const ClosingView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
+        fingerprintMismatchError={fingerprintMismatchError}
         onRetry={() => {
           if (unknownActionType === 'review' && reviewingClosing) {
             handleConfirmReview(true);

@@ -467,7 +467,7 @@ export const PurchasingView: React.FC = () => {
       loadData();
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, newPayment.idempotency_key, 'Record Supplier Payment');
-      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo, newPayment);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsSubmittingPayment(false);
@@ -479,13 +479,14 @@ export const PurchasingView: React.FC = () => {
     if (isAuditor || !applyAdvanceModal || isApplyingAdvance || isOutcomeLocked) return;
     setError(null);
     setIsApplyingAdvance(true);
+    const applyPayload = {
+      bill_id: applyAdvanceModal.bill_id,
+      amount: Number(applyAdvanceModal.amount || 0),
+      idempotency_key: applyAdvanceModal.idempotency_key,
+      notes: applyAdvanceModal.notes,
+    };
     try {
-      const res = await applySupplierAdvance(applyAdvanceModal.payment.payment_id, {
-        bill_id: applyAdvanceModal.bill_id,
-        amount: Number(applyAdvanceModal.amount || 0),
-        idempotency_key: applyAdvanceModal.idempotency_key,
-        notes: applyAdvanceModal.notes,
-      });
+      const res = await applySupplierAdvance(applyAdvanceModal.payment.payment_id, applyPayload);
       clearAfterVerifiedResolution();
       setSuccessMsg(
         `Reconciled ₹${Number(res.applied_amount || applyAdvanceModal.amount).toLocaleString()} advance from ${applyAdvanceModal.payment.payment_id} against bill.`
@@ -494,7 +495,7 @@ export const PurchasingView: React.FC = () => {
       loadData();
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, applyAdvanceModal.idempotency_key, 'Apply Supplier Advance');
-      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo, applyPayload);
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setIsApplyingAdvance(false);
@@ -968,7 +969,9 @@ export const PurchasingView: React.FC = () => {
                         {!isAuditor && unalloc > 0.01 && suppOpenBills.length > 0 && (
                           <button
                             type="button"
+                            disabled={isOutcomeLocked}
                             onClick={() => {
+                              if (isOutcomeLocked || shouldBlockDraftNonceReset(unknownOutcome)) return;
                               const firstBill = suppOpenBills[0];
                               const billBal = Number(
                                 firstBill.balance_amount ?? Number(firstBill.total_amount || 0) - Number(firstBill.paid_amount || 0)
@@ -983,7 +986,7 @@ export const PurchasingView: React.FC = () => {
                                 notes: '',
                               });
                             }}
-                            className="px-2.5 py-1 text-2xs font-semibold rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100"
+                            className="px-2.5 py-1 text-2xs font-semibold rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             Apply to Bill
                           </button>

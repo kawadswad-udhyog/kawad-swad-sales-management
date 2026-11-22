@@ -10,18 +10,24 @@ interface UnknownOutcomeBannerProps {
   onRetry?: () => void;
   onConfirmedRecorded?: (status: TransactionStatusResponse) => void;
   onDismiss?: () => void;
+  persistenceDegraded?: boolean;
+  persistenceFailureReason?: string | null;
+  payloadFingerprint?: string;
+  fingerprintMismatchError?: string | null;
 }
 
 const STATUS_CHECK_COOLDOWN_MS = 2000;
 
 /**
- * Reusable 504 / PENDING_UNKNOWN / RECOVERY_REQUIRED transaction safety banner (TX-FINAL-04).
- * - Retains exact client nonce & correlation_id without clearing user inputs.
- * - Keeps form inputs and new submissions locked while outcome is UNKNOWN or RECOVERY_REQUIRED.
+ * Reusable 504 / PENDING_UNKNOWN / RECOVERY_REQUIRED transaction safety banner (TX-FINAL-04 + 51B-1R-F).
+ * - Retains exact client nonce, correlation_id, and canonical payload fingerprint without clearing user inputs.
+ * - Keeps form inputs and new submissions locked while outcome is UNKNOWN, RECOVERY_REQUIRED, or persistence-degraded.
+ * - Explicitly displays visible Safety-Degraded Mode warning whenever sessionStorage persistence fails,
+ *   is unavailable, or stored lock data is corrupted (never assuming reload safety).
  * - Blocks retrying until GET /api/v2/transactions/status/{nonce} confirms
  *   `NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE` (`safe_to_retry_same_nonce === true`).
  * - Permanently disables automatic retry for `CONFIRMED_RECORDED`, `RECONCILED`,
- *   and `RECOVERY_REQUIRED` (quarantined partial/duplicate effects).
+ *   `RECOVERY_REQUIRED`, or payload fingerprint mismatch.
  * - Disallows casual dismissal while unresolved; unlock is only enabled after verified
  *   `CONFIRMED_RECORDED` or `RECONCILED` status.
  */
@@ -30,6 +36,10 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
   onRetry,
   onConfirmedRecorded,
   onDismiss,
+  persistenceDegraded: propPersistenceDegraded,
+  persistenceFailureReason: propPersistenceFailureReason,
+  payloadFingerprint: propPayloadFingerprint,
+  fingerprintMismatchError,
 }) => {
   const [checking, setChecking] = useState(false);
   const [statusResult, setStatusResult] = useState<TransactionStatusResponse | null>(null);
@@ -43,6 +53,12 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
   }, [outcome?.nonce, outcome?.correlationId, outcome?.recoveryRequired]);
 
   if (!outcome) return null;
+
+  const isPersistenceDegraded = Boolean(
+    propPersistenceDegraded || outcome.persistenceDegraded || outcome.reloadSafe === false
+  );
+  const failureReason = propPersistenceFailureReason || outcome.persistenceFailureReason || null;
+  const effectiveFingerprint = propPayloadFingerprint || outcome.payloadFingerprint || null;
 
   const handleCheckStatus = async () => {
     if (!outcome.nonce || checking || cooldownActive) return;
@@ -78,14 +94,17 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
     outcome.transactionState === 'RECOVERY_REQUIRED' ||
     statusResult?.status === 'RECOVERY_REQUIRED';
   const isInProgress = statusResult?.status === 'IN_PROGRESS';
+  const hasPayloadMismatch = Boolean(fingerprintMismatchError);
   const isSafeRetry =
     !isRecoveryRequired &&
+    !hasPayloadMismatch &&
+    Boolean(outcome.nonce) &&
     statusResult?.status === 'NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE' &&
     statusResult?.safe_to_retry_same_nonce === true;
 
   const palette = isConfirmed
     ? { bg: '#ecfdf5', border: '#6ee7b7', text: '#065f46' }
-    : isRecoveryRequired
+    : isRecoveryRequired || hasPayloadMismatch
     ? { bg: '#fef2f2', border: '#f87171', text: '#991b1b' }
     : { bg: '#fffbeb', border: '#f59e0b', text: '#92400e' };
 
@@ -106,6 +125,8 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
       role="alert"
       data-tx-lock-banner="true"
       data-tx-nonce={outcome.nonce}
+      data-tx-persistence-degraded={isPersistenceDegraded ? 'true' : 'false'}
+      data-tx-payload-fingerprint={effectiveFingerprint || ''}
       style={{
         background: palette.bg,
         border: `1px solid ${palette.border}`,
@@ -125,16 +146,75 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
           <div style={{ lineHeight: 1.45 }}>
             {statusResult ? statusResult.message : outcome.message}
           </div>
+
           {!isVerifiedResolved && (
             <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600 }}>
               Form Locked: Inputs and new submissions remain disabled to prevent duplicate financial entries.
-              {!isRecoveryRequired && !isSafeRetry
+              {!isRecoveryRequired && !isSafeRetry && outcome.nonce
                 ? ' Click "Check Transaction Status" first so the system can verify whether the write committed before enabling retry.'
                 : ''}
             </div>
           )}
+
+          {isPersistenceDegraded && !isVerifiedResolved && (
+            <div
+              data-tx-degraded-persistence="true"
+              style={{
+                marginTop: 8,
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: '#fef2f2',
+                border: '1px solid #fca5a5',
+                color: '#991b1b',
+                fontSize: 12,
+                lineHeight: 1.4,
+              }}
+            >
+              <strong>Safety-Degraded Mode (Lock Persistence Failed):</strong>{' '}
+              Browser storage could not reliably persist this UNKNOWN transaction lock
+              {outcome.persistenceStatus ? ` (${outcome.persistenceStatus})` : ''}. The lock is
+              enforced in active memory only and <strong>reload safety is NOT guaranteed</strong>.
+              Do NOT reload or close this tab, and do NOT submit a new transaction until status is
+              verified below.
+              {failureReason ? (
+                <div style={{ marginTop: 3, fontFamily: 'monospace', fontSize: 11 }}>
+                  Detail: {failureReason}
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {fingerprintMismatchError && (
+            <div
+              data-tx-payload-mismatch="true"
+              style={{
+                marginTop: 8,
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: '#fef2f2',
+                border: '1px solid #f87171',
+                color: '#991b1b',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              Payload Identity Mismatch Blocked: {fingerprintMismatchError}
+            </div>
+          )}
+
           <div style={{ marginTop: 6, fontSize: 11, fontFamily: 'monospace', opacity: 0.9 }}>
-            Preserved Nonce: <strong>{outcome.nonce || 'N/A'}</strong>
+            Preserved Nonce: <strong>{outcome.nonce || 'UNAVAILABLE (DEGRADED LOCK)'}</strong>
+            {effectiveFingerprint ? (
+              <>
+                {' '}
+                | Payload Fingerprint:{' '}
+                <strong title={effectiveFingerprint}>
+                  {effectiveFingerprint.length > 23
+                    ? `${effectiveFingerprint.slice(0, 23)}…`
+                    : effectiveFingerprint}
+                </strong>
+              </>
+            ) : null}
             {outcome.transactionId ? (
               <>
                 {' '}
@@ -201,7 +281,7 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
           </button>
         )}
 
-        {onRetry && !isVerifiedResolved && !isRecoveryRequired && (
+        {onRetry && !isVerifiedResolved && !isRecoveryRequired && outcome.nonce && (
           <button
             type="button"
             onClick={isSafeRetry ? onRetry : undefined}
@@ -209,7 +289,9 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
             data-tx-action="retry-same-nonce"
             title={
               isSafeRetry
-                ? 'Verified safe to retry with the same preserved nonce'
+                ? 'Verified safe to retry with the same preserved nonce and matching payload fingerprint'
+                : hasPayloadMismatch
+                ? 'Payload fingerprint mismatch detected; retry blocked'
                 : 'Check transaction status first to confirm this write was not already recorded'
             }
             style={{

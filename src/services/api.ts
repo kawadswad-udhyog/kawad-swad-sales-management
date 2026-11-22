@@ -32,6 +32,23 @@ import type {
   V2ErrorDetail,
   WorkflowState,
 } from '../types';
+import {
+  type LockPersistenceStatus,
+  PayloadFingerprintError,
+  PayloadMismatchError,
+  UnknownOutcomeLockBlockedError,
+  markTransactionTerminallyResolved,
+  persistUnknownOutcome,
+  recordAuthoritativeStatusCheckResult,
+  registerUnknownTransactionIdentity,
+  verifyPayloadAgainstActiveLock,
+} from '../utils/unknownOutcomeLock';
+
+export {
+  PayloadFingerprintError,
+  PayloadMismatchError,
+  UnknownOutcomeLockBlockedError,
+};
 
 export const DEFAULT_API_BASE_URL =
   (typeof window !== 'undefined' && (window as unknown as { KAWAD_API_URL?: string }).KAWAD_API_URL) ||
@@ -198,6 +215,8 @@ export interface ApiRequestOptions extends RequestInit {
   timeoutMs?: number;
   silent?: boolean;
   idempotencyKey?: string;
+  lockScope?: string;
+  requireVerifiedRetry?: boolean;
 }
 
 function extractBodyIdempotencyKey(body: BodyInit | null | undefined): string {
@@ -359,11 +378,83 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
+  let requestPayloadFingerprint: string | undefined;
+  if (isMutation) {
+    const verified = verifyPayloadAgainstActiveLock({
+      scopeKey: options.lockScope,
+      nonce: resolvedIdempotencyKey,
+      rawBody: options.body,
+      method,
+      path,
+      requireVerifiedRetry: options.requireVerifiedRetry,
+    });
+    requestPayloadFingerprint = verified.payloadFingerprint;
+  }
+
   const flightHandle = buildMutationFlightHandle(path, method, resolvedIdempotencyKey, options.body);
   acquireInflightMutationLock(flightHandle, targetUrl, resolvedIdempotencyKey);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  const registerAndBuildUnknown = (params: {
+    message: string;
+    nonce?: string;
+    correlationId?: string;
+    transactionId?: string;
+    transactionState?: TransactionLifecycleState;
+    recoveryRequired?: boolean;
+  }): ApiOutcomeUnknownError => {
+    const effectiveNonce = params.nonce || resolvedIdempotencyKey || undefined;
+    if (effectiveNonce && requestPayloadFingerprint) {
+      registerUnknownTransactionIdentity({
+        nonce: effectiveNonce,
+        payloadFingerprint: requestPayloadFingerprint,
+        method,
+        path,
+        scopeKey: options.lockScope,
+        transactionId: params.transactionId,
+        correlationId: params.correlationId,
+        transactionState: params.transactionState || 'UNKNOWN',
+        recoveryRequired: params.recoveryRequired,
+      });
+    }
+    let persistenceDegraded: boolean | undefined;
+    let persistenceStatus: LockPersistenceStatus | undefined;
+    let persistenceFailureReason: string | undefined;
+    let reloadSafe: boolean | undefined;
+    if (options.lockScope && effectiveNonce) {
+      const pRes = persistUnknownOutcome(
+        options.lockScope,
+        {
+          nonce: effectiveNonce,
+          correlationId: params.correlationId,
+          transactionId: params.transactionId,
+          transactionState: params.transactionState || 'UNKNOWN',
+          recoveryRequired: Boolean(params.recoveryRequired),
+          payloadFingerprint: requestPayloadFingerprint,
+          scopeKey: options.lockScope,
+          message: params.message,
+        },
+        requestPayloadFingerprint
+      );
+      persistenceDegraded = pRes.degraded;
+      persistenceStatus = pRes.status;
+      persistenceFailureReason = pRes.errorMessage;
+      reloadSafe = pRes.reloadSafe;
+    }
+    return new ApiOutcomeUnknownError(params.message, effectiveNonce, params.correlationId, {
+      transactionId: params.transactionId,
+      transactionState: params.transactionState || 'UNKNOWN',
+      recoveryRequired: Boolean(params.recoveryRequired),
+      payloadFingerprint: requestPayloadFingerprint,
+      scopeKey: options.lockScope,
+      persistenceDegraded,
+      persistenceStatus,
+      persistenceFailureReason,
+      reloadSafe,
+    });
+  };
 
   let res: Response;
   try {
@@ -376,16 +467,18 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     } catch (err: unknown) {
       clearTimeout(timeoutId);
       if (isMutation && isPostTransmissionNetworkError(err)) {
-        throw new ApiOutcomeUnknownError(
-          UNKNOWN_OUTCOME_STANDARD_MSG,
-          resolvedIdempotencyKey || undefined
-        );
+        throw registerAndBuildUnknown({
+          message: UNKNOWN_OUTCOME_STANDARD_MSG,
+          nonce: resolvedIdempotencyKey || undefined,
+          transactionState: 'UNKNOWN',
+        });
       }
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new ApiOutcomeUnknownError(
-          UNKNOWN_OUTCOME_STANDARD_MSG,
-          resolvedIdempotencyKey || undefined
-        );
+        throw registerAndBuildUnknown({
+          message: UNKNOWN_OUTCOME_STANDARD_MSG,
+          nonce: resolvedIdempotencyKey || undefined,
+          transactionState: 'UNKNOWN',
+        });
       }
       throw err;
     }
@@ -418,7 +511,10 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
       } catch {
         // Ignore parse failure on 504
       }
-      throw new ApiOutcomeUnknownError(msg, respNonce || resolvedIdempotencyKey || undefined, corrId, {
+      throw registerAndBuildUnknown({
+        message: msg,
+        nonce: respNonce || resolvedIdempotencyKey || undefined,
+        correlationId: corrId,
         transactionId: txId,
         transactionState: 'UNKNOWN',
         recoveryRequired: false,
@@ -441,18 +537,16 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
           normalized.workflowStatus === 'PENDING_UNKNOWN' ||
           normalized.transactionState === 'UNKNOWN'
         ) {
-          throw new ApiOutcomeUnknownError(
-            normalized.errorMsg || UNKNOWN_OUTCOME_STANDARD_MSG,
-            normalized.nonce || resolvedIdempotencyKey || undefined,
-            normalized.correlationId,
-            {
-              transactionId: normalized.transactionId,
-              transactionState: normalized.transactionState || 'RECOVERY_REQUIRED',
-              recoveryRequired:
-                normalized.transactionState === 'RECOVERY_REQUIRED' ||
-                normalized.failureCategory === 'RECOVERY_REQUIRED',
-            }
-          );
+          throw registerAndBuildUnknown({
+            message: normalized.errorMsg || UNKNOWN_OUTCOME_STANDARD_MSG,
+            nonce: normalized.nonce || resolvedIdempotencyKey || undefined,
+            correlationId: normalized.correlationId,
+            transactionId: normalized.transactionId,
+            transactionState: normalized.transactionState || 'RECOVERY_REQUIRED',
+            recoveryRequired:
+              normalized.transactionState === 'RECOVERY_REQUIRED' ||
+              normalized.failureCategory === 'RECOVERY_REQUIRED',
+          });
         }
       } catch (err) {
         if (err instanceof ApiOutcomeUnknownError) {
@@ -460,6 +554,10 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
         }
         // Ignore JSON parse errors on non-JSON 409
       }
+    }
+
+    if (isMutation && res.ok && resolvedIdempotencyKey) {
+      markTransactionTerminallyResolved(resolvedIdempotencyKey, options.lockScope);
     }
 
     return res;
@@ -506,6 +604,7 @@ export class ApiHttpError extends Error {
   failureCategory?: TransactionFailureCategory;
   nonce?: string;
   recoveryDecision?: string;
+  payloadFingerprint?: string;
 
   constructor(
     status: number,
@@ -523,6 +622,7 @@ export class ApiHttpError extends Error {
       failureCategory?: TransactionFailureCategory;
       nonce?: string;
       recoveryDecision?: string;
+      payloadFingerprint?: string;
     }
   ) {
     super(message);
@@ -540,6 +640,7 @@ export class ApiHttpError extends Error {
     this.failureCategory = extra?.failureCategory;
     this.nonce = extra?.nonce;
     this.recoveryDecision = extra?.recoveryDecision;
+    this.payloadFingerprint = extra?.payloadFingerprint;
   }
 }
 
@@ -731,6 +832,12 @@ export interface UnknownOutcomeState {
   message: string;
   actionLabel?: string;
   recoveryRequired?: boolean;
+  payloadFingerprint?: string;
+  scopeKey?: string;
+  persistenceDegraded?: boolean;
+  persistenceStatus?: LockPersistenceStatus;
+  persistenceFailureReason?: string;
+  reloadSafe?: boolean;
 }
 
 export interface TransactionStatusResponse {
@@ -768,6 +875,12 @@ export class ApiOutcomeUnknownError extends Error {
   transactionId?: string;
   transactionState?: TransactionLifecycleState;
   recoveryRequired?: boolean;
+  payloadFingerprint?: string;
+  scopeKey?: string;
+  persistenceDegraded?: boolean;
+  persistenceStatus?: LockPersistenceStatus;
+  persistenceFailureReason?: string;
+  reloadSafe?: boolean;
 
   constructor(
     message: string,
@@ -779,6 +892,12 @@ export class ApiOutcomeUnknownError extends Error {
           transactionId?: string;
           transactionState?: TransactionLifecycleState;
           recoveryRequired?: boolean;
+          payloadFingerprint?: string;
+          scopeKey?: string;
+          persistenceDegraded?: boolean;
+          persistenceStatus?: LockPersistenceStatus;
+          persistenceFailureReason?: string;
+          reloadSafe?: boolean;
         }
   ) {
     super(message);
@@ -791,6 +910,12 @@ export class ApiOutcomeUnknownError extends Error {
       this.transactionId = transactionIdOrExtra.transactionId;
       this.transactionState = transactionIdOrExtra.transactionState;
       this.recoveryRequired = transactionIdOrExtra.recoveryRequired;
+      this.payloadFingerprint = transactionIdOrExtra.payloadFingerprint;
+      this.scopeKey = transactionIdOrExtra.scopeKey;
+      this.persistenceDegraded = transactionIdOrExtra.persistenceDegraded;
+      this.persistenceStatus = transactionIdOrExtra.persistenceStatus;
+      this.persistenceFailureReason = transactionIdOrExtra.persistenceFailureReason;
+      this.reloadSafe = transactionIdOrExtra.reloadSafe;
     }
   }
 }
@@ -846,6 +971,18 @@ export function extractUnknownOutcomeInfo(
     (err instanceof ApiOutcomeUnknownError && err.transactionId) ||
     (err instanceof ApiHttpError && err.transactionId) ||
     undefined;
+  const payloadFingerprint =
+    (err instanceof ApiOutcomeUnknownError && err.payloadFingerprint) ||
+    (err instanceof ApiHttpError && err.payloadFingerprint) ||
+    undefined;
+  const scopeKey = err instanceof ApiOutcomeUnknownError ? err.scopeKey : undefined;
+  const persistenceDegraded =
+    err instanceof ApiOutcomeUnknownError ? err.persistenceDegraded : undefined;
+  const persistenceStatus =
+    err instanceof ApiOutcomeUnknownError ? err.persistenceStatus : undefined;
+  const persistenceFailureReason =
+    err instanceof ApiOutcomeUnknownError ? err.persistenceFailureReason : undefined;
+  const reloadSafe = err instanceof ApiOutcomeUnknownError ? err.reloadSafe : undefined;
   const rawMsg = err instanceof Error && err.message ? err.message : UNKNOWN_OUTCOME_STANDARD_MSG;
   const message =
     recoveryRequired || rawMsg.toLowerCase().includes('outcome unknown')
@@ -857,6 +994,12 @@ export function extractUnknownOutcomeInfo(
     transactionId,
     transactionState: recoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
     recoveryRequired,
+    payloadFingerprint,
+    scopeKey,
+    persistenceDegraded,
+    persistenceStatus,
+    persistenceFailureReason,
+    reloadSafe,
     message,
     actionLabel,
   };
@@ -921,8 +1064,77 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
+  const isGovernedMutation = !isReadOnlyMethod && !isAuthOrHealth;
+  let requestPayloadFingerprint: string | undefined;
+  if (isGovernedMutation) {
+    const verified = verifyPayloadAgainstActiveLock({
+      scopeKey: options.lockScope,
+      nonce: resolvedIdempotencyKey,
+      rawBody: options.body,
+      method,
+      path,
+      requireVerifiedRetry: options.requireVerifiedRetry,
+    });
+    requestPayloadFingerprint = verified.payloadFingerprint;
+  }
+
   const flightHandle = buildMutationFlightHandle(path, method, resolvedIdempotencyKey, options.body);
   acquireInflightMutationLock(flightHandle, targetUrl, resolvedIdempotencyKey);
+
+  const registerRequestUnknownIdentity = (params: {
+    nonce?: string;
+    correlationId?: string;
+    transactionId?: string;
+    transactionState?: TransactionLifecycleState;
+    recoveryRequired?: boolean;
+    message?: string;
+  }) => {
+    const effectiveNonce = params.nonce || resolvedIdempotencyKey || undefined;
+    if (effectiveNonce && requestPayloadFingerprint) {
+      registerUnknownTransactionIdentity({
+        nonce: effectiveNonce,
+        payloadFingerprint: requestPayloadFingerprint,
+        method,
+        path,
+        scopeKey: options.lockScope,
+        transactionId: params.transactionId,
+        correlationId: params.correlationId,
+        transactionState: params.transactionState || 'UNKNOWN',
+        recoveryRequired: params.recoveryRequired,
+      });
+    }
+    let persistenceDegraded: boolean | undefined;
+    let persistenceStatus: LockPersistenceStatus | undefined;
+    let persistenceFailureReason: string | undefined;
+    let reloadSafe: boolean | undefined;
+    if (options.lockScope && effectiveNonce) {
+      const pRes = persistUnknownOutcome(
+        options.lockScope,
+        {
+          nonce: effectiveNonce,
+          correlationId: params.correlationId,
+          transactionId: params.transactionId,
+          transactionState: params.transactionState || 'UNKNOWN',
+          recoveryRequired: Boolean(params.recoveryRequired),
+          payloadFingerprint: requestPayloadFingerprint,
+          scopeKey: options.lockScope,
+          message: params.message || UNKNOWN_OUTCOME_STANDARD_MSG,
+        },
+        requestPayloadFingerprint
+      );
+      persistenceDegraded = pRes.degraded;
+      persistenceStatus = pRes.status;
+      persistenceFailureReason = pRes.errorMessage;
+      reloadSafe = pRes.reloadSafe;
+    }
+    return {
+      effectiveNonce,
+      persistenceDegraded,
+      persistenceStatus,
+      persistenceFailureReason,
+      reloadSafe,
+    };
+  };
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -1177,12 +1389,47 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       console.groupEnd();
       const effectiveNonce = responseNonce || resolvedIdempotencyKey || undefined;
       if (res.status === 504 && !isReadOnlyMethod) {
+        const regMeta = registerRequestUnknownIdentity({
+          nonce: effectiveNonce,
+          correlationId,
+          transactionId,
+          transactionState: 'UNKNOWN',
+          recoveryRequired: false,
+          message: UNKNOWN_OUTCOME_STANDARD_MSG,
+        });
         throw new ApiOutcomeUnknownError(
           UNKNOWN_OUTCOME_STANDARD_MSG,
-          effectiveNonce,
+          regMeta.effectiveNonce,
           correlationId,
-          transactionId
+          {
+            transactionId,
+            transactionState: 'UNKNOWN',
+            recoveryRequired: false,
+            payloadFingerprint: requestPayloadFingerprint,
+            scopeKey: options.lockScope,
+            persistenceDegraded: regMeta.persistenceDegraded,
+            persistenceStatus: regMeta.persistenceStatus,
+            persistenceFailureReason: regMeta.persistenceFailureReason,
+            reloadSafe: regMeta.reloadSafe,
+          }
         );
+      }
+      if (
+        isGovernedMutation &&
+        (transactionState === 'RECOVERY_REQUIRED' ||
+          failureCategory === 'RECOVERY_REQUIRED' ||
+          workflowStatus === 'PENDING_UNKNOWN' ||
+          transactionState === 'UNKNOWN')
+      ) {
+        registerRequestUnknownIdentity({
+          nonce: effectiveNonce,
+          correlationId,
+          transactionId,
+          transactionState: transactionState || 'RECOVERY_REQUIRED',
+          recoveryRequired:
+            transactionState === 'RECOVERY_REQUIRED' || failureCategory === 'RECOVERY_REQUIRED',
+          message: errorMsg,
+        });
       }
       throw new ApiHttpError(res.status, errorMsg, category, targetUrl, isRenderNoServer, {
         errorCode,
@@ -1194,7 +1441,12 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
         failureCategory,
         nonce: effectiveNonce,
         recoveryDecision,
+        payloadFingerprint: requestPayloadFingerprint,
       });
+    }
+
+    if (isGovernedMutation && resolvedIdempotencyKey) {
+      markTransactionTerminallyResolved(resolvedIdempotencyKey, options.lockScope);
     }
 
     // Success recording
@@ -1229,7 +1481,13 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     clearTimeout(timeoutId);
 
     // If an ApiHttpError or ApiOutcomeUnknownError was already thrown above, do not log a second critical network error
-    if (err instanceof ApiHttpError || err instanceof ApiOutcomeUnknownError) {
+    if (
+      err instanceof ApiHttpError ||
+      err instanceof ApiOutcomeUnknownError ||
+      err instanceof PayloadMismatchError ||
+      err instanceof PayloadFingerprintError ||
+      err instanceof UnknownOutcomeLockBlockedError
+    ) {
       throw err;
     }
 
@@ -1297,9 +1555,24 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     if (err instanceof Error) {
       if (err.name === 'AbortError') {
         if (!isReadOnlyMethod && !isAuthOrHealth) {
+          const regMeta = registerRequestUnknownIdentity({
+            nonce: resolvedIdempotencyKey || undefined,
+            transactionState: 'UNKNOWN',
+            message: UNKNOWN_OUTCOME_STANDARD_MSG,
+          });
           throw new ApiOutcomeUnknownError(
             UNKNOWN_OUTCOME_STANDARD_MSG,
-            resolvedIdempotencyKey || undefined
+            regMeta.effectiveNonce,
+            undefined,
+            {
+              transactionState: 'UNKNOWN',
+              payloadFingerprint: requestPayloadFingerprint,
+              scopeKey: options.lockScope,
+              persistenceDegraded: regMeta.persistenceDegraded,
+              persistenceStatus: regMeta.persistenceStatus,
+              persistenceFailureReason: regMeta.persistenceFailureReason,
+              reloadSafe: regMeta.reloadSafe,
+            }
           );
         }
         throw new Error(
@@ -1311,9 +1584,24 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       // cross-origin CORS heuristic) MUST be classified as UNKNOWN so the UI locks inputs,
       // preserves the nonce, and forces status/recovery inspection instead of fresh-nonce retry.
       if (!isReadOnlyMethod && !isAuthOrHealth && isPostTransmissionNetworkError(err)) {
+        const regMeta = registerRequestUnknownIdentity({
+          nonce: resolvedIdempotencyKey || undefined,
+          transactionState: 'UNKNOWN',
+          message: UNKNOWN_OUTCOME_STANDARD_MSG,
+        });
         throw new ApiOutcomeUnknownError(
           UNKNOWN_OUTCOME_STANDARD_MSG,
-          resolvedIdempotencyKey || undefined
+          regMeta.effectiveNonce,
+          undefined,
+          {
+            transactionState: 'UNKNOWN',
+            payloadFingerprint: requestPayloadFingerprint,
+            scopeKey: options.lockScope,
+            persistenceDegraded: regMeta.persistenceDegraded,
+            persistenceStatus: regMeta.persistenceStatus,
+            persistenceFailureReason: regMeta.persistenceFailureReason,
+            reloadSafe: regMeta.reloadSafe,
+          }
         );
       }
       if (category === 'CORS_RESTRICTION') {
@@ -1323,9 +1611,24 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
       }
       if (category === 'BACKEND_UNREACHABLE_OR_TIMEOUT') {
         if (!isReadOnlyMethod && !isAuthOrHealth) {
+          const regMeta = registerRequestUnknownIdentity({
+            nonce: resolvedIdempotencyKey || undefined,
+            transactionState: 'UNKNOWN',
+            message: UNKNOWN_OUTCOME_STANDARD_MSG,
+          });
           throw new ApiOutcomeUnknownError(
             UNKNOWN_OUTCOME_STANDARD_MSG,
-            resolvedIdempotencyKey || undefined
+            regMeta.effectiveNonce,
+            undefined,
+            {
+              transactionState: 'UNKNOWN',
+              payloadFingerprint: requestPayloadFingerprint,
+              scopeKey: options.lockScope,
+              persistenceDegraded: regMeta.persistenceDegraded,
+              persistenceStatus: regMeta.persistenceStatus,
+              persistenceFailureReason: regMeta.persistenceFailureReason,
+              reloadSafe: regMeta.reloadSafe,
+            }
           );
         }
         throw new Error(
@@ -2678,9 +2981,11 @@ export async function checkV2TransactionStatus(
   const q = new URLSearchParams();
   if (correlationId) q.set('correlation_id', correlationId);
   const qs = q.toString();
-  return apiRequest<TransactionStatusResponse>(
+  const res = await apiRequest<TransactionStatusResponse>(
     `/api/v2/transactions/status/${encodeURIComponent(nonce)}${qs ? `?${qs}` : ''}`
   );
+  recordAuthoritativeStatusCheckResult(nonce, res);
+  return res;
 }
 
 export async function fetchV2OfficialReport(

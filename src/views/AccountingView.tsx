@@ -88,6 +88,8 @@ export const AccountingView: React.FC = () => {
     isOutcomeLocked,
     lockWithUnknownOutcome,
     clearAfterVerifiedResolution,
+    fingerprintMismatchError,
+    verifyPayloadMatchesLock,
   } = useUnknownOutcomeGuard('accounting_view');
   const writesLocked = isAuditor || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled || isOutcomeLocked;
 
@@ -188,6 +190,17 @@ export const AccountingView: React.FC = () => {
     if (isOutcomeLocked && !allowSameNonceRecoveryRetry) return;
     const activeNonce = reversalNonce || createSubmissionNonce('ACC-REV');
     if (!reversalNonce) setReversalNonce(activeNonce);
+    const reversalPayload = {
+      journal_id: reversalTarget.journal_id,
+      reason: reversalReason.trim(),
+    };
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(reversalPayload, activeNonce);
+      if (!fpCheck.ok) {
+        setActionNotice({ text: fpCheck.error, ok: false });
+        return;
+      }
+    }
     setReversing(true);
     try {
       await reverseJournalVoucherApi(reversalTarget.journal_id, reversalReason.trim(), activeNonce);
@@ -202,7 +215,7 @@ export const AccountingView: React.FC = () => {
       loadData();
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reverse Voucher ${reversalTarget.journal_id}`);
-      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo, reversalPayload);
       const msg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : err instanceof Error
@@ -255,6 +268,7 @@ export const AccountingView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
+        fingerprintMismatchError={fingerprintMismatchError}
         onRetry={
           reversalNonce && unknownOutcome?.nonce === reversalNonce
             ? () => handleReverseVoucher(true)
@@ -1197,7 +1211,7 @@ export const AccountingView: React.FC = () => {
                       loadData();
                     } catch (err: unknown) {
                       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Execute Live Reconciliation');
-                      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
+                      if (unknownInfo) lockWithUnknownOutcome(unknownInfo, { dry_run: false, confirm_live_execution: true });
                       setError(
                         isUnknownOutcomeError(err)
                           ? UNKNOWN_OUTCOME_MSG

@@ -87,6 +87,8 @@ export const ExpensesView: React.FC = () => {
     isOutcomeLocked,
     lockWithUnknownOutcome,
     clearAfterVerifiedResolution,
+    fingerprintMismatchError,
+    verifyPayloadMatchesLock,
   } = useUnknownOutcomeGuard('expenses_view');
   const effectiveWritesLocked = writesLocked || isOutcomeLocked;
 
@@ -118,15 +120,25 @@ export const ExpensesView: React.FC = () => {
     const activeNonce = expenseNonce || createSubmissionNonce('EXP');
     if (!expenseNonce) setExpenseNonce(activeNonce);
 
+    const expensePayload = {
+      category,
+      amount: Number(amount),
+      description: description.trim(),
+      receipt_link_or_file_ref: receiptRef.trim(),
+      idempotency_key: activeNonce,
+    };
+
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(expensePayload, activeNonce);
+      if (!fpCheck.ok) {
+        setNotice({ msg: fpCheck.error, error: true });
+        return;
+      }
+    }
+
     try {
       setIsSubmitting(true);
-      await submitExpense({
-        category,
-        amount: Number(amount),
-        description: description.trim(),
-        receipt_link_or_file_ref: receiptRef.trim(),
-        idempotency_key: activeNonce,
-      }, activeNonce);
+      await submitExpense(expensePayload, activeNonce);
       setNotice({ msg: `Expense of ₹${amount} submitted for approval.` });
       setExpenseNonce(null);
       clearAfterVerifiedResolution();
@@ -135,7 +147,7 @@ export const ExpensesView: React.FC = () => {
       setAmount(100);
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Submit Expense Claim');
-      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo, expensePayload);
       const errorMsg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
@@ -168,7 +180,7 @@ export const ExpensesView: React.FC = () => {
       setNotice({ msg: `Expense ${e.expense_id} approved. Marked as cash-reducing.` });
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve Expense ${e.expense_id}`);
-      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo, { expense_id: e.expense_id, remarks: 'Approved by manager' });
       const msg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
@@ -200,7 +212,12 @@ export const ExpensesView: React.FC = () => {
       setRejectionReason('');
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reject Expense ${rejectingExpense.expense_id}`);
-      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo, {
+          expense_id: rejectingExpense.expense_id,
+          rejection_reason: rejectionReason.trim(),
+        });
+      }
       const msg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
@@ -234,6 +251,7 @@ export const ExpensesView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
+        fingerprintMismatchError={fingerprintMismatchError}
         onRetry={expenseNonce && unknownOutcome?.nonce === expenseNonce ? () => executeSubmit(true) : undefined}
         onConfirmedRecorded={() => {
           setExpenseNonce(null);

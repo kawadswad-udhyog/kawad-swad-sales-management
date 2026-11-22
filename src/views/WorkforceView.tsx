@@ -152,12 +152,14 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [approveRunTargetId, setApproveRunTargetId] = useState<string | null>(null);
   const [disburseNonce, setDisburseNonce] = useState('');
 
-  // TX-FINAL-04: Persistent UNKNOWN-outcome lock & nonce preservation
+  // TX-FINAL-04 & 51B-1R-F: Persistent UNKNOWN-outcome lock, nonce & payload fingerprint enforcement
   const {
     unknownOutcome,
     isOutcomeLocked,
     setUnknownOutcome,
     clearAfterVerifiedResolution,
+    fingerprintMismatchError,
+    verifyPayloadMatchesLock,
   } = useUnknownOutcomeGuard('workforce_view');
   const [pendingUnknownAction, setPendingUnknownAction] = useState<
     | { type: 'bulk_att' }
@@ -282,6 +284,14 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       overtime_hours: Math.max(0, (Number(d.hours) || 8) - 8),
       notes: d.notes,
     }));
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock({ attendance_date: attDate, records }, activeNonce);
+      if (!fpCheck.ok) {
+        setIsLoading(false);
+        setActionError(fpCheck.error);
+        return;
+      }
+    }
     try {
       const res = await apiFetch('/api/workforce/labour/attendance/bulk', {
         method: 'POST',
@@ -364,6 +374,14 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       piece_rate: Number(workPieceRate) || 0,
       notes: workNotes,
     };
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(payload, activeNonce);
+      if (!fpCheck.ok) {
+        setIsLoading(false);
+        setActionError(fpCheck.error);
+        return;
+      }
+    }
     try {
       const res = await apiFetch('/api/workforce/labour/work-entries', {
         method: 'POST',
@@ -436,6 +454,14 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock({ month: calcMonth }, activeNonce);
+      if (!fpCheck.ok) {
+        setIsLoading(false);
+        setActionError(fpCheck.error);
+        return;
+      }
+    }
     try {
       const res = await apiFetch('/api/workforce/payroll/calculate', {
         method: 'POST',
@@ -507,6 +533,15 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock({ runId }, activeNonce);
+      if (!fpCheck.ok) {
+        setApprovingRunId(null);
+        setIsLoading(false);
+        setActionError(fpCheck.error);
+        return;
+      }
+    }
     try {
       const res = await apiFetch(`/api/workforce/payroll/${runId}/approve`, {
         method: 'POST',
@@ -598,6 +633,14 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       payment_reference: disburseRef,
       notes: disburseNotes,
     };
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(payload, activeNonce);
+      if (!fpCheck.ok) {
+        setIsLoading(false);
+        setActionError(fpCheck.error);
+        return;
+      }
+    }
     try {
       const res = await apiFetch('/api/workforce/payments', {
         method: 'POST',
@@ -724,6 +767,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       {/* Notifications */}
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
+        fingerprintMismatchError={fingerprintMismatchError}
         onRetry={pendingUnknownAction ? handleRetryUnknownAction : undefined}
         onConfirmedRecorded={handleVerifiedUnlock}
         onDismiss={clearAfterVerifiedResolution}

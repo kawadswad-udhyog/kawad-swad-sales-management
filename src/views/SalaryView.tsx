@@ -52,12 +52,14 @@ export const SalaryView: React.FC = () => {
   const [approveNonces, setApproveNonces] = useState<Record<string, string>>({});
   const [isMutating, setIsMutating] = useState(false);
 
-  // TX-FINAL-04: Persistent UNKNOWN-outcome lock & nonce preservation
+  // TX-FINAL-04 & 51B-1R-F: Persistent UNKNOWN-outcome lock, nonce & payload fingerprint enforcement
   const {
     unknownOutcome,
     isOutcomeLocked,
     setUnknownOutcome,
     clearAfterVerifiedResolution,
+    fingerprintMismatchError,
+    verifyPayloadMatchesLock,
   } = useUnknownOutcomeGuard('salary_view');
   const [pendingUnknownAction, setPendingUnknownAction] = useState<
     { type: 'calculate' } | { type: 'approve'; item: SalaryIncentive } | { type: 'pay' } | null
@@ -111,6 +113,15 @@ export const SalaryView: React.FC = () => {
       base_salary: Number(baseSalary),
       idempotency_key: activeNonce,
     };
+
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(payload, activeNonce);
+      if (!fpCheck.ok) {
+        setIsMutating(false);
+        setNotice({ msg: fpCheck.error, error: true });
+        return;
+      }
+    }
 
     try {
       const generated = await calculatePayroll(payload, activeNonce);
@@ -166,6 +177,13 @@ export const SalaryView: React.FC = () => {
       createSubmissionNonce('SALAPP');
     if (!approveNonces[item.record_id]) {
       setApproveNonces((prev) => ({ ...prev, [item.record_id]: activeNonce }));
+    }
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock({ record_id: item.record_id }, activeNonce);
+      if (!fpCheck.ok) {
+        setNotice({ msg: fpCheck.error, error: true });
+        return;
+      }
     }
     setIsMutating(true);
     try {
@@ -223,6 +241,16 @@ export const SalaryView: React.FC = () => {
       (pendingUnknownAction?.type === 'pay' ? unknownOutcome?.nonce : null) ||
       createSubmissionNonce('SALPAY');
     if (!payNonce) setPayNonce(activeNonce);
+    if (allowSameNonceRecoveryRetry) {
+      const fpCheck = verifyPayloadMatchesLock(
+        { record_id: payingRecord.record_id, payment_reference: cleanRef },
+        activeNonce
+      );
+      if (!fpCheck.ok) {
+        setNotice({ msg: fpCheck.error, error: true });
+        return;
+      }
+    }
     setIsMutating(true);
     try {
       await markSalaryIncentivePaid(payingRecord.record_id, cleanRef, activeNonce);
@@ -283,6 +311,7 @@ export const SalaryView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
+        fingerprintMismatchError={fingerprintMismatchError}
         onRetry={handleRetryUnknown}
         onConfirmedRecorded={handleVerifiedUnlock}
         onDismiss={clearAfterVerifiedResolution}
