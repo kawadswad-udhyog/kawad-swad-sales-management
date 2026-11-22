@@ -28,6 +28,7 @@ import {
   postV2GovernedAction,
   updateV2Policy,
   isUnknownOutcomeError,
+  extractUnknownOutcomeInfo,
   isBlockedOwnerSetupError,
   classifySchemaStatusBadge,
   ApiHttpError,
@@ -35,6 +36,7 @@ import {
   UNKNOWN_OUTCOME_STANDARD_MSG,
 } from '../services/api';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { resolveCanonical12Role } from '../utils/permissions';
 import type {
   PaginatedV2Response,
@@ -135,6 +137,12 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
   // Per-module status banner & loading state
   const [submitting, setSubmitting] = useState(false);
   const [banner, setBanner] = useState<SubmissionStatusBanner | null>(null);
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('erp_operations_hub_view');
 
   // ---------------- Logistics Dispatch Draft (Stable Nonce) ----------------
   const [dispatchNonce, setDispatchNonce] = useState<string | null>(null);
@@ -279,11 +287,20 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
   }, [moduleTab, refreshCapabilities]);
 
   const handleGovernedError = (err: unknown, nonce: string) => {
-    if (isUnknownOutcomeError(err)) {
+    const unknownInfo = extractUnknownOutcomeInfo(err, nonce, MODULE_META[moduleTab].title);
+    if (unknownInfo || isUnknownOutcomeError(err)) {
       const correlationId =
         err instanceof ApiOutcomeUnknownError || err instanceof ApiHttpError
           ? err.correlationId
-          : undefined;
+          : unknownInfo?.correlationId;
+      lockWithUnknownOutcome(
+        unknownInfo || {
+          nonce,
+          correlationId,
+          message: UNKNOWN_OUTCOME_STANDARD_MSG,
+          actionLabel: MODULE_META[moduleTab].title,
+        }
+      );
       setBanner({
         state: 'PENDING_UNKNOWN',
         nonce,
@@ -319,6 +336,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleDispatchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting || isOutcomeLocked) return;
     const activeNonce = dispatchNonce || createSubmissionNonce('MOV');
     if (!dispatchNonce) setDispatchNonce(activeNonce);
     setSubmitting(true);
@@ -330,6 +348,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         nonce: activeNonce,
       });
       setDispatchNonce(null);
+      clearAfterVerifiedResolution();
       setBanner({
         state: 'CONFIRMED',
         nonce: activeNonce,
@@ -353,6 +372,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleSettlementSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting || isOutcomeLocked) return;
     const activeNonce = settlementNonce || createSubmissionNonce('STL');
     if (!settlementNonce) setSettlementNonce(activeNonce);
     setSubmitting(true);
@@ -363,6 +383,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         nonce: activeNonce,
       });
       setSettlementNonce(null);
+      clearAfterVerifiedResolution();
       setBanner({
         state: 'CONFIRMED',
         nonce: activeNonce,
@@ -380,6 +401,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleComplianceSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting || isOutcomeLocked) return;
     const activeNonce = complianceNonce || createSubmissionNonce('STAT');
     if (!complianceNonce) setComplianceNonce(activeNonce);
     setSubmitting(true);
@@ -390,6 +412,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         nonce: activeNonce,
       });
       setComplianceNonce(null);
+      clearAfterVerifiedResolution();
       setBanner({
         state: 'CONFIRMED',
         nonce: activeNonce,
@@ -407,6 +430,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleAssetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting || isOutcomeLocked) return;
     const activeNonce = assetNonce || createSubmissionNonce('MAINT');
     if (!assetNonce) setAssetNonce(activeNonce);
     setSubmitting(true);
@@ -417,6 +441,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         nonce: activeNonce,
       });
       setAssetNonce(null);
+      clearAfterVerifiedResolution();
       setBanner({
         state: 'CONFIRMED',
         nonce: activeNonce,
@@ -434,6 +459,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
 
   const handleGigSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting || isOutcomeLocked) return;
     const activeNonce = gigNonce || createSubmissionNonce('PWE');
     if (!gigNonce) setGigNonce(activeNonce);
     setSubmitting(true);
@@ -444,6 +470,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         nonce: activeNonce,
       });
       setGigNonce(null);
+      clearAfterVerifiedResolution();
       setBanner({
         state: 'CONFIRMED',
         nonce: activeNonce,
@@ -460,6 +487,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
   };
 
   const handleGigTransition = async (entryId: string, action: 'verify' | 'pay') => {
+    if (submitting || isOutcomeLocked) return;
     const key = `${entryId}:${action}`;
     const activeNonce = gigActionNonces[key] || createSubmissionNonce('PWE');
     setGigActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
@@ -476,6 +504,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         delete next[key];
         return next;
       });
+      clearAfterVerifiedResolution();
       setBanner({
         state: 'CONFIRMED',
         nonce: activeNonce,
@@ -491,6 +520,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
   };
 
   const handleAdvanceDisburse = async (advanceId: string) => {
+    if (submitting || isOutcomeLocked) return;
     const ref = (advanceRefs[advanceId] || '').trim();
     if (!ref) {
       setBanner({
@@ -515,6 +545,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         delete next[advanceId];
         return next;
       });
+      clearAfterVerifiedResolution();
       setBanner({
         state: 'CONFIRMED',
         nonce: activeNonce,
@@ -530,6 +561,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
   };
 
   const handleSavePolicy = async (policy: PendingCaPolicy) => {
+    if (submitting || isOutcomeLocked) return;
     const draft = policyDrafts[policy.policy_key] || {
       status: (policy.status === 'APPROVED' ? 'APPROVED' : 'PENDING_CA_APPROVAL') as 'APPROVED' | 'PENDING_CA_APPROVAL',
       value: policy.value || (policy.allowed_values?.[0] || ''),
@@ -551,6 +583,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         delete next[policy.policy_key];
         return next;
       });
+      clearAfterVerifiedResolution();
       await refreshCapabilities();
       setBanner({
         state: 'CONFIRMED',
@@ -572,7 +605,8 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
     !isBackendConnected ||
     !isGoogleSheetsConnected ||
     !persistentWritesEnabled ||
-    !bridgeReady;
+    !bridgeReady ||
+    isOutcomeLocked;
   const policiesMap = capabilities?.pending_ca_policies || {};
   const policyList = Object.values(policiesMap);
   const releasedLots = lots.filter((l) => String(l.quality_status || '').toUpperCase() === 'RELEASED');
@@ -620,26 +654,24 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
       )}
 
       {/* Submission Outcome Banner */}
-      {banner?.state === 'PENDING_UNKNOWN' && (
-        <UnknownOutcomeBanner
-          outcome={{
-            nonce: banner.nonce || '',
-            correlationId: banner.correlationId,
-            message: banner.message,
-            actionLabel: meta.title,
-          }}
-          onConfirmedRecorded={(statusRes) => {
-            setBanner({
-              state: 'CONFIRMED',
-              nonce: banner.nonce,
-              correlationId: statusRes.correlation_id || banner.correlationId,
-              message: `Transaction confirmed recorded in Google Sheets (${statusRes.allocated_id || banner.nonce}).`,
-            });
-            loadCollection();
-          }}
-          onDismiss={() => setBanner(null)}
-        />
-      )}
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={(statusRes) => {
+          const confirmedNonce = unknownOutcome?.nonce || banner?.nonce;
+          clearAfterVerifiedResolution();
+          setBanner({
+            state: 'CONFIRMED',
+            nonce: confirmedNonce,
+            correlationId: statusRes.correlation_id || unknownOutcome?.correlationId || banner?.correlationId,
+            message: `Transaction confirmed recorded in Google Sheets (${statusRes.allocated_id || confirmedNonce}).`,
+          });
+          loadCollection();
+        }}
+        onDismiss={() => {
+          clearAfterVerifiedResolution();
+          setBanner(null);
+        }}
+      />
       {banner && banner.state !== 'PENDING_UNKNOWN' && (
         <div
           className={`rounded-xl p-4 border text-xs flex items-start justify-between gap-3 ${
@@ -681,6 +713,12 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
         </div>
       )}
 
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+        className="space-y-6"
+      >
       {/* LOGISTICS MODULE */}
       {moduleTab === 'logistics' && (
         <div className="space-y-6">
@@ -716,7 +754,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={dispatchForm.dispatch_date}
                     onChange={(e) => {
-                      setDispatchNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                       setDispatchForm({ ...dispatchForm, dispatch_date: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -729,7 +767,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={dispatchForm.product_id}
                     onChange={(e) => {
-                      setDispatchNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                       setDispatchForm({ ...dispatchForm, product_id: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
@@ -750,7 +788,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                       required
                       value={dispatchForm.lot_id}
                       onChange={(e) => {
-                        setDispatchNonce(null);
+                        if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                         setDispatchForm({ ...dispatchForm, lot_id: e.target.value });
                       }}
                       className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
@@ -769,7 +807,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                       placeholder="e.g. LOT-2026-001"
                       value={dispatchForm.lot_id}
                       onChange={(e) => {
-                        setDispatchNonce(null);
+                        if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                         setDispatchForm({ ...dispatchForm, lot_id: e.target.value });
                       }}
                       className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -782,7 +820,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                   <select
                     value={dispatchForm.channel}
                     onChange={(e) => {
-                      setDispatchNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                       setDispatchForm({
                         ...dispatchForm,
                         channel: e.target.value as typeof dispatchForm.channel,
@@ -807,7 +845,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="e.g. Sanawad Route / Distributor"
                     value={dispatchForm.destination}
                     onChange={(e) => {
-                      setDispatchNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                       setDispatchForm({ ...dispatchForm, destination: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -822,7 +860,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={dispatchForm.quantity_packets}
                     onChange={(e) => {
-                      setDispatchNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                       setDispatchForm({
                         ...dispatchForm,
                         quantity_packets: Math.max(1, Number(e.target.value) || 1),
@@ -839,7 +877,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="e.g. MP-10-AB-1234"
                     value={dispatchForm.van_number}
                     onChange={(e) => {
-                      setDispatchNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                       setDispatchForm({ ...dispatchForm, van_number: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -851,7 +889,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                   <select
                     value={dispatchForm.salesman_user_id}
                     onChange={(e) => {
-                      setDispatchNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setDispatchNonce(null);
                       setDispatchForm({ ...dispatchForm, salesman_user_id: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
@@ -921,7 +959,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={settlementForm.channel_name}
                     onChange={(e) => {
-                      setSettlementNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setSettlementNonce(null);
                       setSettlementForm({ ...settlementForm, channel_name: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -936,7 +974,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="e.g. AMZ-STL-2026-11"
                     value={settlementForm.settlement_ref}
                     onChange={(e) => {
-                      setSettlementNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setSettlementNonce(null);
                       setSettlementForm({ ...settlementForm, settlement_ref: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -950,7 +988,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={settlementForm.settlement_date}
                     onChange={(e) => {
-                      setSettlementNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setSettlementNonce(null);
                       setSettlementForm({ ...settlementForm, settlement_date: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -966,7 +1004,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={settlementForm.gross_sales_amount}
                     onChange={(e) => {
-                      setSettlementNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setSettlementNonce(null);
                       setSettlementForm({ ...settlementForm, gross_sales_amount: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono"
@@ -982,7 +1020,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={settlementForm.marketplace_fees}
                     onChange={(e) => {
-                      setSettlementNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setSettlementNonce(null);
                       setSettlementForm({ ...settlementForm, marketplace_fees: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono"
@@ -998,7 +1036,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={settlementForm.net_settlement_amount}
                     onChange={(e) => {
-                      setSettlementNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setSettlementNonce(null);
                       setSettlementForm({ ...settlementForm, net_settlement_amount: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono"
@@ -1011,7 +1049,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                   type="checkbox"
                   checked={settlementForm.apply_automated_gst_posting}
                   onChange={(e) => {
-                    setSettlementNonce(null);
+                    if (!shouldBlockDraftNonceReset(unknownOutcome)) setSettlementNonce(null);
                     setSettlementForm({
                       ...settlementForm,
                       apply_automated_gst_posting: e.target.checked,
@@ -1093,7 +1131,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                   <select
                     value={complianceForm.record_type}
                     onChange={(e) => {
-                      setComplianceNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setComplianceNonce(null);
                       setComplianceForm({
                         ...complianceForm,
                         record_type: e.target.value as typeof complianceForm.record_type,
@@ -1117,7 +1155,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="e.g. Monthly FSSAI Hygiene Inspection"
                     value={complianceForm.title}
                     onChange={(e) => {
-                      setComplianceNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setComplianceNonce(null);
                       setComplianceForm({ ...complianceForm, title: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1129,7 +1167,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     type="date"
                     value={complianceForm.due_date}
                     onChange={(e) => {
-                      setComplianceNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setComplianceNonce(null);
                       setComplianceForm({ ...complianceForm, due_date: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1173,7 +1211,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="e.g. MCH-DRYER-01"
                     value={assetForm.asset_code}
                     onChange={(e) => {
-                      setAssetNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setAssetNonce(null);
                       setAssetForm({ ...assetForm, asset_code: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1187,7 +1225,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="Solar Dryer Line 1"
                     value={assetForm.asset_name}
                     onChange={(e) => {
-                      setAssetNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setAssetNonce(null);
                       setAssetForm({ ...assetForm, asset_name: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1198,7 +1236,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                   <select
                     value={assetForm.maintenance_type}
                     onChange={(e) => {
-                      setAssetNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setAssetNonce(null);
                       setAssetForm({
                         ...assetForm,
                         maintenance_type: e.target.value as typeof assetForm.maintenance_type,
@@ -1219,7 +1257,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     min="0"
                     value={assetForm.cost_amount}
                     onChange={(e) => {
-                      setAssetNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setAssetNonce(null);
                       setAssetForm({ ...assetForm, cost_amount: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono"
@@ -1231,7 +1269,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     type="date"
                     value={assetForm.scheduled_date}
                     onChange={(e) => {
-                      setAssetNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setAssetNonce(null);
                       setAssetForm({ ...assetForm, scheduled_date: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1280,7 +1318,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="e.g. LBR-001"
                     value={gigForm.worker_id}
                     onChange={(e) => {
-                      setGigNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setGigNonce(null);
                       setGigForm({ ...gigForm, worker_id: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1294,7 +1332,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     placeholder="e.g. Papad Rolling & Tray Sorting"
                     value={gigForm.activity_name}
                     onChange={(e) => {
-                      setGigNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setGigNonce(null);
                       setGigForm({ ...gigForm, activity_name: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
@@ -1309,7 +1347,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={gigForm.units_completed}
                     onChange={(e) => {
-                      setGigNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setGigNonce(null);
                       setGigForm({ ...gigForm, units_completed: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono"
@@ -1320,7 +1358,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                   <select
                     value={gigForm.unit_of_measure}
                     onChange={(e) => {
-                      setGigNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setGigNonce(null);
                       setGigForm({
                         ...gigForm,
                         unit_of_measure: e.target.value as typeof gigForm.unit_of_measure,
@@ -1343,7 +1381,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
                     required
                     value={gigForm.piece_rate}
                     onChange={(e) => {
-                      setGigNonce(null);
+                      if (!shouldBlockDraftNonceReset(unknownOutcome)) setGigNonce(null);
                       setGigForm({ ...gigForm, piece_rate: e.target.value });
                     }}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono"
@@ -1821,6 +1859,7 @@ export const ErpOperationsHubView: React.FC<ErpOperationsHubViewProps> = ({
           </div>
         </div>
       )}
+      </fieldset>
     </div>
   );
 };

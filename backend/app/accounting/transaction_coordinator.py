@@ -271,26 +271,79 @@ class TransactionCoordinator:
                 ON governed_transactions (lifecycle_state, updated_at);
                 """)
                 conn.execute("COMMIT;")
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("Failed to initialize SQLite transaction schema: %s", e)
+                raise CoordinatorDurabilityError(
+                    f"Transaction coordinator SQLite schema initialization failed at '{self.db_path}': {e}",
+                    error_code="COORDINATOR_STORAGE_ERROR",
+                    mode=CoordinatorDurabilityMode.UNAVAILABLE,
+                    db_path=self.db_path,
+                ) from e
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Failed to initialize SQLite transaction schema: %s", e)
                 raise
             finally:
                 conn.close()
 
+    def _raise_storage_error(self, operation: str, exc: Exception, *, code: str = "COORDINATOR_STORAGE_ERROR") -> None:
+        raise CoordinatorDurabilityError(
+            f"Transaction coordinator storage error during {operation} at '{self.db_path}': {exc}",
+            error_code=code,
+            mode=CoordinatorDurabilityMode.UNAVAILABLE,
+            db_path=self.db_path,
+        ) from exc
+
     @staticmethod
-    def _row_to_tx_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+    def _row_to_tx_dict(row: Optional[sqlite3.Row], db_path: str = "") -> Optional[Dict[str, Any]]:
         if row is None:
             return None
         d = dict(row)
-        try:
-            d["steps"] = json.loads(d.get("steps_json") or "[]")
-        except Exception:
+        nonce_val = str(d.get("nonce") or "").strip()
+        state_val = str(d.get("lifecycle_state") or "").strip().upper()
+        if not nonce_val or not state_val:
+            raise CoordinatorDurabilityError(
+                "Corrupted coordinator transaction row: missing required nonce or lifecycle_state.",
+                error_code="COORDINATOR_STORAGE_CORRUPTED",
+                mode=CoordinatorDurabilityMode.UNAVAILABLE,
+                db_path=db_path,
+            )
+        raw_steps = d.get("steps_json")
+        if raw_steps is None or str(raw_steps).strip() == "":
             d["steps"] = []
-        try:
-            d["result_snapshot"] = json.loads(d.get("result_snapshot_json") or "null")
-        except Exception:
+        else:
+            try:
+                parsed_steps = json.loads(raw_steps)
+                if not isinstance(parsed_steps, list):
+                    raise ValueError("steps_json is not a JSON list")
+                d["steps"] = parsed_steps
+            except Exception as exc:
+                raise CoordinatorDurabilityError(
+                    f"Corrupted coordinator steps_json for nonce '{nonce_val}': {exc}",
+                    error_code="COORDINATOR_STORAGE_CORRUPTED",
+                    mode=CoordinatorDurabilityMode.UNAVAILABLE,
+                    db_path=db_path,
+                ) from exc
+        raw_snap = d.get("result_snapshot_json")
+        if raw_snap is None or str(raw_snap).strip() == "":
             d["result_snapshot"] = None
+        else:
+            try:
+                d["result_snapshot"] = json.loads(raw_snap)
+            except Exception as exc:
+                raise CoordinatorDurabilityError(
+                    f"Corrupted coordinator result_snapshot_json for nonce '{nonce_val}': {exc}",
+                    error_code="COORDINATOR_STORAGE_CORRUPTED",
+                    mode=CoordinatorDurabilityMode.UNAVAILABLE,
+                    db_path=db_path,
+                ) from exc
         if d.get("version") is None:
             d["version"] = 1
         return d
@@ -366,8 +419,24 @@ class TransactionCoordinator:
                             transitioned.append(updated)
                 conn.execute("COMMIT;")
                 return transitioned
+            except CoordinatorDurabilityError:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                raise
+            except sqlite3.Error as exc:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in recover_stale_leases_on_startup: %s", exc)
+                self._raise_storage_error("recover_stale_leases_on_startup", exc)
             except Exception as exc:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in recover_stale_leases_on_startup: %s", exc)
                 raise
             finally:
@@ -452,8 +521,24 @@ class TransactionCoordinator:
                 created = self._row_to_tx_dict(cur.fetchone()) or {}
                 conn.execute("COMMIT;")
                 return created
+            except CoordinatorDurabilityError:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                raise
+            except sqlite3.Error as exc:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in register_external_recovery_intent(%s): %s", clean_nonce, exc)
+                self._raise_storage_error(f"register_external_recovery_intent({clean_nonce})", exc)
             except Exception as exc:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in register_external_recovery_intent(%s): %s", clean_nonce, exc)
                 raise
             finally:
@@ -705,8 +790,24 @@ class TransactionCoordinator:
                 created = self._row_to_tx_dict(cur.fetchone()) or {}
                 conn.execute("COMMIT;")
                 return "ACQUIRED", created
+            except (CoordinatorDurabilityError, InvalidStateTransitionError):
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                raise
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in begin_governed_transaction(%s): %s", clean_nonce, e)
+                self._raise_storage_error(f"begin_governed_transaction({clean_nonce})", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in begin_governed_transaction(%s): %s", clean_nonce, e)
                 raise
             finally:
@@ -1192,6 +1293,13 @@ class TransactionCoordinator:
                 except Exception:
                     pass
                 raise
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in transition_governed_transaction(%s): %s", clean_nonce, e)
+                self._raise_storage_error(f"transition_governed_transaction({clean_nonce})", e)
             except Exception as e:
                 try:
                     conn.execute("ROLLBACK;")
@@ -1211,12 +1319,15 @@ class TransactionCoordinator:
             try:
                 cur = conn.cursor()
                 cur.execute("SELECT * FROM governed_transactions WHERE nonce = ?", (clean_nonce,))
-                return self._row_to_tx_dict(cur.fetchone())
+                return self._row_to_tx_dict(cur.fetchone(), db_path=self.db_path)
             except CoordinatorDurabilityError:
                 raise
+            except sqlite3.Error as e:
+                logger.error("SQLite error in get_governed_transaction(%s): %s", clean_nonce, e)
+                self._raise_storage_error(f"get_governed_transaction({clean_nonce})", e)
             except Exception as e:
-                logger.error("Error in get_governed_transaction(%s): %s", clean_nonce, e)
-                return None
+                logger.error("Unexpected read error in get_governed_transaction(%s): %s", clean_nonce, e)
+                self._raise_storage_error(f"get_governed_transaction({clean_nonce})", e)
             finally:
                 conn.close()
 
@@ -1234,12 +1345,19 @@ class TransactionCoordinator:
                     """,
                     (max(1, int(limit)),),
                 )
-                return [self._row_to_tx_dict(r) for r in cur.fetchall() if r is not None]
+                return [
+                    self._row_to_tx_dict(r, db_path=self.db_path)
+                    for r in cur.fetchall()
+                    if r is not None
+                ]
             except CoordinatorDurabilityError:
                 raise
+            except sqlite3.Error as e:
+                logger.error("SQLite error in list_unresolved_transactions: %s", e)
+                self._raise_storage_error("list_unresolved_transactions", e)
             except Exception as e:
-                logger.error("Error in list_unresolved_transactions: %s", e)
-                return []
+                logger.error("Unexpected read error in list_unresolved_transactions: %s", e)
+                self._raise_storage_error("list_unresolved_transactions", e)
             finally:
                 conn.close()
 
@@ -1349,10 +1467,23 @@ class TransactionCoordinator:
                 conn.execute("COMMIT;")
                 return True, "reserved successfully"
             except sqlite3.IntegrityError:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 return False, "concurrently reserved by another transaction"
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in reserve_approval: %s", e)
+                self._raise_storage_error("reserve_approval", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in reserve_approval: %s", e)
                 return False, str(e)
             finally:
@@ -1419,8 +1550,18 @@ class TransactionCoordinator:
 
                 conn.execute("COMMIT;")
                 return True, "consumed successfully"
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in consume_approval: %s", e)
+                self._raise_storage_error("consume_approval", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in consume_approval: %s", e)
                 return False, str(e)
             finally:
@@ -1475,8 +1616,18 @@ class TransactionCoordinator:
                 )
                 conn.execute("COMMIT;")
                 return True, "released successfully"
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in release_approval: %s", e)
+                self._raise_storage_error("release_approval", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in release_approval: %s", e)
                 return False, str(e)
             finally:
@@ -1536,8 +1687,18 @@ class TransactionCoordinator:
                 )
                 conn.execute("COMMIT;")
                 return True, "credit reserved successfully"
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in reserve_customer_credit: %s", e)
+                self._raise_storage_error("reserve_customer_credit", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in reserve_customer_credit: %s", e)
                 return False, str(e)
             finally:
@@ -1555,8 +1716,18 @@ class TransactionCoordinator:
                     (clean_cid, clean_sale),
                 )
                 conn.execute("COMMIT;")
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in release_customer_credit(%s, %s): %s", clean_cid, clean_sale, e)
+                self._raise_storage_error("release_customer_credit", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in release_customer_credit(%s, %s): %s", clean_cid, clean_sale, e)
             finally:
                 conn.close()
@@ -1573,8 +1744,18 @@ class TransactionCoordinator:
                     (clean_cid, clean_sale),
                 )
                 conn.execute("COMMIT;")
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in finalize_customer_credit(%s, %s): %s", clean_cid, clean_sale, e)
+                self._raise_storage_error("finalize_customer_credit", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in finalize_customer_credit(%s, %s): %s", clean_cid, clean_sale, e)
             finally:
                 conn.close()
@@ -1614,7 +1795,10 @@ class TransactionCoordinator:
                 conn.execute("COMMIT;")
                 return True, clean_sale
             except sqlite3.IntegrityError:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT sale_id FROM idempotency_locks WHERE idempotency_key = ?",
@@ -1623,8 +1807,18 @@ class TransactionCoordinator:
                 row = cur.fetchone()
                 existing_sale = str(row["sale_id"]).strip() if row else clean_sale
                 return False, existing_sale
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                logger.error("SQLite error in acquire_idempotency_lock: %s", e)
+                self._raise_storage_error("acquire_idempotency_lock", e)
             except Exception as e:
-                conn.execute("ROLLBACK;")
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
                 logger.error("Error in acquire_idempotency_lock: %s", e)
                 return False, None
             finally:

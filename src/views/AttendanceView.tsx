@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { apiRequest, createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import { apiRequest, createSubmissionNonce, extractUnknownOutcomeInfo, isUnknownOutcomeError } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { resolveCanonical12Role } from '../utils/permissions';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -63,6 +65,12 @@ export const AttendanceView: React.FC = () => {
   const [correctionNonce, setCorrectionNonce] = useState<string | null>(null);
   const [deleteNonces, setDeleteNonces] = useState<Record<string, string>>({});
   const [deleteDupTarget, setDeleteDupTarget] = useState<{ attendanceId: string; workerName: string } | null>(null);
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('attendance_view');
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwner = canonicalRole === 'OWNER_ADMIN';
@@ -124,6 +132,7 @@ export const AttendanceView: React.FC = () => {
   // Handle Recording Attendance
   const handleRecordAttendance = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOutcomeLocked) return;
     if (!selectedWorkerId) {
       setFeedback({ type: 'error', message: 'Please select a worker.' });
       return;
@@ -152,6 +161,7 @@ export const AttendanceView: React.FC = () => {
         }),
         idempotencyKey: activeNonce,
       });
+      clearAfterVerifiedResolution();
       setSingleNonce(null);
       setFeedback({
         type: 'success',
@@ -161,8 +171,12 @@ export const AttendanceView: React.FC = () => {
       // Keep worker select open for fast next entry
       await refreshAttendanceOnly();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Record Attendance');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const msg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—tap Record Attendance to retry safely.'
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—verify status before retrying.'
         : err instanceof Error
         ? err.message
         : 'Failed to save attendance.';
@@ -190,6 +204,7 @@ export const AttendanceView: React.FC = () => {
   // Bulk Submission Handler
   const handleRecordBulkAttendance = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOutcomeLocked) return;
     const unrecordedWorkers = activeWorkers.filter((w) => {
       const wId = String(w.worker_id).trim();
       return !attendance.some(
@@ -228,6 +243,7 @@ export const AttendanceView: React.FC = () => {
         }),
         idempotencyKey: activeNonce,
       });
+      clearAfterVerifiedResolution();
       setBulkNonce(null);
       setFeedback({
         type: 'success',
@@ -235,8 +251,12 @@ export const AttendanceView: React.FC = () => {
       });
       await refreshAttendanceOnly();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Bulk Attendance');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const msg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit new bulk attendance. Your entries and retry key are preserved—retry safely.'
+        ? 'Status not confirmed; do not submit new bulk attendance. Your entries and retry key are preserved—verify status before retrying.'
         : err instanceof Error
         ? err.message
         : 'Failed to save bulk attendance.';
@@ -248,7 +268,7 @@ export const AttendanceView: React.FC = () => {
 
   // Handle Owner Correction
   const handleSaveCorrection = async () => {
-    if (!editingAttendance) return;
+    if (!editingAttendance || isOutcomeLocked) return;
     const activeNonce = correctionNonce || createSubmissionNonce('ATTCOR');
     if (!correctionNonce) setCorrectionNonce(activeNonce);
     setIsSubmitting(true);
@@ -261,6 +281,7 @@ export const AttendanceView: React.FC = () => {
         }),
         idempotencyKey: activeNonce,
       });
+      clearAfterVerifiedResolution();
       setCorrectionNonce(null);
       setFeedback({
         type: 'success',
@@ -269,8 +290,12 @@ export const AttendanceView: React.FC = () => {
       setEditingAttendance(null);
       await refreshAttendanceOnly();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Correct Attendance');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const msg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; retry Save Correction safely with preserved inputs and key.'
+        ? 'Status not confirmed; verify status before retrying Save Correction with preserved inputs and key.'
         : err instanceof Error
         ? err.message
         : 'Correction failed.';
@@ -282,7 +307,7 @@ export const AttendanceView: React.FC = () => {
 
   // Handle Remove Duplicate
   const handleRemoveDuplicate = async (attendanceId: string) => {
-    if (isSubmitting) return;
+    if (isSubmitting || isOutcomeLocked) return;
     const activeNonce = deleteNonces[attendanceId] || createSubmissionNonce('ATTDEL');
     if (!deleteNonces[attendanceId]) setDeleteNonces((prev) => ({ ...prev, [attendanceId]: activeNonce }));
     setIsSubmitting(true);
@@ -291,6 +316,7 @@ export const AttendanceView: React.FC = () => {
         method: 'DELETE',
         idempotencyKey: activeNonce,
       });
+      clearAfterVerifiedResolution();
       setDeleteNonces((prev) => {
         const next = { ...prev };
         delete next[attendanceId];
@@ -300,8 +326,12 @@ export const AttendanceView: React.FC = () => {
       setFeedback({ type: 'success', message: `Duplicate attendance entry removed.` });
       await refreshAttendanceOnly();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Remove Duplicate Attendance');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const msg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; retry removal safely with preserved key.'
+        ? 'Status not confirmed; verify status before retrying removal with preserved key.'
         : err instanceof Error
         ? err.message
         : 'Failed to remove duplicate.';
@@ -347,6 +377,23 @@ export const AttendanceView: React.FC = () => {
         }
       />
 
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={async () => {
+          clearAfterVerifiedResolution();
+          setSingleNonce(null);
+          setBulkNonce(null);
+          setCorrectionNonce(null);
+          await refreshAttendanceOnly();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
+      />
+
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
       {/* Top Stat Cards for Selected Filter Date */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
         <StatCard
@@ -890,7 +937,9 @@ export const AttendanceView: React.FC = () => {
       {/* OWNER CORRECTION MODAL */}
       {editingAttendance && (
         <div
-          onClick={() => setEditingAttendance(null)}
+          onClick={() => {
+            if (!isOutcomeLocked) setEditingAttendance(null);
+          }}
           style={{
             position: 'fixed',
             inset: 0,
@@ -956,6 +1005,7 @@ export const AttendanceView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
+                  if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                   setCorrectionNonce(null);
                   setEditingAttendance(null);
                 }}
@@ -1161,6 +1211,7 @@ export const AttendanceView: React.FC = () => {
           </div>
         </div>
       )}
+      </fieldset>
     </div>
   );
 };

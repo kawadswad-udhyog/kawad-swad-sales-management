@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import { createSubmissionNonce, extractUnknownOutcomeInfo, isUnknownOutcomeError } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { resolveCanonical12Role } from '../utils/permissions';
 
 const COMMON_OUTCOMES = [
@@ -28,9 +30,15 @@ export const VisitsView: React.FC = () => {
     isGoogleSheetsConnected,
     persistentWritesEnabled,
   } = useStore();
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('visits_view');
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isAuditor = canonicalRole === 'AUDITOR';
-  const writesLocked = isAuditor || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
+  const writesLocked = isAuditor || isOutcomeLocked || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
   const activeCustomers = useMemo(() => customers.filter((c) => c.active), [customers]);
 
   const [customerFilter, setCustomerFilter] = useState('');
@@ -57,6 +65,7 @@ export const VisitsView: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOutcomeLocked) return;
     setNotice(null);
 
     if (!customerId) {
@@ -83,6 +92,7 @@ export const VisitsView: React.FC = () => {
         idempotency_key: activeNonce,
       }, activeNonce);
 
+      clearAfterVerifiedResolution();
       setNotice({ msg: 'Shop visit recorded successfully.' });
       setVisitNonce(null);
       setOutcome('');
@@ -91,8 +101,12 @@ export const VisitsView: React.FC = () => {
       setOrderTaken(false);
       setNotes('');
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Record Shop Visit');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—tap Save Visit Record to retry safely.'
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—verify status before retrying.'
         : err instanceof Error
         ? err.message
         : 'Failed to record visit';
@@ -110,6 +124,15 @@ export const VisitsView: React.FC = () => {
     <div>
       <h1>Shop Visits &amp; Field Follow-ups</h1>
 
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={() => {
+          clearAfterVerifiedResolution();
+          setVisitNonce(null);
+        }}
+        onDismiss={clearAfterVerifiedResolution}
+      />
+
       {notice && (
         <div className={notice.error ? 'notice-error' : 'notice-success'}>
           {notice.msg}
@@ -119,6 +142,11 @@ export const VisitsView: React.FC = () => {
       {!isAuditor && (
       <div className="card">
         <h2>Record shop visit</h2>
+        <fieldset
+          disabled={isOutcomeLocked}
+          data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+          style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+        >
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: '14px' }}>
             <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.85rem', fontWeight: 600 }}>
@@ -258,6 +286,7 @@ export const VisitsView: React.FC = () => {
             {writesLocked ? '🔒 Writes Locked' : isSubmitting ? 'Saving Visit…' : '💾 Save Visit Record'}
           </button>
         </form>
+        </fieldset>
       </div>
       )}
 

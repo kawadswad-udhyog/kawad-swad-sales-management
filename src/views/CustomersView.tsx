@@ -1,7 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { CustomerType } from '../types';
-import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import { createSubmissionNonce, extractUnknownOutcomeInfo, isUnknownOutcomeError } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { ViewType } from '../components/Navigation';
 import { PageHeader } from '../components/common/PageHeader';
 import { SearchFilter } from '../components/common/SearchFilter';
@@ -63,9 +65,16 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
   const [notes, setNotes] = useState('');
   const [customerNonce, setCustomerNonce] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('customers_view');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOutcomeLocked) return;
     setNotice(null);
 
     if (!shopName.trim()) {
@@ -92,6 +101,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
         notes: notes.trim(),
       }, activeNonce);
 
+      clearAfterVerifiedResolution();
       setNotice({ msg: `Customer "${shopName}" registered successfully.` });
       setCustomerNonce(null);
       setShopName('');
@@ -105,8 +115,12 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
       setNotes('');
       setIsFormOpen(false);
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Register Customer');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—tap Save Customer to retry safely.'
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—verify status before retrying.'
         : err instanceof Error
         ? err.message
         : 'Failed to add customer';
@@ -151,8 +165,12 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
           !isReadOnlyAuditor ? (
             <button
               type="button"
-              onClick={() => setIsFormOpen(!isFormOpen)}
-              className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+              disabled={isOutcomeLocked}
+              onClick={() => {
+                if (isOutcomeLocked) return;
+                setIsFormOpen(!isFormOpen);
+              }}
+              className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
             >
               {isFormOpen ? <X size={15} /> : <Plus size={15} />}
               <span>{isFormOpen ? 'Cancel' : 'Add Customer'}</span>
@@ -161,6 +179,21 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
         }
       />
 
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={() => {
+          clearAfterVerifiedResolution();
+          setCustomerNonce(null);
+          setIsFormOpen(false);
+        }}
+        onDismiss={clearAfterVerifiedResolution}
+      />
+
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
       {notice && (
         <div
           className={`p-3.5 rounded-xl text-xs flex items-center justify-between border ${
@@ -189,12 +222,14 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
             maxWidth="3xl"
             onSubmit={handleSubmit}
             onCancel={() => {
+              if (shouldBlockDraftNonceReset(unknownOutcome)) return;
               setIsFormOpen(false);
               setCustomerNonce(null);
             }}
             actions={
               <FormActions
                 onCancel={() => {
+                  if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                   setIsFormOpen(false);
                   setCustomerNonce(null);
                 }}
@@ -348,6 +383,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({ onNavigate }) => {
           ))}
         </div>
       )}
+      </fieldset>
     </div>
   );
 };

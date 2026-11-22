@@ -24,9 +24,9 @@ import {
   extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
-  UnknownOutcomeState,
 } from '../services/api';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import type {
   DebtorItem,
   CreditorItem,
@@ -83,7 +83,13 @@ export const AccountingView: React.FC = () => {
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwnerOrAdmin = canonicalRole === 'OWNER_ADMIN';
   const isAuditor = canonicalRole === 'AUDITOR';
-  const writesLocked = isAuditor || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled;
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('accounting_view');
+  const writesLocked = isAuditor || !isBackendConnected || !isGoogleSheetsConnected || !persistentWritesEnabled || isOutcomeLocked;
 
   const [activeTab, setActiveTab] = useState<AccountingTab>('trial-balance');
   const [asOfDate, setAsOfDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -125,7 +131,6 @@ export const AccountingView: React.FC = () => {
   const [actionNotice, setActionNotice] = useState<{ text: string; ok: boolean } | null>(null);
   const [reversalNonce, setReversalNonce] = useState('');
   const [reconcileNonce, setReconcileNonce] = useState('');
-  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -178,15 +183,16 @@ export const AccountingView: React.FC = () => {
     loadData();
   }, [loadData]);
 
-  const handleReverseVoucher = async () => {
+  const handleReverseVoucher = async (allowSameNonceRecoveryRetry = false) => {
     if (reversing || !reversalTarget || !reversalReason.trim()) return;
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) return;
     const activeNonce = reversalNonce || createSubmissionNonce('ACC-REV');
     if (!reversalNonce) setReversalNonce(activeNonce);
     setReversing(true);
     try {
       await reverseJournalVoucherApi(reversalTarget.journal_id, reversalReason.trim(), activeNonce);
       setReversalNonce('');
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setActionNotice({
         text: `Journal voucher ${reversalTarget.journal_id} reversed successfully with compensating voucher.`,
         ok: true,
@@ -196,7 +202,7 @@ export const AccountingView: React.FC = () => {
       loadData();
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reverse Voucher ${reversalTarget.journal_id}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       const msg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : err instanceof Error
@@ -249,7 +255,18 @@ export const AccountingView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
-        onDismiss={() => setUnknownOutcome(null)}
+        onRetry={
+          reversalNonce && unknownOutcome?.nonce === reversalNonce
+            ? () => handleReverseVoucher(true)
+            : undefined
+        }
+        onConfirmedRecorded={() => {
+          setReversalNonce('');
+          setReconcileNonce('');
+          clearAfterVerifiedResolution();
+          loadData();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
       />
 
       {actionNotice && (
@@ -958,6 +975,7 @@ export const AccountingView: React.FC = () => {
                             disabled={writesLocked}
                             onClick={(e) => {
                               e.stopPropagation();
+                              if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                               setReversalNonce('');
                               setReversalTarget(v);
                             }}
@@ -1142,6 +1160,11 @@ export const AccountingView: React.FC = () => {
                 </div>
               </div>
 
+              <fieldset
+                disabled={isOutcomeLocked}
+                data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+                style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+              >
               <div className="pt-2 border-t border-amber-200/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <label className="flex items-start gap-2.5 cursor-pointer text-xs text-slate-800 select-none">
                   <input
@@ -1167,14 +1190,14 @@ export const AccountingView: React.FC = () => {
                       setReconcileSuccess(null);
                       const res = await executeReconciliation(false, true, activeNonce);
                       setReconcileNonce('');
-                      setUnknownOutcome(null);
+                      clearAfterVerifiedResolution();
                       setReconcileReport(res);
                       setConfirmLiveExecution(false);
                       setReconcileSuccess(`Live reconciliation complete: ${res.reconciled_count} journal vouchers posted successfully.`);
                       loadData();
                     } catch (err: unknown) {
                       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Execute Live Reconciliation');
-                      if (unknownInfo) setUnknownOutcome(unknownInfo);
+                      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
                       setError(
                         isUnknownOutcomeError(err)
                           ? UNKNOWN_OUTCOME_MSG
@@ -1193,6 +1216,7 @@ export const AccountingView: React.FC = () => {
                   {reconciling ? 'Posting Vouchers…' : `Execute Live Backfill (${reconcileReport.missing_count})`}
                 </button>
               </div>
+              </fieldset>
             </div>
           )}
 
@@ -1672,36 +1696,67 @@ export const AccountingView: React.FC = () => {
             maxWidth="md"
             onSubmit={(e) => {
               e.preventDefault();
-              handleReverseVoucher();
+              handleReverseVoucher(false);
             }}
-            onCancel={() => { setReversalTarget(null); setReversalNonce(''); }}
+            onCancel={isOutcomeLocked ? undefined : () => { setReversalTarget(null); setReversalNonce(''); }}
             actions={
-              <FormActions
-                onCancel={() => { setReversalTarget(null); setReversalNonce(''); }}
-                cancelLabel="Cancel"
-                saveLabel="Confirm Reversal"
-                isLoading={reversing}
-                disabled={!reversalReason.trim()}
-              />
+              <FormActions>
+                <CancelButton
+                  disabled={reversing || isOutcomeLocked}
+                  onClick={() => {
+                    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
+                    setReversalTarget(null);
+                    setReversalNonce('');
+                  }}
+                />
+                <SaveButton
+                  label={isOutcomeLocked ? 'Form Locked' : 'Confirm Reversal'}
+                  isLoading={reversing}
+                  disabled={!reversalReason.trim() || writesLocked}
+                />
+              </FormActions>
             }
           >
-            <div className="p-3 bg-amber-50 rounded-xl text-amber-900 text-xs border border-amber-200">
-              In strict double-entry accounting, posted entries cannot be deleted. An equal and opposite compensating voucher will be permanently posted to nullify the financial impact.
-            </div>
-
-            <FormField
-              label="Reason for Reversal"
-              required
-              helpText="State the audit justification (e.g. Authorized customer order cancellation / duplicate entry correction)"
+            <UnknownOutcomeBanner
+              outcome={unknownOutcome}
+              onRetry={
+                reversalNonce && unknownOutcome?.nonce === reversalNonce
+                  ? () => handleReverseVoucher(true)
+                  : undefined
+              }
+              onConfirmedRecorded={() => {
+                setReversalNonce('');
+                clearAfterVerifiedResolution();
+                setReversalTarget(null);
+                setReversalReason('');
+                loadData();
+              }}
+              onDismiss={clearAfterVerifiedResolution}
+            />
+            <fieldset
+              disabled={isOutcomeLocked}
+              data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+              style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+              className="space-y-4"
             >
-              <TextArea
-                value={reversalReason}
-                onChange={(e) => setReversalReason(e.target.value)}
-                placeholder="e.g. Authorized customer order cancellation / duplicate entry correction"
-                rows={3}
+              <div className="p-3 bg-amber-50 rounded-xl text-amber-900 text-xs border border-amber-200">
+                In strict double-entry accounting, posted entries cannot be deleted. An equal and opposite compensating voucher will be permanently posted to nullify the financial impact.
+              </div>
+
+              <FormField
+                label="Reason for Reversal"
                 required
-              />
-            </FormField>
+                helpText="State the audit justification (e.g. Authorized customer order cancellation / duplicate entry correction)"
+              >
+                <TextArea
+                  value={reversalReason}
+                  onChange={(e) => setReversalReason(e.target.value)}
+                  placeholder="e.g. Authorized customer order cancellation / duplicate entry correction"
+                  rows={3}
+                  required
+                />
+              </FormField>
+            </fieldset>
           </FormLayout>
         </div>
       )}

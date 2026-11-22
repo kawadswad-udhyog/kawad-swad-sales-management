@@ -9,10 +9,13 @@ import {
   extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
-  UnknownOutcomeState,
 } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import {
+  useUnknownOutcomeGuard,
+  shouldBlockDraftNonceReset,
+} from '../utils/unknownOutcomeLock';
 import {
   CalculationPreview,
   MoneyInput,
@@ -93,6 +96,7 @@ export const SalesView: React.FC = () => {
   });
 
   const handleSaleTypeChange = (type: CustomerType) => {
+    if (isOutcomeLocked) return;
     setSalesType(type);
     invalidateDraftKey();
     try {
@@ -109,19 +113,6 @@ export const SalesView: React.FC = () => {
   const [walkInName, setWalkInName] = useState('');
   const [walkInMobile, setWalkInMobile] = useState('');
 
-  // Handle pre-selection from Customers view
-  useEffect(() => {
-    if (activeCustomerIdForBilling) {
-      setCustomerMode('registered');
-      setCustomerId(activeCustomerIdForBilling);
-      const match = customers.find((c) => c.customer_id === activeCustomerIdForBilling);
-      if (match) {
-        handleSaleTypeChange(match.customer_type || 'RETAILER');
-      }
-      setActiveCustomerIdForBilling(null);
-    }
-  }, [activeCustomerIdForBilling, customers, setActiveCustomerIdForBilling]);
-
   // Sale & Payment
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'UPI' | 'BANK_TRANSFER' | 'OTHER'>('CASH');
   const [paymentReference, setPaymentReference] = useState('');
@@ -130,9 +121,40 @@ export const SalesView: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionIdempotencyKey, setSubmissionIdempotencyKey] = useState<string | null>(null);
 
+  // TX-FINAL-04: Persistent UNKNOWN-outcome guard & lock
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    setUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('sales_view');
+  const [unknownActionType, setUnknownActionType] = useState<'create' | 'cancel'>('create');
+
+  // Restore preserved nonce after remount/navigation if a sale submission is locked
+  useEffect(() => {
+    if (unknownOutcome?.nonce && unknownActionType === 'create' && !submissionIdempotencyKey) {
+      setSubmissionIdempotencyKey(unknownOutcome.nonce);
+    }
+  }, [unknownOutcome?.nonce, unknownActionType, submissionIdempotencyKey]);
+
   const invalidateDraftKey = () => {
+    // TX-FINAL-04: Never clear or rotate nonce while an UNKNOWN outcome is active
+    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
     setSubmissionIdempotencyKey(null);
   };
+
+  // Handle pre-selection from Customers view
+  useEffect(() => {
+    if (activeCustomerIdForBilling && !isOutcomeLocked) {
+      setCustomerMode('registered');
+      setCustomerId(activeCustomerIdForBilling);
+      const match = customers.find((c) => c.customer_id === activeCustomerIdForBilling);
+      if (match) {
+        handleSaleTypeChange(match.customer_type || 'RETAILER');
+      }
+      setActiveCustomerIdForBilling(null);
+    }
+  }, [activeCustomerIdForBilling, customers, setActiveCustomerIdForBilling, isOutcomeLocked]);
 
   // Fast Product Search Input State
   const [productSearch, setProductSearch] = useState('');
@@ -149,7 +171,6 @@ export const SalesView: React.FC = () => {
   const [cancelSaleReason, setCancelSaleReason] = useState('');
   const [cancelSaleNonces, setCancelSaleNonces] = useState<Record<string, string>>({});
   const [isCancellingSale, setIsCancellingSale] = useState(false);
-  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isAuditor = canonicalRole === 'AUDITOR';
@@ -224,6 +245,7 @@ export const SalesView: React.FC = () => {
   }, []);
 
   const addOrIncrementProduct = (productId: string) => {
+    if (isOutcomeLocked) return;
     invalidateDraftKey();
     const existingIndex = cart.findIndex((line) => line.product_id === productId);
     if (existingIndex >= 0) {
@@ -246,12 +268,14 @@ export const SalesView: React.FC = () => {
   };
 
   const handleSelectFromProductSearch = (productId: string) => {
+    if (isOutcomeLocked) return;
     addOrIncrementProduct(productId);
     setProductSearch('');
     setIsProductSearchOpen(false);
   };
 
   const addLine = () => {
+    if (isOutcomeLocked) return;
     invalidateDraftKey();
     if (activeProducts.length === 0) {
       setNotice({ msg: 'Add an active product in Catalogue before creating a bill.', error: true });
@@ -269,12 +293,14 @@ export const SalesView: React.FC = () => {
   };
 
   const removeLine = (index: number) => {
+    if (isOutcomeLocked) return;
     invalidateDraftKey();
     if (cart.length <= 1) return;
     setCart((prev) => prev.filter((_, i) => i !== index));
   };
 
   const updateLine = (index: number, updates: Partial<CartLine>) => {
+    if (isOutcomeLocked) return;
     invalidateDraftKey();
     setCart((prev) =>
       prev.map((line, i) => {
@@ -323,8 +349,15 @@ export const SalesView: React.FC = () => {
 
   const totalPackets = cart.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0);
 
-  // Safe deliberate reset for new bill (preserves safe session salesType)
+  // Safe deliberate reset for new bill (blocked while an UNKNOWN outcome is unresolved)
   const resetFormDeliberately = () => {
+    if (isOutcomeLocked) {
+      setNotice({
+        msg: 'Form is locked due to an unresolved transaction outcome. Check transaction status before starting a new bill.',
+        error: true,
+      });
+      return;
+    }
     setCustomerMode('walkin');
     setCustomerId('');
     setCustomerSearchQuery('');
@@ -348,10 +381,16 @@ export const SalesView: React.FC = () => {
     setProductSearch('');
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeSaleSubmission = async (allowSameNonceRecoveryRetry = false) => {
+    if (isSubmitting) return;
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setNotice({
+        msg: UNKNOWN_OUTCOME_STANDARD_MSG,
+        error: true,
+      });
+      return;
+    }
     setNotice(null);
-    setUnknownOutcome(null);
 
     if (isAuditor) {
       setNotice({ msg: 'Auditor role is read-only. Bill creation is disabled.', error: true });
@@ -377,33 +416,37 @@ export const SalesView: React.FC = () => {
       customerMode === 'registered' ? selectedCustomer?.mobile || '' : walkInMobile.trim();
 
     setIsSubmitting(true);
-    // Reuse the active nonce for retries of this exact bill, preventing duplicate sales
-    const idempotencyKey = submissionIdempotencyKey || createSubmissionNonce('SALE');
+    // Reuse the active/preserved nonce for retries of this exact bill, preventing duplicate sales
+    const idempotencyKey =
+      submissionIdempotencyKey || unknownOutcome?.nonce || createSubmissionNonce('SALE');
     if (!submissionIdempotencyKey) {
       setSubmissionIdempotencyKey(idempotencyKey);
     }
 
-    try {
-      const result = await createSale({
-        customer_id: resolvedCustId,
-        customer_name_snapshot: resolvedCustName,
-        customer_mobile: resolvedMobile,
-        sales_type: salesType,
-        payment_method: paymentMethod,
-        payment_reference: paymentReference.trim(),
-        discount_amount: Number(discountAmount) || 0,
-        notes: notes.trim(),
-        delivery_status: 'DELIVERED',
-        idempotency_key: idempotencyKey,
-        lines: cart.map((line) => ({
-          product_id: line.product_id,
-          quantity: Number(line.quantity),
-          actual_unit_price: Number(line.actual_unit_price),
-        })),
-      });
+    const payload = {
+      customer_id: resolvedCustId,
+      customer_name_snapshot: resolvedCustName,
+      customer_mobile: resolvedMobile,
+      sales_type: salesType,
+      payment_method: paymentMethod,
+      payment_reference: paymentReference.trim(),
+      discount_amount: Number(discountAmount) || 0,
+      notes: notes.trim(),
+      delivery_status: 'DELIVERED' as const,
+      idempotency_key: idempotencyKey,
+      lines: cart.map((line) => ({
+        product_id: line.product_id,
+        quantity: Number(line.quantity),
+        actual_unit_price: Number(line.actual_unit_price),
+      })),
+    };
 
-      // Clear the idempotency key once successfully completed
+    try {
+      const result = await createSale(payload);
+
+      // Clear the idempotency key and any UNKNOWN lock ONLY once verified complete
       setSubmissionIdempotencyKey(null);
+      clearAfterVerifiedResolution();
 
       setIssuedSale({ sale: result.sale, paymentId: result.paymentId || '' });
       if (resolvedMobile) {
@@ -431,12 +474,22 @@ export const SalesView: React.FC = () => {
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, idempotencyKey, 'Issue Sales Bill');
       if (unknownInfo) {
-        setUnknownOutcome(unknownInfo);
+        setUnknownActionType('create');
+        setUnknownOutcome(unknownInfo, payload);
         setNotice({
           msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${idempotencyKey})`,
           error: true,
         });
       } else if (isUnknownOutcomeError(err)) {
+        setUnknownActionType('create');
+        setUnknownOutcome(
+          {
+            nonce: idempotencyKey,
+            message: UNKNOWN_OUTCOME_STANDARD_MSG,
+            actionLabel: 'Issue Sales Bill',
+          },
+          payload
+        );
         setNotice({
           msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${idempotencyKey})`,
           error: true,
@@ -450,6 +503,70 @@ export const SalesView: React.FC = () => {
       }
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSaleSubmission(false);
+  };
+
+  const executeCancelSaleSubmission = async (allowSameNonceRecoveryRetry = false) => {
+    if (!cancelSaleTarget || isCancellingSale || !cancelSaleReason.trim()) return;
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
+      return;
+    }
+    const saleId = cancelSaleTarget.sale_id;
+    const activeNonce =
+      cancelSaleNonces[saleId] ||
+      (unknownActionType === 'cancel' ? unknownOutcome?.nonce : null) ||
+      createSubmissionNonce('SALECAN');
+    if (!cancelSaleNonces[saleId]) {
+      setCancelSaleNonces((prev) => ({ ...prev, [saleId]: activeNonce }));
+    }
+    setIsCancellingSale(true);
+    setNotice(null);
+    try {
+      await cancelSale(saleId, cancelSaleReason.trim(), activeNonce);
+      setCancelSaleNonces((prev) => {
+        const next = { ...prev };
+        delete next[saleId];
+        return next;
+      });
+      clearAfterVerifiedResolution();
+      setNotice({
+        msg: `Bill #${cancelSaleTarget.bill_number} has been cancelled and stock/payment reversed.`,
+      });
+      setCancelSaleTarget(null);
+      setCancelSaleReason('');
+    } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(
+        err,
+        activeNonce,
+        `Cancel Bill #${cancelSaleTarget.bill_number}`
+      );
+      if (unknownInfo) {
+        setUnknownActionType('cancel');
+        setUnknownOutcome(unknownInfo, { saleId, reason: cancelSaleReason.trim() });
+        setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
+      } else if (isUnknownOutcomeError(err)) {
+        setUnknownActionType('cancel');
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_STANDARD_MSG,
+            actionLabel: `Cancel Bill #${cancelSaleTarget.bill_number}`,
+          },
+          { saleId, reason: cancelSaleReason.trim() }
+        );
+        setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
+      } else {
+        const errMsg = `Cancellation failed: ${err instanceof Error ? err.message : String(err)}`;
+        setNotice({ msg: errMsg, error: true });
+      }
+    } finally {
+      setIsCancellingSale(false);
     }
   };
 
@@ -499,8 +616,9 @@ export const SalesView: React.FC = () => {
         actions={
           <button
             type="button"
+            disabled={isOutcomeLocked}
             onClick={resetFormDeliberately}
-            className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+            className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
           >
             <span>➕</span>
             <span>Start Fresh Bill</span>
@@ -510,7 +628,25 @@ export const SalesView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
-        onDismiss={() => setUnknownOutcome(null)}
+        onRetry={() => {
+          if (unknownActionType === 'cancel' && cancelSaleTarget) {
+            executeCancelSaleSubmission(true);
+          } else {
+            executeSaleSubmission(true);
+          }
+        }}
+        onConfirmedRecorded={() => {
+          setSubmissionIdempotencyKey(null);
+          if (cancelSaleTarget) {
+            setCancelSaleTarget(null);
+            setCancelSaleReason('');
+          }
+          clearAfterVerifiedResolution();
+          setNotice({
+            msg: '✅ Transaction confirmed recorded in Google Sheets. Form unlocked safely.',
+          });
+        }}
+        onDismiss={clearAfterVerifiedResolution}
       />
 
       {notice && (
@@ -595,6 +731,7 @@ export const SalesView: React.FC = () => {
               </button>
               <button
                 type="button"
+                disabled={isOutcomeLocked}
                 onClick={resetFormDeliberately}
                 style={{ background: '#0e7490', color: '#fff', padding: '8px 14px' }}
               >
@@ -607,6 +744,11 @@ export const SalesView: React.FC = () => {
 
       {/* Main Billing Form Card */}
       <div className="card" style={{ marginBottom: '24px' }}>
+        <fieldset
+          disabled={isOutcomeLocked}
+          data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+          style={{ border: 0, padding: 0, margin: 0, minWidth: 0, opacity: isOutcomeLocked ? 0.72 : 1 }}
+        >
         {/* Step 1: Sale Type Selection */}
         <div style={{ marginBottom: '18px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
@@ -794,6 +936,7 @@ export const SalesView: React.FC = () => {
                       <div
                         key={c.customer_id}
                         onClick={() => {
+                          if (isOutcomeLocked) return;
                           invalidateDraftKey();
                           setCustomerId(c.customer_id);
                           handleSaleTypeChange(c.customer_type || 'RETAILER');
@@ -1265,21 +1408,21 @@ export const SalesView: React.FC = () => {
           <div style={{ display: 'flex', gap: '8px', flexDirection: 'column' }}>
             <button
               type="submit"
-              disabled={isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled}
+              disabled={isOutcomeLocked || isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled}
               style={{
                 width: '100%',
                 padding: '16px 24px',
                 fontSize: '1.15rem',
                 fontWeight: 700,
-                background: (isAuditor || !isGoogleSheetsConnected || !persistentWritesEnabled)
+                background: (isOutcomeLocked || isAuditor || !isGoogleSheetsConnected || !persistentWritesEnabled)
                   ? '#64748b'
                   : submissionIdempotencyKey
                   ? '#b45309'
                   : '#047857',
                 color: '#fff',
                 borderRadius: '8px',
-                cursor: (isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
-                opacity: (isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 0.75 : 1,
+                cursor: (isOutcomeLocked || isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 'not-allowed' : 'pointer',
+                opacity: (isOutcomeLocked || isAuditor || isSubmitting || !isGoogleSheetsConnected || !persistentWritesEnabled) ? 0.75 : 1,
                 boxShadow: submissionIdempotencyKey
                   ? '0 4px 12px rgba(180, 83, 9, 0.25)'
                   : '0 4px 12px rgba(4, 120, 87, 0.25)',
@@ -1289,7 +1432,9 @@ export const SalesView: React.FC = () => {
                 gap: '10px',
               }}
             >
-              {isAuditor ? (
+              {isOutcomeLocked ? (
+                <span>🔒 Outcome Unknown — Check Transaction Status Above Before Retrying</span>
+              ) : isAuditor ? (
                 <span>🔒 Auditor Read-Only Mode — Bill Creation Disabled</span>
               ) : (!isGoogleSheetsConnected || !persistentWritesEnabled) ? (
                 <span>🔒 Google Sheets Disconnected — Bill Creation Locked</span>
@@ -1309,27 +1454,30 @@ export const SalesView: React.FC = () => {
             {submissionIdempotencyKey && !isSubmitting && (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 2px' }}>
                 <span style={{ fontSize: '0.8rem', color: '#b45309', fontWeight: 600 }}>
-                  🔒 Bill draft preserved with duplicate protection
+                  🔒 Bill draft preserved with duplicate protection ({submissionIdempotencyKey})
                 </span>
-                <button
-                  type="button"
-                  onClick={resetFormDeliberately}
-                  style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: '#64748b',
-                    fontSize: '0.82rem',
-                    cursor: 'pointer',
-                    textDecoration: 'underline',
-                    padding: 0,
-                  }}
-                >
-                  Discard draft &amp; start new bill
-                </button>
+                {!isOutcomeLocked && (
+                  <button
+                    type="button"
+                    onClick={resetFormDeliberately}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#64748b',
+                      fontSize: '0.82rem',
+                      cursor: 'pointer',
+                      textDecoration: 'underline',
+                      padding: 0,
+                    }}
+                  >
+                    Discard draft &amp; start new bill
+                  </button>
+                )}
               </div>
             )}
           </div>
         </form>
+        </fieldset>
       </div>
 
       {/* Recent Bills Register */}
@@ -1429,9 +1577,10 @@ export const SalesView: React.FC = () => {
                           <button
                             type="button"
                             className="secondary"
-                            disabled={isCancellingSale}
+                            disabled={isCancellingSale || isOutcomeLocked}
                             style={{ padding: '4px 8px', fontSize: '0.8rem', color: '#b91c1c', borderColor: '#fca5a5' }}
                             onClick={() => {
+                              if (isOutcomeLocked) return;
                               setCancelSaleTarget(s);
                               setCancelSaleReason('');
                               setNotice(null);
@@ -1467,88 +1616,73 @@ export const SalesView: React.FC = () => {
         <div
           className="modal-overlay"
           onClick={() => {
-            if (!isCancellingSale) {
+            if (!isCancellingSale && !isOutcomeLocked) {
               setCancelSaleTarget(null);
               setCancelSaleReason('');
             }
           }}
         >
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '460px' }}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px' }}>
             <h2 style={{ marginTop: 0 }}>Cancel Bill #{cancelSaleTarget.bill_number}</h2>
             <p className="muted" style={{ fontSize: '0.85rem', marginBottom: '12px' }}>
               Cancelling reverses salesman stock and payment entries cleanly. Enter the cancellation reason below.
             </p>
+            {isOutcomeLocked && unknownActionType === 'cancel' && (
+              <UnknownOutcomeBanner
+                outcome={unknownOutcome}
+                onRetry={() => executeCancelSaleSubmission(true)}
+                onConfirmedRecorded={() => {
+                  setCancelSaleTarget(null);
+                  setCancelSaleReason('');
+                  clearAfterVerifiedResolution();
+                  setNotice({ msg: '✅ Bill cancellation confirmed recorded in Google Sheets.' });
+                }}
+                onDismiss={clearAfterVerifiedResolution}
+              />
+            )}
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (isCancellingSale || !cancelSaleReason.trim()) return;
-                const saleId = cancelSaleTarget.sale_id;
-                const activeNonce = cancelSaleNonces[saleId] || createSubmissionNonce('SALECAN');
-                if (!cancelSaleNonces[saleId]) {
-                  setCancelSaleNonces((prev) => ({ ...prev, [saleId]: activeNonce }));
-                }
-                setIsCancellingSale(true);
-                setNotice(null);
-                try {
-                  await cancelSale(saleId, cancelSaleReason.trim(), activeNonce);
-                  setCancelSaleNonces((prev) => {
-                    const next = { ...prev };
-                    delete next[saleId];
-                    return next;
-                  });
-                  setUnknownOutcome(null);
-                  setNotice({
-                    msg: `Bill #${cancelSaleTarget.bill_number} has been cancelled and stock/payment reversed.`,
-                  });
-                  setCancelSaleTarget(null);
-                  setCancelSaleReason('');
-                } catch (err: unknown) {
-                  const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Cancel Bill #${cancelSaleTarget.bill_number}`);
-                  if (unknownInfo) {
-                    setUnknownOutcome(unknownInfo);
-                    setNotice({ msg: UNKNOWN_OUTCOME_STANDARD_MSG, error: true });
-                  } else {
-                    const errMsg = isUnknownOutcomeError(err)
-                      ? UNKNOWN_OUTCOME_STANDARD_MSG
-                      : `Cancellation failed: ${err instanceof Error ? err.message : String(err)}`;
-                    setNotice({ msg: errMsg, error: true });
-                  }
-                } finally {
-                  setIsCancellingSale(false);
-                }
+                await executeCancelSaleSubmission(false);
               }}
             >
-              <label>
-                Reason for cancelling Bill #{cancelSaleTarget.bill_number}
-                <textarea
-                  rows={3}
-                  required
-                  value={cancelSaleReason}
-                  onChange={(e) => setCancelSaleReason(e.target.value)}
-                  placeholder="Customer cancellation, billing error, or stock return..."
-                  disabled={isCancellingSale}
-                />
-              </label>
-              <div className="actions" style={{ marginTop: '14px' }}>
-                <button
-                  type="submit"
-                  disabled={isCancellingSale || !cancelSaleReason.trim()}
-                  style={{ background: '#b91c1c' }}
-                >
-                  {isCancellingSale ? 'Cancelling…' : 'Confirm Bill Cancellation'}
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={isCancellingSale}
-                  onClick={() => {
-                    setCancelSaleTarget(null);
-                    setCancelSaleReason('');
-                  }}
-                >
-                  Keep Bill
-                </button>
-              </div>
+              <fieldset
+                disabled={isCancellingSale || isOutcomeLocked}
+                style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+              >
+                <label>
+                  Reason for cancelling Bill #{cancelSaleTarget.bill_number}
+                  <textarea
+                    rows={3}
+                    required
+                    value={cancelSaleReason}
+                    onChange={(e) => setCancelSaleReason(e.target.value)}
+                    placeholder="Customer cancellation, billing error, or stock return..."
+                    disabled={isCancellingSale || isOutcomeLocked}
+                  />
+                </label>
+                <div className="actions" style={{ marginTop: '14px' }}>
+                  <button
+                    type="submit"
+                    disabled={isCancellingSale || isOutcomeLocked || !cancelSaleReason.trim()}
+                    style={{ background: '#b91c1c' }}
+                  >
+                    {isOutcomeLocked ? 'Locked — Check Status Above' : isCancellingSale ? 'Cancelling…' : 'Confirm Bill Cancellation'}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={isCancellingSale || isOutcomeLocked}
+                    onClick={() => {
+                      if (isOutcomeLocked) return;
+                      setCancelSaleTarget(null);
+                      setCancelSaleReason('');
+                    }}
+                  >
+                    Keep Bill
+                  </button>
+                </div>
+              </fieldset>
             </form>
           </div>
         </div>

@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { apiRequest, createSubmissionNonce, getApiBaseUrl, isUnknownOutcomeError } from '../services/api';
+import { apiRequest, createSubmissionNonce, extractUnknownOutcomeInfo, getApiBaseUrl, isUnknownOutcomeError } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { resolveCanonical12Role } from '../utils/permissions';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -78,8 +80,15 @@ export const ApprovalsView: React.FC = () => {
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [expandedPayloadIds, setExpandedPayloadIds] = useState<Set<string>>(new Set());
   const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('approvals_view');
 
-  const clearActionNonce = (key: string) => {
+  const clearActionNonce = (key: string, force = false) => {
+    if (!force && shouldBlockDraftNonceReset(unknownOutcome)) return;
     setActionNonces((prev) => {
       if (!prev[key]) return prev;
       const next = { ...prev };
@@ -233,6 +242,7 @@ export const ApprovalsView: React.FC = () => {
   }, []);
 
   const handleApproveBatch = async (batchId: string) => {
+    if (isOutcomeLocked) return;
     setBusyActionId(batchId);
     setFeedback(null);
     const key = `batch-approve:${batchId}`;
@@ -244,12 +254,17 @@ export const ApprovalsView: React.FC = () => {
         body: JSON.stringify({ approved: true, notes: `Approved by ${currentUser?.full_name || 'Owner'}` }),
         idempotencyKey: activeNonce,
       });
-      clearActionNonce(key);
+      clearAfterVerifiedResolution();
+      clearActionNonce(key, true);
       setFeedback({ type: 'success', message: `Batch ${batchId} approved. Raw materials consumed and bulk inventory credited.` });
       await fetchBatches();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve Batch ${batchId}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const msg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for batch ${batchId}; do not submit a new transaction. Retry Approve safely with preserved key.`
+        ? `Status not confirmed for batch ${batchId}; do not submit a new transaction. Verify status before retrying with preserved key.`
         : err instanceof Error
         ? err.message
         : 'Batch approval failed.';
@@ -260,6 +275,7 @@ export const ApprovalsView: React.FC = () => {
   };
 
   const handleRejectBatch = async (batchId: string) => {
+    if (isOutcomeLocked) return;
     setBusyActionId(batchId);
     setFeedback(null);
     const key = `batch-reject:${batchId}`;
@@ -271,12 +287,17 @@ export const ApprovalsView: React.FC = () => {
         body: JSON.stringify({ approved: false, notes: `Rejected by ${currentUser?.full_name || 'Owner'}` }),
         idempotencyKey: activeNonce,
       });
-      clearActionNonce(key);
+      clearAfterVerifiedResolution();
+      clearActionNonce(key, true);
       setFeedback({ type: 'success', message: `Batch ${batchId} rejected.` });
       await fetchBatches();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reject Batch ${batchId}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const msg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for batch ${batchId}; retry rejection safely with preserved key.`
+        ? `Status not confirmed for batch ${batchId}; verify status before retrying rejection with preserved key.`
         : err instanceof Error
         ? err.message
         : 'Batch rejection failed.';
@@ -287,6 +308,7 @@ export const ApprovalsView: React.FC = () => {
   };
 
   const handleDecideUserRequest = async (requestId: string, decision: 'APPROVED' | 'REJECTED') => {
+    if (isOutcomeLocked) return;
     setBusyActionId(requestId);
     setFeedback(null);
     const key = `req-${decision}:${requestId}`;
@@ -294,12 +316,17 @@ export const ApprovalsView: React.FC = () => {
     if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
       await decideApprovalRequest(requestId, decision, `${decision} by ${currentUser?.full_name || 'Owner'}`, undefined, activeNonce);
-      clearActionNonce(key);
+      clearAfterVerifiedResolution();
+      clearActionNonce(key, true);
       setFeedback({ type: 'success', message: `Request ${requestId} ${decision.toLowerCase()} successfully.` });
       await fetchRequests();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `${decision} Request ${requestId}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const msg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for request ${requestId}; retry decision safely with preserved key.`
+        ? `Status not confirmed for request ${requestId}; verify status before retrying decision with preserved key.`
         : err instanceof Error
         ? err.message
         : 'Decision execution failed.';
@@ -600,6 +627,21 @@ export const ApprovalsView: React.FC = () => {
           </div>
         }
       />
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={async () => {
+          clearAfterVerifiedResolution();
+          await refreshAll();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
+      />
+
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
 
       {/* Copy Toast Notification */}
       {copiedToast && (
@@ -1739,6 +1781,7 @@ export const ApprovalsView: React.FC = () => {
           </div>
         )}
       </div>
+      </fieldset>
     </div>
   );
 };

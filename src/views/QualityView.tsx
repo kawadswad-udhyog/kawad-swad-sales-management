@@ -29,8 +29,11 @@ import {
   closeComplaint,
   getQualitySummary,
   createSubmissionNonce,
+  extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
 } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import type {
   QualityCheck,
   ProductLot,
@@ -116,6 +119,12 @@ export const QualityView: React.FC = () => {
   const [returnNonce, setReturnNonce] = useState('');
   const [complaintNonce, setComplaintNonce] = useState('');
   const [resolveNonce, setResolveNonce] = useState('');
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('quality_view');
 
   // Clean form states (POL-013: no fabricated dummy records pre-filled)
   const [newCheck, setNewCheck] = useState({
@@ -205,13 +214,14 @@ export const QualityView: React.FC = () => {
   }, [loadData]);
 
   const handleOpenLotTransition = (lotId: string, targetStatus: 'RELEASED' | 'ON_HOLD' | 'REJECTED') => {
+    if (isOutcomeLocked) return;
     setError(null);
     setLotActionModal({ lotId, targetStatus, reason: '' });
   };
 
   const handleConfirmLotTransition = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!lotActionModal || lotTransitionSubmitting) return;
+    if (!lotActionModal || lotTransitionSubmitting || isOutcomeLocked) return;
     if (lotActionModal.targetStatus !== 'RELEASED' && !lotActionModal.reason.trim()) {
       setError(`Reason is required before marking a lot as ${lotActionModal.targetStatus}.`);
       return;
@@ -230,6 +240,7 @@ export const QualityView: React.FC = () => {
         lotActionModal.reason.trim() || undefined,
         activeNonce
       );
+      clearAfterVerifiedResolution();
       setLotActionNonces((prev) => {
         const next = { ...prev };
         delete next[key];
@@ -239,6 +250,10 @@ export const QualityView: React.FC = () => {
       setLotActionModal(null);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Update Lot ${lotActionModal.lotId}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setLotTransitionSubmitting(false);
@@ -257,18 +272,23 @@ export const QualityView: React.FC = () => {
 
   const handleCreateCheck = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (checkSubmitting) return;
+    if (checkSubmitting || isOutcomeLocked) return;
     const activeNonce = checkNonce || createSubmissionNonce('QC-CHK');
     if (!checkNonce) setCheckNonce(activeNonce);
     setCheckSubmitting(true);
     setError(null);
     try {
       await createQualityCheck(newCheck, activeNonce);
+      clearAfterVerifiedResolution();
       setCheckNonce('');
       setSuccessMsg('Quality inspection record submitted.');
       setShowCheckModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Record QC Check');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setCheckSubmitting(false);
@@ -277,18 +297,23 @@ export const QualityView: React.FC = () => {
 
   const handleCreateLot = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (lotSubmitting) return;
+    if (lotSubmitting || isOutcomeLocked) return;
     const activeNonce = lotNonce || createSubmissionNonce('QC-LOT');
     if (!lotNonce) setLotNonce(activeNonce);
     setLotSubmitting(true);
     setError(null);
     try {
       await createProductLot(newLot, activeNonce);
+      clearAfterVerifiedResolution();
       setLotNonce('');
       setSuccessMsg(`Product Lot created for ${newLot.product_name}.`);
       setShowLotModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Create Product Lot');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setLotSubmitting(false);
@@ -297,18 +322,23 @@ export const QualityView: React.FC = () => {
 
   const handleCreateReturn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (returnSubmitting) return;
+    if (returnSubmitting || isOutcomeLocked) return;
     const activeNonce = returnNonce || createSubmissionNonce('QC-RET');
     if (!returnNonce) setReturnNonce(activeNonce);
     setReturnSubmitting(true);
     setError(null);
     try {
       await createCustomerReturn(newReturn, activeNonce);
+      clearAfterVerifiedResolution();
       setReturnNonce('');
       setSuccessMsg('Customer return registered. Goods placed under quarantine disposition.');
       setShowReturnModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Customer Return Intake');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setReturnSubmitting(false);
@@ -317,18 +347,23 @@ export const QualityView: React.FC = () => {
 
   const handleCreateComplaint = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (complaintSubmitting) return;
+    if (complaintSubmitting || isOutcomeLocked) return;
     const activeNonce = complaintNonce || createSubmissionNonce('QC-CMP');
     if (!complaintNonce) setComplaintNonce(activeNonce);
     setComplaintSubmitting(true);
     setError(null);
     try {
       await createComplaintOrRecall(newComplaint, activeNonce);
+      clearAfterVerifiedResolution();
       setComplaintNonce('');
       setSuccessMsg(`${newComplaint.report_type} ticket registered for quality audit.`);
       setShowComplaintModal(false);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Log ${newComplaint.report_type}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setComplaintSubmitting(false);
@@ -337,18 +372,23 @@ export const QualityView: React.FC = () => {
 
   const handleResolveComplaint = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!showResolveModal || resolveSubmitting) return;
+    if (!showResolveModal || resolveSubmitting || isOutcomeLocked) return;
     const activeNonce = resolveNonce || createSubmissionNonce('QC-CAPA');
     if (!resolveNonce) setResolveNonce(activeNonce);
     setResolveSubmitting(true);
     setError(null);
     try {
       await closeComplaint(showResolveModal.complaint_id, resolveForm, activeNonce);
+      clearAfterVerifiedResolution();
       setResolveNonce('');
       setSuccessMsg(`Complaint ${showResolveModal.complaint_id} marked CLOSED with CAPA.`);
       setShowResolveModal(null);
       loadData();
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Resolve Complaint ${showResolveModal.complaint_id}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       setError(isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err instanceof Error ? err.message : String(err));
     } finally {
       setResolveSubmitting(false);
@@ -379,38 +419,62 @@ export const QualityView: React.FC = () => {
           </button>
           {activeTab === 'lots' && canManageQuality && (
             <button
+              disabled={isOutcomeLocked}
               onClick={() => setShowLotModal(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors disabled:opacity-50"
             >
               <Plus size={14} /> New Batch Lot
             </button>
           )}
           {activeTab === 'checks' && canSubmitCheck && (
             <button
+              disabled={isOutcomeLocked}
               onClick={() => setShowCheckModal(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors disabled:opacity-50"
             >
               <Plus size={14} /> Record QC Check
             </button>
           )}
           {activeTab === 'returns' && canManageQuality && (
             <button
+              disabled={isOutcomeLocked}
               onClick={() => setShowReturnModal(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 shadow-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 shadow-xs transition-colors disabled:opacity-50"
             >
               <Plus size={14} /> Log Customer Return
             </button>
           )}
           {activeTab === 'complaints' && canManageQuality && (
             <button
+              disabled={isOutcomeLocked}
               onClick={() => setShowComplaintModal(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-red-700 text-white hover:bg-red-800 shadow-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-red-700 text-white hover:bg-red-800 shadow-xs transition-colors disabled:opacity-50"
             >
               <Plus size={14} /> Log Complaint / Recall
             </button>
           )}
         </div>
       </div>
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={async () => {
+          clearAfterVerifiedResolution();
+          setCheckNonce('');
+          setLotNonce('');
+          setReturnNonce('');
+          setComplaintNonce('');
+          setResolveNonce('');
+          await loadData();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
+      />
+
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
 
       {isAuditor && (
         <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 flex items-center gap-2">
@@ -836,7 +900,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Record Quality Control Inspection"
           subtitle="Mandatory quality check for raw materials, in-process dough/rolling, or finished lots"
-          onClose={() => { setShowCheckModal(false); setCheckNonce(''); }}
+          onClose={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowCheckModal(false); setCheckNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateCheck} className="space-y-4">
@@ -883,7 +947,7 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => { setShowCheckModal(false); setCheckNonce(''); }} />
+              <CancelButton onClick={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowCheckModal(false); setCheckNonce(''); }} />
               <SaveButton label="Submit Inspection" variant="primary" isLoading={checkSubmitting} />
             </FormActions>
           </form>
@@ -896,7 +960,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Create Traceable Product Lot"
           subtitle="Generate batch identifier and expiry tracker for finished goods inventory"
-          onClose={() => { setShowLotModal(false); setLotNonce(''); }}
+          onClose={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowLotModal(false); setLotNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateLot} className="space-y-4">
@@ -953,7 +1017,7 @@ export const QualityView: React.FC = () => {
             </div>
 
             <FormActions>
-              <CancelButton onClick={() => { setShowLotModal(false); setLotNonce(''); }} />
+              <CancelButton onClick={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowLotModal(false); setLotNonce(''); }} />
               <SaveButton label="Generate Lot" variant="primary" isLoading={lotSubmitting} />
             </FormActions>
           </form>
@@ -966,7 +1030,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Intake Customer Return (Quarantine)"
           subtitle="Record goods received back from distributors or retail partners"
-          onClose={() => { setShowReturnModal(false); setReturnNonce(''); }}
+          onClose={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowReturnModal(false); setReturnNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateReturn} className="space-y-4">
@@ -1087,7 +1151,7 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => { setShowReturnModal(false); setReturnNonce(''); }} />
+              <CancelButton onClick={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowReturnModal(false); setReturnNonce(''); }} />
               <SaveButton label="Accept Return to Quarantine" variant="primary" isLoading={returnSubmitting} />
             </FormActions>
           </form>
@@ -1100,7 +1164,7 @@ export const QualityView: React.FC = () => {
           asModal
           title="Log Quality Complaint / Recall"
           subtitle="Register customer defect escalation or initiate batch recall protocol"
-          onClose={() => { setShowComplaintModal(false); setComplaintNonce(''); }}
+          onClose={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowComplaintModal(false); setComplaintNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleCreateComplaint} className="space-y-4">
@@ -1150,7 +1214,7 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => { setShowComplaintModal(false); setComplaintNonce(''); }} />
+              <CancelButton onClick={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowComplaintModal(false); setComplaintNonce(''); }} />
               <SaveButton label="Submit Ticket" variant="danger" isLoading={complaintSubmitting} />
             </FormActions>
           </form>
@@ -1163,7 +1227,7 @@ export const QualityView: React.FC = () => {
           asModal
           title={`Resolve Complaint ${showResolveModal.complaint_id}`}
           subtitle="Document root cause and preventive actions (CAPA) before formal closure"
-          onClose={() => { setShowResolveModal(null); setResolveNonce(''); }}
+          onClose={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowResolveModal(null); setResolveNonce(''); }}
           maxWidth="max-w-md"
         >
           <form onSubmit={handleResolveComplaint} className="space-y-4">
@@ -1188,7 +1252,7 @@ export const QualityView: React.FC = () => {
             </FormField>
 
             <FormActions>
-              <CancelButton onClick={() => { setShowResolveModal(null); setResolveNonce(''); }} />
+              <CancelButton onClick={() => { if (shouldBlockDraftNonceReset(unknownOutcome)) return; setShowResolveModal(null); setResolveNonce(''); }} />
               <SaveButton label="Close Ticket with CAPA" variant="primary" isLoading={resolveSubmitting} />
             </FormActions>
           </form>
@@ -1202,6 +1266,7 @@ export const QualityView: React.FC = () => {
           title={`Update Lot ${lotActionModal.lotId} → ${lotActionModal.targetStatus}`}
           subtitle="Lot Quality State Machine: PENDING_QC → RELEASED / ON_HOLD / REJECTED"
           onClose={() => {
+            if (shouldBlockDraftNonceReset(unknownOutcome)) return;
             const key = `${lotActionModal.lotId}:${lotActionModal.targetStatus}`;
             setLotActionNonces((prev) => {
               const next = { ...prev };
@@ -1231,6 +1296,7 @@ export const QualityView: React.FC = () => {
             <FormActions>
               <CancelButton
                 onClick={() => {
+                  if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                   const key = `${lotActionModal.lotId}:${lotActionModal.targetStatus}`;
                   setLotActionNonces((prev) => {
                     const next = { ...prev };
@@ -1249,6 +1315,7 @@ export const QualityView: React.FC = () => {
           </form>
         </FormLayout>
       )}
+      </fieldset>
     </div>
   );
 };

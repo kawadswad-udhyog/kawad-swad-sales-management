@@ -20,11 +20,11 @@ import {
   extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
-  UnknownOutcomeState,
 } from '../services/api';
 import { useStore } from '../context/StoreContext';
 import { resolveCanonical12Role } from '../utils/permissions';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { FinishedGoodsRegisterItem, FinishedGoodsRegisterSummary } from '../types';
 
 type Product = { product_id: string; product_name: string; sku: string; active: boolean; pack_weight_g: number; recipe_id?: string };
@@ -79,7 +79,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState<'success' | 'error' | null>(null);
-  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('production_view');
   const actionMessageRef = useRef<string | null>(null);
 
   const showSuccess = (text: string) => {
@@ -491,17 +496,16 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
     targetedRefresh?: () => Promise<void>,
     fallbackNonce?: string
   ): Promise<boolean> => {
-    if (busy || isAuditor) return false;
+    if (busy || isAuditor || isOutcomeLocked) return false;
     setBusy(true);
     setMessage('');
     setMessageType(null);
-    setUnknownOutcome(null);
     actionMessageRef.current = null;
     try {
       const result = await fn();
       const customMsg = typeof result === 'string' && result.trim() ? result.trim() : null;
       const finalMsg = customMsg || actionMessageRef.current || defaultSuccess;
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       showSuccess(finalMsg);
       try {
         if (targetedRefresh) {
@@ -516,7 +520,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
       return true;
     } catch (e: any) {
       const unknownInfo = extractUnknownOutcomeInfo(e, fallbackNonce, defaultSuccess);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       showError(isUnknownOutcomeError(e) ? UNKNOWN_OUTCOME_MSG : e?.message || 'Action failed.');
       return false;
     } finally {
@@ -609,7 +613,11 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
-        onDismiss={() => setUnknownOutcome(null)}
+        onConfirmedRecorded={() => {
+          clearAfterVerifiedResolution();
+          load();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
       />
 
       {message && (
@@ -639,6 +647,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
         </div>
       )}
 
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+        className="space-y-6"
+      >
       <div className="flex items-center gap-1.5 p-1.5 bg-slate-100 rounded-xl overflow-x-auto border border-slate-200/60">
         <button
           onClick={() => setTab('production')}
@@ -3890,6 +3904,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({ initialTab = 'pr
           </>
         );
       })()}
+      </fieldset>
     </section>
   );
 };

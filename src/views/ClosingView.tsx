@@ -1,10 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStore } from '../context/StoreContext';
 import { DailyClosing } from '../types';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { EmptyState } from '../components/common/EmptyState';
-import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import {
+  createSubmissionNonce,
+  extractUnknownOutcomeInfo,
+  isUnknownOutcomeError,
+  UNKNOWN_OUTCOME_STANDARD_MSG,
+} from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import {
+  useUnknownOutcomeGuard,
+  shouldBlockDraftNonceReset,
+} from '../utils/unknownOutcomeLock';
 import {
   Lock,
   Wallet,
@@ -58,6 +68,21 @@ export const ClosingView: React.FC = () => {
   const [reviewNonce, setReviewNonce] = useState<string | null>(null);
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
 
+  // TX-FINAL-04: Persistent UNKNOWN-outcome lock & nonce preservation
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    setUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('closing_view');
+  const [unknownActionType, setUnknownActionType] = useState<'submit' | 'review'>('submit');
+
+  useEffect(() => {
+    if (unknownOutcome?.nonce && unknownActionType === 'submit' && !submissionNonce) {
+      setSubmissionNonce(unknownOutcome.nonce);
+    }
+  }, [unknownOutcome?.nonce, unknownActionType, submissionNonce]);
+
   // Live metrics for today
   const metrics = getTodayClosingMetrics(currentSalesmanId, Number(openingCash));
   const liveExpectedReturn = Math.max(
@@ -66,33 +91,65 @@ export const ClosingView: React.FC = () => {
   );
   const liveDifference = physicalCashReturned - liveExpectedReturn;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeSubmitClosing = async (allowSameNonceRecoveryRetry = false) => {
+    if (isSubmitting) return;
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setNotice({
+        msg: UNKNOWN_OUTCOME_STANDARD_MSG,
+        error: true,
+        unknownOutcome: true,
+      });
+      return;
+    }
     setNotice(null);
 
-    const activeNonce = submissionNonce || createSubmissionNonce('CLOSING');
+    const activeNonce =
+      submissionNonce ||
+      (unknownActionType === 'submit' ? unknownOutcome?.nonce : null) ||
+      createSubmissionNonce('CLOSING');
     if (!submissionNonce) {
       setSubmissionNonce(activeNonce);
     }
 
+    const payload = {
+      opening_cash: Number(openingCash),
+      physical_cash_returned: Number(physicalCashReturned),
+      notes: notes.trim(),
+      idempotency_key: activeNonce,
+    };
+
     try {
       setIsSubmitting(true);
-      const closing = await submitDailyClosing({
-        opening_cash: Number(openingCash),
-        physical_cash_returned: Number(physicalCashReturned),
-        notes: notes.trim(),
-        idempotency_key: activeNonce,
-      });
+      const closing = await submitDailyClosing(payload);
 
       setSubmissionNonce(null);
+      clearAfterVerifiedResolution();
       setNotice({
         msg: `Daily closing #${closing.closing_id} confirmed with difference: ₹${closing.cash_difference.toFixed(2)}.`,
       });
       setNotes('');
     } catch (err: unknown) {
-      if (isUnknownOutcomeError(err)) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Submit Daily Cash Closing');
+      if (unknownInfo) {
+        setUnknownActionType('submit');
+        setUnknownOutcome(unknownInfo, payload);
         setNotice({
-          msg: `Status not confirmed; do not submit a new transaction. Inputs preserved for safe retry with same nonce (${activeNonce}).`,
+          msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${activeNonce})`,
+          error: true,
+          unknownOutcome: true,
+        });
+      } else if (isUnknownOutcomeError(err)) {
+        setUnknownActionType('submit');
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_STANDARD_MSG,
+            actionLabel: 'Submit Daily Cash Closing',
+          },
+          payload
+        );
+        setNotice({
+          msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${activeNonce})`,
           error: true,
           unknownOutcome: true,
         });
@@ -108,26 +165,69 @@ export const ClosingView: React.FC = () => {
     }
   };
 
-  const handleConfirmReview = async () => {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSubmitClosing(false);
+  };
+
+  const handleConfirmReview = async (allowSameNonceRecoveryRetry = false) => {
     if (!reviewingClosing || reviewSubmitting) return;
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setNotice({
+        msg: UNKNOWN_OUTCOME_STANDARD_MSG,
+        error: true,
+        unknownOutcome: true,
+      });
+      return;
+    }
     const { closing, decision } = reviewingClosing;
     if (decision === 'CORRECTION_REQUIRED' && !reviewNote.trim()) {
       setNotice({ msg: 'A note explaining the discrepancy is required.', error: true });
       return;
     }
-    const activeNonce = reviewNonce || createSubmissionNonce('CLSRVW');
+    const activeNonce =
+      reviewNonce ||
+      (unknownActionType === 'review' ? unknownOutcome?.nonce : null) ||
+      createSubmissionNonce('CLSRVW');
     if (!reviewNonce) setReviewNonce(activeNonce);
     setReviewSubmitting(true);
     try {
       await reviewDailyClosing(closing.closing_id, decision, reviewNote.trim(), activeNonce);
       setReviewNonce(null);
+      clearAfterVerifiedResolution();
       setNotice({ msg: `Daily closing #${closing.closing_id} marked as ${decision}.` });
       setReviewingClosing(null);
       setReviewNote('');
     } catch (err: unknown) {
-      if (isUnknownOutcomeError(err)) {
+      const unknownInfo = extractUnknownOutcomeInfo(
+        err,
+        activeNonce,
+        `Review Daily Closing #${closing.closing_id}`
+      );
+      if (unknownInfo) {
+        setUnknownActionType('review');
+        setUnknownOutcome(unknownInfo, {
+          closing_id: closing.closing_id,
+          decision,
+          reviewNote: reviewNote.trim(),
+        });
         setNotice({
-          msg: `Status not confirmed; do not submit a new review. Your retry key (${activeNonce}) is preserved—retry safely.`,
+          msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${activeNonce})`,
+          error: true,
+          unknownOutcome: true,
+        });
+      } else if (isUnknownOutcomeError(err)) {
+        setUnknownActionType('review');
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_STANDARD_MSG,
+            actionLabel: `Review Daily Closing #${closing.closing_id}`,
+          },
+          { closing_id: closing.closing_id, decision, reviewNote: reviewNote.trim() }
+        );
+        setNotice({
+          msg: `${UNKNOWN_OUTCOME_STANDARD_MSG} (Preserved nonce: ${activeNonce})`,
           error: true,
           unknownOutcome: true,
         });
@@ -149,6 +249,26 @@ export const ClosingView: React.FC = () => {
         title="Daily Cash Handover"
         subtitle="End-of-day cash handover: Morning cash + Money received - Daily expenses = Cash to submit"
         icon={<Lock size={22} />}
+      />
+
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onRetry={() => {
+          if (unknownActionType === 'review' && reviewingClosing) {
+            handleConfirmReview(true);
+          } else {
+            executeSubmitClosing(true);
+          }
+        }}
+        onConfirmedRecorded={() => {
+          setSubmissionNonce(null);
+          setReviewNonce(null);
+          setReviewingClosing(null);
+          setReviewNote('');
+          clearAfterVerifiedResolution();
+          setNotice({ msg: '✅ Daily closing transaction confirmed in Google Sheets. Form unlocked.' });
+        }}
+        onDismiss={clearAfterVerifiedResolution}
       />
 
       {notice && (
@@ -224,6 +344,12 @@ export const ClosingView: React.FC = () => {
         </div>
 
         <form onSubmit={handleSubmit} className="p-5 sm:p-6 space-y-5">
+          <fieldset
+            disabled={isOutcomeLocked}
+            data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+            style={{ border: 0, padding: 0, margin: 0, minWidth: 0, opacity: isOutcomeLocked ? 0.72 : 1 }}
+            className="space-y-5"
+          >
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <FormField
               label="Morning Cash Float (₹)"
@@ -232,7 +358,9 @@ export const ClosingView: React.FC = () => {
             >
               <MoneyInput
                 value={openingCash}
+                disabled={isOutcomeLocked}
                 onChange={(val) => {
+                  if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                   setSubmissionNonce(null);
                   setOpeningCash(val);
                 }}
@@ -248,7 +376,9 @@ export const ClosingView: React.FC = () => {
             >
               <MoneyInput
                 value={physicalCashReturned}
+                disabled={isOutcomeLocked}
                 onChange={(val) => {
+                  if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                   setSubmissionNonce(null);
                   setPhysicalCashReturned(val);
                 }}
@@ -299,9 +429,11 @@ export const ClosingView: React.FC = () => {
           >
             <TextInput
               maxLength={500}
+              disabled={isOutcomeLocked}
               placeholder="e.g. 500x3, 200x5, 100x10. Shortage due to credit approved for shopkeeper..."
               value={notes}
               onChange={(e) => {
+                if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                 setSubmissionNonce(null);
                 setNotes(e.target.value);
               }}
@@ -317,11 +449,19 @@ export const ClosingView: React.FC = () => {
               <span />
             )}
             <SaveButton
-              label={submissionNonce ? 'Retry Cash Closing (Same Nonce)' : 'Submit Daily Cash Closing'}
+              label={
+                isOutcomeLocked
+                  ? 'Locked — Check Status Above'
+                  : submissionNonce
+                  ? 'Retry Cash Closing (Same Nonce)'
+                  : 'Submit Daily Cash Closing'
+              }
               isLoading={isSubmitting}
+              disabled={isOutcomeLocked}
               icon={<Coins size={14} />}
             />
           </div>
+          </fieldset>
         </form>
       </div>
 
@@ -391,15 +531,23 @@ export const ClosingView: React.FC = () => {
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
-                              onClick={() => setReviewingClosing({ closing: c, decision: 'CONFIRMED' })}
-                              className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-md transition-colors cursor-pointer"
+                              disabled={isOutcomeLocked}
+                              onClick={() => {
+                                if (isOutcomeLocked) return;
+                                setReviewingClosing({ closing: c, decision: 'CONFIRMED' });
+                              }}
+                              className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 text-emerald-800 rounded-md transition-colors cursor-pointer"
                             >
                               Confirm
                             </button>
                             <button
                               type="button"
-                              onClick={() => setReviewingClosing({ closing: c, decision: 'CORRECTION_REQUIRED' })}
-                              className="px-2.5 py-1 text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-md transition-colors cursor-pointer"
+                              disabled={isOutcomeLocked}
+                              onClick={() => {
+                                if (isOutcomeLocked) return;
+                                setReviewingClosing({ closing: c, decision: 'CORRECTION_REQUIRED' });
+                              }}
+                              className="px-2.5 py-1 text-xs font-semibold bg-amber-50 hover:bg-amber-100 disabled:opacity-50 text-amber-800 rounded-md transition-colors cursor-pointer"
                             >
                               Correction
                             </button>
@@ -429,36 +577,77 @@ export const ClosingView: React.FC = () => {
             maxWidth="md"
             onSubmit={(e) => {
               e.preventDefault();
-              handleConfirmReview();
+              handleConfirmReview(false);
             }}
-            onCancel={() => {
-              setReviewingClosing(null);
-              setReviewNote('');
-            }}
+            onCancel={
+              isOutcomeLocked || reviewSubmitting
+                ? undefined
+                : () => {
+                    setReviewingClosing(null);
+                    setReviewNote('');
+                  }
+            }
             actions={
-              <FormActions
-                onCancel={() => {
-                  setReviewingClosing(null);
-                  setReviewNote('');
-                }}
-                cancelLabel="Cancel"
-                saveLabel={reviewingClosing.decision === 'CONFIRMED' ? 'Confirm Closing' : 'Submit Correction'}
-              />
+              <FormActions>
+                <CancelButton
+                  disabled={reviewSubmitting || isOutcomeLocked}
+                  onClick={() => {
+                    if (isOutcomeLocked || reviewSubmitting) return;
+                    setReviewingClosing(null);
+                    setReviewNote('');
+                  }}
+                  label="Cancel"
+                />
+                <SaveButton
+                  label={
+                    isOutcomeLocked
+                      ? 'Locked — Check Status'
+                      : reviewingClosing.decision === 'CONFIRMED'
+                      ? 'Confirm Closing'
+                      : 'Submit Correction'
+                  }
+                  isLoading={reviewSubmitting}
+                  disabled={isOutcomeLocked}
+                />
+              </FormActions>
             }
           >
-            <FormField
-              label={reviewingClosing.decision === 'CORRECTION_REQUIRED' ? 'Correction Reason (Required)' : 'Review Notes (Optional)'}
-              required={reviewingClosing.decision === 'CORRECTION_REQUIRED'}
-              helpText={reviewingClosing.decision === 'CORRECTION_REQUIRED' ? 'Explain the discrepancy to be rectified by the salesman' : 'Optional supervisory confirmation remarks'}
-            >
-              <TextArea
-                rows={3}
-                required={reviewingClosing.decision === 'CORRECTION_REQUIRED'}
-                value={reviewNote}
-                onChange={(e) => setReviewNote(e.target.value)}
-                placeholder="Enter review explanation or reason..."
+            {isOutcomeLocked && unknownActionType === 'review' && (
+              <UnknownOutcomeBanner
+                outcome={unknownOutcome}
+                onRetry={() => handleConfirmReview(true)}
+                onConfirmedRecorded={() => {
+                  setReviewNonce(null);
+                  setReviewingClosing(null);
+                  setReviewNote('');
+                  clearAfterVerifiedResolution();
+                  setNotice({ msg: '✅ Daily closing review confirmed in Google Sheets.' });
+                }}
+                onDismiss={clearAfterVerifiedResolution}
               />
-            </FormField>
+            )}
+            <fieldset
+              disabled={isOutcomeLocked || reviewSubmitting}
+              style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+            >
+              <FormField
+                label={reviewingClosing.decision === 'CORRECTION_REQUIRED' ? 'Correction Reason (Required)' : 'Review Notes (Optional)'}
+                required={reviewingClosing.decision === 'CORRECTION_REQUIRED'}
+                helpText={reviewingClosing.decision === 'CORRECTION_REQUIRED' ? 'Explain the discrepancy to be rectified by the salesman' : 'Optional supervisory confirmation remarks'}
+              >
+                <TextArea
+                  rows={3}
+                  disabled={isOutcomeLocked || reviewSubmitting}
+                  required={reviewingClosing.decision === 'CORRECTION_REQUIRED'}
+                  value={reviewNote}
+                  onChange={(e) => {
+                    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
+                    setReviewNote(e.target.value);
+                  }}
+                  placeholder="Enter review explanation or reason..."
+                />
+              </FormField>
+            </fieldset>
           </FormLayout>
         </div>
       )}

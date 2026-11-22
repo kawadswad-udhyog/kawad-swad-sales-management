@@ -7,10 +7,13 @@ import {
   extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
-  UnknownOutcomeState,
 } from '../services/api';
 import { resolveCanonical12Role } from '../utils/permissions';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import {
+  useUnknownOutcomeGuard,
+  shouldBlockDraftNonceReset,
+} from '../utils/unknownOutcomeLock';
 import {
   Users,
   UserPlus,
@@ -72,8 +75,9 @@ interface WorkforceViewProps {
 
 const UNKNOWN_OUTCOME_MSG = UNKNOWN_OUTCOME_STANDARD_MSG;
 
-async function parseApiFetchJson(res: Response): Promise<{ is504: boolean; data: any }> {
-  if (res.status === 504) return { is504: true, data: {} };
+async function parseApiFetchJson(
+  res: Response
+): Promise<{ is504: boolean; isUnknown: boolean; isRecoveryRequired: boolean; data: any }> {
   const rawText = await res.text();
   let data: any = {};
   try {
@@ -81,7 +85,24 @@ async function parseApiFetchJson(res: Response): Promise<{ is504: boolean; data:
   } catch {
     data = {};
   }
-  return { is504: false, data };
+  const detailObj = data?.detail && typeof data.detail === 'object' ? data.detail : data;
+  const txState = String(detailObj?.transaction_state || '').toUpperCase();
+  const errCode = String(detailObj?.error_code || '').toUpperCase();
+  const statusStr = String(detailObj?.status || '').toUpperCase();
+  const is504 = res.status === 504;
+  const isRecoveryRequired =
+    res.status === 409 &&
+    (txState === 'RECOVERY_REQUIRED' ||
+      errCode === 'RECOVERY_REQUIRED' ||
+      statusStr === 'RECOVERY_REQUIRED');
+  const isPendingUnknown =
+    res.status === 409 && (statusStr === 'PENDING_UNKNOWN' || txState === 'UNKNOWN');
+  return {
+    is504,
+    isRecoveryRequired,
+    isUnknown: is504 || isRecoveryRequired || isPendingUnknown,
+    data,
+  };
 }
 
 export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeePortal }) => {
@@ -130,7 +151,22 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [approvingRunId, setApprovingRunId] = useState<string | null>(null);
   const [approveRunTargetId, setApproveRunTargetId] = useState<string | null>(null);
   const [disburseNonce, setDisburseNonce] = useState('');
-  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
+
+  // TX-FINAL-04: Persistent UNKNOWN-outcome lock & nonce preservation
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    setUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('workforce_view');
+  const [pendingUnknownAction, setPendingUnknownAction] = useState<
+    | { type: 'bulk_att' }
+    | { type: 'work_entry' }
+    | { type: 'calc_payroll' }
+    | { type: 'approve_payroll'; runId: string }
+    | { type: 'disburse' }
+    | null
+  >(null);
 
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isOwner = canonicalRole === 'OWNER_ADMIN';
@@ -224,24 +260,29 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     }
   }, [labourList]);
 
-  const handleSaveBulkAttendance = async () => {
+  const handleSaveBulkAttendance = async (allowSameNonceRecoveryRetry = false) => {
     if (isAuditor || isLoading) return;
-    const activeNonce = bulkAttNonce || createSubmissionNonce('WF-ATT');
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setActionError(UNKNOWN_OUTCOME_MSG);
+      return;
+    }
+    const activeNonce =
+      bulkAttNonce ||
+      (pendingUnknownAction?.type === 'bulk_att' ? unknownOutcome?.nonce : '') ||
+      createSubmissionNonce('WF-ATT');
     if (!bulkAttNonce) setBulkAttNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
-    setUnknownOutcome(null);
+    const records = Object.entries(attendanceDraft).map(([lid, d]) => ({
+      labour_id: lid,
+      attendance_date: attDate,
+      status: d.status,
+      hours_worked: Number(d.hours) || 8,
+      overtime_hours: Math.max(0, (Number(d.hours) || 8) - 8),
+      notes: d.notes,
+    }));
     try {
-      const records = Object.entries(attendanceDraft).map(([lid, d]) => ({
-        labour_id: lid,
-        attendance_date: attDate,
-        status: d.status,
-        hours_worked: Number(d.hours) || 8,
-        overtime_hours: Math.max(0, (Number(d.hours) || 8) - 8),
-        notes: d.notes,
-      }));
-
       const res = await apiFetch('/api/workforce/labour/attendance/bulk', {
         method: 'POST',
         idempotencyKey: activeNonce,
@@ -250,19 +291,26 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           records,
         }),
       });
-      const { is504, data } = await parseApiFetchJson(res);
-      if (is504) {
-        setUnknownOutcome({
-          nonce: activeNonce,
-          message: UNKNOWN_OUTCOME_MSG,
-          actionLabel: 'Save Daily Labour Attendance',
-        });
+      const { isUnknown, isRecoveryRequired, data } = await parseApiFetchJson(res);
+      if (isUnknown) {
+        setPendingUnknownAction({ type: 'bulk_att' });
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_MSG,
+            actionLabel: 'Save Daily Labour Attendance',
+            recoveryRequired: isRecoveryRequired,
+            transactionState: isRecoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
+          },
+          { attendance_date: attDate, records }
+        );
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setBulkAttNonce('');
-        setUnknownOutcome(null);
+        setPendingUnknownAction(null);
+        clearAfterVerifiedResolution();
         setActionSuccess(data.message || 'Labour attendance saved successfully!');
         loadMetrics();
       } else {
@@ -270,7 +318,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Save Daily Labour Attendance');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) {
+        setPendingUnknownAction({ type: 'bulk_att' });
+        setUnknownOutcome(unknownInfo, { attendance_date: attDate, records });
+      }
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -290,42 +341,55 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [workPieceRate, setWorkPieceRate] = useState('');
   const [workNotes, setWorkNotes] = useState('');
 
-  const handleSaveWorkEntry = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeSaveWorkEntry = async (allowSameNonceRecoveryRetry = false) => {
     if (isAuditor || isLoading) return;
-    const activeNonce = workEntryNonce || createSubmissionNonce('WF-WRK');
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setActionError(UNKNOWN_OUTCOME_MSG);
+      return;
+    }
+    const activeNonce =
+      workEntryNonce ||
+      (pendingUnknownAction?.type === 'work_entry' ? unknownOutcome?.nonce : '') ||
+      createSubmissionNonce('WF-WRK');
     if (!workEntryNonce) setWorkEntryNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
-    setUnknownOutcome(null);
+    const payload = {
+      labour_id: workLabourId,
+      entry_date: attDate,
+      activity_name: workActivity,
+      units_completed: Number(workUnits) || 0,
+      unit_of_measure: workUom,
+      piece_rate: Number(workPieceRate) || 0,
+      notes: workNotes,
+    };
     try {
       const res = await apiFetch('/api/workforce/labour/work-entries', {
         method: 'POST',
         idempotencyKey: activeNonce,
-        body: JSON.stringify({
-          labour_id: workLabourId,
-          entry_date: attDate,
-          activity_name: workActivity,
-          units_completed: Number(workUnits) || 0,
-          unit_of_measure: workUom,
-          piece_rate: Number(workPieceRate) || 0,
-          notes: workNotes,
-        }),
+        body: JSON.stringify(payload),
       });
-      const { is504, data } = await parseApiFetchJson(res);
-      if (is504) {
-        setUnknownOutcome({
-          nonce: activeNonce,
-          message: UNKNOWN_OUTCOME_MSG,
-          actionLabel: 'Log Labour Work Entry',
-        });
+      const { isUnknown, isRecoveryRequired, data } = await parseApiFetchJson(res);
+      if (isUnknown) {
+        setPendingUnknownAction({ type: 'work_entry' });
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_MSG,
+            actionLabel: 'Log Labour Work Entry',
+            recoveryRequired: isRecoveryRequired,
+            transactionState: isRecoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
+          },
+          payload
+        );
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setWorkEntryNonce('');
-        setUnknownOutcome(null);
+        setPendingUnknownAction(null);
+        clearAfterVerifiedResolution();
         setActionSuccess(data.message || 'Work entry logged successfully!');
         setShowLogWorkModal(false);
         setWorkActivity('');
@@ -336,7 +400,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Log Labour Work Entry');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) {
+        setPendingUnknownAction({ type: 'work_entry' });
+        setUnknownOutcome(unknownInfo, payload);
+      }
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -347,17 +414,28 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     }
   };
 
+  const handleSaveWorkEntry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSaveWorkEntry(false);
+  };
+
   // Payroll Calculation State
   const [calcMonth, setCalcMonth] = useState(new Date().toISOString().slice(0, 7));
 
-  const handleCalculatePayroll = async () => {
+  const handleCalculatePayroll = async (allowSameNonceRecoveryRetry = false) => {
     if (!isOwner || isAuditor || isLoading) return;
-    const activeNonce = calcPayrollNonce || createSubmissionNonce('WF-PAYCALC');
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setActionError(UNKNOWN_OUTCOME_MSG);
+      return;
+    }
+    const activeNonce =
+      calcPayrollNonce ||
+      (pendingUnknownAction?.type === 'calc_payroll' ? unknownOutcome?.nonce : '') ||
+      createSubmissionNonce('WF-PAYCALC');
     if (!calcPayrollNonce) setCalcPayrollNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
-    setUnknownOutcome(null);
     try {
       const res = await apiFetch('/api/workforce/payroll/calculate', {
         method: 'POST',
@@ -366,19 +444,26 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           month: calcMonth,
         }),
       });
-      const { is504, data } = await parseApiFetchJson(res);
-      if (is504) {
-        setUnknownOutcome({
-          nonce: activeNonce,
-          message: UNKNOWN_OUTCOME_MSG,
-          actionLabel: `Calculate Payroll (${calcMonth})`,
-        });
+      const { isUnknown, isRecoveryRequired, data } = await parseApiFetchJson(res);
+      if (isUnknown) {
+        setPendingUnknownAction({ type: 'calc_payroll' });
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_MSG,
+            actionLabel: `Calculate Payroll (${calcMonth})`,
+            recoveryRequired: isRecoveryRequired,
+            transactionState: isRecoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
+          },
+          { month: calcMonth }
+        );
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setCalcPayrollNonce('');
-        setUnknownOutcome(null);
+        setPendingUnknownAction(null);
+        clearAfterVerifiedResolution();
         setActionSuccess(data.message || 'Draft payroll calculated!');
         setShowCalcPayrollModal(false);
         loadPayroll();
@@ -389,7 +474,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Calculate Payroll (${calcMonth})`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) {
+        setPendingUnknownAction({ type: 'calc_payroll' });
+        setUnknownOutcome(unknownInfo, { month: calcMonth });
+      }
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -400,9 +488,18 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     }
   };
 
-  const handleApprovePayroll = async (runId: string) => {
+  const handleApprovePayroll = async (runId: string, allowSameNonceRecoveryRetry = false) => {
     if (!isOwner || isAuditor || isLoading || approvingRunId) return;
-    const activeNonce = approvePayrollNonces[runId] || createSubmissionNonce('WF-PAYAPP');
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setActionError(UNKNOWN_OUTCOME_MSG);
+      return;
+    }
+    const activeNonce =
+      approvePayrollNonces[runId] ||
+      (pendingUnknownAction?.type === 'approve_payroll' && pendingUnknownAction.runId === runId
+        ? unknownOutcome?.nonce
+        : '') ||
+      createSubmissionNonce('WF-PAYAPP');
     if (!approvePayrollNonces[runId]) {
       setApprovePayrollNonces((prev) => ({ ...prev, [runId]: activeNonce }));
     }
@@ -410,19 +507,24 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
-    setUnknownOutcome(null);
     try {
       const res = await apiFetch(`/api/workforce/payroll/${runId}/approve`, {
         method: 'POST',
         idempotencyKey: activeNonce,
       });
-      const { is504, data } = await parseApiFetchJson(res);
-      if (is504) {
-        setUnknownOutcome({
-          nonce: activeNonce,
-          message: UNKNOWN_OUTCOME_MSG,
-          actionLabel: `Approve Payroll Run ${runId}`,
-        });
+      const { isUnknown, isRecoveryRequired, data } = await parseApiFetchJson(res);
+      if (isUnknown) {
+        setPendingUnknownAction({ type: 'approve_payroll', runId });
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_MSG,
+            actionLabel: `Approve Payroll Run ${runId}`,
+            recoveryRequired: isRecoveryRequired,
+            transactionState: isRecoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
+          },
+          { runId }
+        );
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
@@ -432,7 +534,8 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           delete next[runId];
           return next;
         });
-        setUnknownOutcome(null);
+        setPendingUnknownAction(null);
+        clearAfterVerifiedResolution();
         setApproveRunTargetId(null);
         setActionSuccess(data.message || 'Payroll approved successfully!');
         loadPayroll();
@@ -441,7 +544,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve Payroll Run ${runId}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) {
+        setPendingUnknownAction({ type: 'approve_payroll', runId });
+        setUnknownOutcome(unknownInfo, { runId });
+      }
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -468,43 +574,56 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
   const [disburseRef, setDisburseRef] = useState('');
   const [disburseNotes, setDisburseNotes] = useState('');
 
-  const handleRecordPayment = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeRecordPayment = async (allowSameNonceRecoveryRetry = false) => {
     if (!isOwner || isAuditor || !selectedDisburseItem || isLoading) return;
-    const activeNonce = disburseNonce || createSubmissionNonce('WF-PAYDISB');
+    if (isOutcomeLocked && !allowSameNonceRecoveryRetry) {
+      setActionError(UNKNOWN_OUTCOME_MSG);
+      return;
+    }
+    const activeNonce =
+      disburseNonce ||
+      (pendingUnknownAction?.type === 'disburse' ? unknownOutcome?.nonce : '') ||
+      createSubmissionNonce('WF-PAYDISB');
     if (!disburseNonce) setDisburseNonce(activeNonce);
     setIsLoading(true);
     setActionSuccess('');
     setActionError('');
-    setUnknownOutcome(null);
+    const payload = {
+      reference_id: selectedDisburseItem.id,
+      payment_type: selectedDisburseItem.type,
+      recipient_id: selectedDisburseItem.recipient_id,
+      recipient_name: selectedDisburseItem.recipient_name,
+      amount: selectedDisburseItem.amount,
+      payment_method: disburseMethod,
+      payment_reference: disburseRef,
+      notes: disburseNotes,
+    };
     try {
       const res = await apiFetch('/api/workforce/payments', {
         method: 'POST',
         idempotencyKey: activeNonce,
-        body: JSON.stringify({
-          reference_id: selectedDisburseItem.id,
-          payment_type: selectedDisburseItem.type,
-          recipient_id: selectedDisburseItem.recipient_id,
-          recipient_name: selectedDisburseItem.recipient_name,
-          amount: selectedDisburseItem.amount,
-          payment_method: disburseMethod,
-          payment_reference: disburseRef,
-          notes: disburseNotes,
-        }),
+        body: JSON.stringify(payload),
       });
-      const { is504, data } = await parseApiFetchJson(res);
-      if (is504) {
-        setUnknownOutcome({
-          nonce: activeNonce,
-          message: UNKNOWN_OUTCOME_MSG,
-          actionLabel: 'Disburse Payroll Payment',
-        });
+      const { isUnknown, isRecoveryRequired, data } = await parseApiFetchJson(res);
+      if (isUnknown) {
+        setPendingUnknownAction({ type: 'disburse' });
+        setUnknownOutcome(
+          {
+            nonce: activeNonce,
+            message: UNKNOWN_OUTCOME_MSG,
+            actionLabel: 'Disburse Payroll Payment',
+            recoveryRequired: isRecoveryRequired,
+            transactionState: isRecoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN',
+          },
+          payload
+        );
         setActionError(UNKNOWN_OUTCOME_MSG);
         return;
       }
       if (res.ok) {
         setDisburseNonce('');
-        setUnknownOutcome(null);
+        setPendingUnknownAction(null);
+        clearAfterVerifiedResolution();
         setActionSuccess(data.message || 'Payment recorded and official receipt generated!');
         setShowDisburseModal(false);
         loadReceipts();
@@ -515,7 +634,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       }
     } catch (err) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Disburse Payroll Payment');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) {
+        setPendingUnknownAction({ type: 'disburse' });
+        setUnknownOutcome(unknownInfo, payload);
+      }
       setActionError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -524,6 +646,40 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleRecordPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeRecordPayment(false);
+  };
+
+  const handleRetryUnknownAction = () => {
+    if (!pendingUnknownAction) return;
+    if (pendingUnknownAction.type === 'bulk_att') {
+      handleSaveBulkAttendance(true);
+    } else if (pendingUnknownAction.type === 'work_entry') {
+      executeSaveWorkEntry(true);
+    } else if (pendingUnknownAction.type === 'calc_payroll') {
+      handleCalculatePayroll(true);
+    } else if (pendingUnknownAction.type === 'approve_payroll') {
+      handleApprovePayroll(pendingUnknownAction.runId, true);
+    } else if (pendingUnknownAction.type === 'disburse') {
+      executeRecordPayment(true);
+    }
+  };
+
+  const handleVerifiedUnlock = () => {
+    setBulkAttNonce('');
+    setWorkEntryNonce('');
+    setCalcPayrollNonce('');
+    setDisburseNonce('');
+    setPendingUnknownAction(null);
+    setShowCalcPayrollModal(false);
+    setShowDisburseModal(false);
+    setApproveRunTargetId(null);
+    clearAfterVerifiedResolution();
+    setActionSuccess('✅ Workforce transaction confirmed in Google Sheets. Controls unlocked safely.');
+    refreshAll();
   };
 
   return (
@@ -568,7 +724,9 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       {/* Notifications */}
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
-        onDismiss={() => setUnknownOutcome(null)}
+        onRetry={pendingUnknownAction ? handleRetryUnknownAction : undefined}
+        onConfirmedRecorded={handleVerifiedUnlock}
+        onDismiss={clearAfterVerifiedResolution}
       />
 
       {actionSuccess && (
@@ -836,6 +994,12 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
       {/* TAB 4: DAILY LABOUR ATTENDANCE */}
       {activeTab === 'labour_attendance' && (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-4">
+          <fieldset
+            disabled={isOutcomeLocked}
+            data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+            style={{ border: 0, padding: 0, margin: 0, minWidth: 0, opacity: isOutcomeLocked ? 0.72 : 1 }}
+            className="space-y-4"
+          >
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
             <div>
               <h2 className="text-sm font-bold text-slate-900 m-0">Bulk Daily Labour Attendance Punch</h2>
@@ -848,7 +1012,10 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
               <input
                 type="date"
                 value={attDate}
-                onChange={(e) => setAttDate(e.target.value)}
+                onChange={(e) => {
+                  if (shouldBlockDraftNonceReset(unknownOutcome)) return;
+                  setAttDate(e.target.value);
+                }}
                 className="text-xs p-1.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-600 font-semibold"
               />
             </div>
@@ -886,6 +1053,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                         <select
                           value={draft.status}
                           onChange={(e) => {
+                            if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                             const val = e.target.value;
                             setAttendanceDraft((prev) => ({
                               ...prev,
@@ -904,6 +1072,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                           type="number"
                           value={draft.hours}
                           onChange={(e) => {
+                            if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                             const val = Number(e.target.value);
                             setAttendanceDraft((prev) => ({
                               ...prev,
@@ -924,6 +1093,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                           value={draft.notes}
                           placeholder="Optional remarks…"
                           onChange={(e) => {
+                            if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                             const val = e.target.value;
                             setAttendanceDraft((prev) => ({
                               ...prev,
@@ -942,14 +1112,15 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
 
           <div className="pt-3 border-t border-slate-100 flex justify-end">
             <button
-              onClick={handleSaveBulkAttendance}
-              disabled={isLoading}
+              onClick={() => handleSaveBulkAttendance(false)}
+              disabled={isLoading || isOutcomeLocked}
               className="px-6 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               <CheckCircle2 size={15} />
-              <span>{isLoading ? 'Saving…' : 'Save Attendance Records'}</span>
+              <span>{isOutcomeLocked ? 'Locked — Check Status Above' : isLoading ? 'Saving…' : 'Save Attendance Records'}</span>
             </button>
           </div>
+          </fieldset>
         </div>
       )}
 
@@ -1118,7 +1289,9 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                           </button>
                         ) : ms.status === 'APPROVED' ? (
                           <button
+                            disabled={isOutcomeLocked}
                             onClick={() => {
+                              if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                               setDisburseNonce('');
                               setSelectedDisburseItem({
                                 id: ms.milestone_id,
@@ -1129,7 +1302,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                               });
                               setShowDisburseModal(true);
                             }}
-                            className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10px] cursor-pointer"
+                            className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold text-[10px] cursor-pointer"
                           >
                             Disburse Payment
                           </button>
@@ -1152,8 +1325,12 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-900 m-0">Monthly Payroll Runs & Ledger Postings</h2>
             <button
-              onClick={() => setShowCalcPayrollModal(true)}
-              className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+              disabled={isOutcomeLocked}
+              onClick={() => {
+                if (isOutcomeLocked) return;
+                setShowCalcPayrollModal(true);
+              }}
+              className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <Coins size={15} />
               <span>Calculate New Run</span>
@@ -1203,8 +1380,11 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                       </button>
                       {run.status !== 'APPROVED' && isOwner && (
                         <button
-                          onClick={() => setApproveRunTargetId(run.payroll_run_id)}
-                          disabled={isLoading || Boolean(approvingRunId)}
+                          onClick={() => {
+                            if (isOutcomeLocked) return;
+                            setApproveRunTargetId(run.payroll_run_id);
+                          }}
+                          disabled={isLoading || isOutcomeLocked || Boolean(approvingRunId)}
                           className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs cursor-pointer"
                         >
                           {approvingRunId === run.payroll_run_id ? 'Approving...' : 'Approve'}
@@ -1274,7 +1454,9 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                         <td className="py-2 px-3 text-center">
                           {item.payment_status !== 'PAID' ? (
                             <button
+                              disabled={isOutcomeLocked}
                               onClick={() => {
+                                if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                                 setDisburseNonce('');
                                 setSelectedDisburseItem({
                                   id: item.item_id,
@@ -1285,7 +1467,7 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
                                 });
                                 setShowDisburseModal(true);
                               }}
-                              className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-[11px] cursor-pointer"
+                              className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-[11px] cursor-pointer"
                             >
                               Disburse
                             </button>
@@ -1488,31 +1670,67 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
             maxWidth="md"
             onSubmit={(e) => {
               e.preventDefault();
-              handleCalculatePayroll();
+              handleCalculatePayroll(false);
             }}
-            onCancel={() => { setShowCalcPayrollModal(false); setCalcPayrollNonce(''); }}
+            onCancel={
+              isOutcomeLocked || isLoading
+                ? undefined
+                : () => {
+                    setShowCalcPayrollModal(false);
+                    setCalcPayrollNonce('');
+                  }
+            }
             actions={
-              <FormActions
-                onCancel={() => { setShowCalcPayrollModal(false); setCalcPayrollNonce(''); }}
-                cancelLabel="Cancel"
-                saveLabel="Calculate Draft Payroll"
-                isLoading={isLoading}
-              />
+              <FormActions>
+                <CancelButton
+                  disabled={isLoading || isOutcomeLocked}
+                  onClick={() => {
+                    if (isOutcomeLocked || isLoading) return;
+                    setShowCalcPayrollModal(false);
+                    setCalcPayrollNonce('');
+                  }}
+                  label="Cancel"
+                />
+                <SaveButton
+                  label={isOutcomeLocked ? 'Locked — Check Status Above' : 'Calculate Draft Payroll'}
+                  isLoading={isLoading}
+                  disabled={isOutcomeLocked}
+                />
+              </FormActions>
             }
           >
-            <FormField
-              label="Select Processing Month (YYYY-MM)"
-              required
-              helpText="The engine will pro-rate basic wages against working days and compute incentives"
-            >
-              <input
-                type="month"
-                value={calcMonth}
-                onChange={(e) => setCalcMonth(e.target.value)}
-                className="w-full text-xs p-2.5 rounded-xl border border-slate-300 font-bold focus:ring-2 focus:ring-[#0F2C23]"
-                required
+            {isOutcomeLocked && pendingUnknownAction?.type === 'calc_payroll' && (
+              <UnknownOutcomeBanner
+                outcome={unknownOutcome}
+                onRetry={() => handleCalculatePayroll(true)}
+                onConfirmedRecorded={handleVerifiedUnlock}
+                onDismiss={clearAfterVerifiedResolution}
               />
-            </FormField>
+            )}
+            <fieldset
+              disabled={isOutcomeLocked || isLoading}
+              data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+              style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+            >
+              <FormField
+                label="Select Processing Month (YYYY-MM)"
+                required
+                helpText="The engine will pro-rate basic wages against working days and compute incentives"
+              >
+                <input
+                  type="month"
+                  value={calcMonth}
+                  disabled={isOutcomeLocked || isLoading}
+                  onChange={(e) => {
+                    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
+                    setCalcPayrollNonce('');
+                    setCalcMonth(e.target.value);
+                  }}
+                  className="w-full text-xs p-2.5 rounded-xl border border-slate-300 font-bold focus:ring-2 focus:ring-[#0F2C23] disabled:bg-slate-100"
+                  required
+                />
+              </FormField>
+            </fieldset>
           </FormLayout>
         </div>
       )}
@@ -1526,56 +1744,96 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
             icon={<CreditCard size={18} />}
             maxWidth="md"
             onSubmit={handleRecordPayment}
-            onCancel={() => { setShowDisburseModal(false); setDisburseNonce(''); }}
+            onCancel={
+              isOutcomeLocked || isLoading
+                ? undefined
+                : () => {
+                    setShowDisburseModal(false);
+                    setDisburseNonce('');
+                  }
+            }
             actions={
-              <FormActions
-                onCancel={() => { setShowDisburseModal(false); setDisburseNonce(''); }}
-                cancelLabel="Cancel"
-                saveLabel="Confirm & Generate Slip"
-                isLoading={isLoading}
-              />
+              <FormActions>
+                <CancelButton
+                  disabled={isLoading || isOutcomeLocked}
+                  onClick={() => {
+                    if (isOutcomeLocked || isLoading) return;
+                    setShowDisburseModal(false);
+                    setDisburseNonce('');
+                  }}
+                  label="Cancel"
+                />
+                <SaveButton
+                  label={isOutcomeLocked ? 'Locked — Check Status Above' : 'Confirm & Generate Slip'}
+                  isLoading={isLoading}
+                  disabled={isOutcomeLocked}
+                />
+              </FormActions>
             }
           >
-            <CalculationPreview
-              items={[
-                {
-                  label: 'Recipient',
-                  value: selectedDisburseItem.recipient_name,
-                  subtitle: selectedDisburseItem.type,
-                },
-                {
-                  label: 'Disbursement Due',
-                  value: `₹${selectedDisburseItem.amount.toFixed(2)}`,
-                  subtitle: 'Approved payout',
-                  isHighlight: true,
-                  variant: 'emerald',
-                },
-              ]}
-            />
-
-            <FormField label="Payment Method" required>
-              <SelectInput
-                value={disburseMethod}
-                onChange={(e) => setDisburseMethod(e.target.value)}
-                options={[
-                  { value: 'BANK_TRANSFER', label: 'Bank Transfer (NEFT/RTGS/IMPS)' },
-                  { value: 'UPI', label: 'UPI Direct' },
-                  { value: 'CASH', label: 'Cash Disbursement' },
-                  { value: 'CHEQUE', label: 'Company Cheque' },
+            {isOutcomeLocked && pendingUnknownAction?.type === 'disburse' && (
+              <UnknownOutcomeBanner
+                outcome={unknownOutcome}
+                onRetry={() => executeRecordPayment(true)}
+                onConfirmedRecorded={handleVerifiedUnlock}
+                onDismiss={clearAfterVerifiedResolution}
+              />
+            )}
+            <fieldset
+              disabled={isOutcomeLocked || isLoading}
+              data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+              style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+              className="space-y-4"
+            >
+              <CalculationPreview
+                items={[
+                  {
+                    label: 'Recipient',
+                    value: selectedDisburseItem.recipient_name,
+                    subtitle: selectedDisburseItem.type,
+                  },
+                  {
+                    label: 'Disbursement Due',
+                    value: `₹${selectedDisburseItem.amount.toFixed(2)}`,
+                    subtitle: 'Approved payout',
+                    isHighlight: true,
+                    variant: 'emerald',
+                  },
                 ]}
               />
-            </FormField>
 
-            <FormField
-              label="Transaction Reference / UTR Number"
-              helpText="e.g. UTR123456789, Cheque #, or Cash Voucher ID"
-            >
-              <TextInput
-                value={disburseRef}
-                onChange={(e) => setDisburseRef(e.target.value)}
-                placeholder="e.g. UTR123456789 or Cash Voucher #"
-              />
-            </FormField>
+              <FormField label="Payment Method" required>
+                <SelectInput
+                  value={disburseMethod}
+                  disabled={isOutcomeLocked || isLoading}
+                  onChange={(e) => {
+                    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
+                    setDisburseMethod(e.target.value);
+                  }}
+                  options={[
+                    { value: 'BANK_TRANSFER', label: 'Bank Transfer (NEFT/RTGS/IMPS)' },
+                    { value: 'UPI', label: 'UPI Direct' },
+                    { value: 'CASH', label: 'Cash Disbursement' },
+                    { value: 'CHEQUE', label: 'Company Cheque' },
+                  ]}
+                />
+              </FormField>
+
+              <FormField
+                label="Transaction Reference / UTR Number"
+                helpText="e.g. UTR123456789, Cheque #, or Cash Voucher ID"
+              >
+                <TextInput
+                  value={disburseRef}
+                  disabled={isOutcomeLocked || isLoading}
+                  onChange={(e) => {
+                    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
+                    setDisburseRef(e.target.value);
+                  }}
+                  placeholder="e.g. UTR123456789 or Cash Voucher #"
+                />
+              </FormField>
+            </fieldset>
           </FormLayout>
         </div>
       )}
@@ -1598,25 +1856,36 @@ export const WorkforceView: React.FC<WorkforceViewProps> = ({ onPreviewEmployeeP
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-md w-full p-5 space-y-4">
             <h3 className="text-base font-bold text-slate-900 m-0">Approve Payroll Run</h3>
+            {isOutcomeLocked && pendingUnknownAction?.type === 'approve_payroll' && (
+              <UnknownOutcomeBanner
+                outcome={unknownOutcome}
+                onRetry={() => handleApprovePayroll(approveRunTargetId, true)}
+                onConfirmedRecorded={handleVerifiedUnlock}
+                onDismiss={clearAfterVerifiedResolution}
+              />
+            )}
             <p className="text-xs text-slate-600 m-0">
               Approve payroll run <strong className="font-mono text-slate-900">{approveRunTargetId}</strong>? This freezes calculations for payment.
             </p>
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
               <button
                 type="button"
-                disabled={Boolean(approvingRunId)}
-                onClick={() => setApproveRunTargetId(null)}
+                disabled={Boolean(approvingRunId) || isOutcomeLocked}
+                onClick={() => {
+                  if (isOutcomeLocked || approvingRunId) return;
+                  setApproveRunTargetId(null);
+                }}
                 className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                disabled={isLoading || Boolean(approvingRunId)}
-                onClick={() => handleApprovePayroll(approveRunTargetId)}
+                disabled={isLoading || isOutcomeLocked || Boolean(approvingRunId)}
+                onClick={() => handleApprovePayroll(approveRunTargetId, false)}
                 className="px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl cursor-pointer disabled:opacity-50"
               >
-                {approvingRunId === approveRunTargetId ? 'Approving...' : 'Confirm Approval'}
+                {isOutcomeLocked ? 'Locked — Check Status' : approvingRunId === approveRunTargetId ? 'Approving...' : 'Confirm Approval'}
               </button>
             </div>
           </div>

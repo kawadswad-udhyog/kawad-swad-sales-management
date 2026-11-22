@@ -1,7 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
-import { createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import { createSubmissionNonce, extractUnknownOutcomeInfo, isUnknownOutcomeError } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { Package } from 'lucide-react';
 import {
   FormLayout,
@@ -57,8 +59,15 @@ export const ProductsView: React.FC = () => {
   const [notes, setNotes] = useState('');
   const [productNonce, setProductNonce] = useState<string | null>(null);
   const [toggleNonces, setToggleNonces] = useState<Record<string, string>>({});
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('products_view');
 
-  const resetForm = () => {
+  const resetForm = (force = false) => {
+    if (!force && shouldBlockDraftNonceReset(unknownOutcome)) return;
     setEditingId(null);
     setProductNonce(null);
     setSku('');
@@ -74,7 +83,10 @@ export const ProductsView: React.FC = () => {
   };
 
   const handleEditClick = (p: Product) => {
-    setProductNonce(null);
+    if (isOutcomeLocked) return;
+    if (!shouldBlockDraftNonceReset(unknownOutcome)) {
+      setProductNonce(null);
+    }
     setEditingId(p.product_id);
     setSku(p.sku);
     setProductName(p.product_name);
@@ -91,6 +103,7 @@ export const ProductsView: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOutcomeLocked) return;
     setNotice(null);
 
     const parsedWeight = Number(packWeightG);
@@ -119,8 +132,9 @@ export const ProductsView: React.FC = () => {
           active,
           notes: notes.trim(),
         }, activeNonce);
+        clearAfterVerifiedResolution();
         setNotice({ msg: `✅ Product "${productName.trim()}" updated successfully.` });
-        resetForm();
+        resetForm(true);
       } else {
         // Check SKU uniqueness
         if (products.some((p) => p.sku.toLowerCase() === sku.trim().toLowerCase())) {
@@ -139,12 +153,17 @@ export const ProductsView: React.FC = () => {
           active,
           notes: notes.trim(),
         }, activeNonce);
+        clearAfterVerifiedResolution();
         setNotice({ msg: `✅ Product "${productName.trim()}" added to catalogue successfully.` });
-        resetForm();
+        resetForm(true);
       }
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, editingId ? 'Update Product' : 'Add Product');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.'
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—verify status before retrying.'
         : err instanceof Error
         ? err.message
         : 'Failed to save product';
@@ -153,6 +172,7 @@ export const ProductsView: React.FC = () => {
   };
 
   const handleToggleActive = async (p: Product) => {
+    if (isOutcomeLocked) return;
     setUpdatingId(p.product_id);
     setNotice(null);
     const activeNonce = toggleNonces[p.product_id] || createSubmissionNonce('PRDTGL');
@@ -162,6 +182,7 @@ export const ProductsView: React.FC = () => {
     try {
       const nextState = !p.active;
       await toggleProductActive(p.product_id, activeNonce);
+      clearAfterVerifiedResolution();
       setToggleNonces((prev) => {
         const next = { ...prev };
         delete next[p.product_id];
@@ -172,8 +193,12 @@ export const ProductsView: React.FC = () => {
         error: false,
       });
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Toggle Product ${p.sku}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; retry toggle with preserved idempotency key.'
+        ? 'Status not confirmed; verify status before retrying toggle with preserved idempotency key.'
         : err instanceof Error
         ? err.message
         : 'Failed to toggle product status';
@@ -243,7 +268,9 @@ export const ProductsView: React.FC = () => {
           {isManager && (
             <button
               type="button"
+              disabled={isOutcomeLocked}
               onClick={() => {
+                if (isOutcomeLocked) return;
                 if (isFormOpen && !editingId) {
                   setIsFormOpen(false);
                 } else {
@@ -260,6 +287,7 @@ export const ProductsView: React.FC = () => {
                 display: 'flex',
                 alignItems: 'center',
                 gap: '6px',
+                opacity: isOutcomeLocked ? 0.5 : 1,
               }}
             >
               <span>{isFormOpen ? '✕ Close Form' : '➕ Add New Product'}</span>
@@ -268,6 +296,21 @@ export const ProductsView: React.FC = () => {
         </div>
       </div>
 
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={async () => {
+          clearAfterVerifiedResolution();
+          resetForm(true);
+          await refreshData();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
+      />
+
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
       {notice && (
         <div className={notice.error ? 'notice-error' : 'notice-success'} style={{ marginBottom: '16px' }}>
           {notice.msg}
@@ -283,10 +326,10 @@ export const ProductsView: React.FC = () => {
             icon={<Package size={18} />}
             maxWidth="3xl"
             onSubmit={handleSubmit}
-            onCancel={resetForm}
+            onCancel={() => resetForm()}
             actions={
               <FormActions
-                onCancel={resetForm}
+                onCancel={() => resetForm()}
                 cancelLabel="Cancel"
                 saveLabel={editingId ? 'Save Changes' : 'Save Product'}
               />
@@ -597,6 +640,7 @@ export const ProductsView: React.FC = () => {
           </p>
         )}
       </div>
+      </fieldset>
     </div>
   );
 };

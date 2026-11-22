@@ -985,6 +985,285 @@ class AppsScriptBridge:
             f"Transient read-back error on '{tab_name}' after {max_attempts} attempts: {last_exc}"
         )
 
+    @staticmethod
+    def _parse_strict_decimal(value: Any, label: str) -> Decimal:
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            return Decimal("0")
+        try:
+            dec = Decimal(str(value).strip())
+            if not dec.is_finite():
+                raise ValueError("non-finite decimal")
+            return dec
+        except (InvalidOperation, ValueError) as exc:
+            raise _PartialSideEffectFailure(
+                f"Malformed numeric value for {label}: {value!r}."
+            ) from exc
+
+    def _verify_required_accounting_journal(
+        self,
+        *,
+        action: str,
+        primary_id: Optional[str],
+        primary_record: Optional[Dict[str, Any]],
+        payload: Optional[Dict[str, Any]] = None,
+        clean_nonce: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        TX-FINAL-01 / TX-FINAL-08:
+        Verify required secondary accounting journal records (JournalHeaders + JournalLines)
+        against the authoritative accounting contract in `app.accounting.postings`:
+        - CREATE_SALE: voucher_type='SALES', reference_type='SALE_INVOICE', reference_id=sale_id
+        - RECORD_SALE_PAYMENT: voucher_type='RECEIPT', reference_type='PAYMENT_COLLECTION', reference_id=payment_id
+
+        Rejects missing, non-posted, duplicate, unbalanced, invalid-account, parent/child broken,
+        or mismatched-correlation journal structures by raising `_PartialSideEffectFailure`.
+        Raises `_ReadBackFailure` if authoritative Google Sheets tables cannot be read.
+        """
+        clean_action = str(action or "").strip().upper()
+        contracts = {
+            "CREATE_SALE": {
+                "voucher_type": "SALES",
+                "reference_type": "SALE_INVOICE",
+                "amount_fields": ("bill_total", "total_amount"),
+            },
+            "RECORD_SALE_PAYMENT": {
+                "voucher_type": "RECEIPT",
+                "reference_type": "PAYMENT_COLLECTION",
+                "amount_fields": ("amount",),
+            },
+        }
+        contract = contracts.get(clean_action)
+        if not contract:
+            return None
+
+        clean_primary_id = str(primary_id or "").strip()
+        if not clean_primary_id:
+            raise _PartialSideEffectFailure(
+                f"Cannot verify required accounting journal for {clean_action}: primary record ID is missing."
+            )
+
+        # Determine expected positive transaction amount from primary record or payload
+        expected_amount: Optional[Decimal] = None
+        for src in (primary_record, payload):
+            if not isinstance(src, dict):
+                continue
+            for field in contract["amount_fields"]:
+                raw_amt = src.get(field)
+                if raw_amt is None and isinstance(src.get("sale"), dict):
+                    raw_amt = src["sale"].get(field)
+                if raw_amt is None and isinstance(src.get("payment"), dict):
+                    raw_amt = src["payment"].get(field)
+                if raw_amt not in (None, ""):
+                    expected_amount = self._parse_strict_decimal(raw_amt, f"{clean_action}.{field}")
+                    break
+            if expected_amount is not None:
+                break
+
+        # Mirror postings.py contract: zero-amount records intentionally skip journal creation
+        if expected_amount is not None and expected_amount <= Decimal("0"):
+            return None
+
+        expected_ref_type = contract["reference_type"]
+        expected_voucher_type = contract["voucher_type"]
+
+        # Read authoritative accounting tables fresh from Google Sheets
+        headers_all = self._get_fresh_records_with_retry("JournalHeaders", max_attempts=2, retry_delay_s=0.05)
+        lines_all = self._get_fresh_records_with_retry("JournalLines", max_attempts=2, retry_delay_s=0.05)
+
+        matching_headers = [
+            h for h in headers_all
+            if isinstance(h, dict)
+            and str(h.get("reference_type", "")).strip().upper() == expected_ref_type
+            and str(h.get("reference_id", "")).strip() == clean_primary_id
+        ]
+        if not matching_headers:
+            raise _PartialSideEffectFailure(
+                f"Required accounting journal header missing in JournalHeaders for "
+                f"{clean_action} ({expected_ref_type}={clean_primary_id})."
+            )
+
+        active_headers = [
+            h for h in matching_headers
+            if str(h.get("status", "")).strip().upper() in {"POSTED", "VALID"}
+        ]
+        if len(active_headers) == 0:
+            statuses = [str(h.get("status", "")).strip() for h in matching_headers]
+            raise _PartialSideEffectFailure(
+                f"Accounting journal header for {expected_ref_type}={clean_primary_id} is not POSTED/VALID "
+                f"(found statuses={statuses})."
+            )
+        if len(active_headers) > 1:
+            j_ids = [str(h.get("journal_id", "")).strip() for h in active_headers]
+            raise _PartialSideEffectFailure(
+                f"Duplicate active accounting journal headers ({len(active_headers)}) found for "
+                f"{expected_ref_type}={clean_primary_id}: {j_ids}."
+            )
+
+        header = active_headers[0]
+        journal_id = str(header.get("journal_id", "")).strip()
+        if not journal_id:
+            raise _PartialSideEffectFailure(
+                f"Accounting journal header for {expected_ref_type}={clean_primary_id} is missing journal_id."
+            )
+
+        actual_vtype = str(header.get("voucher_type", "")).strip().upper()
+        if actual_vtype != expected_voucher_type:
+            raise _PartialSideEffectFailure(
+                f"Accounting journal '{journal_id}' voucher_type mismatch for {clean_action}: "
+                f"expected '{expected_voucher_type}', found '{actual_vtype}'."
+            )
+
+        hdr_debit = self._parse_strict_decimal(header.get("total_debit"), f"JournalHeaders[{journal_id}].total_debit")
+        hdr_credit = self._parse_strict_decimal(header.get("total_credit"), f"JournalHeaders[{journal_id}].total_credit")
+        if hdr_debit <= Decimal("0") or hdr_credit <= Decimal("0"):
+            raise _PartialSideEffectFailure(
+                f"Accounting journal '{journal_id}' has non-positive header totals "
+                f"(debit={hdr_debit}, credit={hdr_credit})."
+            )
+        if abs(hdr_debit - hdr_credit) > Decimal("0.005"):
+            raise _PartialSideEffectFailure(
+                f"Accounting journal header '{journal_id}' is unbalanced "
+                f"(total_debit={hdr_debit}, total_credit={hdr_credit})."
+            )
+
+        child_lines = [
+            ln for ln in lines_all
+            if isinstance(ln, dict) and str(ln.get("journal_id", "")).strip() == journal_id
+        ]
+        if len(child_lines) < 2:
+            raise _PartialSideEffectFailure(
+                f"Accounting journal '{journal_id}' for {expected_ref_type}={clean_primary_id} "
+                f"has incomplete JournalLines (expected >= 2, found {len(child_lines)})."
+            )
+
+        from app.accounting.chart_of_accounts import ACCOUNT_LOOKUP
+
+        tot_line_deb = Decimal("0")
+        tot_line_crd = Decimal("0")
+        debits_by_acct: Dict[str, Decimal] = {}
+        credits_by_acct: Dict[str, Decimal] = {}
+
+        for idx, ln in enumerate(child_lines, start=1):
+            acct_code = str(ln.get("account_code", "")).strip()
+            if not acct_code or acct_code not in ACCOUNT_LOOKUP:
+                raise _PartialSideEffectFailure(
+                    f"Accounting journal '{journal_id}' line #{idx} has invalid/unknown account_code '{acct_code}'."
+                )
+            d_amt = self._parse_strict_decimal(ln.get("debit_amount", 0), f"JournalLines[{journal_id}#{idx}].debit_amount")
+            c_amt = self._parse_strict_decimal(ln.get("credit_amount", 0), f"JournalLines[{journal_id}#{idx}].credit_amount")
+            if d_amt < Decimal("0") or c_amt < Decimal("0"):
+                raise _PartialSideEffectFailure(
+                    f"Accounting journal '{journal_id}' line #{idx} contains negative amount (debit={d_amt}, credit={c_amt})."
+                )
+            if (d_amt > Decimal("0") and c_amt > Decimal("0")) or (d_amt == Decimal("0") and c_amt == Decimal("0")):
+                raise _PartialSideEffectFailure(
+                    f"Accounting journal '{journal_id}' line #{idx} violates single-sided debit/credit rule "
+                    f"(debit={d_amt}, credit={c_amt})."
+                )
+            tot_line_deb += d_amt
+            tot_line_crd += c_amt
+            if d_amt > Decimal("0"):
+                debits_by_acct[acct_code] = debits_by_acct.get(acct_code, Decimal("0")) + d_amt
+            if c_amt > Decimal("0"):
+                credits_by_acct[acct_code] = credits_by_acct.get(acct_code, Decimal("0")) + c_amt
+
+        if abs(tot_line_deb - tot_line_crd) > Decimal("0.005"):
+            raise _PartialSideEffectFailure(
+                f"Accounting journal '{journal_id}' JournalLines are unbalanced "
+                f"(debit={tot_line_deb}, credit={tot_line_crd})."
+            )
+        if abs(tot_line_deb - hdr_debit) > Decimal("0.005") or abs(tot_line_crd - hdr_credit) > Decimal("0.005"):
+            raise _PartialSideEffectFailure(
+                f"Accounting journal '{journal_id}' JournalLines totals ({tot_line_deb}/{tot_line_crd}) "
+                f"mismatch JournalHeaders totals ({hdr_debit}/{hdr_credit})."
+            )
+
+        # Contract-specific account & amount consistency checks
+        if clean_action == "CREATE_SALE":
+            settlement_deb = (
+                debits_by_acct.get("1115", Decimal("0"))
+                + debits_by_acct.get("1120", Decimal("0"))
+                + debits_by_acct.get("1130", Decimal("0"))
+            )
+            rev_and_tax_crd = (
+                credits_by_acct.get("4100", Decimal("0"))
+                + credits_by_acct.get("2210", Decimal("0"))
+                + credits_by_acct.get("2220", Decimal("0"))
+            )
+            if settlement_deb <= Decimal("0") or rev_and_tax_crd <= Decimal("0"):
+                raise _PartialSideEffectFailure(
+                    f"Sale journal '{journal_id}' missing required settlement debit (1115/1120/1130) "
+                    f"or revenue credit (4100/2210/2220) legs for sale '{clean_primary_id}'."
+                )
+            if abs(settlement_deb - rev_and_tax_crd) > Decimal("0.05"):
+                raise _PartialSideEffectFailure(
+                    f"Sale journal '{journal_id}' settlement debit ({settlement_deb}) mismatches "
+                    f"revenue+tax credit ({rev_and_tax_crd}) for sale '{clean_primary_id}'."
+                )
+            if expected_amount is not None:
+                if abs(settlement_deb - expected_amount) > Decimal("0.05") or abs(rev_and_tax_crd - expected_amount) > Decimal("0.05"):
+                    raise _PartialSideEffectFailure(
+                        f"Sale journal '{journal_id}' amount ({settlement_deb}/{rev_and_tax_crd}) mismatches "
+                        f"sale bill_total ({expected_amount}) for sale '{clean_primary_id}'."
+                    )
+            cogs_deb = debits_by_acct.get("5100", Decimal("0"))
+            cogs_crd = credits_by_acct.get("1240", Decimal("0"))
+            if (cogs_deb > Decimal("0") or cogs_crd > Decimal("0")) and abs(cogs_deb - cogs_crd) > Decimal("0.01"):
+                raise _PartialSideEffectFailure(
+                    f"Sale journal '{journal_id}' COGS entry is unbalanced (5100={cogs_deb}, 1240={cogs_crd})."
+                )
+        elif clean_action == "RECORD_SALE_PAYMENT":
+            coll_deb = debits_by_acct.get("1115", Decimal("0")) + debits_by_acct.get("1120", Decimal("0"))
+            ar_crd = credits_by_acct.get("1130", Decimal("0"))
+            if coll_deb <= Decimal("0") or ar_crd <= Decimal("0"):
+                raise _PartialSideEffectFailure(
+                    f"Payment journal '{journal_id}' missing required collection debit (1115/1120) "
+                    f"or receivable credit (1130) for payment '{clean_primary_id}'."
+                )
+            if abs(coll_deb - ar_crd) > Decimal("0.01"):
+                raise _PartialSideEffectFailure(
+                    f"Payment journal '{journal_id}' collection debit ({coll_deb}) mismatches "
+                    f"receivable credit ({ar_crd}) for payment '{clean_primary_id}'."
+                )
+            if expected_amount is not None:
+                if abs(coll_deb - expected_amount) > Decimal("0.01") or abs(ar_crd - expected_amount) > Decimal("0.01"):
+                    raise _PartialSideEffectFailure(
+                        f"Payment journal '{journal_id}' amount ({coll_deb}/{ar_crd}) mismatches "
+                        f"payment amount ({expected_amount}) for payment '{clean_primary_id}'."
+                    )
+
+        # Correlation / IdAllocations identity verification
+        alloc_rows = self._get_fresh_records_with_retry("IdAllocations", max_attempts=2, retry_delay_s=0.05)
+        expected_jv_nonce = f"JV-{expected_ref_type}-{clean_primary_id}"
+        jv_allocs = [
+            r for r in alloc_rows
+            if isinstance(r, dict) and str(r.get("nonce", "")).strip() == expected_jv_nonce
+        ]
+        for jv_a in jv_allocs:
+            jv_a_tab = str(jv_a.get("tab_name", "")).strip()
+            jv_a_id = str(jv_a.get("allocated_id", "")).strip()
+            if (jv_a_tab and jv_a_tab != "JournalHeaders") or (jv_a_id and jv_a_id != journal_id):
+                raise _PartialSideEffectFailure(
+                    f"Accounting journal correlation mismatch in IdAllocations for nonce '{expected_jv_nonce}': "
+                    f"expected JournalHeaders/{journal_id}, found {jv_a_tab}/{jv_a_id}."
+                )
+        if clean_nonce:
+            primary_allocs = [
+                r for r in alloc_rows
+                if isinstance(r, dict)
+                and str(r.get("nonce", "")).strip() == clean_nonce
+                and str(r.get("tab_name", "")).strip() != "BillNumbers"
+            ]
+            for p_a in primary_allocs:
+                p_a_id = str(p_a.get("allocated_id", "")).strip()
+                if p_a_id and p_a_id != clean_primary_id:
+                    raise _PartialSideEffectFailure(
+                        f"Primary transaction correlation mismatch in IdAllocations for nonce '{clean_nonce}': "
+                        f"expected '{clean_primary_id}', found '{p_a_id}'."
+                    )
+
+        return {"header": header, "lines": child_lines, "journal_id": journal_id}
+
     def _verify_readback(
         self,
         *,
@@ -994,13 +1273,15 @@ class AppsScriptBridge:
         corr_id: str,
         clean_nonce: str,
         payload_hash: str,
+        verify_secondary_journals: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Perform transaction-specific read-back verification against Google Sheets (`fresh=True`).
         Distinguishes:
         - `_ReadBackFailure`: primary row absent or transient storage outage (`PENDING_UNKNOWN`).
         - `_PartialSideEffectFailure`: primary row duplicated OR primary row written with
-          mismatched state, missing/imbalanced child rows, or inconsistent totals (`RECOVERY_REQUIRED`).
+          mismatched state, missing/imbalanced child rows, inconsistent totals, or missing/invalid
+          required accounting journals (`RECOVERY_REQUIRED`).
         """
         fresh_rows = self._get_fresh_records_with_retry(spec.target_tab)
         matched: Optional[Dict[str, Any]] = None
@@ -1191,41 +1472,93 @@ class AppsScriptBridge:
                 raise _ReadBackFailure(err_msg)
 
             if child_check.verify_journal_balance:
-                tot_deb = sum(Decimal(str(r.get("debit_amount", 0) or 0)) for r in child_rows)
-                tot_crd = sum(Decimal(str(r.get("credit_amount", 0) or 0)) for r in child_rows)
+                if len(child_rows) < 2:
+                    raise _PartialSideEffectFailure(
+                        f"JournalLines incomplete on {fk_val}: expected >= 2 balanced lines, found {len(child_rows)}."
+                    )
+                tot_deb = Decimal("0")
+                tot_crd = Decimal("0")
+                for idx, r in enumerate(child_rows, start=1):
+                    raw_d = r.get("debit_amount") if "debit_amount" in r else r.get("debit", 0)
+                    raw_c = r.get("credit_amount") if "credit_amount" in r else r.get("credit", 0)
+                    d_amt = self._parse_strict_decimal(raw_d, f"JournalLines[{fk_val}#{idx}].debit_amount")
+                    c_amt = self._parse_strict_decimal(raw_c, f"JournalLines[{fk_val}#{idx}].credit_amount")
+                    if d_amt < Decimal("0") or c_amt < Decimal("0"):
+                        raise _PartialSideEffectFailure(
+                            f"JournalLines negative amount on {fk_val} line #{idx}: debit={d_amt}, credit={c_amt}."
+                        )
+                    if (d_amt > Decimal("0") and c_amt > Decimal("0")) or (d_amt == Decimal("0") and c_amt == Decimal("0")):
+                        raise _PartialSideEffectFailure(
+                            f"JournalLines single-sided rule violated on {fk_val} line #{idx}: debit={d_amt}, credit={c_amt}."
+                        )
+                    tot_deb += d_amt
+                    tot_crd += c_amt
+                if tot_deb <= Decimal("0") or tot_crd <= Decimal("0"):
+                    raise _PartialSideEffectFailure(
+                        f"JournalLines non-positive totals on {fk_val}: debit={tot_deb}, credit={tot_crd}."
+                    )
                 if abs(tot_deb - tot_crd) > Decimal("0.01"):
                     raise _PartialSideEffectFailure(
                         f"JournalLines imbalance on {fk_val}: debit={tot_deb}, credit={tot_crd}."
                     )
+                if matched is not None:
+                    raw_hdr_deb = matched.get("total_debit")
+                    raw_hdr_crd = matched.get("total_credit")
+                    if raw_hdr_deb not in (None, ""):
+                        hdr_deb = self._parse_strict_decimal(raw_hdr_deb, f"JournalHeaders[{fk_val}].total_debit")
+                        if abs(hdr_deb - tot_deb) > Decimal("0.01"):
+                            raise _PartialSideEffectFailure(
+                                f"JournalHeaders total_debit ({hdr_deb}) mismatches JournalLines debit ({tot_deb}) on {fk_val}."
+                            )
+                    if raw_hdr_crd not in (None, ""):
+                        hdr_crd = self._parse_strict_decimal(raw_hdr_crd, f"JournalHeaders[{fk_val}].total_credit")
+                        if abs(hdr_crd - tot_crd) > Decimal("0.01"):
+                            raise _PartialSideEffectFailure(
+                                f"JournalHeaders total_credit ({hdr_crd}) mismatches JournalLines credit ({tot_crd}) on {fk_val}."
+                            )
 
             # Financial consistency verification for SaleItems vs Sales subtotal / net bill_total
             # Accounting identity: bill_total = subtotal - discount_amount + tax_amount
             if child_check.tab == "SaleItems" and matched is not None:
                 raw_subtotal = matched.get("subtotal")
                 raw_bill_total = matched.get("bill_total")
-                item_line_totals = [
-                    r.get("line_total")
-                    for r in child_rows
-                    if r.get("line_total") not in (None, "")
-                ]
-                if len(item_line_totals) == len(child_rows) and (raw_subtotal not in (None, "") or raw_bill_total not in (None, "")):
-                    try:
-                        lines_dec = sum(Decimal(str(lt)) for lt in item_line_totals)
-                        if raw_subtotal not in (None, ""):
-                            expected_lines_dec = Decimal(str(raw_subtotal))
-                            expected_label = "Sales.subtotal"
-                        else:
-                            bill_dec = Decimal(str(raw_bill_total))
-                            disc_dec = Decimal(str(matched.get("discount_amount") or 0))
-                            tax_dec = Decimal(str(matched.get("tax_amount") or 0))
-                            expected_lines_dec = bill_dec + disc_dec - tax_dec
-                            expected_label = "Sales.bill_total"
-                        if abs(lines_dec - expected_lines_dec) > Decimal("0.50"):
-                            raise _PartialSideEffectFailure(
-                                f"SaleItems line_total sum ({lines_dec}) mismatches {expected_label} ({expected_lines_dec}) for {fk_val}."
-                            )
-                    except (InvalidOperation, ValueError):
-                        pass
+                if raw_subtotal not in (None, "") or raw_bill_total not in (None, ""):
+                    missing_lt = [r for r in child_rows if r.get("line_total") in (None, "")]
+                    if missing_lt:
+                        raise _PartialSideEffectFailure(
+                            f"SaleItems for {fk_val} has {len(missing_lt)} row(s) missing required line_total."
+                        )
+                    lines_dec = sum(
+                        self._parse_strict_decimal(r.get("line_total"), f"SaleItems[{fk_val}].line_total")
+                        for r in child_rows
+                    )
+                    if raw_subtotal not in (None, ""):
+                        expected_lines_dec = self._parse_strict_decimal(raw_subtotal, f"Sales[{fk_val}].subtotal")
+                        expected_label = "Sales.subtotal"
+                    else:
+                        bill_dec = self._parse_strict_decimal(raw_bill_total, f"Sales[{fk_val}].bill_total")
+                        disc_dec = self._parse_strict_decimal(matched.get("discount_amount") or 0, f"Sales[{fk_val}].discount_amount")
+                        tax_dec = self._parse_strict_decimal(matched.get("tax_amount") or 0, f"Sales[{fk_val}].tax_amount")
+                        expected_lines_dec = bill_dec + disc_dec - tax_dec
+                        expected_label = "Sales.bill_total"
+                    if abs(lines_dec - expected_lines_dec) > Decimal("0.50"):
+                        raise _PartialSideEffectFailure(
+                            f"SaleItems line_total sum ({lines_dec}) mismatches {expected_label} ({expected_lines_dec}) for {fk_val}."
+                        )
+
+        if verify_secondary_journals:
+            resolved_primary_id = str(
+                lookup_id
+                or (matched.get(spec.id_field) if (matched and spec.id_field) else "")
+                or ""
+            ).strip() or None
+            self._verify_required_accounting_journal(
+                action=spec.action,
+                primary_id=resolved_primary_id,
+                primary_record=matched,
+                payload=payload,
+                clean_nonce=clean_nonce,
+            )
 
         return matched
 
@@ -1307,6 +1640,108 @@ class AppsScriptBridge:
         tx_id = existing_tx.get("transaction_id")
         attempt_no = int(existing_tx.get("attempt_count") or 1)
 
+        def _handle_recovery_transition_conflict(st_exc: InvalidStateTransitionError) -> BridgeResult:
+            """
+            TX-FINAL-06: Handle concurrent recovery CAS conflict safely.
+            Losing worker receives an explicit handled current-state/conflict response
+            (never uncaught 500, and never returns None to authorize a duplicate Sheets write).
+            """
+            try:
+                latest = tx_coordinator.get_governed_transaction(clean_nonce)
+            except CoordinatorDurabilityError as dur_exc:
+                return BridgeResult(
+                    status="REJECTED",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    error_code=dur_exc.error_code,
+                    message=(
+                        f"Recovery blocked fail-closed: transaction coordinator unavailable "
+                        f"({dur_exc.error_code})."
+                    ),
+                    retryable=False,
+                    http_status=503,
+                    payload_hash=payload_hash,
+                    transaction_id=tx_id,
+                    transaction_state=TransactionState.UNKNOWN.value,
+                    failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+                    attempt_number=attempt_no,
+                )
+            latest_state = str((latest or {}).get("lifecycle_state") or st_exc.current_state or TransactionState.UNKNOWN.value).strip().upper()
+            latest_hash = str((latest or {}).get("payload_hash") or "").strip()
+            latest_alloc = (latest or {}).get("allocated_id")
+            latest_tx_id = (latest or {}).get("transaction_id") or tx_id
+            latest_attempt = int((latest or {}).get("attempt_count") or attempt_no)
+
+            if latest and latest_state in {TransactionState.COMMITTED.value, TransactionState.RECONCILED.value}:
+                if latest_hash and latest_hash != payload_hash:
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        allocated_id=latest_alloc,
+                        error_code="IDEMPOTENCY_PAYLOAD_CONFLICT",
+                        message=f"Idempotency conflict: nonce '{clean_nonce}' already committed with a different payload.",
+                        retryable=False,
+                        http_status=409,
+                        payload_hash=payload_hash,
+                        transaction_id=latest_tx_id,
+                        transaction_state=latest_state,
+                        failure_category=FailureCategory.IDEMPOTENCY_CONFLICT.value,
+                        attempt_number=latest_attempt,
+                    )
+                return self._build_replay_confirmed_result(
+                    existing_tx=latest,
+                    corr_id=corr_id,
+                    clean_nonce=clean_nonce,
+                    payload_hash=payload_hash,
+                    actor_user_id=actor_user_id,
+                    clean_action=spec.action,
+                    clean_tab=spec.target_tab,
+                    recovery_decision="CONCURRENT_RECOVERY_ALREADY_COMMITTED",
+                )
+
+            if latest_state == TransactionState.RECOVERY_REQUIRED.value:
+                return BridgeResult(
+                    status="RECOVERY_REQUIRED",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    allocated_id=latest_alloc,
+                    error_code=str((latest or {}).get("error_code") or "RECOVERY_REQUIRED"),
+                    message=(
+                        "Transaction is quarantined in RECOVERY_REQUIRED state after concurrent recovery inspection. "
+                        "Automatic retry is blocked until Owner reconciliation completes."
+                    ),
+                    retryable=False,
+                    http_status=409,
+                    payload_hash=payload_hash,
+                    transaction_id=latest_tx_id,
+                    transaction_state=TransactionState.RECOVERY_REQUIRED.value,
+                    failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                    attempt_number=latest_attempt,
+                    recovery_decision="CONCURRENT_RECOVERY_QUARANTINED",
+                )
+
+            return BridgeResult(
+                status="REJECTED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                allocated_id=latest_alloc,
+                error_code="CONCURRENT_RECOVERY_CONFLICT",
+                message=(
+                    f"Concurrent recovery in progress for nonce '{clean_nonce}' "
+                    f"(authoritative state is now '{latest_state}'). Duplicate execution blocked; "
+                    "check transaction status before retrying."
+                ),
+                retryable=True,
+                http_status=409,
+                payload_hash=payload_hash,
+                transaction_id=latest_tx_id,
+                transaction_state=latest_state,
+                failure_category=FailureCategory.DUPLICATE_REQUEST.value,
+                attempt_number=latest_attempt,
+                recovery_decision="CONCURRENT_RECOVERY_LOST_CAS",
+            )
+
         alloc_match: Optional[Dict[str, Any]] = None
         audit_match: Optional[Dict[str, Any]] = None
         read_errors: List[str] = []
@@ -1314,7 +1749,7 @@ class AppsScriptBridge:
         try:
             alloc_rows = self._get_fresh_records_with_retry("IdAllocations", max_attempts=2, retry_delay_s=0.05)
             alloc_match = next(
-                (r for r in alloc_rows if str(r.get("nonce", "")).strip() == clean_nonce),
+                (r for r in alloc_rows if isinstance(r, dict) and str(r.get("nonce", "")).strip() == clean_nonce),
                 None,
             )
         except Exception as exc:
@@ -1324,6 +1759,8 @@ class AppsScriptBridge:
             audit_rows = self._get_fresh_records_with_retry("AuditLog", max_attempts=2, retry_delay_s=0.05)
             alloc_id_hint = str((alloc_match or {}).get("allocated_id") or existing_tx.get("allocated_id") or "").strip()
             for row in reversed(audit_rows):
+                if not isinstance(row, dict):
+                    continue
                 row_related = str(row.get("related_record_id", "")).strip()
                 row_entity = str(row.get("entity_id", "")).strip()
                 row_reason = str(row.get("reason", "")).strip()
@@ -1361,22 +1798,25 @@ class AppsScriptBridge:
                     attempt_number=attempt_no,
                     recovery_decision="QUARANTINED_STORAGE_UNAVAILABLE",
                 )
-            tx_coordinator.transition_governed_transaction(
-                nonce=clean_nonce,
-                lifecycle_state=TransactionState.UNKNOWN.value,
-                bridge_status="PENDING_UNKNOWN",
-                failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
-                error_code="RECOVERY_STORAGE_UNAVAILABLE",
-                message="Recovery inspection blocked: authoritative Sheets status tables are unreachable.",
-                recovery_decision="DEFER_STORAGE_UNAVAILABLE",
-                step_event={"step": "RECOVERY_DEFERRED_STORAGE_ERROR", "errors": read_errors[:3]},
-                clear_lease=True,
-                authority=TransitionAuthority.RECOVERY,
-                expected_from_state=TransactionState.UNKNOWN,
-                actor="SYSTEM_RECOVERY",
-                reason="Recovery inspection blocked: authoritative Sheets status tables unreachable.",
-                evidence={"errors": read_errors[:3]},
-            )
+            try:
+                tx_coordinator.transition_governed_transaction(
+                    nonce=clean_nonce,
+                    lifecycle_state=TransactionState.UNKNOWN.value,
+                    bridge_status="PENDING_UNKNOWN",
+                    failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
+                    error_code="RECOVERY_STORAGE_UNAVAILABLE",
+                    message="Recovery inspection blocked: authoritative Sheets status tables are unreachable.",
+                    recovery_decision="DEFER_STORAGE_UNAVAILABLE",
+                    step_event={"step": "RECOVERY_DEFERRED_STORAGE_ERROR", "errors": read_errors[:3]},
+                    clear_lease=True,
+                    authority=TransitionAuthority.RECOVERY,
+                    expected_from_state=TransactionState.UNKNOWN,
+                    actor="SYSTEM_RECOVERY",
+                    reason="Recovery inspection blocked: authoritative Sheets status tables unreachable.",
+                    evidence={"errors": read_errors[:3]},
+                )
+            except InvalidStateTransitionError as st_exc:
+                return _handle_recovery_transition_conflict(st_exc)
             audit_ok = self._record_tx_audit(
                 actor_user_id=actor_user_id,
                 action=spec.action,
@@ -1423,6 +1863,22 @@ class AppsScriptBridge:
         has_prior_evidence = bool(alloc_match or audit_match or candidate_id)
         if has_prior_evidence:
             try:
+                # Verify allocation table identity consistency before accepting readback
+                if alloc_match is not None:
+                    alloc_tab = str(alloc_match.get("tab_name") or "").strip()
+                    if alloc_tab and alloc_tab != "BillNumbers" and alloc_tab != spec.target_tab:
+                        raise _PartialSideEffectFailure(
+                            f"IdAllocations tab mismatch for nonce '{clean_nonce}': "
+                            f"expected '{spec.target_tab}', found '{alloc_tab}'."
+                        )
+                    alloc_id_val = str(alloc_match.get("allocated_id") or "").strip()
+                    tx_alloc_val = str(existing_tx.get("allocated_id") or "").strip()
+                    if alloc_id_val and tx_alloc_val and alloc_id_val != tx_alloc_val:
+                        raise _PartialSideEffectFailure(
+                            f"IdAllocations allocated_id mismatch for nonce '{clean_nonce}': "
+                            f"coordinator has '{tx_alloc_val}', Sheets has '{alloc_id_val}'."
+                        )
+
                 verified_record = self._verify_readback(
                     spec=spec,
                     payload=payload,
@@ -1430,32 +1886,36 @@ class AppsScriptBridge:
                     corr_id=corr_id,
                     clean_nonce=clean_nonce,
                     payload_hash=payload_hash,
+                    verify_secondary_journals=True,
                 )
-                # Verified complete commit in Google Sheets -> recover cleanly to COMMITTED!
+                # Verified complete commit (primary + child + required accounting journals) -> recover to COMMITTED!
                 final_alloc_id = candidate_id
                 if not final_alloc_id and verified_record and spec.id_field and verified_record.get(spec.id_field):
                     final_alloc_id = str(verified_record.get(spec.id_field)).strip()
                 tabs_to_clear = set(requested_inv) | set(spec.allowed_invalidate_tabs) | {spec.target_tab}
                 for tab in tabs_to_clear:
                     db.invalidate_tab_cache(tab)
-                tx_coordinator.transition_governed_transaction(
-                    nonce=clean_nonce,
-                    lifecycle_state=TransactionState.COMMITTED.value,
-                    bridge_status="CONFIRMED",
-                    failure_category=None,
-                    error_code=None,
-                    allocated_id=final_alloc_id,
-                    message="Recovered confirmed transaction from authoritative Google Sheets state without duplicate write.",
-                    recovery_decision="AUTO_CONFIRMED_FROM_SHEETS",
-                    result_snapshot=verified_record if isinstance(verified_record, dict) else None,
-                    step_event={"step": "RECOVERY_AUTO_CONFIRMED", "allocated_id": final_alloc_id},
-                    clear_lease=True,
-                    authority=TransitionAuthority.RECOVERY,
-                    expected_from_state=(TransactionState.UNKNOWN, TransactionState.RECOVERY_REQUIRED),
-                    actor="SYSTEM_RECOVERY",
-                    reason="Verified complete commit in authoritative Google Sheets during recovery.",
-                    evidence={"allocated_id": final_alloc_id, "alloc_match": bool(alloc_match), "audit_match": bool(audit_match)},
-                )
+                try:
+                    tx_coordinator.transition_governed_transaction(
+                        nonce=clean_nonce,
+                        lifecycle_state=TransactionState.COMMITTED.value,
+                        bridge_status="CONFIRMED",
+                        failure_category=None,
+                        error_code=None,
+                        allocated_id=final_alloc_id,
+                        message="Recovered confirmed transaction from authoritative Google Sheets state without duplicate write.",
+                        recovery_decision="AUTO_CONFIRMED_FROM_SHEETS",
+                        result_snapshot=verified_record if isinstance(verified_record, dict) else None,
+                        step_event={"step": "RECOVERY_AUTO_CONFIRMED", "allocated_id": final_alloc_id},
+                        clear_lease=True,
+                        authority=TransitionAuthority.RECOVERY,
+                        expected_from_state=(TransactionState.UNKNOWN, TransactionState.RECOVERY_REQUIRED),
+                        actor="SYSTEM_RECOVERY",
+                        reason="Verified complete commit (including required child and accounting journal records) in authoritative Google Sheets during recovery.",
+                        evidence={"allocated_id": final_alloc_id, "alloc_match": bool(alloc_match), "audit_match": bool(audit_match)},
+                    )
+                except InvalidStateTransitionError as st_exc:
+                    return _handle_recovery_transition_conflict(st_exc)
                 audit_ok = self._record_tx_audit(
                     actor_user_id=actor_user_id,
                     action=spec.action,
@@ -1488,23 +1948,26 @@ class AppsScriptBridge:
                 )
             except _PartialSideEffectFailure as partial_exc:
                 if existing_state != TransactionState.RECOVERY_REQUIRED.value:
-                    tx_coordinator.transition_governed_transaction(
-                        nonce=clean_nonce,
-                        lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
-                        bridge_status="RECOVERY_REQUIRED",
-                        failure_category=FailureCategory.RECOVERY_REQUIRED.value,
-                        error_code="PARTIAL_SIDE_EFFECT_RECOVERY_REQUIRED",
-                        allocated_id=candidate_id,
-                        message=str(partial_exc),
-                        recovery_decision="QUARANTINED_PARTIAL_SIDE_EFFECT",
-                        step_event={"step": "RECOVERY_QUARANTINED_PARTIAL", "detail": str(partial_exc)[:240]},
-                        clear_lease=True,
-                        authority=TransitionAuthority.RECOVERY,
-                        expected_from_state=TransactionState.UNKNOWN,
-                        actor="SYSTEM_RECOVERY",
-                        reason=str(partial_exc),
-                        evidence={"detail": str(partial_exc)[:240], "allocated_id": candidate_id},
-                    )
+                    try:
+                        tx_coordinator.transition_governed_transaction(
+                            nonce=clean_nonce,
+                            lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
+                            bridge_status="RECOVERY_REQUIRED",
+                            failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                            error_code="PARTIAL_SIDE_EFFECT_RECOVERY_REQUIRED",
+                            allocated_id=candidate_id,
+                            message=str(partial_exc),
+                            recovery_decision="QUARANTINED_PARTIAL_SIDE_EFFECT",
+                            step_event={"step": "RECOVERY_QUARANTINED_PARTIAL", "detail": str(partial_exc)[:240]},
+                            clear_lease=True,
+                            authority=TransitionAuthority.RECOVERY,
+                            expected_from_state=TransactionState.UNKNOWN,
+                            actor="SYSTEM_RECOVERY",
+                            reason=str(partial_exc),
+                            evidence={"detail": str(partial_exc)[:240], "allocated_id": candidate_id},
+                        )
+                    except InvalidStateTransitionError as st_exc:
+                        return _handle_recovery_transition_conflict(st_exc)
                 audit_ok = self._record_tx_audit(
                     actor_user_id=actor_user_id,
                     action=spec.action,
@@ -1540,6 +2003,44 @@ class AppsScriptBridge:
                     recovery_decision="QUARANTINED_PARTIAL_SIDE_EFFECT",
                 )
             except _ReadBackFailure as rb_exc:
+                # Transient read failure MUST NOT clear RECOVERY_REQUIRED quarantine and MUST NOT allow retry
+                if "Transient read-back error" in str(rb_exc):
+                    if existing_state == TransactionState.RECOVERY_REQUIRED.value:
+                        return BridgeResult(
+                            status="RECOVERY_REQUIRED",
+                            correlation_id=corr_id,
+                            nonce=clean_nonce,
+                            allocated_id=candidate_id,
+                            error_code="RECOVERY_STORAGE_UNAVAILABLE",
+                            message=(
+                                f"Transaction remains quarantined in RECOVERY_REQUIRED while target/accounting "
+                                f"table verification cannot reach Google Sheets ({rb_exc})."
+                            ),
+                            retryable=False,
+                            http_status=409,
+                            payload_hash=payload_hash,
+                            transaction_id=tx_id,
+                            transaction_state=TransactionState.RECOVERY_REQUIRED.value,
+                            failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                            attempt_number=attempt_no,
+                            recovery_decision="QUARANTINED_STORAGE_UNAVAILABLE",
+                        )
+                    return BridgeResult(
+                        status="PENDING_UNKNOWN",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        allocated_id=candidate_id,
+                        error_code="RECOVERY_STORAGE_UNAVAILABLE",
+                        message=f"Outcome still unknown: target table read failed during recovery ({rb_exc}).",
+                        retryable=True,
+                        http_status=504,
+                        payload_hash=payload_hash,
+                        transaction_id=tx_id,
+                        transaction_state=TransactionState.UNKNOWN.value,
+                        failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
+                        attempt_number=attempt_no,
+                        recovery_decision="DEFER_STORAGE_UNAVAILABLE",
+                    )
                 # If IdAllocations or AuditLog already recorded this nonce, but target row is absent,
                 # that is an orphan allocation / partial write -> MUST quarantine, NOT blindly retry!
                 if alloc_match or audit_match:
@@ -1548,23 +2049,26 @@ class AppsScriptBridge:
                         f"(allocated_id={candidate_id}), but target state verification failed: {rb_exc}"
                     )
                     if existing_state != TransactionState.RECOVERY_REQUIRED.value:
-                        tx_coordinator.transition_governed_transaction(
-                            nonce=clean_nonce,
-                            lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
-                            bridge_status="RECOVERY_REQUIRED",
-                            failure_category=FailureCategory.RECOVERY_REQUIRED.value,
-                            error_code="ORPHAN_ALLOCATION_RECOVERY_REQUIRED",
-                            allocated_id=candidate_id,
-                            message=quarantine_msg,
-                            recovery_decision="QUARANTINED_ORPHAN_ALLOCATION",
-                            step_event={"step": "RECOVERY_QUARANTINED_ORPHAN", "detail": str(rb_exc)[:240]},
-                            clear_lease=True,
-                            authority=TransitionAuthority.RECOVERY,
-                            expected_from_state=TransactionState.UNKNOWN,
-                            actor="SYSTEM_RECOVERY",
-                            reason=quarantine_msg,
-                            evidence={"detail": str(rb_exc)[:240], "allocated_id": candidate_id},
-                        )
+                        try:
+                            tx_coordinator.transition_governed_transaction(
+                                nonce=clean_nonce,
+                                lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
+                                bridge_status="RECOVERY_REQUIRED",
+                                failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                                error_code="ORPHAN_ALLOCATION_RECOVERY_REQUIRED",
+                                allocated_id=candidate_id,
+                                message=quarantine_msg,
+                                recovery_decision="QUARANTINED_ORPHAN_ALLOCATION",
+                                step_event={"step": "RECOVERY_QUARANTINED_ORPHAN", "detail": str(rb_exc)[:240]},
+                                clear_lease=True,
+                                authority=TransitionAuthority.RECOVERY,
+                                expected_from_state=TransactionState.UNKNOWN,
+                                actor="SYSTEM_RECOVERY",
+                                reason=quarantine_msg,
+                                evidence={"detail": str(rb_exc)[:240], "allocated_id": candidate_id},
+                            )
+                        except InvalidStateTransitionError as st_exc:
+                            return _handle_recovery_transition_conflict(st_exc)
                     audit_ok = self._record_tx_audit(
                         actor_user_id=actor_user_id,
                         action=spec.action,
@@ -1599,24 +2103,6 @@ class AppsScriptBridge:
                         audit_logged=audit_ok,
                         recovery_decision="QUARANTINED_ORPHAN_ALLOCATION",
                     )
-                # Transient read failure vs genuinely absent candidate_id
-                if "Transient read-back error" in str(rb_exc):
-                    return BridgeResult(
-                        status="PENDING_UNKNOWN",
-                        correlation_id=corr_id,
-                        nonce=clean_nonce,
-                        allocated_id=candidate_id,
-                        error_code="RECOVERY_STORAGE_UNAVAILABLE",
-                        message=f"Outcome still unknown: target table read failed during recovery ({rb_exc}).",
-                        retryable=True,
-                        http_status=504,
-                        payload_hash=payload_hash,
-                        transaction_id=tx_id,
-                        transaction_state=TransactionState.UNKNOWN.value,
-                        failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
-                        attempt_number=attempt_no,
-                        recovery_decision="DEFER_STORAGE_UNAVAILABLE",
-                    )
 
         # If previously explicitly quarantined as RECOVERY_REQUIRED with no verified recovery, keep blocked
         if existing_state == TransactionState.RECOVERY_REQUIRED.value:
@@ -1641,42 +2127,69 @@ class AppsScriptBridge:
             )
 
         # Authoritative Sheets confirmed healthy & ZERO side effects found -> safe to transition to PENDING and retry
-        tx_coordinator.transition_governed_transaction(
-            nonce=clean_nonce,
-            lifecycle_state=TransactionState.PENDING.value,
-            bridge_status="PENDING_UNKNOWN",
-            failure_category=None,
-            error_code=None,
-            message="Recovery inspection confirmed zero side effects in Google Sheets; safe to retry with same nonce.",
-            recovery_decision="CONFIRMED_ABSENT_SAFE_TO_RETRY",
-            step_event={"step": "RECOVERY_CONFIRMED_ABSENT_RETRY_ALLOWED"},
-            clear_lease=True,
-            authority=TransitionAuthority.RECOVERY,
-            expected_from_state=TransactionState.UNKNOWN,
-            actor="SYSTEM_RECOVERY",
-            reason="Recovery inspection confirmed zero side effects in authoritative Google Sheets.",
-            evidence={"alloc_match": False, "audit_match": False},
-        )
+        try:
+            tx_coordinator.transition_governed_transaction(
+                nonce=clean_nonce,
+                lifecycle_state=TransactionState.PENDING.value,
+                bridge_status="PENDING_UNKNOWN",
+                failure_category=None,
+                error_code=None,
+                message="Recovery inspection confirmed zero side effects in Google Sheets; safe to retry with same nonce.",
+                recovery_decision="CONFIRMED_ABSENT_SAFE_TO_RETRY",
+                step_event={"step": "RECOVERY_CONFIRMED_ABSENT_RETRY_ALLOWED"},
+                clear_lease=True,
+                authority=TransitionAuthority.RECOVERY,
+                expected_from_state=TransactionState.UNKNOWN,
+                actor="SYSTEM_RECOVERY",
+                reason="Recovery inspection confirmed zero side effects in authoritative Google Sheets.",
+                evidence={"alloc_match": False, "audit_match": False},
+            )
+        except InvalidStateTransitionError as st_exc:
+            return _handle_recovery_transition_conflict(st_exc)
         return None
 
     def _find_existing_sheets_allocation_for_nonce(self, clean_nonce: str) -> Optional[Dict[str, Any]]:
         """
-        Post-coordinator-loss safeguard (TX-AUDIT-02):
+        Post-coordinator-loss safeguard (TX-AUDIT-02 / TX-FINAL-02):
         When a nonce is not present in the local SQLite coordinator (e.g., after local DB wipe
         or replacement), inspect authoritative Google Sheets `IdAllocations` before transmitting
         any gateway POST so previously allocated/committed transactions recover cleanly without
         blindly duplicating writes.
+
+        FAIL-CLOSED CONTRACT (TX-FINAL-02):
+        - Returns `None` ONLY when `IdAllocations` was read cleanly as a valid list of dicts
+          and no matching row was found.
+        - Raises `_SheetsAllocationLookupError` on ANY timeout, connectivity failure, exception,
+          non-list malformed response, or malformed row structure so callers NEVER mistake a read
+          failure for "no allocation exists".
         """
         if not clean_nonce:
             return None
         try:
             alloc_rows = db.get_records("IdAllocations", fresh=True)
-            if isinstance(alloc_rows, list):
-                for row in alloc_rows:
-                    if isinstance(row, dict) and str(row.get("nonce", "")).strip() == clean_nonce:
-                        return row
         except Exception as exc:
-            logger.debug("Pre-write IdAllocations nonce check skipped due to read error (%s): %s", clean_nonce, exc)
+            logger.error("Pre-write IdAllocations nonce check FAILED for '%s': %s", clean_nonce, exc)
+            raise _SheetsAllocationLookupError(
+                f"Failed to read authoritative IdAllocations for nonce '{clean_nonce}': {exc}"
+            ) from exc
+
+        if not isinstance(alloc_rows, list):
+            logger.error(
+                "Pre-write IdAllocations nonce check returned malformed non-list (%s) for '%s'",
+                type(alloc_rows).__name__,
+                clean_nonce,
+            )
+            raise _SheetsAllocationLookupError(
+                f"Malformed IdAllocations response ({type(alloc_rows).__name__}) while checking nonce '{clean_nonce}'."
+            )
+
+        for idx, row in enumerate(alloc_rows):
+            if not isinstance(row, dict):
+                raise _SheetsAllocationLookupError(
+                    f"Malformed IdAllocations entry at index {idx} ({type(row).__name__}) while checking nonce '{clean_nonce}'."
+                )
+            if str(row.get("nonce", "")).strip() == clean_nonce:
+                return row
         return None
 
     def execute_governed_write(
@@ -1911,17 +2424,70 @@ class AppsScriptBridge:
                     clean_tab=clean_tab,
                 )
             if prior_state in {TransactionState.UNKNOWN.value, TransactionState.RECOVERY_REQUIRED.value}:
-                recovery_res = self.recover_transaction(
-                    nonce=clean_nonce,
-                    spec=spec,
-                    payload=payload,
-                    corr_id=corr_id,
-                    payload_hash=payload_hash,
-                    actor_user_id=actor_user_id,
-                    actor_role=actor_role,
-                    existing_tx=prior_tx,
-                    requested_inv=requested_inv,
-                )
+                try:
+                    recovery_res = self.recover_transaction(
+                        nonce=clean_nonce,
+                        spec=spec,
+                        payload=payload,
+                        corr_id=corr_id,
+                        payload_hash=payload_hash,
+                        actor_user_id=actor_user_id,
+                        actor_role=actor_role,
+                        existing_tx=prior_tx,
+                        requested_inv=requested_inv,
+                    )
+                except CoordinatorDurabilityError as dur_exc:
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        error_code=dur_exc.error_code,
+                        message=(
+                            f"Write blocked fail-closed during recovery: transaction coordinator unavailable "
+                            f"({dur_exc.error_code}). Form data was NOT SAVED."
+                        ),
+                        retryable=False,
+                        http_status=503,
+                        payload_hash=payload_hash,
+                        transaction_id=prior_tx.get("transaction_id"),
+                        transaction_state=TransactionState.UNKNOWN.value,
+                        failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+                    )
+                except InvalidStateTransitionError as st_exc:
+                    try:
+                        latest = tx_coordinator.get_governed_transaction(clean_nonce) or {}
+                    except CoordinatorDurabilityError as dur_exc:
+                        return BridgeResult(
+                            status="REJECTED",
+                            correlation_id=corr_id,
+                            nonce=clean_nonce,
+                            error_code=dur_exc.error_code,
+                            message=f"Write blocked fail-closed: coordinator unavailable ({dur_exc.error_code}).",
+                            retryable=False,
+                            http_status=503,
+                            payload_hash=payload_hash,
+                            transaction_id=prior_tx.get("transaction_id"),
+                            transaction_state=TransactionState.UNKNOWN.value,
+                            failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+                        )
+                    return BridgeResult(
+                        status="REJECTED",
+                        correlation_id=corr_id,
+                        nonce=clean_nonce,
+                        allocated_id=latest.get("allocated_id"),
+                        error_code="CONCURRENT_RECOVERY_CONFLICT",
+                        message=(
+                            f"Concurrent recovery conflict ({st_exc.code}): authoritative state is "
+                            f"'{latest.get('lifecycle_state') or st_exc.current_state}'. Duplicate execution blocked."
+                        ),
+                        retryable=True,
+                        http_status=409,
+                        payload_hash=payload_hash,
+                        transaction_id=latest.get("transaction_id") or prior_tx.get("transaction_id"),
+                        transaction_state=str(latest.get("lifecycle_state") or st_exc.current_state or TransactionState.UNKNOWN.value),
+                        failure_category=FailureCategory.DUPLICATE_REQUEST.value,
+                        recovery_decision="CONCURRENT_RECOVERY_LOST_CAS",
+                    )
                 if recovery_res is not None:
                     return recovery_res
 
@@ -2015,10 +2581,33 @@ class AppsScriptBridge:
                 failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
             )
 
-        # Post-coordinator-loss safeguard: if nonce is missing locally, inspect authoritative
-        # Google Sheets IdAllocations before acquiring a fresh execution slot or calling gateway.
+        # Post-coordinator-loss safeguard (TX-FINAL-02): if nonce is missing locally, inspect
+        # authoritative Google Sheets IdAllocations BEFORE acquiring a fresh execution slot or
+        # issuing any gateway POST. Lookup failure MUST fail closed and block new mutation.
         if prior_tx is None:
-            existing_alloc = self._find_existing_sheets_allocation_for_nonce(clean_nonce)
+            try:
+                existing_alloc = self._find_existing_sheets_allocation_for_nonce(clean_nonce)
+            except _SheetsAllocationLookupError as alloc_err:
+                logger.error(
+                    "Governed write blocked fail-closed — IdAllocations lookup failed for nonce=%s: %s",
+                    clean_nonce,
+                    alloc_err,
+                )
+                return BridgeResult(
+                    status="REJECTED",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    error_code="SHEETS_ALLOCATION_LOOKUP_FAILED",
+                    message=(
+                        f"Write blocked fail-closed: unable to verify existing IdAllocations for nonce '{clean_nonce}' "
+                        f"({alloc_err}). No financial write was issued; retry safely once Google Sheets recovers."
+                    ),
+                    retryable=True,
+                    http_status=503,
+                    payload_hash=payload_hash,
+                    transaction_state=TransactionState.FAILED.value,
+                    failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+                )
             if existing_alloc is not None:
                 ext_alloc_id = str(existing_alloc.get("allocated_id") or "").strip() or None
                 try:
@@ -2113,7 +2702,21 @@ class AppsScriptBridge:
                 failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
             )
         except InvalidStateTransitionError as st_exc:
-            latest = tx_coordinator.get_governed_transaction(clean_nonce) or {}
+            try:
+                latest = tx_coordinator.get_governed_transaction(clean_nonce) or {}
+            except CoordinatorDurabilityError as dur_exc:
+                return BridgeResult(
+                    status="REJECTED",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    error_code=dur_exc.error_code,
+                    message=f"Write blocked fail-closed: transaction coordinator unavailable ({dur_exc.error_code}).",
+                    retryable=False,
+                    http_status=503,
+                    payload_hash=payload_hash,
+                    transaction_state=TransactionState.UNKNOWN.value,
+                    failure_category=FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+                )
             return BridgeResult(
                 status="REJECTED",
                 correlation_id=corr_id,
@@ -2588,20 +3191,27 @@ class AppsScriptBridge:
                 "Status not confirmed; Apps Script response nonce did not match request.",
             )
 
+        # TX-FINAL-07: Post-transmission action/table mismatches MUST be classified as UNKNOWN
+        # (never FAILED/REJECTED), because the HTTP write was already transmitted and a downstream
+        # mutation may have occurred. Preserve transaction identity and force same-nonce status/recovery.
         echo_action = str(data.get("action") or "").strip().upper()
         if echo_action and echo_action != clean_action:
-            return _transition_rejected(
+            return _transition_unknown(
                 "RESPONSE_ACTION_MISMATCH",
-                f"Apps Script response action '{echo_action}' did not match '{clean_action}'.",
-                502,
+                (
+                    f"Status not confirmed; post-transmission Apps Script response action '{echo_action}' "
+                    f"did not match '{clean_action}'. Do not submit a new transaction; check status and recover with the same nonce."
+                ),
             )
 
         echo_tab = str(data.get("target_tab") or "").strip()
         if echo_tab and echo_tab != clean_tab:
-            return _transition_rejected(
+            return _transition_unknown(
                 "RESPONSE_TABLE_MISMATCH",
-                f"Apps Script response target_tab '{echo_tab}' did not match '{clean_tab}'.",
-                502,
+                (
+                    f"Status not confirmed; post-transmission Apps Script response target_tab '{echo_tab}' "
+                    f"did not match '{clean_tab}'. Do not submit a new transaction; check status and recover with the same nonce."
+                ),
             )
 
         outcome = str(data.get("status", "")).strip().upper()
@@ -2923,7 +3533,31 @@ class AppsScriptBridge:
             raise ValueError("Transaction nonce is required for status lookup.")
 
         checked_at = now_iso()
-        local_tx = tx_coordinator.get_governed_transaction(clean_nonce)
+        try:
+            local_tx = tx_coordinator.get_governed_transaction(clean_nonce)
+        except CoordinatorDurabilityError as dur_exc:
+            logger.error("Coordinator read failed during check_transaction_status(%s): %s", clean_nonce, dur_exc)
+            return {
+                "status": "UNKNOWN_STORAGE_UNAVAILABLE",
+                "transaction_id": None,
+                "transaction_state": TransactionState.UNKNOWN.value,
+                "failure_category": FailureCategory.DEPENDENCY_UNAVAILABLE.value,
+                "error_code": dur_exc.error_code,
+                "nonce": clean_nonce,
+                "correlation_id": clean_corr or None,
+                "allocated_id": None,
+                "tab_name": None,
+                "recorded_at": None,
+                "audit_entry": None,
+                "safe_to_retry_same_nonce": False,
+                "recovery_decision": "COORDINATOR_STORAGE_UNAVAILABLE",
+                "checked_at": checked_at,
+                "message": (
+                    f"Outcome unknown: local transaction coordinator storage failed ({dur_exc.error_code}). "
+                    "Do NOT submit a new transaction until coordinator storage is restored."
+                ),
+            }
+
         local_state = str((local_tx or {}).get("lifecycle_state") or "").strip().upper() or None
         tx_id = (local_tx or {}).get("transaction_id")
         recovery_decision = (local_tx or {}).get("recovery_decision")
@@ -2940,7 +3574,7 @@ class AppsScriptBridge:
                 alloc_error = f"IdAllocations returned non-list ({type(alloc_rows).__name__})"
             else:
                 alloc_match = next(
-                    (r for r in alloc_rows if str(r.get("nonce", "")).strip() == clean_nonce),
+                    (r for r in alloc_rows if isinstance(r, dict) and str(r.get("nonce", "")).strip() == clean_nonce),
                     None,
                 )
         except Exception as exc:
@@ -2954,6 +3588,8 @@ class AppsScriptBridge:
             else:
                 alloc_id_hint = str((alloc_match or {}).get("allocated_id") or (local_tx or {}).get("allocated_id") or "").strip()
                 for row in reversed(audit_rows):
+                    if not isinstance(row, dict):
+                        continue
                     row_related = str(row.get("related_record_id", "")).strip()
                     row_entity = str(row.get("entity_id", "")).strip()
                     row_reason = str(row.get("reason", "")).strip()
@@ -2990,7 +3626,7 @@ class AppsScriptBridge:
                 "message": "Transaction has been reconciled by an administrator. Do NOT retry.",
             }
 
-        # If quarantined locally in RECOVERY_REQUIRED, never mark safe to retry blindly
+        # If quarantined locally in RECOVERY_REQUIRED, never mark safe to retry blindly or CONFIRMED
         if local_state == TransactionState.RECOVERY_REQUIRED.value:
             tab_name = str((local_tx or {}).get("target_tab") or (alloc_match or {}).get("tab_name") or "").strip()
             allocated_id = str((local_tx or {}).get("allocated_id") or (alloc_match or {}).get("allocated_id") or "").strip() or None
@@ -3016,102 +3652,252 @@ class AppsScriptBridge:
             }
 
         if alloc_match or audit_match:
-            tab_name = str(
-                (alloc_match or {}).get("tab_name")
-                or (audit_match or {}).get("entity_type")
-                or (local_tx or {}).get("target_tab")
-                or ""
+            alloc_tab = str((alloc_match or {}).get("tab_name") or "").strip()
+            local_tab = str((local_tx or {}).get("target_tab") or "").strip()
+            audit_tab = str((audit_match or {}).get("entity_type") or "").strip()
+            tab_name = (
+                (alloc_tab if alloc_tab and alloc_tab != "BillNumbers" else "")
+                or local_tab
+                or audit_tab
             ).strip()
-            allocated_id = str(
-                (alloc_match or {}).get("allocated_id")
-                or (audit_match or {}).get("entity_id")
-                or (local_tx or {}).get("allocated_id")
+
+            alloc_rec_id = str((alloc_match or {}).get("allocated_id") or "").strip()
+            local_rec_id = str((local_tx or {}).get("allocated_id") or "").strip()
+            audit_rec_id = str((audit_match or {}).get("entity_id") or "").strip()
+            allocated_id = (alloc_rec_id or local_rec_id or audit_rec_id or "").strip() or None
+
+            is_confidential_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE or tab_name in SECURITY_NO_CACHE_TABS
+            redacted_alloc = "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else allocated_id
+            redacted_tab = "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else (tab_name or None)
+            recorded_at_val = str(
+                (alloc_match or {}).get("created_at")
+                or (audit_match or {}).get("event_datetime")
                 or ""
             ).strip() or None
-            is_confidential_tab = tab_name in CONFIDENTIAL_TABS_NO_CACHE or tab_name in SECURITY_NO_CACHE_TABS
 
-            # Verify primary row existence & uniqueness whenever an IdAllocations row points to a real business tab
-            if alloc_match and tab_name and tab_name != "BillNumbers" and allocated_id:
-                spec = get_governed_action_spec(str((local_tx or {}).get("action") or ""))
-                candidate_id_fields: List[str] = []
-                if spec and spec.id_field:
-                    candidate_id_fields.append(spec.id_field)
-                try:
-                    db.invalidate_tab_cache(tab_name)
-                    target_rows = db.get_records(tab_name, fresh=True)
-                    if not isinstance(target_rows, list):
-                        raise RuntimeError(f"Target tab '{tab_name}' returned non-list data.")
-                    if candidate_id_fields:
-                        matched_rows = [
-                            r for r in target_rows
-                            if any(str(r.get(f, "")).strip() == allocated_id for f in candidate_id_fields)
-                        ]
-                    else:
-                        matched_rows = [
-                            r for r in target_rows
-                            if any(str(v).strip() == allocated_id for v in r.values())
-                        ]
-                    if len(matched_rows) == 0:
-                        return {
-                            "status": "RECOVERY_REQUIRED",
-                            "transaction_id": tx_id,
-                            "transaction_state": TransactionState.RECOVERY_REQUIRED.value,
-                            "failure_category": FailureCategory.RECOVERY_REQUIRED.value,
-                            "nonce": clean_nonce,
-                            "correlation_id": clean_corr or (local_tx or {}).get("correlation_id"),
-                            "allocated_id": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else allocated_id,
-                            "tab_name": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else (tab_name or None),
-                            "recorded_at": str((alloc_match or {}).get("created_at") or "").strip() or None,
-                            "audit_entry": None,
-                            "safe_to_retry_same_nonce": False,
-                            "recovery_decision": "ORPHAN_ID_ALLOCATION_DETECTED",
-                            "checked_at": checked_at,
-                            "message": (
-                                "Recovery required: ID allocation was recorded in IdAllocations, but the primary "
-                                "business row is missing in Google Sheets. Do NOT retry blindly; Owner reconciliation is required."
-                            ),
-                        }
-                    if len(matched_rows) > 1:
-                        return {
-                            "status": "RECOVERY_REQUIRED",
-                            "transaction_id": tx_id,
-                            "transaction_state": TransactionState.RECOVERY_REQUIRED.value,
-                            "failure_category": FailureCategory.RECOVERY_REQUIRED.value,
-                            "nonce": clean_nonce,
-                            "correlation_id": clean_corr or (local_tx or {}).get("correlation_id"),
-                            "allocated_id": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else allocated_id,
-                            "tab_name": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else (tab_name or None),
-                            "recorded_at": str((alloc_match or {}).get("created_at") or "").strip() or None,
-                            "audit_entry": None,
-                            "safe_to_retry_same_nonce": False,
-                            "recovery_decision": "DUPLICATE_PRIMARY_ROWS_DETECTED",
-                            "checked_at": checked_at,
-                            "message": (
-                                f"Recovery required: {len(matched_rows)} duplicate primary rows were found for "
-                                "this transaction in Google Sheets. Do NOT retry; Owner reconciliation is required."
-                            ),
-                        }
-                except Exception as target_exc:
-                    logger.warning("Target verification failed during status check for nonce=%s tab=%s: %s", clean_nonce, tab_name, target_exc)
-                    return {
-                        "status": "UNKNOWN_STORAGE_UNAVAILABLE",
-                        "transaction_id": tx_id,
-                        "transaction_state": TransactionState.UNKNOWN.value,
-                        "failure_category": FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
-                        "nonce": clean_nonce,
-                        "correlation_id": clean_corr or (local_tx or {}).get("correlation_id"),
-                        "allocated_id": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else allocated_id,
-                        "tab_name": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else (tab_name or None),
-                        "recorded_at": None,
-                        "audit_entry": None,
-                        "safe_to_retry_same_nonce": False,
-                        "recovery_decision": "DEFER_TARGET_TABLE_UNAVAILABLE",
-                        "checked_at": checked_at,
-                        "message": (
-                            "Outcome still unknown: ID allocation exists, but primary table verification could not "
-                            "reach Google Sheets. Do NOT submit a duplicate; re-check status shortly."
+            def _recovery_required_status(decision: str, detail_msg: str) -> Dict[str, Any]:
+                return {
+                    "status": "RECOVERY_REQUIRED",
+                    "transaction_id": tx_id,
+                    "transaction_state": TransactionState.RECOVERY_REQUIRED.value,
+                    "failure_category": FailureCategory.RECOVERY_REQUIRED.value,
+                    "nonce": clean_nonce,
+                    "correlation_id": clean_corr or (local_tx or {}).get("correlation_id"),
+                    "allocated_id": redacted_alloc,
+                    "tab_name": redacted_tab,
+                    "recorded_at": recorded_at_val,
+                    "audit_entry": None,
+                    "safe_to_retry_same_nonce": False,
+                    "recovery_decision": decision,
+                    "checked_at": checked_at,
+                    "message": detail_msg,
+                }
+
+            # TX-FINAL-08: Never confirm from allocation/audit evidence alone without verifiable target identity
+            if local_tab and alloc_tab and alloc_tab != "BillNumbers" and alloc_tab != local_tab:
+                return _recovery_required_status(
+                    "ALLOCATION_TAB_MISMATCH",
+                    f"Recovery required: IdAllocations tab '{alloc_tab}' does not match coordinator tab '{local_tab}'.",
+                )
+            if local_rec_id and alloc_rec_id and alloc_rec_id != local_rec_id:
+                return _recovery_required_status(
+                    "ALLOCATION_ID_MISMATCH",
+                    f"Recovery required: IdAllocations ID '{alloc_rec_id}' does not match coordinator ID '{local_rec_id}'.",
+                )
+            if not tab_name or tab_name == "BillNumbers" or not allocated_id:
+                return _recovery_required_status(
+                    "INCOMPLETE_VERIFICATION_EVIDENCE",
+                    (
+                        "Recovery required: allocation/audit trace exists, but verifiable primary target tab "
+                        "and allocated_id could not be established. Do NOT treat as confirmed; Owner inspection required."
+                    ),
+                )
+
+            # Resolve governed action spec from coordinator, audit log, or canonical tab mapping
+            resolved_action = str(
+                (local_tx or {}).get("action")
+                or (audit_match or {}).get("action")
+                or ""
+            ).strip().upper()
+            spec = get_governed_action_spec(resolved_action) if resolved_action else None
+            if spec is None:
+                canonical_tab_actions = {
+                    "Sales": "CREATE_SALE",
+                    "Payments": "RECORD_SALE_PAYMENT",
+                    "JournalHeaders": "POST_JOURNAL_VOUCHER",
+                    "PayrollRuns": "CALCULATE_PAYROLL",
+                    "WorkforcePayments": "RECORD_WORKFORCE_PAYMENT",
+                    "SalesOrders": "CREATE_SALES_ORDER",
+                    "CustomerReturns": "CREATE_CUSTOMER_RETURN",
+                    "ProductionDispatches": "PRODUCTION_STOCK_DISPATCH",
+                }
+                inferred_action = canonical_tab_actions.get(tab_name)
+                if inferred_action:
+                    spec = get_governed_action_spec(inferred_action)
+                    resolved_action = inferred_action
+
+            # 1. Verify primary target row existence & uniqueness
+            candidate_id_fields: List[str] = []
+            if spec and spec.id_field:
+                candidate_id_fields.append(spec.id_field)
+            try:
+                db.invalidate_tab_cache(tab_name)
+                target_rows = db.get_records(tab_name, fresh=True)
+                if not isinstance(target_rows, list):
+                    raise RuntimeError(f"Target tab '{tab_name}' returned non-list data.")
+                if candidate_id_fields:
+                    matched_rows = [
+                        r for r in target_rows
+                        if isinstance(r, dict) and any(str(r.get(f, "")).strip() == allocated_id for f in candidate_id_fields)
+                    ]
+                else:
+                    matched_rows = [
+                        r for r in target_rows
+                        if isinstance(r, dict) and any(str(v).strip() == allocated_id for v in r.values())
+                    ]
+                if len(matched_rows) == 0:
+                    return _recovery_required_status(
+                        "ORPHAN_ID_ALLOCATION_DETECTED",
+                        (
+                            "Recovery required: ID allocation/audit trace was recorded, but the primary "
+                            "business row is missing in Google Sheets. Do NOT retry blindly; Owner reconciliation is required."
                         ),
-                    }
+                    )
+                if len(matched_rows) > 1:
+                    return _recovery_required_status(
+                        "DUPLICATE_PRIMARY_ROWS_DETECTED",
+                        (
+                            f"Recovery required: {len(matched_rows)} duplicate primary rows were found for "
+                            "this transaction in Google Sheets. Do NOT retry; Owner reconciliation is required."
+                        ),
+                    )
+                primary_row = matched_rows[0]
+
+                # 2. Verify required child records, balance/totals, and integrity constraints
+                if spec is not None:
+                    for child_check in spec.readback.child_checks:
+                        if child_check.condition_payload_key:
+                            continue
+                        if child_check.source_id_key == "allocated_id":
+                            fk_val = allocated_id
+                        else:
+                            fk_val = str(primary_row.get(child_check.source_id_key, "") or "").strip()
+                        if not fk_val:
+                            return _recovery_required_status(
+                                "INCOMPLETE_CHILD_RECORDS",
+                                f"Recovery required: missing foreign key '{child_check.source_id_key}' for child table '{child_check.tab}'.",
+                            )
+                        db.invalidate_tab_cache(child_check.tab)
+                        child_rows_all = db.get_records(child_check.tab, fresh=True)
+                        if not isinstance(child_rows_all, list):
+                            raise RuntimeError(f"Child tab '{child_check.tab}' returned non-list data.")
+                        child_rows = [
+                            r for r in child_rows_all
+                            if isinstance(r, dict) and str(r.get(child_check.fk_field, "")).strip() == fk_val
+                        ]
+                        min_required = 2 if child_check.verify_journal_balance else 1
+                        if len(child_rows) < min_required:
+                            return _recovery_required_status(
+                                "INCOMPLETE_CHILD_RECORDS",
+                                (
+                                    f"Recovery required: child table '{child_check.tab}' for {child_check.fk_field}={fk_val} "
+                                    f"is incomplete (expected >= {min_required} row(s), found {len(child_rows)})."
+                                ),
+                            )
+                        if child_check.verify_journal_balance:
+                            tot_deb = Decimal("0")
+                            tot_crd = Decimal("0")
+                            for idx, r in enumerate(child_rows, start=1):
+                                raw_d = r.get("debit_amount") if "debit_amount" in r else r.get("debit", 0)
+                                raw_c = r.get("credit_amount") if "credit_amount" in r else r.get("credit", 0)
+                                d_amt = self._parse_strict_decimal(raw_d, f"JournalLines[{fk_val}#{idx}].debit_amount")
+                                c_amt = self._parse_strict_decimal(raw_c, f"JournalLines[{fk_val}#{idx}].credit_amount")
+                                if d_amt < Decimal("0") or c_amt < Decimal("0") or (d_amt > Decimal("0") and c_amt > Decimal("0")) or (d_amt == Decimal("0") and c_amt == Decimal("0")):
+                                    raise _PartialSideEffectFailure(
+                                        f"JournalLines integrity error on {fk_val} line #{idx} (debit={d_amt}, credit={c_amt})."
+                                    )
+                                tot_deb += d_amt
+                                tot_crd += c_amt
+                            if tot_deb <= Decimal("0") or abs(tot_deb - tot_crd) > Decimal("0.01"):
+                                raise _PartialSideEffectFailure(
+                                    f"JournalLines imbalance on {fk_val}: debit={tot_deb}, credit={tot_crd}."
+                                )
+                            raw_hdr_deb = primary_row.get("total_debit")
+                            raw_hdr_crd = primary_row.get("total_credit")
+                            if raw_hdr_deb not in (None, ""):
+                                hdr_deb = self._parse_strict_decimal(raw_hdr_deb, f"JournalHeaders[{fk_val}].total_debit")
+                                if abs(hdr_deb - tot_deb) > Decimal("0.01"):
+                                    raise _PartialSideEffectFailure(
+                                        f"JournalHeaders total_debit ({hdr_deb}) mismatches JournalLines debit ({tot_deb})."
+                                    )
+                            if raw_hdr_crd not in (None, ""):
+                                hdr_crd = self._parse_strict_decimal(raw_hdr_crd, f"JournalHeaders[{fk_val}].total_credit")
+                                if abs(hdr_crd - tot_crd) > Decimal("0.01"):
+                                    raise _PartialSideEffectFailure(
+                                        f"JournalHeaders total_credit ({hdr_crd}) mismatches JournalLines credit ({tot_crd})."
+                                    )
+                        if child_check.tab == "SaleItems":
+                            raw_subtotal = primary_row.get("subtotal")
+                            raw_bill_total = primary_row.get("bill_total")
+                            if raw_subtotal not in (None, "") or raw_bill_total not in (None, ""):
+                                if any(r.get("line_total") in (None, "") for r in child_rows):
+                                    raise _PartialSideEffectFailure(
+                                        f"SaleItems for {fk_val} is missing required line_total values."
+                                    )
+                                lines_dec = sum(
+                                    self._parse_strict_decimal(r.get("line_total"), f"SaleItems[{fk_val}].line_total")
+                                    for r in child_rows
+                                )
+                                if raw_subtotal not in (None, ""):
+                                    exp_dec = self._parse_strict_decimal(raw_subtotal, f"Sales[{fk_val}].subtotal")
+                                else:
+                                    exp_dec = (
+                                        self._parse_strict_decimal(raw_bill_total, f"Sales[{fk_val}].bill_total")
+                                        + self._parse_strict_decimal(primary_row.get("discount_amount") or 0, f"Sales[{fk_val}].discount_amount")
+                                        - self._parse_strict_decimal(primary_row.get("tax_amount") or 0, f"Sales[{fk_val}].tax_amount")
+                                    )
+                                if abs(lines_dec - exp_dec) > Decimal("0.50"):
+                                    raise _PartialSideEffectFailure(
+                                        f"SaleItems line_total sum ({lines_dec}) mismatches Sales total ({exp_dec}) for {fk_val}."
+                                    )
+
+                    # 3. Verify required secondary accounting journals (TX-FINAL-01 / TX-FINAL-08)
+                    self._verify_required_accounting_journal(
+                        action=spec.action,
+                        primary_id=allocated_id,
+                        primary_record=primary_row,
+                        payload=None,
+                        clean_nonce=clean_nonce,
+                    )
+            except _PartialSideEffectFailure as integrity_exc:
+                return _recovery_required_status(
+                    "INCOMPLETE_OR_INVALID_TRANSACTION_READBACK",
+                    (
+                        f"Recovery required: complete transaction readback verification failed ({integrity_exc}). "
+                        "Do NOT treat as confirmed or retry blindly; Owner reconciliation is required."
+                    ),
+                )
+            except Exception as target_exc:
+                logger.warning("Target/child/journal verification failed during status check for nonce=%s tab=%s: %s", clean_nonce, tab_name, target_exc)
+                return {
+                    "status": "UNKNOWN_STORAGE_UNAVAILABLE",
+                    "transaction_id": tx_id,
+                    "transaction_state": TransactionState.UNKNOWN.value,
+                    "failure_category": FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
+                    "nonce": clean_nonce,
+                    "correlation_id": clean_corr or (local_tx or {}).get("correlation_id"),
+                    "allocated_id": redacted_alloc,
+                    "tab_name": redacted_tab,
+                    "recorded_at": None,
+                    "audit_entry": None,
+                    "safe_to_retry_same_nonce": False,
+                    "recovery_decision": "DEFER_TARGET_TABLE_UNAVAILABLE",
+                    "checked_at": checked_at,
+                    "message": (
+                        "Outcome still unknown: authoritative readback verification could not reach Google Sheets "
+                        "for all required primary, child, and accounting tables. Do NOT submit a duplicate; re-check status shortly."
+                    ),
+                }
 
             safe_audit: Optional[Dict[str, Any]] = None
             if audit_match:
@@ -3128,20 +3914,16 @@ class AppsScriptBridge:
                 "transaction_state": TransactionState.COMMITTED.value,
                 "nonce": clean_nonce,
                 "correlation_id": clean_corr or (local_tx or {}).get("correlation_id"),
-                "allocated_id": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else allocated_id,
-                "tab_name": "REDACTED_CONFIDENTIAL" if (is_confidential_tab and not actor_is_owner) else (tab_name or None),
-                "recorded_at": str(
-                    (alloc_match or {}).get("created_at")
-                    or (audit_match or {}).get("event_datetime")
-                    or ""
-                ).strip() or None,
+                "allocated_id": redacted_alloc,
+                "tab_name": redacted_tab,
+                "recorded_at": recorded_at_val,
                 "audit_entry": safe_audit,
                 "safe_to_retry_same_nonce": False,
                 "recovery_decision": "CONFIRMED_IN_AUTHORITATIVE_SHEETS",
                 "checked_at": checked_at,
                 "message": (
-                    "Transaction was already recorded in Google Sheets. Do NOT submit a duplicate transaction; "
-                    "refresh the view to see the saved record."
+                    "Transaction was completely verified (primary, child, and required accounting records) in Google Sheets. "
+                    "Do NOT submit a duplicate transaction; refresh the view to see the saved record."
                 ),
             }
 
@@ -3211,6 +3993,10 @@ class _ReadBackFailure(RuntimeError):
 
 class _PartialSideEffectFailure(RuntimeError):
     """Internal signal when Sheets read-back detects duplicate primary rows or partial/inconsistent child writes."""
+
+
+class _SheetsAllocationLookupError(RuntimeError):
+    """TX-FINAL-02: Fail-closed signal when authoritative IdAllocations lookup fails or returns malformed data."""
 
 
 apps_script_bridge = AppsScriptBridge()

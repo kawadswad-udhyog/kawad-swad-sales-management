@@ -15,12 +15,15 @@ interface UnknownOutcomeBannerProps {
 const STATUS_CHECK_COOLDOWN_MS = 2000;
 
 /**
- * Reusable 504 / PENDING_UNKNOWN / RECOVERY_REQUIRED transaction safety banner.
+ * Reusable 504 / PENDING_UNKNOWN / RECOVERY_REQUIRED transaction safety banner (TX-FINAL-04).
  * - Retains exact client nonce & correlation_id without clearing user inputs.
+ * - Keeps form inputs and new submissions locked while outcome is UNKNOWN or RECOVERY_REQUIRED.
  * - Blocks retrying until GET /api/v2/transactions/status/{nonce} confirms
  *   `NOT_FOUND_SAFE_TO_RETRY_SAME_NONCE` (`safe_to_retry_same_nonce === true`).
  * - Permanently disables automatic retry for `CONFIRMED_RECORDED`, `RECONCILED`,
  *   and `RECOVERY_REQUIRED` (quarantined partial/duplicate effects).
+ * - Disallows casual dismissal while unresolved; unlock is only enabled after verified
+ *   `CONFIRMED_RECORDED` or `RECONCILED` status.
  */
 export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
   outcome,
@@ -58,7 +61,7 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
       setCheckError(
         err instanceof Error
           ? err.message
-          : 'Could not reach transaction status endpoint. Keep your form inputs and try checking again.'
+          : 'Could not reach transaction status endpoint. Keep your form inputs locked and try checking again.'
       );
     } finally {
       setChecking(false);
@@ -67,10 +70,13 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
     }
   };
 
-  const isConfirmed =
+  const isVerifiedResolved =
     statusResult?.status === 'CONFIRMED_RECORDED' || statusResult?.status === 'RECONCILED';
+  const isConfirmed = isVerifiedResolved;
   const isRecoveryRequired =
-    Boolean(outcome.recoveryRequired) || statusResult?.status === 'RECOVERY_REQUIRED';
+    Boolean(outcome.recoveryRequired) ||
+    outcome.transactionState === 'RECOVERY_REQUIRED' ||
+    statusResult?.status === 'RECOVERY_REQUIRED';
   const isInProgress = statusResult?.status === 'IN_PROGRESS';
   const isSafeRetry =
     !isRecoveryRequired &&
@@ -88,16 +94,18 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
       ? 'Transaction Reconciled by Administrator'
       : 'Transaction Confirmed Recorded in Google Sheets'
     : isRecoveryRequired
-    ? 'Recovery Required — Automatic Retry Disabled'
+    ? 'Recovery Required — Automatic Retry Disabled (Form Locked)'
     : isInProgress
-    ? 'Transaction Still Processing on Server'
+    ? 'Transaction Still Processing on Server (Form Locked)'
     : isSafeRetry
     ? 'Verified Not Recorded — Safe to Retry with Same Nonce'
-    : 'Outcome Unknown — Check Transaction Status Before Retrying';
+    : 'Outcome Unknown — Check Transaction Status Before Retrying (Form Locked)';
 
   return (
     <div
       role="alert"
+      data-tx-lock-banner="true"
+      data-tx-nonce={outcome.nonce}
       style={{
         background: palette.bg,
         border: `1px solid ${palette.border}`,
@@ -117,9 +125,12 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
           <div style={{ lineHeight: 1.45 }}>
             {statusResult ? statusResult.message : outcome.message}
           </div>
-          {!isConfirmed && !isRecoveryRequired && !isSafeRetry && (
-            <div style={{ marginTop: 4, fontSize: 12, opacity: 0.9 }}>
-              Click &ldquo;Check Transaction Status&rdquo; first so the system can verify whether the write committed before enabling retry.
+          {!isVerifiedResolved && (
+            <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600 }}>
+              Form Locked: Inputs and new submissions remain disabled to prevent duplicate financial entries.
+              {!isRecoveryRequired && !isSafeRetry
+                ? ' Click "Check Transaction Status" first so the system can verify whether the write committed before enabling retry.'
+                : ''}
             </div>
           )}
           <div style={{ marginTop: 6, fontSize: 11, fontFamily: 'monospace', opacity: 0.9 }}>
@@ -148,6 +159,12 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
                 | Sheet: <strong>{statusResult.tab_name}</strong>
               </>
             ) : null}
+            {statusResult?.recovery_decision ? (
+              <>
+                {' '}
+                | Decision: <strong>{statusResult.recovery_decision}</strong>
+              </>
+            ) : null}
           </div>
           {checkError && (
             <div style={{ marginTop: 6, color: '#b91c1c', fontWeight: 600 }}>
@@ -155,32 +172,15 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
             </div>
           )}
         </div>
-        {onDismiss && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'inherit',
-              cursor: 'pointer',
-              fontWeight: 700,
-              fontSize: 14,
-              padding: '2px 6px',
-            }}
-            aria-label="Dismiss status banner"
-          >
-            ✕
-          </button>
-        )}
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
-        {outcome.nonce && !isConfirmed && (
+        {outcome.nonce && !isVerifiedResolved && (
           <button
             type="button"
             onClick={handleCheckStatus}
             disabled={checking || cooldownActive}
+            data-tx-action="check-status"
             style={{
               padding: '6px 12px',
               borderRadius: 6,
@@ -201,11 +201,12 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
           </button>
         )}
 
-        {onRetry && !isConfirmed && !isRecoveryRequired && (
+        {onRetry && !isVerifiedResolved && !isRecoveryRequired && (
           <button
             type="button"
             onClick={isSafeRetry ? onRetry : undefined}
             disabled={!isSafeRetry}
+            data-tx-action="retry-same-nonce"
             title={
               isSafeRetry
                 ? 'Verified safe to retry with the same preserved nonce'
@@ -224,6 +225,26 @@ export const UnknownOutcomeBanner: React.FC<UnknownOutcomeBannerProps> = ({
             }}
           >
             {isSafeRetry ? 'Retry Safely (Same Nonce)' : 'Verify Status Before Retrying'}
+          </button>
+        )}
+
+        {isVerifiedResolved && onDismiss && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            data-tx-action="unlock-verified"
+            style={{
+              padding: '6px 12px',
+              borderRadius: 6,
+              border: 'none',
+              background: '#059669',
+              color: '#ffffff',
+              fontWeight: 600,
+              fontSize: 12,
+              cursor: 'pointer',
+            }}
+          >
+            Unlock Form (Verified)
           </button>
         )}
       </div>

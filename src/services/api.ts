@@ -245,15 +245,104 @@ function resolveRequestIdempotencyKey(
   return '';
 }
 
+// In-flight mutation deduplication sets shared across apiRequest() and apiFetch()
+// Prevents concurrent double-clicks / rapid re-entries before React re-renders disabled state.
+const inflightMutationKeys = new Set<string>();
+const inflightMutationSignatures = new Set<string>();
+
+function isMutationMethod(method: string): boolean {
+  const upper = (method || 'GET').toUpperCase();
+  return upper !== 'GET' && upper !== 'HEAD' && upper !== 'OPTIONS';
+}
+
+function isPostTransmissionNetworkError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'AbortError') return true;
+  const msg = (err.message || '').toLowerCase();
+  if (
+    err.name === 'TypeError' &&
+    (msg.includes('failed to fetch') ||
+      msg.includes('networkerror') ||
+      msg.includes('load failed') ||
+      msg.includes('fetch failed') ||
+      msg.includes('network request failed'))
+  ) {
+    return true;
+  }
+  return (
+    msg.includes('failed to fetch') ||
+    msg.includes('networkerror') ||
+    msg.includes('load failed') ||
+    msg.includes('fetch failed') ||
+    msg.includes('network request failed')
+  );
+}
+
+interface MutationFlightHandle {
+  nonceKey: string;
+  sigKey: string;
+}
+
+function buildMutationFlightHandle(
+  path: string,
+  method: string,
+  resolvedIdempotencyKey: string,
+  body: BodyInit | null | undefined
+): MutationFlightHandle {
+  const upperMethod = (method || 'GET').toUpperCase();
+  if (!isMutationMethod(upperMethod) || path.includes('/auth/') || path.includes('/health')) {
+    return { nonceKey: '', sigKey: '' };
+  }
+  const nonceKey = resolvedIdempotencyKey ? `${upperMethod}:${path}:${resolvedIdempotencyKey}` : '';
+  const bodySig = typeof body === 'string' ? body.slice(0, 2048) : '';
+  const sigKey = `${upperMethod}:${path}:${bodySig}`;
+  return { nonceKey, sigKey };
+}
+
+function acquireInflightMutationLock(
+  handle: MutationFlightHandle,
+  targetUrl: string,
+  resolvedIdempotencyKey: string
+): void {
+  if (
+    (handle.nonceKey && inflightMutationKeys.has(handle.nonceKey)) ||
+    (handle.sigKey && inflightMutationSignatures.has(handle.sigKey))
+  ) {
+    throw new ApiHttpError(
+      409,
+      'This transaction is already submitting. Duplicate click blocked to prevent double submission.',
+      'HTTP_ERROR',
+      targetUrl,
+      false,
+      {
+        errorCode: 'CONCURRENT_DUPLICATE_REQUEST',
+        retryable: true,
+        transactionState: 'PENDING',
+        failureCategory: 'DUPLICATE_REQUEST',
+        nonce: resolvedIdempotencyKey || undefined,
+      }
+    );
+  }
+  if (handle.nonceKey) inflightMutationKeys.add(handle.nonceKey);
+  if (handle.sigKey) inflightMutationSignatures.add(handle.sigKey);
+}
+
+function releaseInflightMutationLock(handle: MutationFlightHandle): void {
+  if (handle.nonceKey) inflightMutationKeys.delete(handle.nonceKey);
+  if (handle.sigKey) inflightMutationSignatures.delete(handle.sigKey);
+}
+
 /**
- * Shared fetch helper ensuring all API calls respect the configured API Base URL
- * and inject standard authentication and idempotency headers.
+ * Shared fetch helper ensuring all API calls respect the configured API Base URL,
+ * inject standard authentication and idempotency headers, deduplicate concurrent
+ * in-flight mutations, and classify post-transmission network drops as UNKNOWN.
  */
 export async function apiFetch(path: string, options: ApiRequestOptions = {}): Promise<Response> {
   const baseUrl = getApiBaseUrl();
   const token = getAuthToken();
   const { targetUrl } = constructApiUrl(baseUrl, path);
   const method = (options.method || 'GET').toUpperCase();
+  const isMutation = isMutationMethod(method) && !path.includes('/auth/') && !path.includes('/health');
   const timeoutMs = options.timeoutMs ?? 35000;
 
   const headers: Record<string, string> = {
@@ -270,51 +359,113 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
+  const flightHandle = buildMutationFlightHandle(path, method, resolvedIdempotencyKey, options.body);
+  acquireInflightMutationLock(flightHandle, targetUrl, resolvedIdempotencyKey);
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   let res: Response;
   try {
-    res = await fetch(targetUrl, {
-      ...options,
-      headers,
-      signal: options.signal ?? controller.signal,
-    });
-  } catch (err: unknown) {
-    clearTimeout(timeoutId);
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new ApiOutcomeUnknownError(
-        UNKNOWN_OUTCOME_STANDARD_MSG,
-        resolvedIdempotencyKey || undefined
-      );
-    }
-    throw err;
-  }
-  clearTimeout(timeoutId);
-
-  if (res.status === 504) {
-    let msg = UNKNOWN_OUTCOME_STANDARD_MSG;
-    let corrId: string | undefined;
-    let respNonce: string | undefined;
     try {
-      const payload = await res.clone().json();
-      const detail = payload?.detail;
-      if (detail && typeof detail === 'object') {
-        if (typeof detail.message === 'string' && detail.message.trim()) {
-          msg = `Outcome unknown / checking transaction status — ${detail.message}`;
-        }
-        if (typeof detail.correlation_id === 'string') corrId = detail.correlation_id;
-        if (typeof detail.nonce === 'string') respNonce = detail.nonce;
-      } else if (typeof payload?.message === 'string' && payload.message.trim()) {
-        msg = `Outcome unknown / checking transaction status — ${payload.message}`;
+      res = await fetch(targetUrl, {
+        ...options,
+        headers,
+        signal: options.signal ?? controller.signal,
+      });
+    } catch (err: unknown) {
+      clearTimeout(timeoutId);
+      if (isMutation && isPostTransmissionNetworkError(err)) {
+        throw new ApiOutcomeUnknownError(
+          UNKNOWN_OUTCOME_STANDARD_MSG,
+          resolvedIdempotencyKey || undefined
+        );
       }
-    } catch {
-      // Ignore parse failure on 504
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new ApiOutcomeUnknownError(
+          UNKNOWN_OUTCOME_STANDARD_MSG,
+          resolvedIdempotencyKey || undefined
+        );
+      }
+      throw err;
     }
-    throw new ApiOutcomeUnknownError(msg, respNonce || resolvedIdempotencyKey || undefined, corrId);
-  }
+    clearTimeout(timeoutId);
 
-  return res;
+    if (res.status === 504) {
+      let msg = UNKNOWN_OUTCOME_STANDARD_MSG;
+      let corrId: string | undefined;
+      let respNonce: string | undefined;
+      let txId: string | undefined;
+      try {
+        const reader = typeof res.clone === 'function' ? res.clone() : res;
+        const payload =
+          typeof reader.json === 'function'
+            ? await reader.json()
+            : typeof reader.text === 'function'
+            ? JSON.parse(await reader.text())
+            : null;
+        const detail = payload?.detail;
+        if (detail && typeof detail === 'object') {
+          if (typeof detail.message === 'string' && detail.message.trim()) {
+            msg = `Outcome unknown / checking transaction status — ${detail.message}`;
+          }
+          if (typeof detail.correlation_id === 'string') corrId = detail.correlation_id;
+          if (typeof detail.nonce === 'string') respNonce = detail.nonce;
+          if (typeof detail.transaction_id === 'string') txId = detail.transaction_id;
+        } else if (typeof payload?.message === 'string' && payload.message.trim()) {
+          msg = `Outcome unknown / checking transaction status — ${payload.message}`;
+        }
+      } catch {
+        // Ignore parse failure on 504
+      }
+      throw new ApiOutcomeUnknownError(msg, respNonce || resolvedIdempotencyKey || undefined, corrId, {
+        transactionId: txId,
+        transactionState: 'UNKNOWN',
+        recoveryRequired: false,
+      });
+    }
+
+    if (isMutation && res.status === 409) {
+      try {
+        const reader = typeof res.clone === 'function' ? res.clone() : res;
+        const payload =
+          typeof reader.json === 'function'
+            ? await reader.json()
+            : typeof reader.text === 'function'
+            ? JSON.parse(await reader.text())
+            : null;
+        const normalized = normalizeApiErrorPayload(payload, 409);
+        if (
+          normalized.transactionState === 'RECOVERY_REQUIRED' ||
+          normalized.failureCategory === 'RECOVERY_REQUIRED' ||
+          normalized.workflowStatus === 'PENDING_UNKNOWN' ||
+          normalized.transactionState === 'UNKNOWN'
+        ) {
+          throw new ApiOutcomeUnknownError(
+            normalized.errorMsg || UNKNOWN_OUTCOME_STANDARD_MSG,
+            normalized.nonce || resolvedIdempotencyKey || undefined,
+            normalized.correlationId,
+            {
+              transactionId: normalized.transactionId,
+              transactionState: normalized.transactionState || 'RECOVERY_REQUIRED',
+              recoveryRequired:
+                normalized.transactionState === 'RECOVERY_REQUIRED' ||
+                normalized.failureCategory === 'RECOVERY_REQUIRED',
+            }
+          );
+        }
+      } catch (err) {
+        if (err instanceof ApiOutcomeUnknownError) {
+          throw err;
+        }
+        // Ignore JSON parse errors on non-JSON 409
+      }
+    }
+
+    return res;
+  } finally {
+    releaseInflightMutationLock(flightHandle);
+  }
 }
 
 export type TransactionLifecycleState =
@@ -499,6 +650,9 @@ export function normalizeApiErrorPayload(
 }
 
 export function isRecoveryRequiredError(err: unknown): boolean {
+  if (err instanceof ApiOutcomeUnknownError) {
+    return Boolean(err.recoveryRequired || err.transactionState === 'RECOVERY_REQUIRED');
+  }
   if (err instanceof ApiHttpError) {
     return (
       err.transactionState === 'RECOVERY_REQUIRED' ||
@@ -612,13 +766,32 @@ export class ApiOutcomeUnknownError extends Error {
   nonce?: string;
   correlationId?: string;
   transactionId?: string;
+  transactionState?: TransactionLifecycleState;
+  recoveryRequired?: boolean;
 
-  constructor(message: string, nonce?: string, correlationId?: string, transactionId?: string) {
+  constructor(
+    message: string,
+    nonce?: string,
+    correlationId?: string,
+    transactionIdOrExtra?:
+      | string
+      | {
+          transactionId?: string;
+          transactionState?: TransactionLifecycleState;
+          recoveryRequired?: boolean;
+        }
+  ) {
     super(message);
     this.name = 'ApiOutcomeUnknownError';
     this.nonce = nonce;
     this.correlationId = correlationId;
-    this.transactionId = transactionId;
+    if (typeof transactionIdOrExtra === 'string') {
+      this.transactionId = transactionIdOrExtra;
+    } else if (transactionIdOrExtra && typeof transactionIdOrExtra === 'object') {
+      this.transactionId = transactionIdOrExtra.transactionId;
+      this.transactionState = transactionIdOrExtra.transactionState;
+      this.recoveryRequired = transactionIdOrExtra.recoveryRequired;
+    }
   }
 }
 
@@ -715,10 +888,6 @@ export interface BackendHealthResponse {
   };
 }
 
-// Synchronous in-flight mutation deduplication guard (blocks millisecond double-clicks
-// across all views before React state re-renders, without affecting read-only GET queries).
-const inflightMutationKeys = new Set<string>();
-
 export function getInflightMutationCount(): number {
   return inflightMutationKeys.size;
 }
@@ -752,29 +921,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     headers['X-KS-Idempotency-Key'] = resolvedIdempotencyKey;
   }
 
-  const flightKey =
-    !isReadOnlyMethod && !isAuthOrHealth && resolvedIdempotencyKey
-      ? `${method}:${path}:${resolvedIdempotencyKey}`
-      : '';
-  if (flightKey) {
-    if (inflightMutationKeys.has(flightKey)) {
-      throw new ApiHttpError(
-        409,
-        'This transaction is already submitting. Duplicate click blocked to prevent double submission.',
-        'HTTP_ERROR',
-        targetUrl,
-        false,
-        {
-          errorCode: 'CONCURRENT_DUPLICATE_REQUEST',
-          retryable: true,
-          transactionState: 'PENDING',
-          failureCategory: 'DUPLICATE_REQUEST',
-          nonce: resolvedIdempotencyKey,
-        }
-      );
-    }
-    inflightMutationKeys.add(flightKey);
-  }
+  const flightHandle = buildMutationFlightHandle(path, method, resolvedIdempotencyKey, options.body);
+  acquireInflightMutationLock(flightHandle, targetUrl, resolvedIdempotencyKey);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -1158,18 +1306,26 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
           `Request timed out after ${timeoutMs / 1000}s connecting to backend.`
         );
       }
+      // TX-FINAL-04: For business mutations, ANY post-transmission fetch network failure
+      // (including TypeError: Failed to fetch, NetworkError, Load failed — regardless of
+      // cross-origin CORS heuristic) MUST be classified as UNKNOWN so the UI locks inputs,
+      // preserves the nonce, and forces status/recovery inspection instead of fresh-nonce retry.
+      if (!isReadOnlyMethod && !isAuthOrHealth && isPostTransmissionNetworkError(err)) {
+        throw new ApiOutcomeUnknownError(
+          UNKNOWN_OUTCOME_STANDARD_MSG,
+          resolvedIdempotencyKey || undefined
+        );
+      }
       if (category === 'CORS_RESTRICTION') {
         throw new Error(
           `CORS Error: Backend server did not allow connection from ${typeof window !== 'undefined' ? window.location.origin : 'this origin'}.`
         );
       }
       if (category === 'BACKEND_UNREACHABLE_OR_TIMEOUT') {
-        // For business mutations, a dropped connection after fetch dispatch has an UNKNOWN outcome
-        // (the backend may already have received and committed the request). Preserve the nonce!
-        if (!isReadOnlyMethod && !isAuthOrHealth && resolvedIdempotencyKey) {
+        if (!isReadOnlyMethod && !isAuthOrHealth) {
           throw new ApiOutcomeUnknownError(
             UNKNOWN_OUTCOME_STANDARD_MSG,
-            resolvedIdempotencyKey
+            resolvedIdempotencyKey || undefined
           );
         }
         throw new Error(
@@ -1180,9 +1336,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
     }
     throw new Error('An unexpected network or client error occurred.');
   } finally {
-    if (flightKey) {
-      inflightMutationKeys.delete(flightKey);
-    }
+    releaseInflightMutationLock(flightHandle);
   }
 }
 

@@ -13,9 +13,9 @@ import {
   extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
-  UnknownOutcomeState,
 } from '../services/api';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import {
   Truck,
   CheckCircle2,
@@ -172,7 +172,12 @@ export const StockView: React.FC = () => {
   const [discSubmitting, setDiscSubmitting] = useState(false);
   const [reviewNonces, setReviewNonces] = useState<Record<string, string>>({});
   const [reviewingDiscId, setReviewingDiscId] = useState<string | null>(null);
-  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('stock_view');
 
   const loadLoadingPasses = async () => {
     try {
@@ -230,7 +235,7 @@ export const StockView: React.FC = () => {
 
   const handleCreateLoadingPass = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isCreatingPass) return;
+    if (isCreatingPass || isOutcomeLocked) return;
     setLoadingPassNotice(null);
 
     if (passSummary.totalPackets <= 0) {
@@ -267,7 +272,7 @@ export const StockView: React.FC = () => {
       }, activeNonce);
 
       setCreatePassNonce('');
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setLoadingPassNotice({
         msg: `Loading Pass ${created.pass_number} created successfully! Waiting for salesman verification and acceptance.`,
       });
@@ -277,7 +282,7 @@ export const StockView: React.FC = () => {
       await refreshData();
     } catch (err: any) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Create Van Loading Pass');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       setLoadingPassNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to create van loading pass',
         error: true,
@@ -288,7 +293,7 @@ export const StockView: React.FC = () => {
   };
 
   const handleAcceptPass = async (passIdOrNumber: string) => {
-    if (acceptingPassId) return;
+    if (acceptingPassId || isOutcomeLocked) return;
     const activeNonce = acceptPassNonces[passIdOrNumber] || createSubmissionNonce('STK-VLA');
     if (!acceptPassNonces[passIdOrNumber]) {
       setAcceptPassNonces((prev) => ({ ...prev, [passIdOrNumber]: activeNonce }));
@@ -302,7 +307,7 @@ export const StockView: React.FC = () => {
         delete next[passIdOrNumber];
         return next;
       });
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setLoadingPassNotice({
         msg: `Stock loading pass ${accepted.pass_number} verified and accepted! Van inventory has been credited and warehouse inventory deducted.`,
       });
@@ -313,7 +318,7 @@ export const StockView: React.FC = () => {
       }
     } catch (err: any) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Accept Loading Pass ${passIdOrNumber}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       setLoadingPassNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to accept loading pass',
         error: true,
@@ -325,7 +330,7 @@ export const StockView: React.FC = () => {
 
   const handleReportDiscrepancy = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!discrepancyModalPass || isSubmittingDiscrepancy) return;
+    if (!discrepancyModalPass || isSubmittingDiscrepancy || isOutcomeLocked) return;
     setDiscrepancyError(null);
     if (!discrepancyNotes.trim()) {
       setDiscrepancyError('Please describe the physical count discrepancy.');
@@ -343,7 +348,7 @@ export const StockView: React.FC = () => {
         activeNonce
       );
       setDiscrepancyNonce('');
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setDiscrepancyError(null);
       setLoadingPassNotice({
         msg: `Discrepancy on ${updated.pass_number} recorded. The warehouse manager has been notified for resolution.`,
@@ -354,7 +359,7 @@ export const StockView: React.FC = () => {
       await refreshData();
     } catch (err: any) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Report Van Loading Discrepancy');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       setDiscrepancyError(
         isUnknownOutcomeError(err)
           ? UNKNOWN_OUTCOME_MSG
@@ -366,7 +371,7 @@ export const StockView: React.FC = () => {
   };
 
   const handleCancelPass = async (passIdOrNumber: string) => {
-    if (cancellingPassId) return;
+    if (cancellingPassId || isOutcomeLocked) return;
     const activeNonce = cancelPassNonces[passIdOrNumber] || createSubmissionNonce('STK-VLC');
     if (!cancelPassNonces[passIdOrNumber]) {
       setCancelPassNonces((prev) => ({ ...prev, [passIdOrNumber]: activeNonce }));
@@ -385,7 +390,7 @@ export const StockView: React.FC = () => {
         return next;
       });
       setCancelPassTargetId(null);
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setLoadingPassNotice({ msg: `Loading pass ${cancelled.pass_number} cancelled.` });
       await loadLoadingPasses();
       await refreshData();
@@ -394,7 +399,7 @@ export const StockView: React.FC = () => {
       }
     } catch (err: any) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Cancel Loading Pass ${passIdOrNumber}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       setLoadingPassNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to cancel loading pass',
         error: true,
@@ -422,7 +427,7 @@ export const StockView: React.FC = () => {
 
   const handleResolveLegacyCost = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!resolvingBatchId || resolvingLoading) return;
+    if (!resolvingBatchId || resolvingLoading || isOutcomeLocked) return;
     const batchKey = resolvingBatchId;
     const activeNonce = resolveCostNonces[batchKey] || createSubmissionNonce('STK-COST');
     if (!resolveCostNonces[batchKey]) {
@@ -445,7 +450,7 @@ export const StockView: React.FC = () => {
         delete next[batchKey];
         return next;
       });
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setBatchNotice({ msg: `Successfully updated cost for batch ${batchKey} to ₹${resolveRate}/kg (${resolveStatus}).` });
       setResolvingBatchId(null);
       setResolveRate(0);
@@ -453,7 +458,7 @@ export const StockView: React.FC = () => {
       await loadBulkBatches();
     } catch (err: any) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Resolve Batch Cost ${batchKey}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       setBatchNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Failed to resolve batch cost.',
         error: true,
@@ -502,7 +507,7 @@ export const StockView: React.FC = () => {
 
   const handleReconcileOpening = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (reconLoading) return;
+    if (reconLoading || isOutcomeLocked) return;
     setReconNotice(null);
     if (!reconProductId) {
       setReconNotice({ msg: 'Please select a product SKU.', error: true });
@@ -533,14 +538,14 @@ export const StockView: React.FC = () => {
       });
       setReconNonce('');
       setReconFallbackRef('');
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setReconNotice({ msg: res.message || 'Physical stock reconciled and ledger balance updated successfully.' });
       setReconReason('');
       setReconReference('');
       await Promise.allSettled([loadRegister(), refreshData()]);
     } catch (err: any) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Physical Opening Stock Reconciliation');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       setReconNotice({
         msg: isUnknownOutcomeError(err) ? UNKNOWN_OUTCOME_MSG : err?.message || 'Reconciliation failed',
         error: true,
@@ -554,7 +559,7 @@ export const StockView: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (movementSubmitting) return;
+    if (movementSubmitting || isOutcomeLocked) return;
     setNotice(null);
 
     if (quantity <= 0) {
@@ -576,13 +581,13 @@ export const StockView: React.FC = () => {
       }, activeNonce);
 
       setMovementNonce('');
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setNotice({ msg: `Stock movement "${txnType}" recorded successfully.` });
       setNotes('');
       loadRegister();
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Record Stock Movement (${txnType})`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       const errorMsg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : err instanceof Error
@@ -596,7 +601,7 @@ export const StockView: React.FC = () => {
 
   const handleDiscrepancySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (discSubmitting) return;
+    if (discSubmitting || isOutcomeLocked) return;
     setNotice(null);
     if (!discProductId) {
       setNotice({ msg: 'Select a product for audit discrepancy check.', error: true });
@@ -614,12 +619,12 @@ export const StockView: React.FC = () => {
         reason: discReason.trim() || 'Physical stock audit reconciliation',
       }, activeNonce);
       setDiscSubmitNonce('');
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setNotice({ msg: 'Stock physical count submitted for review. Unexplained differences are preserved for verification and not treated as automatic losses.' });
       setDiscReason('');
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Submit Stock Discrepancy');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       const errStr = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : `Failed to submit discrepancy: ${err instanceof Error ? err.message : String(err)}`;
@@ -630,7 +635,7 @@ export const StockView: React.FC = () => {
   };
 
   const handleReview = async (discrepancyId: string, action: 'APPROVE' | 'REJECT') => {
-    if (reviewingDiscId) return;
+    if (reviewingDiscId || isOutcomeLocked) return;
     const key = `${discrepancyId}:${action}`;
     const activeNonce = reviewNonces[key] || createSubmissionNonce('STK-REV');
     if (!reviewNonces[key]) {
@@ -649,12 +654,12 @@ export const StockView: React.FC = () => {
         delete next[key];
         return next;
       });
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setNotice({ msg: `Discrepancy ${action === 'APPROVE' ? 'approved and stock adjusted' : 'rejected'}.` });
       loadRegister();
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `${action} Stock Discrepancy ${discrepancyId}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       const errStr = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_MSG
         : `Review failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -818,9 +823,21 @@ export const StockView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
-        onDismiss={() => setUnknownOutcome(null)}
+        onConfirmedRecorded={() => {
+          clearAfterVerifiedResolution();
+          loadLoadingPasses();
+          loadRegister();
+          refreshData();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
       />
 
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+        className="space-y-6"
+      >
       <div className="flex items-center gap-1.5 p-1.5 bg-slate-100 rounded-xl overflow-x-auto border border-slate-200/60">
         <button
           type="button"
@@ -2621,6 +2638,7 @@ export const StockView: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => {
+                      if (shouldBlockDraftNonceReset(unknownOutcome)) return;
                       setDiscrepancyModalPass(null);
                       setDiscrepancyNonce('');
                       setDiscrepancyError(null);
@@ -2672,6 +2690,7 @@ export const StockView: React.FC = () => {
           )}
         </div>
       )}
+      </fieldset>
     </div>
   );
 };

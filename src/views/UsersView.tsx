@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { User, UserRole, ApprovalRequest, ReconciliationReport } from '../types';
-import { apiRequest, createSubmissionNonce, isUnknownOutcomeError } from '../services/api';
+import { apiRequest, createSubmissionNonce, extractUnknownOutcomeInfo, isUnknownOutcomeError } from '../services/api';
+import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 
 export const UsersView: React.FC = () => {
   const {
@@ -67,8 +69,15 @@ export const UsersView: React.FC = () => {
   const [statusConfirmUser, setStatusConfirmUser] = useState<User | null>(null);
   const [cancelConfirmReqId, setCancelConfirmReqId] = useState<string | null>(null);
   const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('users_view');
 
-  const clearActionNonce = (key: string) => {
+  const clearActionNonce = (key: string, force = false) => {
+    if (!force && shouldBlockDraftNonceReset(unknownOutcome)) return;
     setActionNonces((prev) => {
       if (!prev[key]) return prev;
       const next = { ...prev };
@@ -91,6 +100,7 @@ export const UsersView: React.FC = () => {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOutcomeLocked) return;
     setNotice(null);
 
     const cleanUsername = username.trim().toLowerCase();
@@ -126,6 +136,7 @@ export const UsersView: React.FC = () => {
         idempotency_key: activeNonce,
       }, activeNonce);
 
+      clearAfterVerifiedResolution();
       if (res && res.pending_approval) {
         setNotice({ msg: `Request to create '${cleanUsername}' submitted. Awaiting Owner approval.` });
       } else {
@@ -140,8 +151,12 @@ export const UsersView: React.FC = () => {
       setEmail('');
       setNotes('');
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Create Employee Account');
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—retry safely.'
+        ? 'Status not confirmed; do not submit a new transaction. Your inputs and retry key are preserved—verify status before retrying.'
         : err instanceof Error
         ? err.message
         : 'Failed to process user creation.';
@@ -152,7 +167,10 @@ export const UsersView: React.FC = () => {
   };
 
   const handleOpenEdit = (u: User) => {
-    setEditUserNonce(null);
+    if (isOutcomeLocked) return;
+    if (!shouldBlockDraftNonceReset(unknownOutcome)) {
+      setEditUserNonce(null);
+    }
     setEditingUser(u);
     setEditFullName(u.full_name);
     setEditRole(u.role);
@@ -163,7 +181,7 @@ export const UsersView: React.FC = () => {
 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingUser) return;
+    if (!editingUser || isOutcomeLocked) return;
     setNotice(null);
     const activeNonce = editUserNonce || createSubmissionNonce('USREDIT');
     if (!editUserNonce) setEditUserNonce(activeNonce);
@@ -178,6 +196,7 @@ export const UsersView: React.FC = () => {
         notes: editNotes.trim(),
       }, activeNonce);
 
+      clearAfterVerifiedResolution();
       if (res.pending_approval) {
         setNotice({ msg: `Update request for '${editingUser.full_name}' submitted for Owner approval.` });
       } else {
@@ -186,8 +205,12 @@ export const UsersView: React.FC = () => {
       setEditUserNonce(null);
       setEditingUser(null);
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Update Employee ${editingUser.user_id}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; retry saving employee changes safely with preserved inputs and key.'
+        ? 'Status not confirmed; verify status before retrying employee changes with preserved inputs and key.'
         : err instanceof Error
         ? err.message
         : 'Failed to update employee.';
@@ -198,7 +221,7 @@ export const UsersView: React.FC = () => {
   };
 
   const handleToggleStatus = async (u: User) => {
-    if (isSubmitting) return;
+    if (isSubmitting || isOutcomeLocked) return;
     const nextState = !u.active;
     const actionWord = nextState ? 'reactivate' : 'deactivate';
 
@@ -209,7 +232,8 @@ export const UsersView: React.FC = () => {
     setIsSubmitting(true);
     try {
       const res = await setUserStatus(u.user_id, nextState, `Requested by ${currentUser?.full_name}`, activeNonce);
-      clearActionNonce(key);
+      clearAfterVerifiedResolution();
+      clearActionNonce(key, true);
       setStatusConfirmUser(null);
       if (res.pending_approval) {
         setNotice({ msg: `Status change request for '${u.full_name}' submitted for Owner approval.` });
@@ -217,8 +241,12 @@ export const UsersView: React.FC = () => {
         setNotice({ msg: `Account for '${u.full_name}' ${nextState ? 'reactivated' : 'deactivated and all sessions revoked'}.` });
       }
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `${actionWord} Employee ${u.full_name}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for '${u.full_name}'; retry safely with preserved key.`
+        ? `Status not confirmed for '${u.full_name}'; verify status before retrying with preserved key.`
         : err instanceof Error
         ? err.message
         : `Failed to ${actionWord} employee.`;
@@ -230,7 +258,7 @@ export const UsersView: React.FC = () => {
 
   const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pwResetUser) return;
+    if (!pwResetUser || isOutcomeLocked) return;
     setNotice(null);
 
     if (isOwner && (!newPassword || newPassword.length < 8)) {
@@ -243,6 +271,7 @@ export const UsersView: React.FC = () => {
     setIsSubmitting(true);
     try {
       const res = await resetUserPassword(pwResetUser.user_id, isOwner ? newPassword : '', activeNonce);
+      clearAfterVerifiedResolution();
       if (res.pending_approval) {
         setNotice({ msg: `Password reset request for '${pwResetUser.full_name}' submitted for Owner approval.` });
       } else {
@@ -252,8 +281,12 @@ export const UsersView: React.FC = () => {
       setPwResetUser(null);
       setNewPassword('');
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reset Password ${pwResetUser.full_name}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; retry password reset safely with preserved key.'
+        ? 'Status not confirmed; verify status before retrying password reset with preserved key.'
         : err instanceof Error
         ? err.message
         : 'Failed to reset password.';
@@ -264,20 +297,26 @@ export const UsersView: React.FC = () => {
   };
 
   const handleApprove = async (req: ApprovalRequest) => {
+    if (isOutcomeLocked) return;
     setNotice(null);
     const key = `approve:${req.request_id}`;
     const activeNonce = actionNonces[key] || createSubmissionNonce('USRAPR');
     if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
       const res = await decideApprovalRequest(req.request_id, 'APPROVED', '', undefined, activeNonce);
-      clearActionNonce(key);
+      clearAfterVerifiedResolution();
+      clearActionNonce(key, true);
       const credNotice = (res as { temporary_credentials?: string })?.temporary_credentials;
       setNotice({
         msg: `Request ${req.request_id} (${req.request_type}) approved and executed! ${credNotice ? ` [${credNotice}]` : ''}`,
       });
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve Request ${req.request_id}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for request ${req.request_id}; retry Approve safely with preserved key.`
+        ? `Status not confirmed for request ${req.request_id}; verify status before retrying Approve with preserved key.`
         : err instanceof Error
         ? err.message
         : 'Failed to approve request.';
@@ -287,7 +326,7 @@ export const UsersView: React.FC = () => {
 
   const handleRejectSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!rejectingRequest) return;
+    if (!rejectingRequest || isOutcomeLocked) return;
     setNotice(null);
 
     const key = `reject:${rejectingRequest.request_id}`;
@@ -296,13 +335,18 @@ export const UsersView: React.FC = () => {
 
     try {
       await decideApprovalRequest(rejectingRequest.request_id, 'REJECTED', rejectReason.trim(), undefined, activeNonce);
-      clearActionNonce(key);
+      clearAfterVerifiedResolution();
+      clearActionNonce(key, true);
       setNotice({ msg: `Request ${rejectingRequest.request_id} rejected.` });
       setRejectingRequest(null);
       setRejectReason('');
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reject Request ${rejectingRequest.request_id}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? 'Status not confirmed; retry rejection safely with preserved key.'
+        ? 'Status not confirmed; verify status before retrying rejection with preserved key.'
         : err instanceof Error
         ? err.message
         : 'Failed to reject request.';
@@ -311,7 +355,7 @@ export const UsersView: React.FC = () => {
   };
 
   const handleCancelRequest = async (reqId: string) => {
-    if (isSubmitting) return;
+    if (isSubmitting || isOutcomeLocked) return;
     setNotice(null);
     const key = `cancel:${reqId}`;
     const activeNonce = actionNonces[key] || createSubmissionNonce('USRCAN');
@@ -319,12 +363,17 @@ export const UsersView: React.FC = () => {
     setIsSubmitting(true);
     try {
       await cancelApprovalRequest(reqId, activeNonce);
-      clearActionNonce(key);
+      clearAfterVerifiedResolution();
+      clearActionNonce(key, true);
       setCancelConfirmReqId(null);
       setNotice({ msg: `Request ${reqId} cancelled.` });
     } catch (err: unknown) {
+      const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Cancel Request ${reqId}`);
+      if (unknownInfo) {
+        lockWithUnknownOutcome(unknownInfo);
+      }
       const errorMsg = isUnknownOutcomeError(err)
-        ? `Status not confirmed for cancelling ${reqId}; retry safely.`
+        ? `Status not confirmed for cancelling ${reqId}; verify status before retrying.`
         : err instanceof Error
         ? err.message
         : 'Failed to cancel request.';
@@ -420,6 +469,22 @@ export const UsersView: React.FC = () => {
         </div>
       </div>
 
+      <UnknownOutcomeBanner
+        outcome={unknownOutcome}
+        onConfirmedRecorded={() => {
+          clearAfterVerifiedResolution();
+          setCreateUserNonce(null);
+          setEditUserNonce(null);
+          setPwResetNonce(null);
+        }}
+        onDismiss={clearAfterVerifiedResolution}
+      />
+
+      <fieldset
+        disabled={isOutcomeLocked}
+        data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+        style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
       {notice && (
         <div className={notice.error ? 'notice-error' : 'notice-success'} style={{ marginBottom: '16px' }}>
           {notice.msg}
@@ -1203,6 +1268,7 @@ export const UsersView: React.FC = () => {
           </div>
         </div>
       )}
+      </fieldset>
     </div>
   );
 };

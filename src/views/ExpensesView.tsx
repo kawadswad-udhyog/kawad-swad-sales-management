@@ -6,10 +6,10 @@ import {
   extractUnknownOutcomeInfo,
   isUnknownOutcomeError,
   UNKNOWN_OUTCOME_STANDARD_MSG,
-  UnknownOutcomeState,
 } from '../services/api';
 import { Expense } from '../types';
 import { UnknownOutcomeBanner } from '../components/common/UnknownOutcomeBanner';
+import { shouldBlockDraftNonceReset, useUnknownOutcomeGuard } from '../utils/unknownOutcomeLock';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { EmptyState } from '../components/common/EmptyState';
@@ -82,10 +82,16 @@ export const ExpensesView: React.FC = () => {
   const [rejectingExpense, setRejectingExpense] = useState<Expense | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
   const [expenseNonce, setExpenseNonce] = useState<string | null>(null);
-  const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
-  const [unknownOutcome, setUnknownOutcome] = useState<UnknownOutcomeState | null>(null);
+  const {
+    unknownOutcome,
+    isOutcomeLocked,
+    lockWithUnknownOutcome,
+    clearAfterVerifiedResolution,
+  } = useUnknownOutcomeGuard('expenses_view');
+  const effectiveWritesLocked = writesLocked || isOutcomeLocked;
 
   const clearActionNonce = (key: string) => {
+    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
     setActionNonces((prev) => {
       if (!prev[key]) return prev;
       const next = { ...prev };
@@ -94,8 +100,10 @@ export const ExpensesView: React.FC = () => {
     });
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const [actionNonces, setActionNonces] = useState<Record<string, string>>({});
+
+  const executeSubmit = async (allowSameNonceRecoveryRetry = false) => {
+    if (isSubmitting || writesLocked || (isOutcomeLocked && !allowSameNonceRecoveryRetry)) return;
     setNotice(null);
 
     if (amount <= 0) {
@@ -121,13 +129,13 @@ export const ExpensesView: React.FC = () => {
       }, activeNonce);
       setNotice({ msg: `Expense of ₹${amount} submitted for approval.` });
       setExpenseNonce(null);
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
       setDescription('');
       setReceiptRef('');
       setAmount(100);
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, 'Submit Expense Claim');
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       const errorMsg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
@@ -139,18 +147,28 @@ export const ExpensesView: React.FC = () => {
     }
   };
 
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSubmit(false);
+  };
+
   const handleApprove = async (e: Expense) => {
+    if (effectiveWritesLocked || isSubmitting) return;
     const key = `approve:${e.expense_id}`;
     const activeNonce = actionNonces[key] || createSubmissionNonce('EXPAPP');
     if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
       await approveExpense(e.expense_id, 'Approved by manager', activeNonce);
-      clearActionNonce(key);
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
+      setActionNonces((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
       setNotice({ msg: `Expense ${e.expense_id} approved. Marked as cash-reducing.` });
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Approve Expense ${e.expense_id}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       const msg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
@@ -161,7 +179,7 @@ export const ExpensesView: React.FC = () => {
   };
 
   const handleConfirmReject = async () => {
-    if (!rejectingExpense) return;
+    if (!rejectingExpense || effectiveWritesLocked || isSubmitting) return;
     if (!rejectionReason.trim()) {
       setNotice({ msg: 'A reason is required to reject an expense.', error: true });
       return;
@@ -171,14 +189,18 @@ export const ExpensesView: React.FC = () => {
     if (!actionNonces[key]) setActionNonces((prev) => ({ ...prev, [key]: activeNonce }));
     try {
       await rejectExpense(rejectingExpense.expense_id, rejectionReason.trim(), activeNonce);
-      clearActionNonce(key);
-      setUnknownOutcome(null);
+      clearAfterVerifiedResolution();
+      setActionNonces((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
       setNotice({ msg: `Expense ${rejectingExpense.expense_id} rejected.` });
       setRejectingExpense(null);
       setRejectionReason('');
     } catch (err: unknown) {
       const unknownInfo = extractUnknownOutcomeInfo(err, activeNonce, `Reject Expense ${rejectingExpense.expense_id}`);
-      if (unknownInfo) setUnknownOutcome(unknownInfo);
+      if (unknownInfo) lockWithUnknownOutcome(unknownInfo);
       const msg = isUnknownOutcomeError(err)
         ? UNKNOWN_OUTCOME_STANDARD_MSG
         : err instanceof Error
@@ -212,7 +234,12 @@ export const ExpensesView: React.FC = () => {
 
       <UnknownOutcomeBanner
         outcome={unknownOutcome}
-        onDismiss={() => setUnknownOutcome(null)}
+        onRetry={expenseNonce && unknownOutcome?.nonce === expenseNonce ? () => executeSubmit(true) : undefined}
+        onConfirmedRecorded={() => {
+          setExpenseNonce(null);
+          clearAfterVerifiedResolution();
+        }}
+        onDismiss={clearAfterVerifiedResolution}
       />
 
       {notice && (
@@ -244,6 +271,12 @@ export const ExpensesView: React.FC = () => {
         </div>
 
         <form onSubmit={handleSubmit} className="p-5 sm:p-6 space-y-5">
+          <fieldset
+            disabled={isOutcomeLocked}
+            data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+            style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+            className="space-y-5"
+          >
           {/* Category Selector */}
           <FormField label="Expense Category" required>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
@@ -351,12 +384,13 @@ export const ExpensesView: React.FC = () => {
 
           <div className="pt-2 flex justify-end">
             <SaveButton
-              label={writesLocked ? 'Writes Locked' : 'Submit Expense Claim'}
+              label={effectiveWritesLocked ? (isOutcomeLocked ? 'Form Locked — Check Status' : 'Writes Locked') : 'Submit Expense Claim'}
               isLoading={isSubmitting}
-              disabled={writesLocked}
+              disabled={effectiveWritesLocked}
               icon={<Receipt size={14} />}
             />
           </div>
+          </fieldset>
         </form>
       </div>
       )}
@@ -435,15 +469,17 @@ export const ExpensesView: React.FC = () => {
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
+                              disabled={effectiveWritesLocked}
                               onClick={() => handleApprove(exp)}
-                              className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-md transition-colors cursor-pointer"
+                              className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               Approve
                             </button>
                             <button
                               type="button"
+                              disabled={effectiveWritesLocked}
                               onClick={() => setRejectingExpense(exp)}
-                              className="px-2.5 py-1 text-xs font-semibold bg-red-50 hover:bg-red-100 text-red-800 rounded-md transition-colors cursor-pointer"
+                              className="px-2.5 py-1 text-xs font-semibold bg-red-50 hover:bg-red-100 text-red-800 rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               Reject
                             </button>
@@ -471,36 +507,61 @@ export const ExpensesView: React.FC = () => {
               e.preventDefault();
               handleConfirmReject();
             }}
-            onCancel={() => {
-              if (rejectingExpense) clearActionNonce(`reject:${rejectingExpense.expense_id}`);
-              setRejectingExpense(null);
-              setRejectionReason('');
-            }}
+            onCancel={
+              isOutcomeLocked
+                ? undefined
+                : () => {
+                    if (rejectingExpense) clearActionNonce(`reject:${rejectingExpense.expense_id}`);
+                    setRejectingExpense(null);
+                    setRejectionReason('');
+                  }
+            }
             actions={
-              <FormActions
-                onCancel={() => {
-                  if (rejectingExpense) clearActionNonce(`reject:${rejectingExpense.expense_id}`);
-                  setRejectingExpense(null);
-                  setRejectionReason('');
-                }}
-                cancelLabel="Cancel"
-                saveLabel="Confirm Rejection"
-              />
+              <FormActions>
+                <CancelButton
+                  disabled={isOutcomeLocked}
+                  onClick={() => {
+                    if (shouldBlockDraftNonceReset(unknownOutcome)) return;
+                    if (rejectingExpense) clearActionNonce(`reject:${rejectingExpense.expense_id}`);
+                    setRejectingExpense(null);
+                    setRejectionReason('');
+                  }}
+                />
+                <SaveButton
+                  label={isOutcomeLocked ? 'Form Locked' : 'Confirm Rejection'}
+                  disabled={effectiveWritesLocked}
+                />
+              </FormActions>
             }
           >
-            <FormField
-              label="Rejection Reason (Required)"
-              required
-              helpText="Specify why this operational claim cannot be reimbursed"
+            <UnknownOutcomeBanner
+              outcome={unknownOutcome}
+              onConfirmedRecorded={() => {
+                clearAfterVerifiedResolution();
+                setRejectingExpense(null);
+                setRejectionReason('');
+              }}
+              onDismiss={clearAfterVerifiedResolution}
+            />
+            <fieldset
+              disabled={isOutcomeLocked}
+              data-tx-form-locked={isOutcomeLocked ? 'true' : 'false'}
+              style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
             >
-              <TextArea
+              <FormField
+                label="Rejection Reason (Required)"
                 required
-                rows={3}
-                value={rejectionReason}
-                onChange={(e) => setRejectionReason(e.target.value)}
-                placeholder="e.g. Duplicate claim, missing receipt, exceeds allowable daily limit..."
-              />
-            </FormField>
+                helpText="Specify why this operational claim cannot be reimbursed"
+              >
+                <TextArea
+                  required
+                  rows={3}
+                  value={rejectionReason}
+                  onChange={(e) => setRejectionReason(e.target.value)}
+                  placeholder="e.g. Duplicate claim, missing receipt, exceeds allowable daily limit..."
+                />
+              </FormField>
+            </fieldset>
           </FormLayout>
         </div>
       )}
