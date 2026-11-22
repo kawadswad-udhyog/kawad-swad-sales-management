@@ -795,6 +795,85 @@ class TransactionCoordinator:
                 current_attempt = int(ex.get("attempt_count") or 1)
                 current_lease_owner = str(ex.get("lease_owner") or "").strip()
 
+                def _validate_strict_identity_int(
+                    raw_val: Any,
+                    *,
+                    field_name: str,
+                    missing_code: str,
+                    required: bool,
+                ) -> Optional[int]:
+                    """
+                    TX-AUDIT-08: Strict genuine-integer validation for security-sensitive
+                    transaction identity parameters (expected_attempt, expected_version).
+                    - Accepts ONLY genuine built-in `int` values >= 1 (`type(raw_val) is int`).
+                    - Strictly rejects bool (`True`/`False`), numeric strings (`"1"`, `"5"`),
+                      floats including integral floats (`1.0`, `5.0`, `nan`, `inf`, `-inf`),
+                      Decimal, negative values, zero, and None when mandatory.
+                    - NEVER calls `int()` to coerce non-integer types.
+                    """
+                    if raw_val is None:
+                        if required:
+                            conn.execute("ROLLBACK;")
+                            raise InvalidStateTransitionError(
+                                f"Ordinary lease-protected transition {current_state} -> {target_state_str} "
+                                f"for nonce '{clean_nonce}' requires explicit positive integer {field_name}.",
+                                code=missing_code,
+                                nonce=clean_nonce,
+                                current_state=current_state,
+                                target_state=target_state_str,
+                                authority=auth_enum.value,
+                            )
+                        return None
+                    if isinstance(raw_val, bool):
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Invalid boolean {field_name}={raw_val!r} for nonce '{clean_nonce}'; "
+                            f"genuine positive integer required.",
+                            code=missing_code,
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if type(raw_val) is not int:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Invalid non-integer {field_name}={raw_val!r} "
+                            f"(type={type(raw_val).__name__}) for nonce '{clean_nonce}'; "
+                            f"genuine positive integer required without implicit coercion.",
+                            code="INVALID_WORKER_IDENTITY_TYPE",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    if raw_val < 1:
+                        conn.execute("ROLLBACK;")
+                        raise InvalidStateTransitionError(
+                            f"Out-of-range {field_name}={raw_val} for nonce '{clean_nonce}'; "
+                            f"must be a positive integer >= 1.",
+                            code="INVALID_WORKER_IDENTITY_RANGE",
+                            nonce=clean_nonce,
+                            current_state=current_state,
+                            target_state=target_state_str,
+                            authority=auth_enum.value,
+                        )
+                    return raw_val
+
+                # 0. Strict pre-CAS type & range validation on any supplied expected_version / expected_attempt (TX-AUDIT-08)
+                validated_exp_ver: Optional[int] = _validate_strict_identity_int(
+                    expected_version,
+                    field_name="expected_version",
+                    missing_code="MISSING_EXPECTED_VERSION",
+                    required=False,
+                )
+                validated_exp_attempt: Optional[int] = _validate_strict_identity_int(
+                    expected_attempt,
+                    field_name="expected_attempt",
+                    missing_code="MISSING_WORKER_ATTEMPT",
+                    required=False,
+                )
+
                 # 1. Explicit expected_from_state CAS check
                 if expected_states_set is not None and current_state not in expected_states_set:
                     conn.execute("ROLLBACK;")
@@ -809,40 +888,17 @@ class TransactionCoordinator:
                     )
 
                 # 2. Explicit optimistic version CAS check
-                if expected_version is not None:
-                    if isinstance(expected_version, bool):
-                        conn.execute("ROLLBACK;")
-                        raise InvalidStateTransitionError(
-                            f"Invalid boolean expected_version for nonce '{clean_nonce}'.",
-                            code="MISSING_EXPECTED_VERSION",
-                            nonce=clean_nonce,
-                            current_state=current_state,
-                            target_state=target_state_str,
-                            authority=auth_enum.value,
-                        )
-                    try:
-                        exp_ver_check = int(expected_version)
-                    except (TypeError, ValueError) as cast_exc:
-                        conn.execute("ROLLBACK;")
-                        raise InvalidStateTransitionError(
-                            f"Invalid expected_version '{expected_version}' for nonce '{clean_nonce}'.",
-                            code="INVALID_WORKER_IDENTITY_ARGUMENT",
-                            nonce=clean_nonce,
-                            current_state=current_state,
-                            target_state=target_state_str,
-                            authority=auth_enum.value,
-                        ) from cast_exc
-                    if current_ver != exp_ver_check:
-                        conn.execute("ROLLBACK;")
-                        raise InvalidStateTransitionError(
-                            f"CAS version mismatch for nonce '{clean_nonce}': "
-                            f"expected version {exp_ver_check}, found {current_ver}.",
-                            code="CAS_VERSION_MISMATCH",
-                            nonce=clean_nonce,
-                            current_state=current_state,
-                            target_state=target_state_str,
-                            authority=auth_enum.value,
-                        )
+                if validated_exp_ver is not None and current_ver != validated_exp_ver:
+                    conn.execute("ROLLBACK;")
+                    raise InvalidStateTransitionError(
+                        f"CAS version mismatch for nonce '{clean_nonce}': "
+                        f"expected version {validated_exp_ver}, found {current_ver}.",
+                        code="CAS_VERSION_MISMATCH",
+                        nonce=clean_nonce,
+                        current_state=current_state,
+                        target_state=target_state_str,
+                        authority=auth_enum.value,
+                    )
 
                 # 3. Authoritative transition-matrix & terminal-state validation
                 effective_reason = reason if reason is not None else message
@@ -866,10 +922,21 @@ class TransactionCoordinator:
                     actor=effective_actor,
                 )
 
-                # 4. Unconditional worker identity, version, attempt & lease ownership validation (TX-AUDIT-04)
+                # 4. Unconditional worker identity, version, attempt & lease ownership validation (TX-AUDIT-04 & TX-AUDIT-08)
+                if expected_correlation_id is not None and not isinstance(expected_correlation_id, str):
+                    conn.execute("ROLLBACK;")
+                    raise InvalidStateTransitionError(
+                        f"Invalid non-string expected_correlation_id={expected_correlation_id!r} "
+                        f"for nonce '{clean_nonce}'.",
+                        code="INVALID_WORKER_IDENTITY_TYPE",
+                        nonce=clean_nonce,
+                        current_state=current_state,
+                        target_state=target_state_str,
+                        authority=auth_enum.value,
+                    )
                 clean_exp_corr = (
-                    str(expected_correlation_id).strip()
-                    if expected_correlation_id is not None and str(expected_correlation_id).strip()
+                    expected_correlation_id.strip()
+                    if isinstance(expected_correlation_id, str) and expected_correlation_id.strip()
                     else None
                 )
                 is_ordinary_lease_transition = bool(
@@ -890,41 +957,18 @@ class TransactionCoordinator:
                             target_state=target_state_str,
                             authority=auth_enum.value,
                         )
-                    if expected_attempt is None or isinstance(expected_attempt, bool):
-                        conn.execute("ROLLBACK;")
-                        raise InvalidStateTransitionError(
-                            f"Ordinary lease-protected transition {current_state} -> {target_state_str} "
-                            f"for nonce '{clean_nonce}' requires explicit integer expected_attempt.",
-                            code="MISSING_WORKER_ATTEMPT",
-                            nonce=clean_nonce,
-                            current_state=current_state,
-                            target_state=target_state_str,
-                            authority=auth_enum.value,
-                        )
-                    if expected_version is None or isinstance(expected_version, bool):
-                        conn.execute("ROLLBACK;")
-                        raise InvalidStateTransitionError(
-                            f"Ordinary lease-protected transition {current_state} -> {target_state_str} "
-                            f"for nonce '{clean_nonce}' requires explicit integer expected_version.",
-                            code="MISSING_EXPECTED_VERSION",
-                            nonce=clean_nonce,
-                            current_state=current_state,
-                            target_state=target_state_str,
-                            authority=auth_enum.value,
-                        )
-                    try:
-                        exp_attempt_int = int(expected_attempt)
-                        exp_ver_int = int(expected_version)
-                    except (TypeError, ValueError) as cast_exc:
-                        conn.execute("ROLLBACK;")
-                        raise InvalidStateTransitionError(
-                            f"Invalid worker attempt/version argument for nonce '{clean_nonce}': {cast_exc}",
-                            code="INVALID_WORKER_IDENTITY_ARGUMENT",
-                            nonce=clean_nonce,
-                            current_state=current_state,
-                            target_state=target_state_str,
-                            authority=auth_enum.value,
-                        ) from cast_exc
+                    exp_attempt_int = _validate_strict_identity_int(
+                        expected_attempt,
+                        field_name="expected_attempt",
+                        missing_code="MISSING_WORKER_ATTEMPT",
+                        required=True,
+                    )
+                    exp_ver_int = _validate_strict_identity_int(
+                        expected_version,
+                        field_name="expected_version",
+                        missing_code="MISSING_EXPECTED_VERSION",
+                        required=True,
+                    )
 
                     if not current_corr or current_corr != clean_exp_corr:
                         conn.execute("ROLLBACK;")
@@ -1015,11 +1059,11 @@ class TransactionCoordinator:
                             target_state=target_state_str,
                             authority=auth_enum.value,
                         )
-                    if expected_attempt is not None and current_attempt != int(expected_attempt):
+                    if validated_exp_attempt is not None and current_attempt != validated_exp_attempt:
                         conn.execute("ROLLBACK;")
                         raise InvalidStateTransitionError(
                             f"Stale worker rejected for nonce '{clean_nonce}': "
-                            f"attempt {expected_attempt} does not match active attempt {current_attempt}.",
+                            f"attempt {validated_exp_attempt} does not match active attempt {current_attempt}.",
                             code="STALE_WORKER_ATTEMPT_MISMATCH",
                             nonce=clean_nonce,
                             current_state=current_state,
@@ -1073,16 +1117,16 @@ class TransactionCoordinator:
                     where_params.extend([
                         clean_exp_corr,
                         clean_exp_corr,
-                        int(expected_attempt),
+                        exp_attempt_int,
                         str(raw_lease_exp),
                     ])
                 else:
                     if clean_exp_corr is not None:
                         where_clauses.append("correlation_id = ?")
                         where_params.append(clean_exp_corr)
-                    if expected_attempt is not None:
+                    if validated_exp_attempt is not None:
                         where_clauses.append("attempt_count = ?")
-                        where_params.append(int(expected_attempt))
+                        where_params.append(validated_exp_attempt)
 
                 sql = f"""
                     UPDATE governed_transactions

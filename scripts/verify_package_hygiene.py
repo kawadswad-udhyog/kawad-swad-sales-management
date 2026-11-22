@@ -50,6 +50,13 @@ REQUIRED_ROUND3_FILES = REQUIRED_ROUND2_FILES + [
     "docs/MISSION_51B1_ROUND3_README.md",
 ]
 
+REQUIRED_ROUND31_FILES = REQUIRED_ROUND3_FILES + [
+    "backend/tests/_durability_test_helpers.py",
+    "backend/tests/test_mission51b1_round31_repairs.py",
+    "docs/MISSION_51B1_ROUND31_REPAIR_REPORT.md",
+    "docs/MISSION_51B1_ROUND31_README.md",
+]
+
 ROOT_LAYOUT_ANCHORS = (
     "backend/app/main.py",
     "render.yaml",
@@ -159,10 +166,11 @@ def audit_zip_archive(
     *,
     require_round2_files: bool = True,
     require_round3_files: bool = False,
+    require_round31_files: bool = False,
 ) -> Tuple[bool, Dict[str, object]]:
     """
     Independently verify ZIP integrity, forbidden-file hygiene, leaked-key absence,
-    repository-root layout, required Round 2 / Round 3 files, and final SHA-256 digest.
+    repository-root layout, required Round 2 / Round 3 / Round 3.1 files, and final SHA-256 digest.
     """
     if not os.path.isfile(zip_path):
         return False, {"error": f"Archive not found: {zip_path}"}
@@ -189,7 +197,15 @@ def audit_zip_archive(
 
     member_set = set(members)
     missing_required: List[str] = []
-    required_list = REQUIRED_ROUND3_FILES if require_round3_files else (REQUIRED_ROUND2_FILES if require_round2_files else [])
+    if require_round31_files:
+        required_list = REQUIRED_ROUND31_FILES
+    elif require_round3_files:
+        required_list = REQUIRED_ROUND3_FILES
+    elif require_round2_files:
+        required_list = REQUIRED_ROUND2_FILES
+    else:
+        required_list = []
+
     for req in required_list:
         if req not in member_set:
             missing_required.append(req)
@@ -197,7 +213,7 @@ def audit_zip_archive(
 
     top_level_entries = sorted({m.split("/", 1)[0] for m in members if m})
     is_repo_root = all(anchor in member_set for anchor in ROOT_LAYOUT_ANCHORS)
-    if require_round2_files or require_round3_files:
+    if require_round2_files or require_round3_files or require_round31_files:
         if not is_repo_root:
             violations.append(
                 f"invalid_root_layout:expected_repository_root_anchors ({', '.join(ROOT_LAYOUT_ANCHORS)})"
@@ -230,7 +246,12 @@ def main(argv: List[str]) -> int:
         print("Usage: python3 scripts/verify_package_hygiene.py <archive.zip>", file=sys.stderr)
         return 2
     zip_path = argv[1]
-    ok, report = audit_zip_archive(zip_path, require_round2_files=True, require_round3_files=True)
+    ok, report = audit_zip_archive(
+        zip_path,
+        require_round2_files=True,
+        require_round3_files=True,
+        require_round31_files=True,
+    )
     for k in (
         "archive_name",
         "size_bytes",

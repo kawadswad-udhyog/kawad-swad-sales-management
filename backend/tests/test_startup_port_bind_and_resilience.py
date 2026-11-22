@@ -622,8 +622,8 @@ server = ThreadingHTTPServer(("127.0.0.1", {port}), Handler)
 threading.Timer(0.05, sheets_mod.db.start_background_init).start()
 server.serve_forever()
 """
-        pers_coord_dir = os.path.join(backend_dir, f".startup_coord_test_stdlib_{os.getpid()}_{port}")
-        os.makedirs(pers_coord_dir, exist_ok=True)
+        from tests._durability_test_helpers import make_nonvolatile_test_dir
+        pers_coord_dir = make_nonvolatile_test_dir(f"ks_startup_stdlib_{os.getpid()}_{port}")
         env = os.environ.copy()
         env["SALES_TESTING"] = "0"
         env["SALES_ENV"] = "production"
@@ -789,8 +789,8 @@ sys.modules["google.oauth2.service_account"] = fake_sa_mod
 
 uvicorn.run("main:app", host="0.0.0.0", port={port}, log_level="warning")
 """
-        pers_coord_dir = os.path.join(backend_dir, f".startup_coord_test_uvicorn_{os.getpid()}_{port}")
-        os.makedirs(pers_coord_dir, exist_ok=True)
+        from tests._durability_test_helpers import make_nonvolatile_test_dir
+        pers_coord_dir = make_nonvolatile_test_dir(f"ks_startup_uvicorn_{os.getpid()}_{port}")
         env = os.environ.copy()
         env["SALES_TESTING"] = "0"
         env["SALES_ENV"] = "production"

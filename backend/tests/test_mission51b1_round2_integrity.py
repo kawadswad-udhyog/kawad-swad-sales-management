@@ -79,6 +79,10 @@ from app.transaction_safety import (
     validate_state_transition,
 )
 from scripts.verify_package_hygiene import audit_zip_archive
+from tests._durability_test_helpers import (
+    make_nonvolatile_test_dir,
+    nonexistent_nonvolatile_db_path,
+)
 
 
 def _mp_worker_race_acquire(db_path: str, nonce: str, payload_hash: str, worker_id: str, barrier_file: str):
@@ -959,7 +963,7 @@ class TestMission51B1Round2DurabilityAndRestart(unittest.TestCase):
 
     # Test 8: Coordinator directory unavailable -> fail closed at startup AND at runtime mutation (HTTP 503)
     def test_08_coordinator_directory_unavailable_fails_closed(self):
-        non_existent_path = os.path.join(REPO_ROOT, ".nonexistent_mount_dir_r2", "coord.db")
+        non_existent_path = nonexistent_nonvolatile_db_path("r2_mount_unavail")
         with self.assertRaises(CoordinatorDurabilityError) as ctx:
             validate_coordinator_durability(db_path=non_existent_path, env="production", testing=False)
         self.assertEqual(ctx.exception.error_code, "COORDINATOR_DIRECTORY_UNAVAILABLE")
@@ -998,16 +1002,15 @@ class TestMission51B1Round2DurabilityAndRestart(unittest.TestCase):
         # Multi-instance scaling guard (SQLite WAL is single-host only)
         with self.assertRaises(CoordinatorDurabilityError) as ctx_scale:
             validate_coordinator_durability(
-                db_path=os.path.join(REPO_ROOT, "coord.db"),
+                db_path=nonexistent_nonvolatile_db_path("r2_scale_guard"),
                 env="production",
                 testing=False,
                 instance_count=2,
             )
         self.assertEqual(ctx_scale.exception.error_code, "COORDINATOR_MULTI_INSTANCE_UNSUPPORTED")
 
-        # Valid non-volatile persistent path in production passes cleanly
-        pers_dir = os.path.join(REPO_ROOT, ".tmp_r2_persistent_test_dir")
-        os.makedirs(pers_dir, exist_ok=True)
+        # Valid non-volatile persistent path in production passes cleanly (isolated even when repo is under /tmp)
+        pers_dir = make_nonvolatile_test_dir("ks_r2_persistent")
         try:
             pers_db = os.path.join(pers_dir, "coord.db")
             info = validate_coordinator_durability(db_path=pers_db, env="production", testing=False, instance_count=1)
@@ -1035,8 +1038,7 @@ class TestMission51B1Round2DurabilityAndRestart(unittest.TestCase):
             shutil.rmtree(pers_dir, ignore_errors=True)
 
         # Read-only directory fails closed (skip only if running as root where chmod 0555 stays writable)
-        ro_dir = os.path.join(REPO_ROOT, ".tmp_r2_ro_test_dir")
-        os.makedirs(ro_dir, exist_ok=True)
+        ro_dir = make_nonvolatile_test_dir("ks_r2_readonly")
         try:
             os.chmod(ro_dir, stat.S_IRUSR | stat.S_IXUSR)
             if not os.access(ro_dir, os.W_OK):
