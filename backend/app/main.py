@@ -2,6 +2,19 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
+
+from app.config import (
+    SALES_CORS_ORIGINS,
+    SALES_ENV,
+    assert_production_test_isolation,
+    assert_runtime_config,
+    is_isolated_testing_mode,
+    is_production_env,
+)
+
+# Enforce production/test isolation before API framework, storage, routers, auth, or coordinator initialization.
+assert_production_test_isolation()
+
 from fastapi import FastAPI, Depends
 try:
     from fastapi import Request
@@ -16,7 +29,6 @@ except ImportError:
             self.content = content
             self.status_code = status_code
 from fastapi.middleware.cors import CORSMiddleware
-from app.config import SALES_CORS_ORIGINS, SALES_ENV, assert_runtime_config
 from app.sheets import db
 from app.routers import (
     auth,
@@ -47,22 +59,22 @@ logger = logging.getLogger("kawad_swad")
 
 
 def _check_configuration():
-    import os
-    if os.getenv("SALES_TESTING", "").strip() == "1":
-        return
     try:
+        assert_production_test_isolation()
+        if is_isolated_testing_mode():
+            return
         assert_runtime_config()
     except Exception as exc:
-        if SALES_ENV == "production":
+        if is_production_env():
             logger.critical("FATAL: Invalid production configuration: %s", exc)
-            raise exc
+            raise
         logger.error("Configuration warning on startup: %s", exc)
 
 
 def _schedule_post_bind_sheets_init() -> None:
     """Schedule Google Sheets initialization strictly after Uvicorn binds $PORT."""
-    import os
-    if os.getenv("SALES_TESTING", "").strip() == "1":
+    assert_production_test_isolation()
+    if is_isolated_testing_mode():
         return
     try:
         loop = asyncio.get_running_loop()
@@ -109,7 +121,7 @@ configured_origins = [o.strip().rstrip("/") for o in SALES_CORS_ORIGINS.split(",
 default_origins = {
     "https://kawad-swad-sales-frontend.onrender.com",
 }
-if SALES_ENV != "production":
+if not is_production_env():
     default_origins.update({
         "http://localhost:3000",
         "http://127.0.0.1:3000",
@@ -126,7 +138,7 @@ cors_kwargs = {
     "expose_headers": ["*"],
 }
 
-if SALES_ENV != "production":
+if not is_production_env():
     cors_kwargs["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 
 app.add_middleware(

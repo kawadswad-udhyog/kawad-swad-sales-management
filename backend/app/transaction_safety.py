@@ -894,12 +894,29 @@ def validate_coordinator_durability(
     - Isolated testing (`SALES_TESTING=1`) or explicit local development allows volatile/temp paths
       while still failing closed if an explicitly configured directory is missing or unwritable.
     """
-    resolved_env = (env if env is not None else os.getenv("SALES_ENV", "development")).strip().lower()
-    is_testing = (
-        bool(testing)
-        if testing is not None
-        else (os.getenv("SALES_TESTING", "").strip() == "1")
+    from app.config import (
+        assert_production_test_isolation,
+        get_effective_env,
+        is_testing_flag_enabled,
     )
+
+    resolved_env = get_effective_env(env=env)
+    is_testing = is_testing_flag_enabled(testing=testing)
+
+    explicit_env_path = os.getenv("TRANSACTION_DB_PATH", "").strip()
+    configured_path = str(db_path).strip() if db_path is not None else explicit_env_path
+
+    if resolved_env == "production" and is_testing:
+        try:
+            assert_production_test_isolation(env=resolved_env, testing=is_testing)
+        except RuntimeError as exc:
+            raise CoordinatorDurabilityError(
+                str(exc),
+                error_code="PRODUCTION_TEST_MODE_CONFLICT",
+                mode=CoordinatorDurabilityMode.MISCONFIGURED,
+                db_path=configured_path,
+            ) from exc
+
     volatile_flag = (
         bool(allow_volatile_in_test)
         if allow_volatile_in_test is not None
@@ -914,7 +931,7 @@ def validate_coordinator_durability(
             or "1"
         )
     )
-    if raw_instances > 1 and not is_testing:
+    if raw_instances > 1 and (resolved_env == "production" or not is_testing):
         raise CoordinatorDurabilityError(
             f"Unsupported horizontal scaling detected (instance_count={raw_instances}). "
             "Host-local SQLite WAL transaction coordination is single-instance only; "
@@ -924,10 +941,7 @@ def validate_coordinator_durability(
             db_path=str(db_path or ""),
         )
 
-    explicit_env_path = os.getenv("TRANSACTION_DB_PATH", "").strip()
-    configured_path = str(db_path).strip() if db_path is not None else explicit_env_path
-
-    if resolved_env == "production" and not is_testing:
+    if resolved_env == "production":
         if not configured_path:
             raise CoordinatorDurabilityError(
                 "TRANSACTION_DB_PATH is not configured in production. "

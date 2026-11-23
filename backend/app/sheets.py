@@ -17,6 +17,9 @@ from app.config import (
     SALES_GOOGLE_SPREADSHEET_ID,
     SALES_GOOGLE_SERVICE_ACCOUNT_FILE,
     SALES_GOOGLE_SERVICE_ACCOUNT_JSON,
+    assert_production_test_isolation,
+    is_isolated_testing_mode,
+    is_production_env,
 )
 from app.schema_registry import (
     CONFIDENTIAL_TABS_NO_CACHE,
@@ -377,11 +380,12 @@ class SheetsDatabase:
     """Google Sheets adapter with persistent write enforcement and isolated testing support."""
 
     def __init__(self, connect_on_init: bool = False):
+        assert_production_test_isolation()
         self.client = None
         self.spreadsheet = None
         self.is_connected = False
         self.last_connection_error: Optional[str] = None
-        self.allow_in_memory_fallback = os.getenv("SALES_TESTING", "").strip() == "1"
+        self.allow_in_memory_fallback = is_isolated_testing_mode()
         self._records_cache: Dict[str, tuple] = {}
         self._records_cache_ttl_seconds = 30.0
         self._diagnostic_headers_cache: Optional[Dict[str, Any]] = None
@@ -400,15 +404,46 @@ class SheetsDatabase:
         self._consecutive_failures = 0
         self._inflight: Dict[str, threading.Event] = {}
         self._fail_once: Dict[str, int] = {}
-        self.shared_file_dir: Optional[str] = os.getenv("SALES_SHARED_TEST_DIR") or None
+        self.shared_file_dir: Optional[str] = (
+            None if is_production_env() else (os.getenv("SALES_SHARED_TEST_DIR") or None)
+        )
         self.memory_store: Dict[str, List[Dict[str, Any]]] = {name: [] for name in list(ID_PREFIXES) + ["Settings"]}
         self._test_tab_headers: Dict[str, Any] = {}
         self._last_conn_attempt_time: float = 0.0
         if connect_on_init:
             self.init_connection()
 
+    def __getattribute__(self, name: str) -> Any:
+        if name == "allow_in_memory_fallback":
+            assert_production_test_isolation()
+            if is_production_env():
+                return False
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "allow_in_memory_fallback":
+            assert_production_test_isolation()
+            if bool(value) and is_production_env():
+                raise RuntimeError(
+                    "In-memory fallback storage cannot be activated when SALES_ENV=production."
+                )
+            value = bool(value)
+        super().__setattr__(name, value)
+
+    def _get_effective_shared_test_dir(self) -> Optional[str]:
+        """Return shared test directory ONLY in isolated non-production environments."""
+        assert_production_test_isolation()
+        if is_production_env():
+            return None
+        return self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR") or None
+
     def enable_shared_file_store(self, directory_path: str) -> None:
         """Enables multi-process shared persistent file storage for testing."""
+        assert_production_test_isolation()
+        if is_production_env():
+            raise RuntimeError(
+                "Shared file test store cannot be enabled when SALES_ENV=production."
+            )
         self.shared_file_dir = directory_path
         os.environ["SALES_SHARED_TEST_DIR"] = directory_path
         os.makedirs(directory_path, exist_ok=True)
@@ -579,6 +614,7 @@ class SheetsDatabase:
 
     def start_background_init(self) -> bool:
         """Start Google Sheets initialization on a single background daemon thread after port bind."""
+        assert_production_test_isolation()
         if self.is_connected and self.spreadsheet is not None:
             return False
         if not SALES_GOOGLE_SPREADSHEET_ID:
@@ -654,6 +690,7 @@ class SheetsDatabase:
 
     def init_connection(self) -> bool:
         """Attempt to connect to Google Sheets using configured service account credentials."""
+        assert_production_test_isolation()
         acquired = self._connect_exec_lock.acquire(timeout=20.0)
         if not acquired:
             logger.warning("Timed out waiting for in-flight Google Sheets connection attempt.")
@@ -1301,7 +1338,7 @@ class SheetsDatabase:
                 self.attempt_auto_reconnect()
 
         if not (self.is_connected and self.spreadsheet):
-            shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+            shared_dir = self._get_effective_shared_test_dir()
             if shared_dir:
                 rows = self._read_shared_records(tab_name)
                 self.memory_store[tab_name] = rows
@@ -1364,7 +1401,7 @@ class SheetsDatabase:
                         logger.info("Serving stale cached records for %s due to Google Sheets rate limit", tab_name)
                         return [dict(row) for row in cached[1]]
                     if attempt < max_retries:
-                        sleep_time = 0.01 if os.getenv("SALES_TESTING", "").strip() == "1" else (2 ** attempt) * 1.5 + 0.5
+                        sleep_time = 0.01 if is_isolated_testing_mode() else (2 ** attempt) * 1.5 + 0.5
                         time.sleep(sleep_time)
                         continue
                 else:
@@ -1414,7 +1451,7 @@ class SheetsDatabase:
                 raise RuntimeError(f"Row-1 headers for '{tab_name}' are empty or missing.")
             return cleaned
 
-        shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+        shared_dir = self._get_effective_shared_test_dir()
         if shared_dir or self.allow_in_memory_fallback:
             if tab_name in self._test_tab_headers:
                 override = self._test_tab_headers[tab_name]
@@ -1504,7 +1541,8 @@ class SheetsDatabase:
         All runtime state changes must go through AppsScriptBridge. Direct store helpers only run
         when SALES_TESTING=1 in-memory/shared-file fallback is explicitly active and disconnected.
         """
-        if (self.is_connected and self.spreadsheet) or not self.allow_in_memory_fallback:
+        assert_production_test_isolation()
+        if is_production_env() or (self.is_connected and self.spreadsheet) or not self.allow_in_memory_fallback:
             raise RuntimeError(
                 f"BLOCKED_PENDING_OWNER_SETUP: Direct Google Sheets mutation '{op}' on '{tab_name}' is disabled "
                 "under Blueprint v2.1 Single-Write-Owner architecture. Delegate through AppsScriptBridge."
@@ -1576,7 +1614,7 @@ class SheetsDatabase:
                 return False
 
         # Disconnected state:
-        shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+        shared_dir = self._get_effective_shared_test_dir()
         if shared_dir:
             lock_path = self._tab_file_lock_path(tab_name)
             with open(lock_path, "a") as lk:
@@ -1672,7 +1710,7 @@ class SheetsDatabase:
                     raise RuntimeError(f"Injected failure updating {tab_name}")
                 return False
             if not (self.is_connected and self.spreadsheet):
-                shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+                shared_dir = self._get_effective_shared_test_dir()
                 if shared_dir:
                     lock_path = self._tab_file_lock_path(tab_name)
                     with open(lock_path, "a") as lk:
@@ -1775,7 +1813,7 @@ class SheetsDatabase:
             return False
         self._invalidate_records_cache(tab_name)
         if not (self.is_connected and self.spreadsheet):
-            shared_dir = self.shared_file_dir or os.getenv("SALES_SHARED_TEST_DIR")
+            shared_dir = self._get_effective_shared_test_dir()
             if shared_dir:
                 lock_path = self._tab_file_lock_path(tab_name)
                 with open(lock_path, "a") as lk:
