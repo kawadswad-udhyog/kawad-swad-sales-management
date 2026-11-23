@@ -1,0 +1,6 @@
+file_path,change_type,scope_category,sha256_before,sha256_after,summary
+backend/tests/test_mission1_9r2_factory_worker_rbac.py,MODIFIED,Security Test Repair,a37244c30a52462381fc654bb4814ff836a5784a9636cb24e48f8edab84c4fdd,b03f878da5845c572e5fe26044cf34ce2918e6761dc6ed82f4f347f8419b821b,"Fixed RecipeSave, DalMillingCreate, GigWorkSubmitRequest, LabourWorkEntryCreate, RawMaterialReceiveRequest, PackagingCreate, RecipeConfirmRequest, and QualityCheckCreate payloads to match actual Pydantic schemas; constructed all models outside assertRaises via _build_validated and verified real guard invocation via _assert_guard_403."
+MISSION_1_9R2V_CORRECTION_REPORT.md,ADDED,Mission Report,,GENERATED_THIS_MISSION,"Exact diff summary, schema audit, and confirmation that zero RBAC implementation files changed."
+MISSION_1_9R2V_FILES_CHANGED.csv,ADDED,Mission Report,,GENERATED_THIS_MISSION,"Machine-readable manifest of Mission 1.9R-2V file modifications."
+MISSION_1_9R2V_TEST_EXECUTION_EVIDENCE.md,ADDED,Mission Report,,GENERATED_THIS_MISSION,"Environment inventory, dependency status, targeted + strict schema-constraint audit + full regression results, and guard-reach proof."
+MISSION_1_9R2V_LOCKFILE_AND_FINAL_GATE.md,ADDED,Mission Report,,GENERATED_THIS_MISSION,"ZIP61 lockfile restoration status, remaining limitations, and Mission 1.9R-2V Final Gate verdict."

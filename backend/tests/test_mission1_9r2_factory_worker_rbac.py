@@ -17,6 +17,7 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 import asyncio
+from decimal import Decimal
 import unittest
 from unittest.mock import patch
 
@@ -158,6 +159,55 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
         self.assertEqual(exc_ctx.exception.status_code, 403)
         self.assertTrue(str(exc_ctx.exception.detail).strip())
 
+    def _build_validated(self, model_cls, **kwargs):
+        """
+        Construct a request model OUTSIDE assertRaises(HTTPException) so schema validation
+        errors fail the test immediately rather than masking authorization checks.
+        Also enforces declared-field and required-field parity even under the stdlib mock shim.
+        """
+        declared_annotations = {}
+        for cls in reversed(model_cls.__mro__):
+            declared_annotations.update(getattr(cls, "__annotations__", {}) or {})
+
+        # Verify every passed kwarg corresponds to an actual declared schema field
+        if declared_annotations:
+            unknown_fields = set(kwargs.keys()) - set(declared_annotations.keys())
+            self.assertFalse(
+                unknown_fields,
+                f"{model_cls.__name__} received unknown schema fields: {sorted(unknown_fields)}",
+            )
+            # Verify every required field (no default or Ellipsis sentinel from Field(...)) is provided
+            missing_required = []
+            for fname in declared_annotations:
+                has_attr = any(fname in cls.__dict__ for cls in model_cls.__mro__)
+                default_val = getattr(model_cls, fname, None) if has_attr else ...
+                if default_val is ... and fname not in kwargs:
+                    missing_required.append(fname)
+            self.assertFalse(
+                missing_required,
+                f"{model_cls.__name__} missing required schema fields: {sorted(missing_required)}",
+            )
+
+        return model_cls(**kwargs)
+
+    def _assert_guard_403(self, guard_target, guard_attr, call_fn):
+        """
+        Invoke an async route handler while spying on its actual authorization guard.
+        Proves the request bypassed schema construction, reached the real guard, and
+        failed specifically with HTTP 403 from authorization enforcement.
+        """
+        real_guard = getattr(guard_target, guard_attr)
+        with patch.object(guard_target, guard_attr, wraps=real_guard) as guard_spy:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(call_fn())
+            self.assertGreaterEqual(
+                guard_spy.call_count,
+                1,
+                f"Expected authorization guard {guard_target.__name__}.{guard_attr} to be reached",
+            )
+        self._assert_403(ctx)
+        return ctx
+
     # 1. FACTORY_WORKER can view permitted production resources
     def test_01_factory_worker_can_view_production_resources(self):
         self.assertTrue(perms.has_permission(self.factory_worker, "production", "view"))
@@ -183,92 +233,86 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
     def test_02_factory_worker_cannot_create_production_records(self):
         self.assertFalse(perms.has_permission(self.factory_worker, "production", "create"))
 
-        with self.assertRaises(HTTPException) as ctx_batch:
-            asyncio.run(
-                prod.create_batch(
-                    prod_mod.ProductionCreate(
-                        product_id="PRD-M-200",
-                        production_date="2026-11-01",
-                        quantity_kg=10,
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_batch)
+        batch_req = self._build_validated(
+            prod_mod.ProductionCreate,
+            product_id="PRD-M-200",
+            production_date="2026-11-01",
+            quantity_kg=10.0,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.create_batch(batch_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_recipe:
-            asyncio.run(
-                prod.save_recipe(
-                    prod_mod.RecipeSave(
-                        product_id="PRD-M-200",
-                        base_output_kg=10,
-                        ingredients=[{"raw_material_id": "RM-MOONG", "quantity": 10, "unit": "kg"}],
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_recipe)
+        recipe_item = self._build_validated(
+            prod_mod.RecipeItemInput,
+            material_name="Moong Flour",
+            quantity_per_kg=1.0,
+            unit="kg",
+        )
+        recipe_req = self._build_validated(
+            prod_mod.RecipeSave,
+            product_id="PRD-M-200",
+            items=[recipe_item],
+            expected_yield_kg=10.0,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.save_recipe(recipe_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_rm:
-            asyncio.run(
-                prod.receive_raw_material(
-                    prod_mod.RawMaterialReceiveRequest(
-                        raw_material_id="RM-MOONG",
-                        quantity=25,
-                        unit="kg",
-                        rate_per_unit=90,
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_rm)
+        rm_req = self._build_validated(
+            prod_mod.RawMaterialReceiveRequest,
+            raw_material_id="RM-MOONG",
+            quantity=25.0,
+            unit="kg",
+            purchase_rate=90.0,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.receive_raw_material(rm_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_pack:
-            asyncio.run(
-                prod.create_packaging(
-                    prod_mod.PackagingCreate(
-                        product_id="PRD-M-200",
-                        packaging_date="2026-11-01",
-                        bulk_used_kg=5,
-                        packets_produced=25,
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_pack)
+        pack_req = self._build_validated(
+            prod_mod.PackagingCreate,
+            product_id="PRD-M-200",
+            packaging_date="2026-11-01",
+            bulk_kg_used=5.0,
+            packets_produced=25,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.create_packaging(pack_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_v2_batch:
-            asyncio.run(
-                v2_erp.create_v2_production_batch(
-                    v2_erp_mod.GovernedProductionBatchRequest(
-                        product_id="PRD-M-200",
-                        planned_quantity_kg=10,
-                        nonce="fw-test-nonce-1",
-                    ),
-                    self.factory_worker,
-                    _DummyRequest(),
-                )
-            )
-        self._assert_403(ctx_v2_batch)
+        v2_batch_req = self._build_validated(
+            v2_erp_mod.GovernedProductionBatchRequest,
+            product_id="PRD-M-200",
+            planned_quantity_kg=Decimal("10"),
+            nonce="fw-test-nonce-1",
+        )
+        self._assert_guard_403(
+            v2_erp_mod,
+            "require_module_action",
+            lambda: v2_erp.create_v2_production_batch(v2_batch_req, self.factory_worker, _DummyRequest()),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_v2_mill:
-            asyncio.run(
-                v2_erp.create_v2_milling_batch(
-                    v2_erp_mod.GovernedMillingBatchRequest(
-                        source_material_id="RM-MOONG",
-                        input_quantity_kg=20,
-                        flour_output_kg=18,
-                        nonce="fw-test-nonce-2",
-                    ),
-                    self.factory_worker,
-                    _DummyRequest(),
-                )
-            )
-        self._assert_403(ctx_v2_mill)
+        v2_mill_req = self._build_validated(
+            v2_erp_mod.GovernedMillingBatchRequest,
+            source_material_id="RM-MOONG",
+            input_quantity_kg=Decimal("20"),
+            flour_output_kg=Decimal("18"),
+            nonce="fw-test-nonce-2",
+        )
+        self._assert_guard_403(
+            v2_erp_mod,
+            "require_module_action",
+            lambda: v2_erp.create_v2_milling_batch(v2_mill_req, self.factory_worker, _DummyRequest()),
+        )
 
     # 3. FACTORY_WORKER cannot edit production records (HTTP 403)
     def test_03_factory_worker_cannot_edit_production_records(self):
@@ -288,55 +332,47 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
                 f"FACTORY_WORKER must not have production:{action}",
             )
 
-        with self.assertRaises(HTTPException) as ctx_att:
-            asyncio.run(
-                prod.update_attendance(
-                    "ATT-1",
-                    prod_mod.AttendanceUpdate(status="PRESENT", notes="unauthorized edit"),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_att)
+        att_req = self._build_validated(
+            prod_mod.AttendanceUpdate,
+            status="PRESENT",
+            notes="unauthorized edit",
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.update_attendance("ATT-1", att_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_issue:
-            asyncio.run(
-                prod.issue_materials(
-                    "PRD-BATCH-1",
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_issue)
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.issue_materials("PRD-BATCH-1", _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_mill:
-            asyncio.run(
-                prod.record_dal_milling_batch(
-                    prod_mod.DalMillingCreate(
-                        raw_dal_id="RM-WHOLE-MOONG-DAL",
-                        raw_dal_input_kg=10,
-                        flour_output_kg=9,
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_mill)
+        mill_req = self._build_validated(
+            prod_mod.DalMillingCreate,
+            source_material_id="RM-WHOLE-MOONG-DAL",
+            input_quantity_kg=10.0,
+            flour_output_kg=9.0,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.record_dal_milling_batch(mill_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_disp:
-            asyncio.run(
-                prod.dispatch(
-                    prod_mod.DispatchCreate(
-                        product_id="PRD-M-200",
-                        quantity_packets=5,
-                        channel="WHOLESALE",
-                        destination="Unauthorized",
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_disp)
+        disp_req = self._build_validated(
+            prod_mod.DispatchCreate,
+            product_id="PRD-M-200",
+            quantity_packets=5,
+            channel="WHOLESALE",
+            destination="Unauthorized",
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.dispatch(disp_req, _DummyRequest(), self.factory_worker),
+        )
 
     # 4. FACTORY_WORKER cannot approve production mutations (HTTP 403)
     def test_04_factory_worker_cannot_approve_production_mutations(self):
@@ -344,38 +380,35 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
 
         batch = asyncio.run(
             prod.create_batch(
-                prod_mod.ProductionCreate(
+                self._build_validated(
+                    prod_mod.ProductionCreate,
                     product_id="PRD-M-200",
                     production_date="2026-11-01",
-                    quantity_kg=10,
+                    quantity_kg=10.0,
                 ),
                 _DummyRequest(),
                 self.production_user,
             )
         )
 
-        with self.assertRaises(HTTPException) as ctx_approve:
-            asyncio.run(
-                prod.approve_batch(
-                    batch["batch_id"],
-                    prod_mod.ApprovalRequest(approved=True),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_approve)
+        approve_req = self._build_validated(prod_mod.ApprovalRequest, approved=True)
+        ctx_approve = self._assert_guard_403(
+            prod_mod,
+            "require_owner",
+            lambda: prod.approve_batch(batch["batch_id"], approve_req, _DummyRequest(), self.factory_worker),
+        )
         self.assertIn("Owner", str(ctx_approve.exception.detail))
 
-        with self.assertRaises(HTTPException) as ctx_confirm:
-            asyncio.run(
-                prod.confirm_master_recipe(
-                    "RCP-1",
-                    prod_mod.RecipeConfirmRequest(notes="unauthorized confirm"),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_confirm)
+        confirm_req = self._build_validated(
+            prod_mod.RecipeConfirmRequest,
+            approved=True,
+            change_notes="unauthorized confirm",
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_owner",
+            lambda: prod.confirm_master_recipe("RCP-1", confirm_req, _DummyRequest(), self.factory_worker),
+        )
 
     # 5. FACTORY_WORKER cannot perform privileged writes via alternate routes (HTTP 403)
     def test_05_factory_worker_denied_on_alternate_privileged_routes(self):
@@ -391,67 +424,62 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
             perms.require_roles(self.factory_worker, {"OWNER_ADMIN", "PRODUCTION"})
         self._assert_403(ctx_roles)
 
-        with self.assertRaises(HTTPException) as ctx_qc:
-            asyncio.run(
-                quality.create_quality_check(
-                    quality_mod.QualityCheckCreate(
-                        check_type="PRODUCTION_BATCH",
-                        reference_type="PRODUCTION_BATCH",
-                        reference_id="PRD-BATCH-1",
-                        product_or_material_id="PRD-M-200",
-                        item_name="Moong Master Papad",
-                        result="PASS",
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_qc)
+        qc_req = self._build_validated(
+            quality_mod.QualityCheckCreate,
+            check_type="PRODUCTION_BATCH",
+            reference_type="PRODUCTION_BATCH",
+            reference_id="PRD-BATCH-1",
+            product_or_material_id="PRD-M-200",
+            item_name="Moong Master Papad",
+            decision="PASS",
+        )
+        self._assert_guard_403(
+            quality_mod,
+            "require_roles",
+            lambda: quality.create_quality_check(qc_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_v2_gig:
-            asyncio.run(
-                v2_erp.submit_gig_worker_entry(
-                    v2_erp_mod.GigWorkSubmitRequest(
-                        labour_id="LAB-1",
-                        work_date="2026-11-01",
-                        quantity_kg=10,
-                        rate_per_kg=15,
-                        nonce="fw-gig-nonce-1",
-                    ),
-                    self.factory_worker,
-                    _DummyRequest(),
-                )
-            )
-        self._assert_403(ctx_v2_gig)
+        gig_req = self._build_validated(
+            v2_erp_mod.GigWorkSubmitRequest,
+            nonce="fw-gig-nonce-1",
+            worker_id="LAB-1",
+            work_date="2026-11-01",
+            activity_name="Papad Rolling",
+            units_completed=Decimal("10"),
+            unit_of_measure="KG",
+            piece_rate=Decimal("15"),
+        )
+        self._assert_guard_403(
+            v2_erp_mod,
+            "require_roles",
+            lambda: v2_erp.submit_gig_worker_entry(gig_req, self.factory_worker, _DummyRequest()),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_wf_att:
-            asyncio.run(
-                workforce.save_labour_attendance_bulk(
-                    workforce_mod.LabourAttendanceBulk(
-                        attendance_date="2026-11-01",
-                        records=[],
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_wf_att)
+        wf_att_req = self._build_validated(
+            workforce_mod.LabourAttendanceBulk,
+            attendance_date="2026-11-01",
+            records=[],
+        )
+        self._assert_guard_403(
+            workforce_mod,
+            "require_roles",
+            lambda: workforce.save_labour_attendance_bulk(wf_att_req, _DummyRequest(), self.factory_worker),
+        )
 
-        with self.assertRaises(HTTPException) as ctx_wf_work:
-            asyncio.run(
-                workforce.create_labour_work_entry(
-                    workforce_mod.LabourWorkEntryCreate(
-                        labour_id="LAB-1",
-                        work_date="2026-11-01",
-                        task_type="ROLLING",
-                        quantity=5,
-                        rate=10,
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_wf_work)
+        wf_work_req = self._build_validated(
+            workforce_mod.LabourWorkEntryCreate,
+            labour_id="LAB-1",
+            entry_date="2026-11-01",
+            activity_name="ROLLING",
+            units_completed=5.0,
+            unit_of_measure="KG",
+            piece_rate=10.0,
+        )
+        self._assert_guard_403(
+            workforce_mod,
+            "require_roles",
+            lambda: workforce.create_labour_work_entry(wf_work_req, _DummyRequest(), self.factory_worker),
+        )
 
     # 6. Canonical role mapping cannot elevate FACTORY_WORKER to PRODUCTION
     def test_06_canonical_role_mapping_does_not_elevate_factory_worker(self):
@@ -492,52 +520,46 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
             self.assertIn("bulk_stock", summary)
 
             # Create denied (HTTP 403)
-            with self.assertRaises(HTTPException) as ctx_create:
-                asyncio.run(
-                    prod.create_batch(
-                        prod_mod.ProductionCreate(
-                            product_id="PRD-M-200",
-                            production_date="2026-11-01",
-                            quantity_kg=5,
-                        ),
-                        _DummyRequest(),
-                        user,
-                    )
-                )
-            self._assert_403(ctx_create)
+            alias_batch_req = self._build_validated(
+                prod_mod.ProductionCreate,
+                product_id="PRD-M-200",
+                production_date="2026-11-01",
+                quantity_kg=5.0,
+            )
+            self._assert_guard_403(
+                prod_mod,
+                "require_production_access",
+                lambda req=alias_batch_req, u=user: prod.create_batch(req, _DummyRequest(), u),
+            )
 
             # v2 create denied (HTTP 403)
-            with self.assertRaises(HTTPException) as ctx_v2:
-                asyncio.run(
-                    v2_erp.create_v2_production_batch(
-                        v2_erp_mod.GovernedProductionBatchRequest(
-                            product_id="PRD-M-200",
-                            planned_quantity_kg=5,
-                            nonce=f"alias-nonce-{token.strip()}",
-                        ),
-                        user,
-                        _DummyRequest(),
-                    )
-                )
-            self._assert_403(ctx_v2)
+            alias_v2_req = self._build_validated(
+                v2_erp_mod.GovernedProductionBatchRequest,
+                product_id="PRD-M-200",
+                planned_quantity_kg=Decimal("5"),
+                nonce=f"alias-nonce-{token.strip()}",
+            )
+            self._assert_guard_403(
+                v2_erp_mod,
+                "require_module_action",
+                lambda req=alias_v2_req, u=user: v2_erp.create_v2_production_batch(req, u, _DummyRequest()),
+            )
 
             # Quality check denied (HTTP 403)
-            with self.assertRaises(HTTPException) as ctx_qc:
-                asyncio.run(
-                    quality.create_quality_check(
-                        quality_mod.QualityCheckCreate(
-                            check_type="PRODUCTION_BATCH",
-                            reference_type="PRODUCTION_BATCH",
-                            reference_id="PRD-BATCH-1",
-                            product_or_material_id="PRD-M-200",
-                            item_name="Moong Master Papad",
-                            result="PASS",
-                        ),
-                        _DummyRequest(),
-                        user,
-                    )
-                )
-            self._assert_403(ctx_qc)
+            alias_qc_req = self._build_validated(
+                quality_mod.QualityCheckCreate,
+                check_type="PRODUCTION_BATCH",
+                reference_type="PRODUCTION_BATCH",
+                reference_id="PRD-BATCH-1",
+                product_or_material_id="PRD-M-200",
+                item_name="Moong Master Papad",
+                decision="PASS",
+            )
+            self._assert_guard_403(
+                quality_mod,
+                "require_roles",
+                lambda req=alias_qc_req, u=user: quality.create_quality_check(req, _DummyRequest(), u),
+            )
 
     # 8. Role normalization & specificity cannot widen explicit least-privilege rules
     def test_08_role_normalization_cannot_widen_least_privilege_rules(self):
@@ -568,19 +590,17 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
         # AUDITOR remains strictly view-only
         self.assertTrue(perms.has_permission(self.auditor_user, "production", "view"))
         self.assertFalse(perms.has_permission(self.auditor_user, "production", "create"))
-        with self.assertRaises(HTTPException) as ctx_aud:
-            asyncio.run(
-                prod.create_batch(
-                    prod_mod.ProductionCreate(
-                        product_id="PRD-M-200",
-                        production_date="2026-11-01",
-                        quantity_kg=5,
-                    ),
-                    _DummyRequest(),
-                    self.auditor_user,
-                )
-            )
-        self._assert_403(ctx_aud)
+        aud_batch_req = self._build_validated(
+            prod_mod.ProductionCreate,
+            product_id="PRD-M-200",
+            production_date="2026-11-01",
+            quantity_kg=5.0,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.create_batch(aud_batch_req, _DummyRequest(), self.auditor_user),
+        )
 
         # Forged JWT claiming role=PRODUCTION for an AuthUsers FACTORY_WORKER is overridden by fresh DB lookup
         forged_token = auth_mod.create_access_token(
@@ -590,19 +610,17 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
         resolved_user = asyncio.run(auth_mod.get_current_user(credentials=creds))
         self.assertEqual(resolved_user["role"], "FACTORY_WORKER")
         self.assertFalse(perms.has_permission(resolved_user, "production", "create"))
-        with self.assertRaises(HTTPException) as ctx_forged:
-            asyncio.run(
-                prod.create_batch(
-                    prod_mod.ProductionCreate(
-                        product_id="PRD-M-200",
-                        production_date="2026-11-01",
-                        quantity_kg=5,
-                    ),
-                    _DummyRequest(),
-                    resolved_user,
-                )
-            )
-        self._assert_403(ctx_forged)
+        forged_batch_req = self._build_validated(
+            prod_mod.ProductionCreate,
+            product_id="PRD-M-200",
+            production_date="2026-11-01",
+            quantity_kg=5.0,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.create_batch(forged_batch_req, _DummyRequest(), resolved_user),
+        )
 
         # Blank / unknown role fails closed
         self.assertFalse(perms.has_permission({"user_id": "U-BLANK", "role": ""}, "production", "view"))
@@ -655,16 +673,12 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
             )
         )
         self.assertEqual(batch_pa["status"], "PENDING")
-        with self.assertRaises(HTTPException) as ctx_pa_approve:
-            asyncio.run(
-                prod.approve_batch(
-                    batch_pa["batch_id"],
-                    prod_mod.ApprovalRequest(approved=True),
-                    _DummyRequest(),
-                    self.pa_user,
-                )
-            )
-        self._assert_403(ctx_pa_approve)
+        pa_approve_req = self._build_validated(prod_mod.ApprovalRequest, approved=True)
+        self._assert_guard_403(
+            prod_mod,
+            "require_owner",
+            lambda: prod.approve_batch(batch_pa["batch_id"], pa_approve_req, _DummyRequest(), self.pa_user),
+        )
 
     # 10. OWNER_ADMIN (and legacy OWNER) retains full access including approvals
     def test_10_owner_admin_retains_full_access_and_approvals(self):
@@ -720,19 +734,17 @@ class TestMission19R2FactoryWorkerRBAC(unittest.TestCase):
         )
         self.assertEqual(created["status"], "PENDING")
 
-        with self.assertRaises(HTTPException) as ctx_fw_write:
-            asyncio.run(
-                prod.create_batch(
-                    prod_mod.ProductionCreate(
-                        product_id="PRD-M-200",
-                        production_date="2026-11-02",
-                        quantity_kg=6,
-                    ),
-                    _DummyRequest(),
-                    self.factory_worker,
-                )
-            )
-        self._assert_403(ctx_fw_write)
+        fw_batch_req = self._build_validated(
+            prod_mod.ProductionCreate,
+            product_id="PRD-M-200",
+            production_date="2026-11-02",
+            quantity_kg=6.0,
+        )
+        self._assert_guard_403(
+            prod_mod,
+            "require_production_access",
+            lambda: prod.create_batch(fw_batch_req, _DummyRequest(), self.factory_worker),
+        )
 
         # Verify /api/v2/meta/capabilities accurately reflects least-privilege permissions per role
         fw_caps = asyncio.run(v2_erp.get_erp_capabilities(self.factory_worker))
