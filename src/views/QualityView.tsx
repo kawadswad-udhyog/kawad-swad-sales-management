@@ -54,7 +54,7 @@ import {
 } from '../components/common/FormComponents';
 
 import { useStore } from '../context/StoreContext';
-import { resolveCanonical12Role } from '../utils/permissions';
+import { isFactoryWorkerRole, resolveCanonical12Role } from '../utils/permissions';
 
 type QualityTab = 'checks' | 'lots' | 'returns' | 'complaints';
 
@@ -69,7 +69,8 @@ export const QualityView: React.FC = () => {
   const { currentUser, products, customers } = useStore();
   const canonicalRole = resolveCanonical12Role(currentUser?.role);
   const isAuditor = canonicalRole === 'AUDITOR';
-  const canSubmitCheck = ['OWNER_ADMIN', 'QUALITY', 'PRODUCTION'].includes(canonicalRole);
+  const isFactoryWorker = isFactoryWorkerRole(currentUser?.role);
+  const canSubmitCheck = !isFactoryWorker && ['OWNER_ADMIN', 'QUALITY', 'PRODUCTION'].includes(canonicalRole);
   const canManageQuality = ['OWNER_ADMIN', 'QUALITY'].includes(canonicalRole);
   const canCloseComplaint = canonicalRole === 'OWNER_ADMIN';
 

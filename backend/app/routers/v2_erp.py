@@ -26,6 +26,7 @@ from app.auth import get_current_user, require_sheets_connection
 from app.permissions import (
     TWELVE_ROLES,
     V2_ROLE_PERMISSIONS,
+    effective_permissions_for,
     filter_confidential_records,
     has_permission,
     is_owner,
@@ -379,7 +380,7 @@ def _safe_query_tab(
 @router.get("/meta/capabilities")
 async def get_erp_capabilities(current_user: dict = Depends(get_current_user)):
     v2_role = role_v2_of(current_user)
-    matrix = V2_ROLE_PERMISSIONS.get(v2_role, {})
+    matrix = effective_permissions_for(current_user)
     return {
         "role": v2_role,
         "all_roles": list(TWELVE_ROLES),

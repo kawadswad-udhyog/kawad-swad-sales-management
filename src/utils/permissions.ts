@@ -55,6 +55,11 @@ export function resolveCanonical12Role(role?: string | null): Canonical12Role {
   return 'FIELD_SALESMAN';
 }
 
+export function isFactoryWorkerRole(role?: string | null): boolean {
+  const norm = String(role || '').trim().toUpperCase();
+  return norm === 'FACTORY_WORKER' || norm === 'PRODUCTION_WORKER' || norm === 'WORKER';
+}
+
 export const DESIGNATIONS: Record<string, DesignationConfig> = {
   // 1. Factory Workers
   production_worker: {
@@ -64,7 +69,7 @@ export const DESIGNATIONS: Record<string, DesignationConfig> = {
     defaultRole: 'FACTORY_WORKER',
     department: 'Factory Floor',
     allowedViews: ['dashboard', 'attendance', 'production', 'stock'],
-    canEditProduction: true,
+    canEditProduction: false,
     canEditOrders: false,
     canBuyMaterials: false,
     canManageTeam: false,

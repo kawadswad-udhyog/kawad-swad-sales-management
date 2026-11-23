@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from app.apps_script_bridge import apps_script_bridge
 from app.auth import get_current_user, require_sheets_connection
-from app.permissions import role_v2_of
+from app.permissions import is_factory_worker, role_v2_of
 from app.sheets import db
 from app.config import SALES_GOOGLE_SPREADSHEET_ID
 from app.accounting.customer_ledger import CrossProcessLock
@@ -54,10 +54,10 @@ from app.calculations import (
 
 router = APIRouter(prefix="/api/production", tags=["Production"])
 
-# Role permissions: Owner has full control including approvals; PA/Production/Packaging have operational entry; AUDITOR is read-only.
+# Role permissions: Owner has full control including approvals; PA/Production/Packaging have operational entry; AUDITOR and FACTORY_WORKER are read-only.
 OWNER_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN"}
 PRODUCTION_ROLES = {"OWNER", "OWNER_ADMIN", "ADMIN", "PA", "PRODUCTION", "PACKAGING"}
-PRODUCTION_READ_ROLES = PRODUCTION_ROLES | {"STORE", "PROCUREMENT", "QUALITY", "ACCOUNTS", "SALES", "AUDITOR"}
+PRODUCTION_READ_ROLES = PRODUCTION_ROLES | {"STORE", "PROCUREMENT", "QUALITY", "ACCOUNTS", "SALES", "AUDITOR", "FACTORY_WORKER"}
 
 
 def actor_info(user: dict):
@@ -123,8 +123,13 @@ def require_production_read(user: dict):
 
 
 def require_production_access(user: dict):
-    """Allow Owner, PA, Production, or Packaging to perform production operations (blocks AUDITOR)."""
+    """Allow Owner, PA, Production, or Packaging to perform production operations (blocks AUDITOR and view-only FACTORY_WORKER)."""
     _reject_auditor(user)
+    if is_factory_worker(user):
+        raise HTTPException(
+            status_code=403,
+            detail="FACTORY_WORKER role is strictly view-only for production and cannot create, edit, or approve production records."
+        )
     actor, role = actor_info(user)
     if role not in PRODUCTION_ROLES:
         raise HTTPException(

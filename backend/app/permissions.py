@@ -79,13 +79,13 @@ CANONICAL_ROLE_V2_MAP: Dict[str, str] = {
     "PROCUREMENT": "PROCUREMENT",
     "STORE": "STORE",
     "PRODUCTION": "PRODUCTION",
-    "FACTORY_WORKER": "PRODUCTION",
-    "PRODUCTION_WORKER": "PRODUCTION",
-    "WORKER": "PRODUCTION",
+    "FACTORY_WORKER": "FACTORY_WORKER",
+    "PRODUCTION_WORKER": "FACTORY_WORKER",
+    "WORKER": "FACTORY_WORKER",
     "QUALITY": "QUALITY",
     "PACKAGING": "PACKAGING",
     "SALES": "SALES",
-    "DISPATCH": "SALES",
+    "DISPATCH": "STORE",
     "FIELD_SALESMAN": "FIELD_SALESMAN",
     "SALESMAN": "FIELD_SALESMAN",
     "HR": "HR",
@@ -453,6 +453,11 @@ def require_owner(user: dict) -> tuple[str, str]:
 
 
 def require_production_access(user: dict) -> tuple[str, str]:
+    if is_factory_worker(user):
+        raise HTTPException(
+            status_code=403,
+            detail="FACTORY_WORKER role has view-only production access and cannot modify production records.",
+        )
     if not (is_manager(user) or role_v2_of(user) in {"PRODUCTION", "PACKAGING"}):
         raise HTTPException(status_code=403, detail="Production or Packaging manager permission is required.")
     return str((user or {}).get("user_id", "")), role_v2_of(user)
@@ -470,10 +475,75 @@ def require_roles(user: dict, allowed_roles: Iterable[str], detail: Optional[str
     return str((user or {}).get("user_id", "")), v2_role
 
 
+def _resolve_builtin_permission_matrix(user: dict) -> Optional[Dict[str, List[str]]]:
+    """
+    Resolve the single most-specific built-in permission matrix for a user.
+    Evaluates in strict specificity order: raw role -> canonical legacy role -> canonical v2 role.
+    Stops at the FIRST defined matrix so explicit least-privilege rules (such as
+    FACTORY_WORKER = {"production": ["view"]}) can never be widened by broader
+    canonical category fallbacks via OR-union.
+    """
+    raw_role = raw_role_of(user)
+    if not raw_role:
+        return None
+    c_role = role_of(user)
+    v2_role = role_v2_of(user)
+    seen: Set[str] = set()
+    for candidate in (raw_role, c_role, v2_role):
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in DEFAULT_ROLE_PERMISSIONS:
+            return DEFAULT_ROLE_PERMISSIONS[candidate]
+        if candidate in V2_ROLE_PERMISSIONS:
+            return V2_ROLE_PERMISSIONS[candidate]
+    return None
+
+
+def effective_permissions_for(user: dict, custom_roles: Optional[List[dict]] = None) -> Dict[str, List[str]]:
+    """Return the effective module-to-actions permission map for a user without broad-role widening."""
+    raw_role = raw_role_of(user)
+    if not raw_role:
+        return {}
+    if is_owner(user):
+        return {m: list(acts) for m, acts in V2_ROLE_PERMISSIONS["OWNER_ADMIN"].items()}
+    matrix = _resolve_builtin_permission_matrix(user)
+    if matrix is not None:
+        return {m: list(acts) for m, acts in matrix.items()}
+    if custom_roles and raw_role not in KNOWN_SYSTEM_ROLES:
+        v2_role = role_v2_of(user)
+        c_role = role_of(user)
+        for cr in custom_roles:
+            if not is_active_custom_role(cr):
+                continue
+            cr_name = str(cr.get("role_name") or "").strip().upper()
+            if not cr_name or cr_name in KNOWN_SYSTEM_ROLES:
+                continue
+            if cr_name in {raw_role, c_role, v2_role}:
+                perms_data = cr.get("permissions")
+                if perms_data is None:
+                    perms_data = cr.get("permissions_json") or {}
+                if isinstance(perms_data, str):
+                    try:
+                        import json
+                        perms_data = json.loads(perms_data)
+                    except Exception:
+                        perms_data = {}
+                if isinstance(perms_data, dict):
+                    return {
+                        str(m): list(acts)
+                        for m, acts in perms_data.items()
+                        if isinstance(acts, list)
+                    }
+    return {}
+
+
 def has_permission(user: dict, module: str, action: str, custom_roles: Optional[List[dict]] = None) -> bool:
     """
     Default-deny permission evaluation.
     OWNER_ADMIN always passes; protected owner-only permissions are never bypassed.
+    Explicit least-privilege role matrices take strict precedence over broad role categories
+    (single-matrix specificity resolution; no OR-union across broader fallbacks).
     Blank or unrecognized roles are always denied.
     """
     raw_role = raw_role_of(user)
@@ -486,17 +556,13 @@ def has_permission(user: dict, module: str, action: str, custom_roles: Optional[
     if (module, action) in OWNER_ONLY_PERMISSIONS:
         return False
 
+    matrix = _resolve_builtin_permission_matrix(user)
+    if matrix is not None:
+        module_perms = matrix.get(module, [])
+        return action in module_perms or "*" in module_perms
+
     v2_role = role_v2_of(user)
     c_role = role_of(user)
-
-    for candidate in (v2_role, c_role, raw_role):
-        if not candidate:
-            continue
-        matrix = V2_ROLE_PERMISSIONS.get(candidate) or DEFAULT_ROLE_PERMISSIONS.get(candidate)
-        if matrix:
-            module_perms = matrix.get(module, [])
-            if action in module_perms or "*" in module_perms:
-                return True
 
     if custom_roles and raw_role not in KNOWN_SYSTEM_ROLES:
         owner_protected_modules = {m for m, _ in OWNER_ONLY_PERMISSIONS} | {"security"}
@@ -647,9 +713,9 @@ def ui_role(role: str) -> str:
     if value == "SALESMAN":
         return "FIELD_SALESMAN"
     if value in FACTORY_WORKERS:
-        return "PRODUCTION"
+        return "FACTORY_WORKER"
     if value == "DISPATCH":
-        return "SALES"
+        return "STORE"
     if value in {"FREELANCER"}:
         return "FREELANCER"
     if value in {"SOCIAL_MEDIA_ECOMMERCE_MANAGER", "SOCIAL_MEDIA_MANAGER", "ECOMMERCE_MANAGER"}:
