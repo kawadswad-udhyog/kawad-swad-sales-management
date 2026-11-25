@@ -1,34 +1,40 @@
 /**
- * Kawad Swad ERP — Apps Script Isolated Development Module (Reconciled Draft — NOT MERGE-READY)
+ * Kawad Swad ERP — Apps Script Isolated Development Module (Source-Reconciled — NOT YET MERGED)
  * File: BootstrapOwnerHandler.js
  *
  * Status:
- *   ISOLATED SOURCE PACKAGE ONLY. NOT VERIFIED FOR LIVE MERGE because the raw bound
- *   Apps Script archive (`Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip`) is not yet
- *   available in this workspace.
+ *   ISOLATED SOURCE PACKAGE — RECONCILED AGAINST ALL 43 VERBATIM BOUND APPS SCRIPT FILES
+ *   (`Kawad_Swad_Bound_Apps_Script_Source_COMPLETE_VERBATIM_EXPORT.txt`, original ZIP SHA-256
+ *   `68c80c8a0c9d64dfd80716bfe39a92c1d0541dbfcc3855a03ab1a994ea6b50d7`).
+ *   NOT MERGED into the live Apps Script project; no secrets provisioned; no execution performed.
  *
  * Purpose:
  *   Single-Write-Owner governed handler for action `BOOTSTRAP_FIRST_OWNER`.
  *   Establishes the first Owner account (`OWNER_ADMIN`, `must_change_password = "false"`)
  *   into Google Sheets (`Users` + `AuthUsers`) under `ScriptLock`, with:
- *     - Zero schema changes (preserves exact 25-col `Users`, 9-col `AuthUsers`, 5-col `IdAllocations`)
- *     - ZERO fallback bypass of `SafeWriter` (`ksAppendAndVerifyRow_`) or `AuditAndExceptions` (`ksLogAudit_`)
+ *     - Zero schema changes (preserves exact 25-col `Users`, 9-col `AuthUsers`,
+ *       5-col `IdAllocations`, and 12-col `AuditLog`)
+ *     - Exact verified bound-helper contracts:
+ *         * `ksAllocateId(targetTabName, nonce)` (`IdAllocator.js:7`, export line 4376)
+ *         * `ksAppendAndVerifyRow_(ss, tabName, recordObj, primaryKeyField, mandatoryFields)`
+ *           (`SafeWriter.js:44`, export line 13395)
+ *         * `ksLogAudit_(action, entityType, entityId, opts)`
+ *           (`AuditAndExceptions.js:60`, export line 344)
+ *     - Mandatory `Config.js` pre-flight check verifying `KS_CONFIG.ID_PREFIXES.AuthUsers === 'AUTH'`
+ *       BEFORE allocating any ID (see `Config_AuthUsersPrefixPatch.js`)
+ *     - Mitigation for `IdAllocator.js:15-16,92` premature `lock.releaseLock()` inside nested
+ *       `ScriptLock` critical sections (re-acquires `ScriptLock` immediately after each
+ *       `ksAllocateId` / `ksLogAudit_` call)
+ *     - Mitigation for `AuditAndExceptions.js:64,89-91` silent audit failure swallowing:
+ *       verifies `AuditLog` exists upfront AND reads back the persisted `AuditLog` row matching
+ *       `(action='BOOTSTRAP_FIRST_OWNER', entity_type='Users', entity_id=userId, related_record_id=nonce)`
+ *       BEFORE setting `KS_OWNER_BOOTSTRAP_COMPLETED = "true"` (Mission 51B-1R-E2F O-06)
  *     - Mandatory zero-row precondition on BOTH `Users` and `AuthUsers`
  *     - Server-side PBKDF2-SHA256 hash format verification (plain-text rejected)
  *     - Constant-time bootstrap token SHA-256 digest verification + UTC expiry window
- *     - Idempotent replay & payload-conflict detection via Script Properties
  *     - Explicit `KS_OWNER_BOOTSTRAP_RECOVERY_REQUIRED` quarantine on partial write,
- *       read-back failure, or mandatory audit failure (Mission 51B-1R-E2F O-06)
- *     - Permanent one-time completion latch (`KS_OWNER_BOOTSTRAP_COMPLETED = "true"`) set
- *       ONLY AFTER primary write, child write, read-back verification, AND mandatory audit succeed
- *     - Automatic deletion of temporary bootstrap properties on both confirmation and quarantine
- *
- * UNRESOLVED PRE-MERGE BLOCKERS (REQUIRE RAW BOUND APPS SCRIPT SOURCE):
- *   1. Confirm exact parameter order & return shape of `ksAllocateId(...)` in `IdAllocator.js`.
- *   2. Resolve `AuthUsers` prefix (`AUTH` in `backend/app/sheets.py:63` vs `AUT` in
- *      `backend/tests/v2_test_harness.py:1840`) against actual `IdAllocator.js` prefix table.
- *   3. Confirm exact parameter order of `ksAppendAndVerifyRow_(...)` in `SafeWriter.js`.
- *   4. Confirm exact parameter order of `ksLogAudit_(...)` in `AuditAndExceptions.js`.
+ *       read-back failure, or audit verification failure
+ *     - Zero global function/constant name collisions with all 40 bound `.js` files
  */
 
 var KS_BOOTSTRAP_PROP_COMPLETED = 'KS_OWNER_BOOTSTRAP_COMPLETED';
@@ -41,16 +47,18 @@ var KS_BOOTSTRAP_PROP_PAYLOAD_HASH = 'KS_OWNER_BOOTSTRAP_PAYLOAD_HASH';
 var KS_BOOTSTRAP_PROP_USER_ID = 'KS_OWNER_BOOTSTRAP_USER_ID';
 var KS_BOOTSTRAP_PROP_COMPLETED_AT = 'KS_OWNER_BOOTSTRAP_COMPLETED_AT';
 
+// Exact 25-column live `Users` header set verified in both `KS_P3_MD_Header_Audit.js:25`
+// (export line 5974) and `backend/app/sheets.py:128-133`. Mapped strictly by header name.
 var KS_USERS_REQUIRED_HEADERS = [
   'user_id',
   'full_name',
-  'username',
   'role',
   'mobile',
   'email',
   'active',
   'created_at',
   'notes',
+  'username',
   'employment_type',
   'designation',
   'department',
@@ -69,6 +77,8 @@ var KS_USERS_REQUIRED_HEADERS = [
   'effective_to'
 ];
 
+// Exact 9-column `AuthUsers` header set verified in `backend/app/sheets.py:127`
+// and `KS_Phase3_Batch1A_1D_Master_Preflight_v1_0.js:41` (export line 6116).
 var KS_AUTH_USERS_REQUIRED_HEADERS = [
   'auth_id',
   'user_id',
@@ -79,6 +89,31 @@ var KS_AUTH_USERS_REQUIRED_HEADERS = [
   'created_at',
   'must_change_password',
   'sessions_revoked_at'
+];
+
+// Exact 5-column `IdAllocations` and 12-column `AuditLog` headers verified in
+// `Config.js:121-126` (export lines 3126–3131).
+var KS_ID_ALLOCATIONS_REQUIRED_HEADERS = [
+  'allocation_id',
+  'tab_name',
+  'allocated_id',
+  'nonce',
+  'created_at'
+];
+
+var KS_AUDIT_LOG_REQUIRED_HEADERS = [
+  'audit_id',
+  'event_datetime',
+  'actor_user_id',
+  'action',
+  'entity_type',
+  'entity_id',
+  'field_changed',
+  'old_value',
+  'new_value',
+  'reason',
+  'approved_by_user_id',
+  'related_record_id'
 ];
 
 var KS_PLACEHOLDER_OWNER_NAMES = {
@@ -113,6 +148,21 @@ function ksBootstrapSafeEqual_(a, b) {
     diff |= (ca ^ cb);
   }
   return diff === 0 && sa.length > 0;
+}
+
+/**
+ * Re-acquire `ScriptLock` if a nested helper (`IdAllocator.js:92` `finally { lock.releaseLock(); }`)
+ * released the shared execution script lock prematurely.
+ *
+ * @param {GoogleAppsScript.Lock.Lock} lock
+ */
+function ksReacquireBootstrapLock_(lock) {
+  if (!lock.hasLock()) {
+    var timeoutMs = (typeof KS_CONFIG !== 'undefined' && KS_CONFIG && KS_CONFIG.LOCK_TIMEOUT_MS)
+      ? KS_CONFIG.LOCK_TIMEOUT_MS
+      : 30000;
+    lock.waitLock(timeoutMs);
+  }
 }
 
 /**
@@ -159,34 +209,59 @@ function ksValidatePbkdf2Hash_(hashStr) {
 }
 
 /**
- * Read header row (row 1) of a sheet and verify every required column exists.
+ * Read header row (row 1) of a sheet, reject blank/duplicate headers, and verify
+ * every required column exists (consistent with `SafeWriter.js:10-38`).
  *
  * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
  * @param {string[]} requiredHeaders
- * @return {{ok: boolean, headers: string[], missing: string[]}}
+ * @return {{ok: boolean, headers: string[], missing: string[], reason: string}}
  */
 function ksVerifyExactHeaders_(sheet, requiredHeaders) {
   var lastCol = sheet.getLastColumn();
   if (lastCol < requiredHeaders.length) {
-    return { ok: false, headers: [], missing: requiredHeaders.slice() };
+    return {
+      ok: false,
+      headers: [],
+      missing: requiredHeaders.slice(),
+      reason: 'Header row has fewer columns than required.'
+    };
   }
   var rawHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
   var headers = [];
   var headerMap = {};
   for (var i = 0; i < rawHeaders.length; i++) {
     var h = String(rawHeaders[i] || '').trim();
-    headers.push(h);
-    if (h) {
-      headerMap[h] = i;
+    if (!h) {
+      return {
+        ok: false,
+        headers: [],
+        missing: [],
+        reason: 'Blank header at column ' + (i + 1) + ' in "' + sheet.getName() + '".'
+      };
     }
+    if (Object.prototype.hasOwnProperty.call(headerMap, h)) {
+      return {
+        ok: false,
+        headers: [],
+        missing: [],
+        reason: 'Duplicate header "' + h + '" in "' + sheet.getName() + '".'
+      };
+    }
+    headers.push(h);
+    headerMap[h] = i;
   }
   var missing = [];
   for (var j = 0; j < requiredHeaders.length; j++) {
-    if (headerMap[requiredHeaders[j]] === undefined) {
+    if (!Object.prototype.hasOwnProperty.call(headerMap, requiredHeaders[j])) {
       missing.push(requiredHeaders[j]);
     }
   }
-  return { ok: missing.length === 0, headers: headers, missing: missing };
+  return {
+    ok: missing.length === 0,
+    headers: headers,
+    missing: missing,
+    reason: missing.length === 0 ? '' : ('Missing headers: ' + missing.join(', '))
+  };
 }
 
 /**
@@ -253,10 +328,18 @@ function ksFindRowsByColumn_(sheet, headers, keyCol, keyVal) {
 }
 
 /**
- * Verify all mandatory bound dependencies exist BEFORE any write or ID allocation occurs.
- * Strictly prohibits bypassing IdAllocator, SafeWriter, or AuditAndExceptions.
+ * Verify all mandatory bound dependencies AND `KS_CONFIG.ID_PREFIXES` entries exist
+ * BEFORE any write or ID allocation occurs.
  *
- * @return {{ok: boolean, missing: string[]}}
+ * Verified against verbatim bound source:
+ *   - `IdAllocator.js:7` (`ksAllocateId(targetTabName, nonce)`)
+ *   - `SafeWriter.js:10,44` (`ksGetHeaderMap_`, `ksAppendAndVerifyRow_`)
+ *   - `AuditAndExceptions.js:60` (`ksLogAudit_(action, entityType, entityId, opts)`)
+ *   - `Config.js:7,29-117` (`KS_CONFIG.ID_PREFIXES.Users === 'USR'`,
+ *     `KS_CONFIG.ID_PREFIXES.AuthUsers === 'AUTH'` via `Config_AuthUsersPrefixPatch.js`,
+ *     `KS_CONFIG.ID_PREFIXES.AuditLog === 'AUD'`)
+ *
+ * @return {{ok: boolean, errorCode: string, missing: string[]}}
  */
 function ksAssertBootstrapBoundDependencies_() {
   var missing = [];
@@ -266,80 +349,162 @@ function ksAssertBootstrapBoundDependencies_() {
   if (typeof ksAppendAndVerifyRow_ !== 'function') {
     missing.push('ksAppendAndVerifyRow_ (SafeWriter.js)');
   }
+  if (typeof ksGetHeaderMap_ !== 'function') {
+    missing.push('ksGetHeaderMap_ (SafeWriter.js)');
+  }
   if (typeof ksLogAudit_ !== 'function') {
     missing.push('ksLogAudit_ (AuditAndExceptions.js)');
   }
-  return { ok: missing.length === 0, missing: missing };
+  if (typeof KS_CONFIG === 'undefined' || !KS_CONFIG || !KS_CONFIG.ID_PREFIXES || !KS_CONFIG.TABS) {
+    missing.push('KS_CONFIG (Config.js)');
+  }
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      errorCode: 'BOUND_WRITE_DEPENDENCIES_MISSING',
+      missing: missing
+    };
+  }
+
+  var prefixIssues = [];
+  if (KS_CONFIG.ID_PREFIXES.Users !== 'USR') {
+    prefixIssues.push('KS_CONFIG.ID_PREFIXES.Users must equal "USR"');
+  }
+  if (KS_CONFIG.ID_PREFIXES.AuthUsers !== 'AUTH') {
+    prefixIssues.push('KS_CONFIG.ID_PREFIXES.AuthUsers must equal "AUTH" (apply Config_AuthUsersPrefixPatch.js to Config.js)');
+  }
+  if (KS_CONFIG.ID_PREFIXES.AuditLog !== 'AUD') {
+    prefixIssues.push('KS_CONFIG.ID_PREFIXES.AuditLog must equal "AUD"');
+  }
+  if (prefixIssues.length > 0) {
+    return {
+      ok: false,
+      errorCode: 'CONFIG_PREFIX_CONTRACT_INCOMPLETE',
+      missing: prefixIssues
+    };
+  }
+
+  return { ok: true, errorCode: '', missing: [] };
 }
 
 /**
- * Adapter for canonical ID allocation (`IdAllocator.js`).
- * Fail-closed: never synthesizes IDs locally if `ksAllocateId` is unavailable.
+ * Adapter for canonical ID allocation (`IdAllocator.js:7-94`, export lines 4376–4463).
+ * Exact signature: `ksAllocateId(targetTabName, nonce)`
+ * Exact return: `{ status, allocation_id, allocated_id, tab_name, nonce }`
  *
- * PRE-MERGE VERIFICATION BLOCKER:
- *   Confirm exact parameter signature & return shape of `ksAllocateId` in raw `IdAllocator.js`
- *   and confirm `AuthUsers` canonical prefix (`AUTH` vs `AUT`).
+ * Immediately re-acquires `lock` because `IdAllocator.js:92` calls `lock.releaseLock()`
+ * on the shared `ScriptLock` inside its `finally` block.
  *
+ * @param {GoogleAppsScript.Lock.Lock} lock
  * @param {string} tabName
  * @param {string} nonce
- * @return {string}
+ * @return {{status: string, allocation_id: string, allocated_id: string, tab_name: string, nonce: string}}
  */
-function ksBootstrapAllocateCanonicalId_(tabName, nonce) {
-  if (typeof ksAllocateId !== 'function') {
-    throw new Error('BOUND_DEPENDENCY_MISSING: ksAllocateId is required.');
+function ksBootstrapAllocateCanonicalId_(lock, tabName, nonce) {
+  var result;
+  try {
+    result = ksAllocateId(tabName, nonce);
+  } finally {
+    ksReacquireBootstrapLock_(lock);
   }
-  var allocated = ksAllocateId(tabName, nonce);
-  var idStr = '';
-  if (typeof allocated === 'string') {
-    idStr = allocated.trim();
-  } else if (allocated && typeof allocated === 'object') {
-    idStr = String(allocated.allocated_id || allocated.id || '').trim();
-  }
+
+  var idStr = (result && typeof result === 'object')
+    ? String(result.allocated_id || '').trim()
+    : '';
   if (!idStr) {
-    throw new Error('ID_ALLOCATION_EMPTY: ksAllocateId returned empty ID for ' + tabName);
+    throw new Error('ID_ALLOCATION_EMPTY: ksAllocateId returned empty allocated_id for ' + tabName);
   }
-  return idStr;
+  return {
+    status: String(result.status || ''),
+    allocation_id: String(result.allocation_id || ''),
+    allocated_id: idStr,
+    tab_name: String(result.tab_name || tabName),
+    nonce: String(result.nonce || nonce)
+  };
 }
 
 /**
- * Adapter for approved SafeWriter row persistence (`SafeWriter.js`).
+ * Adapter for approved SafeWriter row persistence (`SafeWriter.js:44-83`, export lines 13395–13434).
+ * Exact signature: `ksAppendAndVerifyRow_(ss, tabName, recordObj, primaryKeyField, mandatoryFields)`
+ * Exact return: `{ row: number, record: Object }`
+ *
  * STRICT SINGLE-WRITE-OWNER RULE:
  *   NEVER falls back to direct `sheet.getRange().setValues()` or `appendRow()`.
- *   Fails closed if `ksAppendAndVerifyRow_` is absent.
  *
- * PRE-MERGE VERIFICATION BLOCKER:
- *   Confirm exact parameter order of `ksAppendAndVerifyRow_` in raw `SafeWriter.js`.
- *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
  * @param {string} tabName
  * @param {Object} record
  * @param {string} keyField
+ * @param {string[]} mandatoryFields
+ * @return {{row: number, record: Object}}
  */
-function ksBootstrapPersistRow_(tabName, record, keyField) {
-  if (typeof ksAppendAndVerifyRow_ !== 'function') {
-    throw new Error('BOUND_DEPENDENCY_MISSING: SafeWriter ksAppendAndVerifyRow_ is required (direct write fallback forbidden).');
-  }
-  ksAppendAndVerifyRow_(tabName, record, keyField);
+function ksBootstrapPersistRow_(ss, tabName, record, keyField, mandatoryFields) {
+  return ksAppendAndVerifyRow_(ss, tabName, record, keyField, mandatoryFields);
 }
 
 /**
- * Adapter for mandatory sanitized AuditLog recording (`AuditAndExceptions.js`).
+ * Adapter for mandatory sanitized AuditLog recording (`AuditAndExceptions.js:60-92`,
+ * export lines 344–376) with mandatory read-back verification.
+ *
+ * Exact bound signature: `ksLogAudit_(action, entityType, entityId, opts)`
+ *
+ * CRITICAL SAFETY GUARD:
+ *   In verbatim `AuditAndExceptions.js:64` and `:89-91` (export lines 348, 373–375),
+ *   `ksLogAudit_` silently returns if `AuditLog` is missing and catches/swallows all
+ *   exceptions via `console.error(...)` without throwing. It also calls `ksAllocateId(...)`,
+ *   which releases the shared `ScriptLock`.
+ *   Therefore this wrapper:
+ *     1. Calls `ksLogAudit_(action, entityType, entityId, opts)` using its exact 4-arg contract.
+ *     2. Immediately re-acquires `ScriptLock` via `ksReacquireBootstrapLock_(lock)`.
+ *     3. Flushes and reads back `AuditLog` to prove a row matching
+ *        `(action, entity_type, entity_id, related_record_id === nonce)` was actually written.
+ *     4. Throws `MANDATORY_AUDIT_LOG_VERIFICATION_FAILED` if read-back fails (fail-closed O-06).
+ *
  * Never logs password, password_hash, or bootstrap token/digest.
- * Fails closed if `ksLogAudit_` is absent.
  *
- * PRE-MERGE VERIFICATION BLOCKER:
- *   Confirm exact parameter order of `ksLogAudit_` in raw `AuditAndExceptions.js`.
- *
- * @param {string} actor
- * @param {string} action
- * @param {string} entityType
+ * @param {GoogleAppsScript.Lock.Lock} lock
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} auditSheet
+ * @param {string[]} auditHeaders
+ * @param {string} actorUserId
  * @param {string} entityId
- * @param {string} reason
+ * @param {string} nonce
  */
-function ksBootstrapWriteAudit_(actor, action, entityType, entityId, reason) {
-  if (typeof ksLogAudit_ !== 'function') {
-    throw new Error('BOUND_DEPENDENCY_MISSING: ksLogAudit_ is required (audit bypass forbidden).');
+function ksBootstrapWriteAndVerifyAudit_(lock, auditSheet, auditHeaders, actorUserId, entityId, nonce) {
+  var actionName = 'BOOTSTRAP_FIRST_OWNER';
+  var entityType = 'Users';
+
+  try {
+    ksLogAudit_(actionName, entityType, entityId, {
+      actor_user_id: actorUserId,
+      field_changed: 'owner_bootstrap',
+      old_value: '',
+      new_value: 'OWNER_ADMIN',
+      reason: 'First Owner account initialized via governed one-time bootstrap (nonce=' + nonce + ')',
+      approved_by_user_id: actorUserId,
+      related_record_id: nonce
+    });
+  } finally {
+    ksReacquireBootstrapLock_(lock);
   }
-  ksLogAudit_(actor, action, entityType, entityId, '', '', '', reason);
+
+  SpreadsheetApp.flush();
+  var matched = ksFindRowsByColumn_(auditSheet, auditHeaders, 'related_record_id', nonce);
+  var confirmed = false;
+  for (var i = 0; i < matched.length; i++) {
+    var row = matched[i];
+    if (
+      String(row.action || '').trim() === actionName &&
+      String(row.entity_type || '').trim() === entityType &&
+      String(row.entity_id || '').trim() === String(entityId) &&
+      String(row.audit_id || '').trim().indexOf('AUD-') === 0
+    ) {
+      confirmed = true;
+      break;
+    }
+  }
+  if (!confirmed) {
+    throw new Error('MANDATORY_AUDIT_LOG_VERIFICATION_FAILED: AuditLog read-back did not find persisted BOOTSTRAP_FIRST_OWNER entry.');
+  }
 }
 
 /**
@@ -367,10 +532,12 @@ function ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, reasonCo
 /**
  * Governed First-Owner Initialization Handler (`BOOTSTRAP_FIRST_OWNER`).
  *
- * Called ONLY by `ksRouteGovernedWriteWithBootstrap_` after mandatory HMAC-SHA256
- * verification, contract_version validation, and ±300s timestamp skew check succeed.
+ * Called ONLY from `WebAppBridge.js` `doPost(e)` AFTER `ksVerifySignedBridgeEnvelope_(e)`
+ * succeeds (mandatory HMAC-SHA256, `contract_version = "2.0"`, `signature_alg = "HMAC-SHA-256"`,
+ * outer-vs-signed tamper check, and ±300s timestamp skew check) and BEFORE legacy
+ * `ksFindByNonce_` / `ksRecordIdAllocation_` / `ksWriteCanonicalRowByHeaders_`.
  *
- * @param {Object} envelope Verified canonical envelope from WebAppBridge.js
+ * @param {Object} envelope Verified canonical envelope from `ksVerifySignedBridgeEnvelope_(e)`
  * @return {Object} Standardized Apps Script bridge response
  */
 function ksBootstrapFirstOwner_(envelope) {
@@ -411,12 +578,12 @@ function ksBootstrapFirstOwner_(envelope) {
       });
     }
 
-    // 1. Verify all mandatory central Single-Write-Owner dependencies exist BEFORE any sheet check/write
+    // 1. Verify all mandatory central Single-Write-Owner dependencies & Config.js prefixes upfront
     var depCheck = ksAssertBootstrapBoundDependencies_();
     if (!depCheck.ok) {
       return ksBootstrapResponse_(envelope, 'REJECTED', {
-        error_code: 'BOUND_WRITE_DEPENDENCIES_MISSING',
-        message: 'First-owner bootstrap blocked fail-closed: missing bound helpers (' + depCheck.missing.join(', ') + ').',
+        error_code: depCheck.errorCode,
+        message: 'First-owner bootstrap blocked fail-closed: ' + depCheck.missing.join('; ') + '.',
         http_status: 503,
         retryable: false
       });
@@ -434,10 +601,12 @@ function ksBootstrapFirstOwner_(envelope) {
 
     var usersSheet = ss.getSheetByName('Users');
     var authSheet = ss.getSheetByName('AuthUsers');
-    if (!usersSheet || !authSheet) {
+    var allocSheet = ss.getSheetByName(KS_CONFIG.TABS.ID_ALLOCATIONS);
+    var auditSheet = ss.getSheetByName(KS_CONFIG.TABS.AUDIT_LOG);
+    if (!usersSheet || !authSheet || !allocSheet || !auditSheet) {
       return ksBootstrapResponse_(envelope, 'REJECTED', {
         error_code: 'REQUIRED_SHEET_MISSING',
-        message: 'Users or AuthUsers tab is missing from the authoritative workbook.',
+        message: 'One or more required tabs (Users, AuthUsers, IdAllocations, AuditLog) are missing from the authoritative workbook.',
         http_status: 503,
         retryable: false
       });
@@ -445,10 +614,12 @@ function ksBootstrapFirstOwner_(envelope) {
 
     var usersHeaderCheck = ksVerifyExactHeaders_(usersSheet, KS_USERS_REQUIRED_HEADERS);
     var authHeaderCheck = ksVerifyExactHeaders_(authSheet, KS_AUTH_USERS_REQUIRED_HEADERS);
-    if (!usersHeaderCheck.ok || !authHeaderCheck.ok) {
+    var allocHeaderCheck = ksVerifyExactHeaders_(allocSheet, KS_ID_ALLOCATIONS_REQUIRED_HEADERS);
+    var auditHeaderCheck = ksVerifyExactHeaders_(auditSheet, KS_AUDIT_LOG_REQUIRED_HEADERS);
+    if (!usersHeaderCheck.ok || !authHeaderCheck.ok || !allocHeaderCheck.ok || !auditHeaderCheck.ok) {
       return ksBootstrapResponse_(envelope, 'REJECTED', {
         error_code: 'SCHEMA_HEADER_MISMATCH',
-        message: 'Users or AuthUsers headers do not match the canonical schema contract.',
+        message: 'Required workbook headers (Users, AuthUsers, IdAllocations, or AuditLog) failed canonical verification.',
         http_status: 503,
         retryable: false
       });
@@ -570,9 +741,11 @@ function ksBootstrapFirstOwner_(envelope) {
       });
     }
 
-    // 6. Canonical ID allocation (`USR` locked prefix for Users; AuthUsers prefix pending raw IdAllocator.js verification)
-    var userId = ksBootstrapAllocateCanonicalId_('Users', nonce);
-    if (userId.indexOf('USR-') !== 0) {
+    // 6. Canonical ID allocation via IdAllocator.js (`USR-YYYYMMDD-00001` & `AUTH-YYYYMMDD-00001`)
+    //    `ksAllocateId` automatically records the row in `IdAllocations` via `SafeWriter.js`.
+    var userAlloc = ksBootstrapAllocateCanonicalId_(lock, 'Users', nonce);
+    var userId = userAlloc.allocated_id;
+    if (!/^USR-[A-Z0-9_-]{3,}$/.test(userId)) {
       ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, 'INVALID_USER_ID_PREFIX');
       return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
         allocated_id: userId,
@@ -583,9 +756,9 @@ function ksBootstrapFirstOwner_(envelope) {
       });
     }
 
-    var authId;
+    var authAlloc;
     try {
-      authId = ksBootstrapAllocateCanonicalId_('AuthUsers', nonce + ':AUTH');
+      authAlloc = ksBootstrapAllocateCanonicalId_(lock, 'AuthUsers', nonce + ':AUTH');
     } catch (authAllocErr) {
       ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, 'AUTH_ID_ALLOCATION_FAILED_AFTER_USER_ID');
       return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
@@ -597,13 +770,15 @@ function ksBootstrapFirstOwner_(envelope) {
       });
     }
 
-    // PRE-MERGE BLOCKER: Restrict to exact single prefix once raw IdAllocator.js is inspected (AUTH vs AUT).
-    if (!/^(AUTH|AUT)-[A-Za-z0-9_-]+$/.test(authId)) {
+    var authId = authAlloc.allocated_id;
+    // Canonical prefix `AUTH` confirmed by `Code.js:2129` (`KS_MASTER.ID_RULES`), `backend/app/sheets.py:63`,
+    // and `Config_AuthUsersPrefixPatch.js`.
+    if (!/^AUTH-[A-Z0-9_-]{3,}$/.test(authId)) {
       ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, 'INVALID_AUTH_ID_PREFIX');
       return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
         allocated_id: userId,
         error_code: 'INVALID_AUTH_ID_PREFIX',
-        message: 'Allocated AuthUsers auth_id failed prefix validation; quarantined for Owner inspection.',
+        message: 'Allocated AuthUsers auth_id does not match canonical AUTH- prefix; quarantined for Owner inspection.',
         http_status: 409,
         retryable: false
       });
@@ -614,7 +789,8 @@ function ksBootstrapFirstOwner_(envelope) {
     var updatedAt = String(payload.updated_at || createdAt).trim() || createdAt;
     var effectiveFrom = createdAt.slice(0, 10);
 
-    // Force canonical OWNER_ADMIN role, active="true", and Owner-approved must_change_password="false"
+    // Force canonical OWNER_ADMIN role, active="true", and Owner-approved must_change_password="false".
+    // Exact 25 keys match live `Users` Row-1 headers (`SafeWriter.js:61-63` throws on any unknown key).
     var userRecord = {
       user_id: userId,
       full_name: fullName,
@@ -643,6 +819,7 @@ function ksBootstrapFirstOwner_(envelope) {
       effective_to: ''
     };
 
+    // Exact 9 keys match `AuthUsers` Row-1 headers.
     var authRecord = {
       auth_id: authId,
       user_id: userId,
@@ -655,9 +832,15 @@ function ksBootstrapFirstOwner_(envelope) {
       sessions_revoked_at: ''
     };
 
-    // 7. Governed SafeWriter persistence into Users and AuthUsers
+    // 7. Governed SafeWriter persistence using exact 5-arg `ksAppendAndVerifyRow_` contract
     try {
-      ksBootstrapPersistRow_('Users', userRecord, 'user_id');
+      ksBootstrapPersistRow_(
+        ss,
+        'Users',
+        userRecord,
+        'user_id',
+        ['user_id', 'full_name', 'username', 'role', 'active', 'created_at']
+      );
     } catch (userWriteErr) {
       ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, 'USERS_WRITE_FAILED_AFTER_ALLOCATION');
       return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
@@ -670,7 +853,13 @@ function ksBootstrapFirstOwner_(envelope) {
     }
 
     try {
-      ksBootstrapPersistRow_('AuthUsers', authRecord, 'auth_id');
+      ksBootstrapPersistRow_(
+        ss,
+        'AuthUsers',
+        authRecord,
+        'auth_id',
+        ['auth_id', 'user_id', 'username', 'password_hash', 'role', 'active', 'created_at', 'must_change_password']
+      );
     } catch (authWriteErr) {
       ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, 'PARTIAL_BOOTSTRAP_WRITE_AUTHUSERS_FAILED');
       return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
@@ -682,7 +871,7 @@ function ksBootstrapFirstOwner_(envelope) {
       });
     }
 
-    // 8. Authoritative read-back verification across BOTH Users and AuthUsers
+    // 8. Authoritative cross-table read-back verification across BOTH Users and AuthUsers
     SpreadsheetApp.flush();
     var verifiedUsers = ksFindRowsByColumn_(usersSheet, usersHeaderCheck.headers, 'user_id', userId);
     var verifiedAuth = ksFindRowsByColumn_(authSheet, authHeaderCheck.headers, 'user_id', userId);
@@ -691,6 +880,7 @@ function ksBootstrapFirstOwner_(envelope) {
       verifiedAuth.length !== 1 ||
       String(verifiedUsers[0].role || '').trim().toUpperCase() !== 'OWNER_ADMIN' ||
       String(verifiedAuth[0].role || '').trim().toUpperCase() !== 'OWNER_ADMIN' ||
+      String(verifiedAuth[0].auth_id || '').trim() !== authId ||
       String(verifiedAuth[0].active || '').trim().toLowerCase() !== 'true' ||
       String(verifiedAuth[0].must_change_password || '').trim().toLowerCase() !== 'false'
     ) {
@@ -704,21 +894,15 @@ function ksBootstrapFirstOwner_(envelope) {
       });
     }
 
-    // 9. Mandatory sanitized AuditLog entry BEFORE setting CONFIRMED completion latch (Mission 51B-1R-E2F O-06)
+    // 9. Mandatory sanitized AuditLog entry + read-back verification BEFORE completion latch (O-06)
     try {
-      ksBootstrapWriteAudit_(
-        userId,
-        'BOOTSTRAP_FIRST_OWNER',
-        'Users',
-        userId,
-        'First Owner account initialized via governed one-time bootstrap (nonce=' + nonce + ')'
-      );
+      ksBootstrapWriteAndVerifyAudit_(lock, auditSheet, auditHeaderCheck.headers, userId, userId, nonce);
     } catch (auditErr) {
       ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, 'MANDATORY_AUDIT_LOG_FAILED');
       return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
         allocated_id: userId,
         error_code: 'MANDATORY_AUDIT_LOG_FAILED',
-        message: 'Users and AuthUsers were written but mandatory AuditLog recording failed; quarantined for Owner reconciliation.',
+        message: 'Users and AuthUsers were written but mandatory AuditLog persistence/verification failed; quarantined for Owner reconciliation.',
         http_status: 409,
         retryable: false
       });
@@ -741,6 +925,8 @@ function ksBootstrapFirstOwner_(envelope) {
       message: 'Initial Owner account created, audited, and verified in Google Sheets.'
     });
   } finally {
-    lock.releaseLock();
+    if (lock.hasLock()) {
+      lock.releaseLock();
+    }
   }
 }

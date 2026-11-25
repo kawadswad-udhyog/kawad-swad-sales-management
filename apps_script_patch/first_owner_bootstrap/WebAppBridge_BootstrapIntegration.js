@@ -1,30 +1,52 @@
 /**
- * Kawad Swad ERP — Apps Script Isolated Development Module (Reconciled Draft — NOT MERGE-READY)
+ * Kawad Swad ERP — Apps Script Isolated Development Module (Source-Reconciled — NOT YET MERGED)
  * File: WebAppBridge_BootstrapIntegration.js
  *
  * Status:
- *   ISOLATED SOURCE PACKAGE ONLY. NOT VERIFIED FOR LIVE MERGE because the raw bound
- *   Apps Script archive (`Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip`) is not yet
- *   available in this workspace.
+ *   ISOLATED SOURCE PACKAGE — RECONCILED AGAINST VERBATIM `WebAppBridge.js` (42/43, SHA-256
+ *   `3c1e85e895fe5e685970a86586531bba7ee90aab5d2d108a8fefd971ab828287`, export lines 13912–14193).
+ *   NOT MERGED into the live Apps Script project; no execution or deployment performed.
  *
- * Purpose:
- *   Provides the hardened mandatory HMAC-SHA256 verification and closed `BOOTSTRAP_FIRST_OWNER`
- *   dispatch hook for `WebAppBridge.js`, addressing Mission 51B-1R-E2D Critical C1 (optional HMAC
- *   bypass) and aligning byte-for-byte with FastAPI `backend/app/apps_script_bridge.py`.
+ * Verified Exact Defects in Current Bound `WebAppBridge.js` Addressed Here:
+ *   1. `WebAppBridge.js:34-49` (export lines 13949–13964):
+ *      - HMAC check is wrapped in `if (providedSig) { ... }` (E2D Critical C1: unsigned requests bypass HMAC).
+ *      - Computes `ksHmacSha256Hex_(rawBody, sharedSecret)` even when `providedSig` came from `req.signature`
+ *        inside `rawBody` (self-referential JSON signature impossibility).
+ *   2. `WebAppBridge.js:71-114` (export lines 13986–14029):
+ *      - Runs nonce-only `ksFindByNonce_(nonce)` (E2D High H4) without action/tab/payload_hash verification.
+ *      - Appends a second `ALLOC-<Date.now()>` row via `ksRecordIdAllocation_` (`WebAppBridge.js:91`,
+ *        export line 14006) — which would DUPLICATE `IdAllocations` if `BOOTSTRAP_FIRST_OWNER` fell through
+ *        after calling `ksAllocateId`.
+ *      - Calls `ksLogAudit_` (`WebAppBridge.js:93`, export line 14008) — which would DUPLICATE `AuditLog`.
+ *      - Always wraps the response as `status: 'CONFIRMED'` (`WebAppBridge.js:106`, export line 14021),
+ *        which would mask `REJECTED` or `RECOVERY_REQUIRED` bootstrap states!
  *
- * Byte-for-Byte Signed Envelope Contract (`backend/app/apps_script_bridge.py:2818-2829`):
- *   Python computes:
- *     canonical_body = json.dumps(envelope, separators=(",", ":"), sort_keys=True, ensure_ascii=True, default=str)
- *     signature = hmac.new(secret.encode("utf-8"), canonical_body.encode("utf-8"), hashlib.sha256).hexdigest()
- *   Because `ensure_ascii=True` emits strictly 7-bit printable ASCII characters (`0x20..0x7E`),
- *   `canonical_body.encode("utf-8")` in Python and `Utilities.computeHmacSha256Signature(
- *   outer.canonical_envelope, sharedSecret, Utilities.Charset.UTF_8)` in Apps Script V8 hash the
- *   exact same byte sequence without any JSON key-order or Unicode normalization drift.
+ * Verified Exact Safe Integration Point Inside Bound `WebAppBridge.js` `doPost(e)`:
+ *   - REPLACE `WebAppBridge.js:9-50` (export lines 13924–13965) with:
+ *       const auth = ksVerifySignedBridgeEnvelope_(e);
+ *       if (!auth.ok) {
+ *         return ksBridgeJson_(auth.errorResponse);
+ *       }
+ *       const req = auth.envelope;
+ *   - KEEP `WebAppBridge.js:51-69` (export lines 13966–13984) parsing `action`, `targetTab`, `nonce`,
+ *     `correlationId`, `actorUserId`, `actorRole`, `payload` and checking required envelope fields.
+ *   - INSERT IMMEDIATELY BEFORE `WebAppBridge.js:71` (export line 13986 `// 2. Serialize via ScriptLock`):
+ *       if (action === 'BOOTSTRAP_FIRST_OWNER') {
+ *         return ksBridgeJson_(ksDispatchBootstrapFirstOwner_(req));
+ *       }
+ *   - PRESERVE `WebAppBridge.js:71-124` (export lines 13986–14039) untouched for all other existing
+ *     governed actions (note: full Mission 51B-1R-E2G remediation of H1–H9 for ordinary actions
+ *     remains a separate workstream).
  *
- * Script Property Alignment:
- *   Mission 51B-1R-E2D §3.1 documents that bound `WebAppBridge.js` reads Script Property
- *   `SALES_APPS_SCRIPT_SHARED_SECRET` (>= 32 chars). Confirm against raw `WebAppBridge.js`
- *   once `Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip` is supplied.
+ * Verified Compatibility:
+ *   - Script Property name matches verbatim `WebAppBridge.js:22` (export line 13937):
+ *     `SALES_APPS_SCRIPT_SHARED_SECRET` (>= 32 chars).
+ *   - FastAPI `backend/app/apps_script_bridge.py:2818-2829` ALREADY transmits `wire_envelope` with
+ *     `contract_version: "2.0"`, `signature_alg: "HMAC-SHA-256"`, `signature`, and ASCII-escaped
+ *     `canonical_envelope` for ALL governed bridge actions (not only bootstrap), so mandatory HMAC
+ *     verification is 100% compatible with every existing FastAPI governed action.
+ *   - Zero symbol collisions with `WebAppBridge.js` (`ksBridgeJson_`, `ksHmacSha256Hex_`, `ksSafeEqual_`)
+ *     or any of the other 39 `.js` files in the bound project.
  */
 
 var KS_BRIDGE_SHARED_SECRET_PROP = 'SALES_APPS_SCRIPT_SHARED_SECRET';
@@ -59,23 +81,13 @@ function ksComputeHmacSha256Hex_(messageUtf8, secretUtf8) {
 }
 
 /**
- * Emit a JSON TextOutput response for Web App `doPost(e)`.
+ * Verify mandatory `contract_version = "2.0"`, `signature_alg = "HMAC-SHA-256"`,
+ * HMAC-SHA256 signature over exact `canonical_envelope` bytes, outer-vs-signed field consistency,
+ * and ±300s timestamp freshness window.
  *
- * @param {Object} payloadObj
- * @return {GoogleAppsScript.Content.TextOutput}
- */
-function ksJsonOutput_(payloadObj) {
-  return ContentService
-    .createTextOutput(JSON.stringify(payloadObj))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-/**
- * Verify mandatory contract_version, HMAC-SHA256 signature over exact `canonical_envelope` bytes,
- * outer-vs-signed field consistency, and ±300s timestamp freshness window.
- * Fails closed on any missing, weak, malformed, unknown-version, expired, or forged request.
+ * Fails closed on any missing, weak, malformed, unknown-version, expired, tampered, or forged request.
  *
- * @param {Object} e Apps Script doPost event object
+ * @param {Object} e Apps Script `doPost(e)` event object
  * @return {{ok: boolean, envelope?: Object, errorResponse?: Object}}
  */
 function ksVerifySignedBridgeEnvelope_(e) {
@@ -86,8 +98,8 @@ function ksVerifySignedBridgeEnvelope_(e) {
       ok: false,
       errorResponse: {
         status: 'REJECTED',
-        error_code: 'BRIDGE_SHARED_SECRET_NOT_CONFIGURED',
-        message: 'Apps Script HMAC shared secret is missing or below minimum 32-char length.',
+        error_code: 'BRIDGE_NOT_CONFIGURED',
+        message: 'SALES_APPS_SCRIPT_SHARED_SECRET missing or < 32 chars in ScriptProperties.',
         http_status: 503,
         retryable: false
       }
@@ -102,8 +114,8 @@ function ksVerifySignedBridgeEnvelope_(e) {
       ok: false,
       errorResponse: {
         status: 'REJECTED',
-        error_code: 'EMPTY_REQUEST_BODY',
-        message: 'Request body is required.',
+        error_code: 'EMPTY_PAYLOAD',
+        message: 'Missing POST body.',
         http_status: 400,
         retryable: false
       }
@@ -190,7 +202,7 @@ function ksVerifySignedBridgeEnvelope_(e) {
       ok: false,
       errorResponse: {
         status: 'REJECTED',
-        error_code: 'INVALID_HMAC_SIGNATURE',
+        error_code: 'INVALID_SIGNATURE',
         message: 'HMAC-SHA256 signature verification failed.',
         http_status: 401,
         retryable: false
@@ -282,49 +294,95 @@ function ksVerifySignedBridgeEnvelope_(e) {
 }
 
 /**
- * Closed action dispatch hook to integrate inside existing `WebAppBridge.js` `doPost(e)`.
+ * Isolated pre-lock dispatcher for `BOOTSTRAP_FIRST_OWNER`, called from `WebAppBridge.js` `doPost(e)`
+ * immediately AFTER `ksVerifySignedBridgeEnvelope_(e)` and required envelope field validation,
+ * and strictly BEFORE `WebAppBridge.js:71` (`lock.waitLock(20000)` / `ksFindByNonce_`).
  *
- * IMPORTANT — PRE-MERGE INTEGRATION REQUIREMENT:
- *   Per Mission 51B-1R-E2D §3.4–3.6, the bound `WebAppBridge.js` currently:
- *     - skips HMAC when signature is absent (Critical C1),
- *     - uses nonce-only lookup `ksFindByNonce_` before routing (High H4),
- *     - falls through unknown actions to generic `ksWriteCanonicalRowByHeaders_` (High H2/H3).
- *   When merging into the real `WebAppBridge.js` (after raw ZIP inspection):
- *     1. Run `ksVerifySignedBridgeEnvelope_(e)` BEFORE any nonce lookup or sheet access.
- *     2. Route `BOOTSTRAP_FIRST_OWNER` directly to `ksBootstrapFirstOwner_(auth.envelope)`
- *        BEFORE legacy `ksFindByNonce_` / `ksRecordIdAllocation_` so bootstrap never uses
- *        the defective nonce-only lookup or generic fallback writer.
- *     3. Pass all other verified actions to the existing governed dispatcher (which itself
- *        must be hardened under Mission 51B-1R-E2G before production deployment).
+ * Ensures `BOOTSTRAP_FIRST_OWNER`:
+ *   - NEVER hits defective nonce-only `ksFindByNonce_` (`WebAppBridge.js:73`, E2D H4),
+ *   - NEVER falls through to `ksWriteCanonicalRowByHeaders_` (`WebAppBridge.js:165`, E2D H2/H3),
+ *   - NEVER writes a duplicate `ALLOC-<Date.now()>` row via `ksRecordIdAllocation_` (`WebAppBridge.js:91`),
+ *   - NEVER writes a duplicate unverified `AuditLog` row (`WebAppBridge.js:93`),
+ *   - NEVER gets wrapped as `CONFIRMED` when returning `REJECTED` or `RECOVERY_REQUIRED`.
  *
  * @param {Object} verifiedEnvelope
- * @param {Function=} existingDispatcher Existing bound action dispatcher from WebAppBridge.js
- * @return {Object}
+ * @return {Object} Standardized bridge response ready for `ksBridgeJson_(...)`
  */
-function ksRouteGovernedWriteWithBootstrap_(verifiedEnvelope, existingDispatcher) {
+function ksDispatchBootstrapFirstOwner_(verifiedEnvelope) {
   var action = String((verifiedEnvelope && verifiedEnvelope.action) || '').trim().toUpperCase();
   var targetTab = String((verifiedEnvelope && verifiedEnvelope.target_tab) || '').trim();
 
-  if (action === 'BOOTSTRAP_FIRST_OWNER') {
-    if (targetTab !== 'Users') {
-      return ksBootstrapResponse_(verifiedEnvelope, 'REJECTED', {
-        error_code: 'INVALID_TARGET_TAB',
-        message: 'BOOTSTRAP_FIRST_OWNER must target Users.',
-        http_status: 422,
-        retryable: false
-      });
-    }
-    return ksBootstrapFirstOwner_(verifiedEnvelope);
+  if (action !== 'BOOTSTRAP_FIRST_OWNER') {
+    return ksBootstrapResponse_(verifiedEnvelope, 'REJECTED', {
+      error_code: 'UNEXPECTED_BOOTSTRAP_DISPATCH',
+      message: 'ksDispatchBootstrapFirstOwner_ only handles BOOTSTRAP_FIRST_OWNER.',
+      http_status: 400,
+      retryable: false
+    });
   }
 
-  if (typeof existingDispatcher === 'function') {
-    return existingDispatcher(verifiedEnvelope);
+  if (targetTab !== 'Users') {
+    return ksBootstrapResponse_(verifiedEnvelope, 'REJECTED', {
+      error_code: 'INVALID_TARGET_TAB',
+      message: 'BOOTSTRAP_FIRST_OWNER must target Users.',
+      http_status: 422,
+      retryable: false
+    });
   }
 
-  return ksBootstrapResponse_(verifiedEnvelope, 'REJECTED', {
-    error_code: 'UNREGISTERED_GOVERNED_ACTION',
-    message: 'Governed action is not registered on this WebAppBridge route.',
-    http_status: 403,
-    retryable: false
-  });
+  return ksBootstrapFirstOwner_(verifiedEnvelope);
 }
+
+/*
+ * ============================================================================
+ * EXACT SURGICAL MERGE PATCH FOR BOUND `WebAppBridge.js` `doPost(e)`
+ * (Reference: verbatim `WebAppBridge.js:6-124`, export lines 13921–14039)
+ * ============================================================================
+ *
+ *   function doPost(e) {
+ *     const lock = LockService.getScriptLock();
+ *     try {
+ *       // 1. Mandatory HMAC-SHA256 + contract_version="2.0" + ±300s skew check
+ *       //    (Replaces WebAppBridge.js lines 9–50 / export lines 13924–13965)
+ *       const auth = ksVerifySignedBridgeEnvelope_(e);
+ *       if (!auth.ok) {
+ *         return ksBridgeJson_(auth.errorResponse);
+ *       }
+ *       const req = auth.envelope;
+ *
+ *       const action = String(req.action || '').trim().toUpperCase();
+ *       const targetTab = String(req.target_tab || '').trim();
+ *       const nonce = String(req.nonce || '').trim();
+ *       const correlationId = String(req.correlation_id || '').trim();
+ *       const actorUserId = String(req.actor_user_id || '').trim();
+ *       const actorRole = String(req.actor_role || '').trim().toUpperCase();
+ *       const payload = req.payload || {};
+ *
+ *       if (!action || !targetTab || !nonce || !correlationId) {
+ *         return ksBridgeJson_({
+ *           status: 'REJECTED',
+ *           correlation_id: correlationId,
+ *           nonce: nonce,
+ *           action: action,
+ *           target_tab: targetTab,
+ *           error_code: 'MISSING_ENVELOPE_FIELDS',
+ *           message: 'action, target_tab, nonce, and correlation_id are all required.'
+ *         });
+ *       }
+ *
+ *       // 1B. Isolated pre-lock route for BOOTSTRAP_FIRST_OWNER
+ *       //     (Inserted strictly BEFORE WebAppBridge.js line 71 / export line 13986)
+ *       if (action === 'BOOTSTRAP_FIRST_OWNER') {
+ *         return ksBridgeJson_(ksDispatchBootstrapFirstOwner_(req));
+ *       }
+ *
+ *       // 2..5. Existing governed action flow (WebAppBridge.js lines 71–124 unchanged)
+ *       lock.waitLock(20000);
+ *       ...
+ *     } catch (err) {
+ *       ...
+ *     } finally {
+ *       if (lock.hasLock()) lock.releaseLock();
+ *     }
+ *   }
+ */
