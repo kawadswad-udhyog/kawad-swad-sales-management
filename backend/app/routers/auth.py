@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import time
 from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Request
@@ -5,8 +7,14 @@ from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from app.apps_script_bridge import apps_script_bridge
-from app.config import SALES_LOGIN_MAX_ATTEMPTS, SALES_LOGIN_LOCKOUT_SECONDS
-from app.models import LoginRequest, TokenResponse
+from app.config import (
+    SALES_LOGIN_MAX_ATTEMPTS,
+    SALES_LOGIN_LOCKOUT_SECONDS,
+    SALES_OWNER_BOOTSTRAP_MAX_ATTEMPTS,
+    SALES_OWNER_BOOTSTRAP_LOCKOUT_SECONDS,
+    get_owner_bootstrap_config,
+)
+from app.models import LoginRequest, OwnerSetupRequest, OwnerSetupResponse, TokenResponse
 from app.sheets import db
 from app.auth import (
     verify_password,
@@ -24,6 +32,7 @@ from app.auth import (
 )
 from app.permissions import ui_role, role_v2_of
 from app.timeutil import now_iso
+from app.user_service import execute_bootstrap_first_owner
 
 router = APIRouter(tags=["Authentication"])
 
@@ -31,6 +40,11 @@ router = APIRouter(tags=["Authentication"])
 _LOGIN_ATTEMPTS: Dict[str, List[float]] = {}
 _MAX_FAILED_ATTEMPTS = SALES_LOGIN_MAX_ATTEMPTS
 _LOCKOUT_WINDOW_SECONDS = SALES_LOGIN_LOCKOUT_SECONDS
+
+# Strict brute-force protection for one-time owner bootstrap verification
+_BOOTSTRAP_ATTEMPTS: List[float] = []
+_BOOTSTRAP_MAX_FAILED_ATTEMPTS = SALES_OWNER_BOOTSTRAP_MAX_ATTEMPTS
+_BOOTSTRAP_LOCKOUT_SECONDS = SALES_OWNER_BOOTSTRAP_LOCKOUT_SECONDS
 
 
 def _format_lockout_duration(seconds: float) -> str:
@@ -117,7 +131,7 @@ async def login(req: LoginRequest, background_tasks: BackgroundTasks):
     if not auth_records:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No login accounts exist yet. The owner must create the first account with the local reset/bootstrap script. Passwordless login is disabled.",
+            detail="No login accounts exist yet. The owner must initialize the first Owner account using the governed one-time bootstrap utility. Public registration and passwordless login are disabled.",
         )
 
     matching_accounts = []
@@ -256,4 +270,122 @@ async def change_password(req: ChangePasswordRequest, request: Request, current_
     _USER_REVOKED_AT[user_id.strip().lower()] = time.time()
     db.log_audit(user_id, "CHANGE_PASSWORD", "AuthUsers", user_id, reason="User changed password and invalidated prior sessions")
     return {"ok": True, **res}
+
+
+@router.post(
+    "/api/auth/bootstrap-owner",
+    response_model=OwnerSetupResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_sheets_connection)],
+)
+async def bootstrap_first_owner(req: OwnerSetupRequest, request: Request):
+    """
+    Gated one-time First-Owner initialization endpoint (NOT public registration).
+
+    Security controls:
+    - Disabled fail-closed unless SALES_OWNER_BOOTSTRAP_ENABLED=true,
+      SALES_OWNER_BOOTSTRAP_SECRET (>= 32 chars, unique), and unexpired
+      SALES_OWNER_BOOTSTRAP_EXPIRES_AT (ISO-8601 UTC) are set in server environment.
+    - Requires matching X-KS-Bootstrap-Token header (constant-time verified; never via query string).
+    - Requires explicit X-KS-Idempotency-Key header for replay & conflict protection.
+    - Rate-limited to prevent secret guessing.
+    - Enforces zero existing rows in BOTH Users and AuthUsers before delegating to Apps Script.
+    - Never stores plain-text passwords or exposes secrets/hashes in responses or logs.
+    """
+    global _BOOTSTRAP_ATTEMPTS
+
+    now_ts = time.time()
+    _BOOTSTRAP_ATTEMPTS = [t for t in _BOOTSTRAP_ATTEMPTS if now_ts - t < _BOOTSTRAP_LOCKOUT_SECONDS]
+    if len(_BOOTSTRAP_ATTEMPTS) >= _BOOTSTRAP_MAX_FAILED_ATTEMPTS:
+        duration_label = _format_lockout_duration(_BOOTSTRAP_LOCKOUT_SECONDS)
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_429_TOO_MANY_REQUESTS", 429),
+            detail={
+                "status": "REJECTED",
+                "error_code": "OWNER_BOOTSTRAP_RATE_LIMITED",
+                "message": f"Bootstrap temporarily locked due to repeated invalid attempts. Wait {duration_label}.",
+                "retryable": False,
+            },
+        )
+
+    # Reject any attempt to pass bootstrap token via URL query parameters
+    query_params = getattr(request, "query_params", None) or {}
+    if any(k.lower() in {"bootstrap_token", "token", "secret"} for k in query_params.keys()):
+        _BOOTSTRAP_ATTEMPTS.append(now_ts)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "status": "REJECTED",
+                "error_code": "BOOTSTRAP_TOKEN_IN_QUERY_FORBIDDEN",
+                "message": "Bootstrap token must never be transmitted in URL query parameters.",
+                "retryable": False,
+            },
+        )
+
+    cfg = get_owner_bootstrap_config()
+    if not cfg.get("ready"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "status": "REJECTED",
+                "error_code": cfg.get("error_code", "OWNER_BOOTSTRAP_DISABLED"),
+                "message": cfg.get("message", "First-owner initialization is disabled."),
+                "retryable": False,
+            },
+        )
+
+    headers = getattr(request, "headers", None) or {}
+    provided_token = str(
+        headers.get("X-KS-Bootstrap-Token")
+        or headers.get("x-ks-bootstrap-token")
+        or ""
+    ).strip()
+    configured_secret = str(cfg.get("secret") or "")
+
+    if not provided_token or not hmac.compare_digest(
+        provided_token.encode("utf-8"),
+        configured_secret.encode("utf-8"),
+    ):
+        _BOOTSTRAP_ATTEMPTS.append(now_ts)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "status": "REJECTED",
+                "error_code": "INVALID_OWNER_BOOTSTRAP_TOKEN",
+                "message": "Invalid or missing one-time owner bootstrap authority token.",
+                "retryable": False,
+            },
+        )
+
+    idempotency_key = apps_script_bridge.extract_request_nonce(request=request)
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "status": "REJECTED",
+                "error_code": "MISSING_IDEMPOTENCY_NONCE",
+                "message": "Header X-KS-Idempotency-Key is mandatory for one-time owner bootstrap.",
+                "retryable": False,
+            },
+        )
+
+    token_digest = hashlib.sha256(provided_token.encode("utf-8")).hexdigest()
+    provided_token = ""
+    configured_secret = ""
+
+    result = execute_bootstrap_first_owner(
+        username=req.username,
+        full_name=req.full_name,
+        password=req.password,
+        bootstrap_token_digest=token_digest,
+        bootstrap_expires_at=str(cfg.get("expires_at") or ""),
+        email=req.email or "",
+        mobile=req.mobile or "",
+        notes=req.notes or "",
+        nonce=idempotency_key,
+        request=request,
+    )
+    _BOOTSTRAP_ATTEMPTS.clear()
+    return OwnerSetupResponse(**result)
+
 

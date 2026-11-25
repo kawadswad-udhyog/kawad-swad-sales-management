@@ -98,6 +98,7 @@ VOLATILE_FINGERPRINT_KEYS: FrozenSet[str] = frozenset({
 _SENSITIVE_KEY_RE = re.compile(
     r"(password|passwd|pwd|secret|token|authorization|auth_header|cookie|"
     r"api_key|private_key|signature|hmac|salt|hash|pin|otp|cvv|"
+    r"bootstrap_token|bootstrap_secret|bootstrap_proof|"
     r"bank_account|account_number|ifsc|aadhaar|pan_number|ssn)",
     re.IGNORECASE,
 )

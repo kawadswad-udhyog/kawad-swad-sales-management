@@ -10,15 +10,25 @@ class OwnerSetupRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50, description="Owner username (alphanumeric, min 3 chars)")
     full_name: str = Field(..., min_length=2, max_length=100, description="Owner full name")
     password: str = Field(..., min_length=12, max_length=128, description="Strong password, at least 12 characters")
+    email: Optional[str] = Field(default="", max_length=120, description="Optional Owner email address")
+    mobile: Optional[str] = Field(default="", max_length=30, description="Optional Owner mobile number")
+    notes: Optional[str] = Field(default="", max_length=250, description="Optional initialization note")
 
 class OwnerSetupResponse(BaseModel):
     success: bool = True
+    status: str = "CONFIRMED"
     message: str
     user_id: str
     username: str
     full_name: str
     role: str = "OWNER"
+    canonical_role: str = "OWNER_ADMIN"
+    must_change_password: bool = False
     created_at: str
+    transaction_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    nonce: Optional[str] = None
+    is_replay: bool = False
 
 class TokenResponse(BaseModel):
     access_token: str

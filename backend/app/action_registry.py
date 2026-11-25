@@ -126,6 +126,16 @@ _SPECS: Tuple[GovernedActionSpec, ...] = (
         state_assertions=(("must_change_password", "must_change_password"),),
     ),
     _spec(
+        "BOOTSTRAP_FIRST_OWNER",
+        "Users",
+        "user_id",
+        ("Users", "AuthUsers"),
+        requires_allocated_id=True,
+        locked_prefix="USR",
+        state_assertions=(("role", "role"), ("active", "active")),
+        child_checks=(ChildTabCheck("AuthUsers", "user_id", "allocated_id"),),
+    ),
+    _spec(
         "CREATE_USER",
         "Users",
         "user_id",

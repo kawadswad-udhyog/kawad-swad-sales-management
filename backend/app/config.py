@@ -48,6 +48,23 @@ SALES_ALLOW_OFFLINE_SHEETS_MIGRATION = (
     os.getenv("SALES_ALLOW_OFFLINE_SHEETS_MIGRATION", "false").strip().lower() in {"1", "true", "yes"}
 )
 
+# One-Time First-Owner Bootstrap Configuration (strictly disabled by default; server env only)
+SALES_OWNER_BOOTSTRAP_ENABLED = (
+    os.getenv("SALES_OWNER_BOOTSTRAP_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+)
+SALES_OWNER_BOOTSTRAP_SECRET = os.getenv("SALES_OWNER_BOOTSTRAP_SECRET", "").strip()
+SALES_OWNER_BOOTSTRAP_EXPIRES_AT = os.getenv("SALES_OWNER_BOOTSTRAP_EXPIRES_AT", "").strip()
+try:
+    SALES_OWNER_BOOTSTRAP_MAX_ATTEMPTS = max(1, int(os.getenv("SALES_OWNER_BOOTSTRAP_MAX_ATTEMPTS", "3")))
+except (TypeError, ValueError):
+    SALES_OWNER_BOOTSTRAP_MAX_ATTEMPTS = 3
+try:
+    SALES_OWNER_BOOTSTRAP_LOCKOUT_SECONDS = max(
+        60.0, float(os.getenv("SALES_OWNER_BOOTSTRAP_LOCKOUT_SECONDS", "900"))
+    )
+except (TypeError, ValueError):
+    SALES_OWNER_BOOTSTRAP_LOCKOUT_SECONDS = 900.0
+
 _EPHEMERAL_SECRET = secrets.token_hex(32)
 TEST_ONLY_JWT_SECRET = "test-only-secret-do-not-use-for-deployment-32"
 
@@ -183,6 +200,78 @@ def assert_runtime_config() -> None:
         # is missing, volatile (/tmp), unmounted, unwritable, or horizontally scaled (>1 instance).
         from app.transaction_safety import validate_coordinator_durability
         validate_coordinator_durability(env="production", testing=is_testing_flag_enabled())
+
+
+def get_owner_bootstrap_config() -> dict:
+    """
+    Fail-closed validator for one-time First-Owner initialization authority.
+    Reads live environment variables so enabling/disabling bootstrap takes effect
+    cleanly without hardcoded defaults. Never returns or logs secrets on failure.
+    """
+    from datetime import datetime, timezone
+
+    raw_enabled = str(os.getenv("SALES_OWNER_BOOTSTRAP_ENABLED", "") or "").strip().lower()
+    enabled = raw_enabled in {"1", "true", "yes"}
+    if not enabled:
+        return {
+            "ready": False,
+            "error_code": "OWNER_BOOTSTRAP_DISABLED",
+            "message": "First-owner initialization is disabled.",
+        }
+
+    secret = str(os.getenv("SALES_OWNER_BOOTSTRAP_SECRET", "") or "").strip()
+    if not secret or len(secret) < 32 or secret in _INSECURE_SECRETS:
+        return {
+            "ready": False,
+            "error_code": "OWNER_BOOTSTRAP_SECRET_UNCONFIGURED",
+            "message": "One-time owner bootstrap secret is missing or below required strength (minimum 32 characters).",
+        }
+
+    # Prevent secret reuse across trust boundaries (JWT or Apps Script HMAC shared secret)
+    jwt_env_secret = str(os.getenv("SALES_JWT_SECRET", "") or "").strip()
+    bridge_env_secret = str(os.getenv("SALES_APPS_SCRIPT_SHARED_SECRET", "") or "").strip()
+    if (jwt_env_secret and secret == jwt_env_secret) or (
+        bridge_env_secret and secret == bridge_env_secret
+    ) or (SALES_APPS_SCRIPT_SHARED_SECRET and secret == SALES_APPS_SCRIPT_SHARED_SECRET):
+        return {
+            "ready": False,
+            "error_code": "OWNER_BOOTSTRAP_SECRET_REUSE_FORBIDDEN",
+            "message": "One-time owner bootstrap secret must be unique and cannot reuse JWT or bridge HMAC secrets.",
+        }
+
+    raw_expires = str(os.getenv("SALES_OWNER_BOOTSTRAP_EXPIRES_AT", "") or "").strip()
+    if not raw_expires:
+        return {
+            "ready": False,
+            "error_code": "OWNER_BOOTSTRAP_EXPIRY_MISSING",
+            "message": "One-time owner bootstrap expiry timestamp (ISO-8601 UTC) is required.",
+        }
+    try:
+        iso_norm = raw_expires.replace("Z", "+00:00")
+        expires_dt = datetime.fromisoformat(iso_norm)
+        if expires_dt.tzinfo is None:
+            raise ValueError("Timezone-aware UTC timestamp required")
+        expires_utc = expires_dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return {
+            "ready": False,
+            "error_code": "OWNER_BOOTSTRAP_EXPIRY_INVALID",
+            "message": "One-time owner bootstrap expiry timestamp is invalid (expected timezone-aware ISO-8601 UTC).",
+        }
+
+    now_utc = datetime.now(timezone.utc)
+    if now_utc >= expires_utc:
+        return {
+            "ready": False,
+            "error_code": "OWNER_BOOTSTRAP_EXPIRED",
+            "message": "One-time owner bootstrap window has expired.",
+        }
+
+    return {
+        "ready": True,
+        "secret": secret,
+        "expires_at": expires_utc.isoformat(),
+    }
 
 
 # Fail-closed startup ordering guard: reject production + test-mode conflict immediately

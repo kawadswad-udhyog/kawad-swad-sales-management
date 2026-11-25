@@ -1163,3 +1163,273 @@ def execute_reset_password(user_id: str, new_password: str, actor_user_id: str, 
         "active": current_active_status == "true",
         **bridge_res,
     }
+
+
+def _non_blank_sheet_rows(tab_name: str) -> List[Dict[str, Any]]:
+    """
+    Fail-closed fresh read of a governance table returning all non-blank data rows.
+    Raises HTTP 503 if Google Sheets is unavailable or returns malformed structures.
+    """
+    try:
+        rows = db.get_records(tab_name, fresh=True)
+    except Exception as exc:
+        logger.error("Failed to read '%s' during first-owner bootstrap check (%s).", tab_name, type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Unable to verify '{tab_name}' state in Google Sheets. First-owner initialization aborted safely.",
+        ) from exc
+
+    if not isinstance(rows, list):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"'{tab_name}' returned malformed data. First-owner initialization aborted safely.",
+        )
+
+    non_blank: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"'{tab_name}' contains malformed row at index {idx}. First-owner initialization aborted safely.",
+            )
+        if any(str(v or "").strip() for v in row.values()):
+            non_blank.append(row)
+    return non_blank
+
+
+def _hash_bootstrap_password(raw_password: str, token_digest: str, nonce: str) -> str:
+    """
+    Generate a standard PBKDF2-SHA256 hash (`pbkdf2:sha256:100000$<b64_salt>$<b64_dk>`)
+    with a 128-bit salt derived from the high-entropy one-time bootstrap secret digest
+    and the caller's unique idempotency nonce.
+
+    This preserves full 128-bit cryptographic salt entropy for the single bootstrap while
+    ensuring exact idempotency-fingerprint stability across legitimate same-nonce retries
+    and immediate 409 IDEMPOTENCY_PAYLOAD_CONFLICT if the password is altered on retry.
+    """
+    import base64
+    import hashlib
+    import hmac
+
+    iterations = 100000
+    salt = hmac.new(
+        token_digest.encode("utf-8"),
+        f"KS-BOOTSTRAP-PBKDF2-SALT:{nonce}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()[:16]
+    dk = hashlib.pbkdf2_hmac("sha256", raw_password.encode("utf-8"), salt, iterations)
+    salt_b64 = base64.b64encode(salt).decode("utf-8")
+    dk_b64 = base64.b64encode(dk).decode("utf-8")
+    return f"pbkdf2:sha256:{iterations}${salt_b64}${dk_b64}"
+
+
+def execute_bootstrap_first_owner(
+    *,
+    username: str,
+    full_name: str,
+    password: str,
+    bootstrap_token_digest: str,
+    bootstrap_expires_at: str,
+    email: str = "",
+    mobile: str = "",
+    notes: str = "",
+    nonce: str = "",
+    request: Any = None,
+) -> Dict[str, Any]:
+    """
+    Governed One-Time First-Owner Initialization (Single-Write-Owner compliant).
+
+    Enforces:
+    1. Both Users and AuthUsers MUST contain zero non-blank data rows before any new
+       initialization (while permitting idempotent replay/recovery for an identical
+       prior `BOOTSTRAP_FIRST_OWNER` nonce via the transaction coordinator).
+    2. Never writes directly to Google Sheets from FastAPI; delegates exclusively to Apps Script
+       via signed action `BOOTSTRAP_FIRST_OWNER`.
+    3. Hashes password server-side with PBKDF2-SHA256 before forwarding and never logs or returns
+       plain-text passwords, password hashes, or bootstrap secrets.
+    4. Forces canonical role `OWNER_ADMIN`, `active="true"`, and `must_change_password="false"`.
+    5. Allocates the Owner User ID via Apps Script IdAllocator (`USR` locked prefix) and
+       verifies both Users and AuthUsers by read-back before returning CONFIRMED.
+    """
+    import re
+    from app.accounting.transaction_coordinator import tx_coordinator
+    from app.permissions import ui_role
+    from app.transaction_safety import CoordinatorDurabilityError
+
+    clean_username = str(username or "").strip().lower()
+    clean_full_name = str(full_name or "").strip()
+    clean_email = str(email or "").strip()
+    clean_mobile = str(mobile or "").strip()
+    clean_notes = str(notes or "").strip() or "Initial Owner account created via governed one-time bootstrap"
+    raw_password = str(password or "")
+    clean_digest = str(bootstrap_token_digest or "").strip().lower()
+    clean_expires_at = str(bootstrap_expires_at or "").strip()
+    clean_nonce = str(nonce or "").strip()
+
+    try:
+        if not clean_nonce:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Header X-KS-Idempotency-Key is mandatory for one-time owner bootstrap.",
+            )
+        if not re.fullmatch(r"[a-z0-9._-]{3,50}", clean_username):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Username must be 3-50 lowercase letters, numbers, dots, underscores, or hyphens.",
+            )
+        if len(clean_full_name) < 2 or clean_full_name.lower() in PLACEHOLDER_NAMES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A real Owner full name (at least 2 characters, non-placeholder) is required.",
+            )
+        if len(raw_password) < 12 or len(raw_password) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Owner password must be between 12 and 128 characters.",
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", clean_digest):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid bootstrap verification proof.",
+            )
+
+        # Check whether this exact nonce already belongs to a prior BOOTSTRAP_FIRST_OWNER
+        # attempt so legitimate same-nonce idempotent replays / timeout recoveries reach
+        # tx_coordinator conflict & replay logic instead of being masked as a fresh attempt.
+        is_known_bootstrap_nonce = False
+        try:
+            prior_tx = tx_coordinator.get_governed_transaction(clean_nonce)
+        except CoordinatorDurabilityError as dur_exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "status": "REJECTED",
+                    "error_code": dur_exc.error_code,
+                    "message": "Transaction coordinator unavailable; first-owner initialization aborted safely.",
+                    "retryable": False,
+                },
+            ) from dur_exc
+
+        if prior_tx is not None:
+            if str(prior_tx.get("action") or "").strip().upper() != "BOOTSTRAP_FIRST_OWNER":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "status": "REJECTED",
+                        "error_code": "IDEMPOTENCY_ACTION_CONFLICT",
+                        "message": f"Nonce '{clean_nonce}' is already bound to a different action.",
+                        "retryable": False,
+                    },
+                )
+            is_known_bootstrap_nonce = True
+        else:
+            # Post-coordinator-loss check against authoritative IdAllocations
+            alloc_rows = _non_blank_sheet_rows("IdAllocations")
+            if any(
+                str(r.get("nonce") or "").strip() == clean_nonce
+                and str(r.get("tab_name") or "").strip() == "Users"
+                for r in alloc_rows
+            ):
+                is_known_bootstrap_nonce = True
+
+        # Authoritative pre-flight empty-table guard: BOTH Users and AuthUsers must have 0 data rows
+        # for any fresh initialization attempt.
+        if not is_known_bootstrap_nonce:
+            existing_users = _non_blank_sheet_rows("Users")
+            existing_auth = _non_blank_sheet_rows("AuthUsers")
+            if existing_users or existing_auth:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "status": "REJECTED",
+                        "error_code": "OWNER_ALREADY_INITIALIZED",
+                        "message": (
+                            "First-owner initialization refused: Users or AuthUsers already contains records. "
+                            "Duplicate Owner bootstrap is permanently blocked."
+                        ),
+                        "retryable": False,
+                    },
+                )
+
+        now_dt = datetime.now(timezone.utc)
+        now_iso_str = now_dt.isoformat()
+        effective_date_str = now_dt.date().isoformat()
+        hashed_pw = _hash_bootstrap_password(raw_password, clean_digest, clean_nonce)
+        valid_hash, hash_err = validate_pbkdf2_hash(hashed_pw)
+        if not valid_hash:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Password hashing invariant failed ({hash_err}).",
+            )
+    finally:
+        # Clear plain-text password reference before any network delegation or logging
+        raw_password = ""
+        password = ""
+
+    from app.apps_script_bridge import apps_script_bridge
+
+    bridge_res = apps_script_bridge.delegate_governed_write(
+        action="BOOTSTRAP_FIRST_OWNER",
+        target_tab="Users",
+        payload={
+            "full_name": clean_full_name,
+            "username": clean_username,
+            "role": "OWNER_ADMIN",
+            "mobile": clean_mobile,
+            "email": clean_email,
+            "active": "true",
+            "created_at": now_iso_str,
+            "updated_at": now_iso_str,
+            "effective_from": effective_date_str,
+            "effective_to": "",
+            "employment_type": "OWNER",
+            "designation": "Owner / Managing Director",
+            "department": "Executive",
+            "employment_status": "ACTIVE",
+            "notes": clean_notes,
+            "password_hash": hashed_pw,
+            "must_change_password": "false",
+            "sessions_revoked_at": "",
+            "bootstrap_token_digest": clean_digest,
+            "bootstrap_expires_at": clean_expires_at,
+        },
+        nonce=clean_nonce,
+        request=request,
+        actor_user_id="BOOTSTRAP_OWNER_INIT",
+        actor_role="OWNER_ADMIN",
+        id_field="user_id",
+        invalidate_tabs=["Users", "AuthUsers"],
+    )
+
+    allocated_user_id = str(
+        bridge_res.get("allocated_id")
+        or (bridge_res.get("record") or {}).get("user_id")
+        or ""
+    ).strip()
+
+    if not bridge_res.get("is_replay"):
+        db.log_audit(
+            actor=allocated_user_id or "BOOTSTRAP_OWNER_INIT",
+            action="BOOTSTRAP_FIRST_OWNER",
+            entity_type="Users",
+            entity_id=allocated_user_id or clean_username,
+            reason="Initial Owner account established through governed one-time bootstrap",
+        )
+
+    return {
+        "success": True,
+        "status": str(bridge_res.get("status") or "CONFIRMED"),
+        "message": "Initial Owner account created and verified in Google Sheets.",
+        "user_id": allocated_user_id,
+        "username": clean_username,
+        "full_name": clean_full_name,
+        "role": ui_role("OWNER_ADMIN"),
+        "canonical_role": "OWNER_ADMIN",
+        "must_change_password": False,
+        "created_at": now_iso_str,
+        "transaction_id": bridge_res.get("transaction_id"),
+        "correlation_id": bridge_res.get("correlation_id"),
+        "nonce": bridge_res.get("nonce"),
+        "is_replay": bool(bridge_res.get("is_replay", False)),
+    }
+

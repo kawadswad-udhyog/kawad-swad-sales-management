@@ -163,6 +163,8 @@ class LocalAppsScriptSimulator:
         self._counters: Dict[str, int] = {}
         self._patches: List[Any] = []
         self._active = False
+        self._owner_bootstrap_completed: bool = False
+        self._current_nonce: str = ""
         self.calls: List[Dict[str, Any]] = []
 
     def start(self) -> "LocalAppsScriptSimulator":
@@ -225,6 +227,8 @@ class LocalAppsScriptSimulator:
         if self.reconcile_core_tables:
             schema_reg.clear_runtime_core_schema_reconciliations()
         tx_coordinator.reset_store()
+        self._owner_bootstrap_completed = False
+        self._current_nonce = ""
         self._active = False
 
     def __enter__(self) -> "LocalAppsScriptSimulator":
@@ -405,23 +409,50 @@ class LocalAppsScriptSimulator:
             raise RuntimeError(f"LocalAppsScriptSimulator blocked unexpected external URL: {url}")
 
         raw_body = req.data.decode("utf-8") if isinstance(req.data, (bytes, bytearray)) else str(req.data or "")
-        sig = req.headers.get("X-ks-signature") or req.headers.get("X-KS-Signature") or ""
-        expected_sig = bridge_mod.AppsScriptBridge.sign_envelope(raw_body, TEST_SIM_SECRET)
-        if not hmac.compare_digest(sig, expected_sig):
+        header_sig = req.headers.get("X-ks-signature") or req.headers.get("X-KS-Signature") or ""
+        try:
+            outer = json.loads(raw_body)
+        except Exception:
             return _FakeHTTPResponse({
                 "status": "REJECTED",
-                "error_code": "INVALID_HMAC_SIGNATURE",
-                "message": "Simulated Apps Script rejected invalid HMAC signature.",
-                "http_status": 401,
+                "error_code": "INVALID_JSON_ENVELOPE",
+                "message": "Simulated Apps Script rejected malformed JSON body.",
+                "http_status": 400,
             })
 
-        envelope = json.loads(raw_body)
+        if isinstance(outer, dict) and isinstance(outer.get("canonical_envelope"), str) and outer.get("signature"):
+            body_sig = str(outer.get("signature") or "")
+            canonical_str = str(outer.get("canonical_envelope") or "")
+            expected_sig = bridge_mod.AppsScriptBridge.sign_envelope(canonical_str, TEST_SIM_SECRET)
+            sig_ok = hmac.compare_digest(body_sig, expected_sig)
+            if header_sig:
+                sig_ok = sig_ok and hmac.compare_digest(header_sig, expected_sig)
+            if not sig_ok:
+                return _FakeHTTPResponse({
+                    "status": "REJECTED",
+                    "error_code": "INVALID_HMAC_SIGNATURE",
+                    "message": "Simulated Apps Script rejected invalid HMAC signature.",
+                    "http_status": 401,
+                })
+            envelope = json.loads(canonical_str)
+        else:
+            expected_sig = bridge_mod.AppsScriptBridge.sign_envelope(raw_body, TEST_SIM_SECRET)
+            if not hmac.compare_digest(header_sig, expected_sig):
+                return _FakeHTTPResponse({
+                    "status": "REJECTED",
+                    "error_code": "INVALID_HMAC_SIGNATURE",
+                    "message": "Simulated Apps Script rejected invalid HMAC signature.",
+                    "http_status": 401,
+                })
+            envelope = outer
+
         action = str(envelope.get("action") or "").strip().upper()
         target_tab = str(envelope.get("target_tab") or "").strip()
         nonce = str(envelope.get("nonce") or "").strip()
         corr_id = str(envelope.get("correlation_id") or "").strip()
         payload = envelope.get("payload") or {}
         actor_user_id = str(envelope.get("actor_user_id") or "")
+        self._current_nonce = nonce
 
         self.calls.append(copy.deepcopy(envelope))
 
@@ -581,6 +612,8 @@ class LocalAppsScriptSimulator:
             return self._act_create_supplier_return(payload, spec)
 
         # 7. Users, Auth, Revocation
+        if action == "BOOTSTRAP_FIRST_OWNER":
+            return self._act_bootstrap_first_owner(payload, spec)
         if action == "CREATE_USER":
             return self._act_create_user(payload, spec)
         if action in ("UPDATE_USER", "DEACTIVATE_USER", "REACTIVATE_USER", "RECONCILE_ROLE_ALIAS"):
@@ -1824,6 +1857,109 @@ class LocalAppsScriptSimulator:
                 lrow["raw_material_txn_id"] = str(lrow.get("raw_material_txn_id") or "").strip() or self._alloc_id("RawMaterialLedger", explicit_prefix="RML")
                 self._append_row("RawMaterialLedger", lrow)
         return {"allocated_id": rid, "record": ret}
+
+    def _act_bootstrap_first_owner(self, payload: Dict[str, Any], spec: GovernedActionSpec) -> Dict[str, Any]:
+        if self._owner_bootstrap_completed:
+            raise _SimRejectError(
+                "OWNER_BOOTSTRAP_ALREADY_COMPLETED",
+                "One-time first-owner bootstrap has already completed and is permanently locked.",
+                409,
+            )
+
+        existing_users = [
+            r for r in self._load_tab("Users")
+            if isinstance(r, dict) and any(str(v or "").strip() for v in r.values())
+        ]
+        existing_auth = [
+            r for r in self._load_tab("AuthUsers")
+            if isinstance(r, dict) and any(str(v or "").strip() for v in r.values())
+        ]
+        if existing_users or existing_auth:
+            raise _SimRejectError(
+                "OWNER_ALREADY_INITIALIZED",
+                "First-owner bootstrap rejected: Users or AuthUsers already contains records.",
+                409,
+            )
+
+        pw_hash = str(payload.get("password_hash") or "").strip()
+        if not pw_hash.startswith("pbkdf2:sha256:") or len(pw_hash.split("$")) != 3:
+            raise _SimRejectError(
+                "INVALID_PASSWORD_HASH",
+                "Plain-text or non-PBKDF2 password hashes are strictly rejected.",
+                422,
+            )
+
+        digest = str(payload.get("bootstrap_token_digest") or "").strip().lower()
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise _SimRejectError(
+                "INVALID_BOOTSTRAP_PROOF",
+                "Missing or malformed bootstrap verification digest.",
+                403,
+            )
+
+        fail_a = self._check_injected_failure("AuthUsers")
+        if fail_a:
+            raise RuntimeError(fail_a)
+
+        uid = self._alloc_id("Users", spec)
+        auth_id = self._alloc_id("AuthUsers", explicit_prefix="AUTH")
+        created_at = str(payload.get("created_at") or now_iso())
+        updated_at = str(payload.get("updated_at") or created_at)
+        effective_from = str(payload.get("effective_from") or created_at[:10])
+        username = str(payload.get("username") or "").strip().lower()
+        full_name = str(payload.get("full_name") or "").strip()
+
+        user_rec = {
+            "user_id": uid,
+            "full_name": full_name,
+            "username": username,
+            "role": "OWNER_ADMIN",
+            "mobile": str(payload.get("mobile") or "").strip(),
+            "email": str(payload.get("email") or "").strip(),
+            "active": "true",
+            "created_at": created_at,
+            "notes": str(payload.get("notes") or "").strip(),
+            "employment_type": str(payload.get("employment_type") or "OWNER").strip(),
+            "designation": str(payload.get("designation") or "Owner / Managing Director").strip(),
+            "department": str(payload.get("department") or "Executive").strip(),
+            "reporting_manager_id": "",
+            "joining_date": effective_from,
+            "employment_status": str(payload.get("employment_status") or "ACTIVE").strip(),
+            "salary_frequency": "",
+            "salary_structure_id": "",
+            "address": "",
+            "emergency_contact": "",
+            "bank_details": "",
+            "document_references": "",
+            "updated_at": updated_at,
+            "created_by": uid,
+            "effective_from": effective_from,
+            "effective_to": "",
+        }
+        auth_rec = {
+            "auth_id": auth_id,
+            "user_id": uid,
+            "username": username,
+            "password_hash": pw_hash,
+            "role": "OWNER_ADMIN",
+            "active": "true",
+            "created_at": created_at,
+            "must_change_password": "false",
+            "sessions_revoked_at": "",
+        }
+
+        if self._current_nonce:
+            self._append_row("IdAllocations", {
+                "allocation_id": self._alloc_id("IdAllocations", explicit_prefix="ALC"),
+                "tab_name": "Users",
+                "allocated_id": uid,
+                "nonce": self._current_nonce,
+                "created_at": created_at,
+            })
+        self._append_row("Users", user_rec)
+        self._append_row("AuthUsers", auth_rec)
+        self._owner_bootstrap_completed = True
+        return {"allocated_id": uid, "record": dict(user_rec)}
 
     def _act_create_user(self, payload: Dict[str, Any], spec: GovernedActionSpec) -> Dict[str, Any]:
         # Atomic check: fail before mutating Users if AuthUsers fails

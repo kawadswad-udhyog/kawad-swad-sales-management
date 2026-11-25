@@ -2815,12 +2815,22 @@ class AppsScriptBridge:
             "timestamp": now_iso(),
             "payload": payload,
         }
-        canonical_body = json.dumps(envelope, separators=(",", ":"), sort_keys=True, default=str)
+        canonical_body = json.dumps(envelope, separators=(",", ":"), sort_keys=True, ensure_ascii=True, default=str)
         signature = self.sign_envelope(canonical_body, SALES_APPS_SCRIPT_SHARED_SECRET)
+
+        # Google Apps Script doPost(e) cannot read custom HTTP headers such as X-KS-Signature.
+        # Carry the exact signed canonical_envelope string + signature in the JSON body alongside
+        # top-level fields so Apps Script verifies the exact signed bytes with zero canonicalization drift.
+        wire_envelope = dict(envelope)
+        wire_envelope["contract_version"] = "2.0"
+        wire_envelope["signature_alg"] = "HMAC-SHA-256"
+        wire_envelope["signature"] = signature
+        wire_envelope["canonical_envelope"] = canonical_body
+        wire_body = json.dumps(wire_envelope, separators=(",", ":"), sort_keys=True, ensure_ascii=True, default=str)
 
         req = urllib.request.Request(
             SALES_APPS_SCRIPT_WEBAPP_URL,
-            data=canonical_body.encode("utf-8"),
+            data=wire_body.encode("utf-8"),
             method="POST",
             headers={
                 "Content-Type": "application/json",
