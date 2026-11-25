@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    :root {
+      --primary: #1b5e20;
+      --primary-light: #e8f5e9;
+      --border: #dadce0;
+      --bg: #f8f9fa;
+      --text: #202124;
+      --muted: #5f6368;
+      --danger: #b3261e;
+    }
+    * { box-sizing: border-box; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
+    body { margin: 0; padding: 12px; background: var(--bg); color: var(--text); font-size: 13px; }
+    .header { background: var(--primary); color: #fff; padding: 10px 12px; border-radius: 6px; margin-bottom: 10px; }
+    .header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+    .header .meta { font-size: 11px; opacity: 0.9; margin-top: 3px; }
+
+    .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 10px; }
+    .tab-btn {
+      padding: 7px 4px; border: 1px solid var(--border); background: #fff;
+      border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted);
+    }
+    .tab-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .tab-btn.hidden { display: none; }
+
+    .card { background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+    .card h3 { margin: 0 0 10px 0; font-size: 14px; color: var(--primary); border-bottom: 1px solid #eee; padding-bottom: 6px; }
+
+    .field { margin-bottom: 9px; }
+    label { display: block; font-size: 11px; font-weight: 600; color: #3c4043; margin-bottom: 3px; }
+    input, select, textarea {
+      width: 100%; padding: 7px 8px; border: 1px solid var(--border); border-radius: 4px;
+      font-size: 12px; background: #fff;
+    }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 8px 0; font-size: 12px; }
+    .checkbox-row input { width: auto; }
+
+    .btn-submit {
+      width: 100%; padding: 9px; background: var(--primary); color: #fff; border: none;
+      border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 6px;
+    }
+    .btn-submit:disabled { background: #9e9e9e; cursor: not-allowed; }
+
+    .status-box {
+      margin-top: 10px; padding: 9px; border-radius: 4px; font-size: 12px; display: none; word-break: break-word;
+    }
+    .status-ok { background: var(--primary-light); color: #1b5e20; border: 1px solid #a5d6a7; display: block; }
+    .status-err { background: #fce8e6; color: var(--danger); border: 1px solid #f28b82; display: block; }
+    .section { display: none; }
+    .section.active { display: block; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>Kawad Swad Operations</h2>
+    <div class="meta" id="userBadge">Loading session...</div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn" id="btn-purchase" onclick="switchTab('purchase')">1. Purchase</button>
+    <button class="tab-btn" id="btn-production" onclick="switchTab('production')">2. Production</button>
+    <button class="tab-btn" id="btn-quality" onclick="switchTab('quality')">3. Quality</button>
+    <button class="tab-btn" id="btn-packaging" onclick="switchTab('packaging')">4. Packaging</button>
+    <button class="tab-btn" id="btn-sales" onclick="switchTab('sales')">5. Sales</button>
+    <button class="tab-btn" id="btn-finance" onclick="switchTab('finance')">6. Finance</button>
+  </div>
+
+  <!-- 1. PURCHASE / MATERIAL RECEIPT -->
+  <div class="card section" id="sec-purchase">
+    <h3>Purchase / Material Receipt</h3>
+    <div class="field">
+      <label>Item Category *</label>
+      <select id="pur_item_type">
+        <option value="RAW_MATERIAL">Raw Material (Dal, Spices, Oil)</option>
+        <option value="PACKAGING_MAT">Packaging Material (Pouches, Cartons)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Material ID *</label>
+      <input type="text" id="pur_item_id" placeholder="e.g., RM-MOONG-DAL">
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Supplier Lot No.</label>
+        <input type="text" id="pur_sup_lot" placeholder="Optional">
+      </div>
+      <div class="field">
+        <label>Warehouse ID *</label>
+        <input type="text" id="pur_wh" value="WH-MAIN">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Quantity Received *</label>
+        <input type="number" step="0.001" id="pur_qty" placeholder="0.00">
+      </div>
+      <div class="field">
+        <label>Unit *</label>
+        <select id="pur_unit">
+          <option value="KG">KG</option>
+          <option value="LTR">LTR</option>
+          <option value="PCS">PCS</option>
+          <option value="ROLL">ROLL</option>
+        </select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Rate per Unit (INR)</label>
+        <input type="number" step="0.01" id="pur_cost" placeholder="0.00">
+      </div>
+      <div class="field">
+        <label>Initial QC Status *</label>
+        <select id="pur_qc">
+          <option value="PENDING_QC">PENDING_QC (Hold)</option>
+          <option value="RELEASED">RELEASED (Approved)</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>GRN / Bill Reference & Notes</label>
+      <input type="text" id="pur_notes" placeholder="e.g., Supplier Bill #104">
+    </div>
+    <button class="btn-submit" onclick="submitPurchase(this)">Record Stock Receipt</button>
+  </div>
+
+  <!-- 2. PRODUCTION BATCH -->
+  <div class="card section" id="sec-production">
+    <h3>Daily Production Batch</h3>
+    <div class="row2">
+      <div class="field">
+        <label>Product ID *</label>
+        <input type="text" id="prd_prod_id" placeholder="e.g., PRD-MMP">
+      </div>
+      <div class="field">
+        <label>Recipe Version ID *</label>
+        <input type="text" id="prd_rcp_ver" placeholder="e.g., RCP-MMP-V1">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Raw Material ID *</label>
+        <input type="text" id="prd_rm_id" placeholder="e.g., RM-MOONG-DAL">
+      </div>
+      <div class="field">
+        <label>Source RM Lot ID *</label>
+        <input type="text" id="prd_rm_lot" placeholder="LOT-2026...">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>RM Consumed (KG) *</label>
+        <input type="number" step="0.001" id="prd_rm_qty" placeholder="0.00">
+      </div>
+      <div class="field">
+        <label>Bulk Output (KG) *</label>
+        <input type="number" step="0.001" id="prd_out_qty" placeholder="0.00">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Process Loss (KG)</label>
+        <input type="number" step="0.001" id="prd_loss_qty" value="0">
+      </div>
+      <div class="field">
+        <label>Loss Reason</label>
+        <input type="text" id="prd_loss_reason" placeholder="Drying / Trim">
+      </div>
+    </div>
+    <button class="btn-submit" onclick="submitProduction(this)">Post Production Batch</button>
+  </div>
+
+  <!-- 3. QUALITY RELEASE / HOLD -->
+  <div class="card section" id="sec-quality">
+    <h3>Quality Inspection & Lot Release</h3>
+    <div class="field">
+      <label>Inventory Lot ID *</label>
+      <input type="text" id="qc_lot_id" placeholder="LOT-2026...">
+    </div>
+    <div class="field">
+      <label>Inspection Parameter *</label>
+      <input type="text" id="qc_param" value="MOISTURE_AND_SENSORY">
+    </div>
+    <div class="field">
+      <label>Measured Value / Observation *</label>
+      <input type="text" id="qc_val" placeholder="e.g., Moisture 11.2% - Clean">
+    </div>
+    <div class="field">
+      <label>Release Decision *</label>
+      <select id="qc_decision">
+        <option value="RELEASED">RELEASED (Approve for Packaging/Sale)</option>
+        <option value="ON_HOLD">ON_HOLD (Quarantine)</option>
+        <option value="REJECTED">REJECTED (Fail)</option>
+      </select>
+    </div>
+    <button class="btn-submit" onclick="submitQuality(this)">Record Quality Decision</button>
+  </div>
+
+  <!-- 4. PACKAGING BATCH -->
+  <div class="card section" id="sec-packaging">
+    <h3>Packaging Batch (Bulk to Retail SKU)</h3>
+    <div class="row2">
+      <div class="field">
+        <label>Packaging Batch No. *</label>
+        <input type="text" id="pkg_batch_id" placeholder="e.g., PKB-2026-01">
+      </div>
+      <div class="field">
+        <label>Released Bulk Lot ID *</label>
+        <input type="text" id="pkg_bulk_lot" placeholder="LOT-2026...">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Product ID *</label>
+        <input type="text" id="pkg_prod_id" placeholder="e.g., PRD-MMP">
+      </div>
+      <div class="field">
+        <label>Target SKU Code *</label>
+        <input type="text" id="pkg_sku" placeholder="e.g., KS-MMP-200">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Packet Size *</label>
+        <select id="pkg_weight">
+          <option value="200">200 g Pack</option>
+          <option value="500">500 g Pack</option>
+          <option value="1000">1000 g Pack</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Good Packets Count *</label>
+        <input type="number" id="pkg_count" placeholder="0">
+      </div>
+    </div>
+    <button class="btn-submit" onclick="submitPackaging(this)">Post Packaging Output</button>
+  </div>
+
+  <!-- 5. SALES ORDER & INVOICE -->
+  <div class="card section" id="sec-sales">
+    <h3>Sales Order & Invoice</h3>
+    <div class="row2">
+      <div class="field">
+        <label>Customer ID *</label>
+        <input type="text" id="sal_cust_id" placeholder="CUST-2026...">
+      </div>
+      <div class="field">
+        <label>Sales Channel *</label>
+        <select id="sal_channel">
+          <option value="RETAIL_FIELD">Field Salesman / Retail</option>
+          <option value="DIRECT">Direct / Counter</option>
+          <option value="DISTRIBUTOR">Distributor</option>
+          <option value="ONLINE">Website / Online</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Customer / Shop Name</label>
+      <input type="text" id="sal_cust_name" placeholder="Shop or customer name">
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>SKU Code *</label>
+        <input type="text" id="sal_sku" placeholder="e.g., KS-MMP-200">
+      </div>
+      <div class="field">
+        <label>Pack Weight (g)</label>
+        <select id="sal_pack_g">
+          <option value="200">200 g</option>
+          <option value="500">500 g</option>
+          <option value="1000">1000 g</option>
+        </select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Quantity (Packets) *</label>
+        <input type="number" id="sal_qty" placeholder="0">
+      </div>
+      <div class="field">
+        <label>Selling Rate / Pkt (INR) *</label>
+        <input type="number" step="0.01" id="sal_price" placeholder="0.00">
+      </div>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="sal_issue_inv" checked>
+      <label for="sal_issue_inv" style="margin:0;">Also issue Sales Invoice immediately</label>
+    </div>
+    <button class="btn-submit" onclick="submitSales(this)">Save Order & Invoice</button>
+  </div>
+
+  <!-- 6. FINANCE: CUSTOMER RECEIPT & EXPENSE VOUCHER -->
+  <div class="card section" id="sec-finance">
+    <h3>Customer Receipt</h3>
+    <div class="row2">
+      <div class="field">
+        <label>Customer ID *</label>
+        <input type="text" id="fin_cust_id" placeholder="CUST-2026...">
+      </div>
+      <div class="field">
+        <label>Invoice ID (Optional)</label>
+        <input type="text" id="fin_inv_id" placeholder="INV-2026...">
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Amount Received (INR) *</label>
+        <input type="number" step="0.01" id="fin_rcpt_amt" placeholder="0.00">
+      </div>
+      <div class="field">
+        <label>Payment Mode *</label>
+        <select id="fin_rcpt_mode">
+          <option value="CASH">CASH</option>
+          <option value="UPI">UPI</option>
+          <option value="BANK_TRANSFER">BANK_TRANSFER</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>UTR / Reference No.</label>
+      <input type="text" id="fin_rcpt_ref" placeholder="Transaction reference">
+    </div>
+    <button class="btn-submit" onclick="submitReceipt(this)">Record Customer Receipt</button>
+
+    <hr style="margin:14px 0; border:none; border-top:1px solid #eee;">
+
+    <h3>Daily Expense Voucher</h3>
+    <div class="row2">
+      <div class="field">
+        <label>Date *</label>
+        <input type="date" id="exp_date">
+      </div>
+      <div class="field">
+        <label>Amount (INR) *</label>
+        <input type="number" step="0.01" id="exp_amt" placeholder="0.00">
+      </div>
+    </div>
+    <div class="field">
+      <label>Payee / Vendor *</label>
+      <input type="text" id="exp_payee" placeholder="Paid to...">
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Expense Head *</label>
+        <select id="exp_acct">
+          <option value="5210-FREIGHT-DELIVERY">Freight / Delivery</option>
+          <option value="5220-UTILITIES-POWER">Electricity / Utilities</option>
+          <option value="5230-REPAIRS-MAINT">Repairs & Maintenance</option>
+          <option value="5240-OFFICE-ADMIN">Office / Admin / Tea</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Paid From *</label>
+        <select id="exp_pay_acct">
+          <option value="1110-PETTY-CASH">Petty Cash</option>
+          <option value="1120-BANK-MAIN">Main Bank / UPI</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Purpose / Bill Note *</label>
+      <input type="text" id="exp_purpose" placeholder="Reason for expense">
+    </div>
+    <button class="btn-submit" onclick="submitExpense(this)">Post Expense Voucher</button>
+  </div>
+
+  <div id="statusBox" class="status-box"></div>
+
+  <script>
+    const USER_CTX = <?!= userContext ?>;
+    const DEFAULT_TAB = "<?= defaultTab ?>";
+
+    const ROLE_TABS = {
+      OWNER_ADMIN: ['purchase', 'production', 'quality', 'packaging', 'sales', 'finance'],
+      PA:          ['purchase', 'production', 'sales', 'finance'],
+      STORE:       ['purchase'],
+      PROCUREMENT: ['purchase'],
+      PRODUCTION:  ['production'],
+      QUALITY:     ['quality'],
+      PACKAGING:   ['packaging'],
+      SALES:       ['sales'],
+      FIELD_SALESMAN: ['sales', 'finance'],
+      ACCOUNTS:    ['finance'],
+      AUDITOR:     []
+    };
+
+    function makeNonce(prefix) {
+      return prefix + '_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+    }
+
+    function showStatus(ok, msg) {
+      const box = document.getElementById('statusBox');
+      box.className = 'status-box ' + (ok ? 'status-ok' : 'status-err');
+      box.textContent = msg;
+    }
+
+    function switchTab(tabName) {
+      document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+      const sec = document.getElementById('sec-' + tabName);
+      const btn = document.getElementById('btn-' + tabName);
+      if (sec) sec.classList.add('active');
+      if (btn) btn.classList.add('active');
+      document.getElementById('statusBox').className = 'status-box';
+    }
+
+    function runServer(btn, fnName, payload, onSuccess) {
+      btn.disabled = true;
+      const origText = btn.textContent;
+      btn.textContent = 'Saving & Verifying...';
+      showStatus(true, 'Processing request...');
+
+      google.script.run
+        .withSuccessHandler(res => {
+          btn.disabled = false;
+          btn.textContent = origText;
+          onSuccess(res);
+        })
+        .withFailureHandler(err => {
+          btn.disabled = false;
+          btn.textContent = origText;
+          showStatus(false, 'Error: ' + (err.message || err));
+        })[fnName](payload);
+    }
+
+    function submitPurchase(btn) {
+      runServer(btn, 'ksCreateInventoryLotAndReceipt', {
+        nonce: makeNonce('UI_PUR'),
+        item_type: document.getElementById('pur_item_type').value,
+        item_id: document.getElementById('pur_item_id').value,
+        supplier_lot_number: document.getElementById('pur_sup_lot').value,
+        warehouse_id: document.getElementById('pur_wh').value,
+        quantity_received: Number(document.getElementById('pur_qty').value),
+        unit: document.getElementById('pur_unit').value,
+        unit_cost: Number(document.getElementById('pur_cost').value),
+        quality_status: document.getElementById('pur_qc').value,
+        notes: document.getElementById('pur_notes').value
+      }, res => {
+        showStatus(true, 'Saved! Lot ID: ' + res.inventory_lot_id + ' | Movement: ' + res.movement_id + ' (' + res.quality_status + ')');
+      });
+    }
+
+    function submitProduction(btn) {
+      const nonce = makeNonce('UI_PRD');
+      const prodId = document.getElementById('prd_prod_id').value;
+      const rcpVer = document.getElementById('prd_rcp_ver').value;
+      const outQty = Number(document.getElementById('prd_out_qty').value);
+
+      runServer(btn, 'ksCreateProductionOrder', {
+        nonce: nonce + '_PO',
+        product_id: prodId,
+        recipe_id: rcpVer.split('-V')[0] || rcpVer,
+        recipe_version_id: rcpVer,
+        planned_quantity_kg: outQty
+      }, poRes => {
+        google.script.run
+          .withSuccessHandler(() => {
+            google.script.run
+              .withSuccessHandler(outRes => {
+                showStatus(true, 'Production Posted! Batch: ' + poRes.production_order_id + ' | Bulk Lot: ' + outRes.output_lot_id + ' (PENDING_QC)');
+              })
+              .withFailureHandler(e => showStatus(false, 'Output Error: ' + e.message))
+              .ksRecordProductionOutputAndLoss({
+                nonce: nonce + '_OUT',
+                production_batch_id: poRes.production_order_id,
+                product_id: prodId,
+                output_quantity_kg: outQty,
+                loss_quantity_kg: Number(document.getElementById('prd_loss_qty').value),
+                loss_reason: document.getElementById('prd_loss_reason').value
+              });
+          })
+          .withFailureHandler(e => showStatus(false, 'Consumption Error: ' + e.message))
+          .ksRecordProductionConsumption({
+            nonce: nonce + '_CON',
+            production_batch_id: poRes.production_order_id,
+            raw_material_id: document.getElementById('prd_rm_id').value,
+            inventory_lot_id: document.getElementById('prd_rm_lot').value,
+            actual_quantity: Number(document.getElementById('prd_rm_qty').value),
+            unit: 'KG'
+          });
+      });
+    }
+
+    function submitQuality(btn) {
+      runServer(btn, 'ksRecordQualityRelease', {
+        nonce: makeNonce('UI_QC'),
+        product_lot_id: document.getElementById('qc_lot_id').value,
+        parameter_name: document.getElementById('qc_param').value,
+        measured_value: document.getElementById('qc_val').value,
+        release_status: document.getElementById('qc_decision').value
+      }, res => {
+        showStatus(true, 'QC Recorded (' + res.finished_qc_id + '): Lot ' + res.product_lot_id + ' is now ' + res.release_status);
+      });
+    }
+
+    function submitPackaging(btn) {
+      runServer(btn, 'ksRecordPackagingOutput', {
+        nonce: makeNonce('UI_PKG'),
+        packaging_batch_id: document.getElementById('pkg_batch_id').value,
+        bulk_lot_id: document.getElementById('pkg_bulk_lot').value,
+        product_id: document.getElementById('pkg_prod_id').value,
+        sku: document.getElementById('pkg_sku').value,
+        pack_weight_g: Number(document.getElementById('pkg_weight').value),
+        packet_count: Number(document.getElementById('pkg_count').value)
+      }, res => {
+        showStatus(true, 'Packaged ' + res.packet_count + ' pkts (' + res.net_weight_kg + ' KG)! FG Lot: ' + res.finished_sku_lot_id);
+      });
+    }
+
+    function submitSales(btn) {
+      const sku = document.getElementById('sal_sku').value;
+      runServer(btn, 'ksUiSubmitSalesEntry', {
+        nonce: makeNonce('UI_SAL'),
+        customer_id: document.getElementById('sal_cust_id').value,
+        customer_name_snapshot: document.getElementById('sal_cust_name').value,
+        channel_id: document.getElementById('sal_channel').value,
+        issue_invoice_now: document.getElementById('sal_issue_inv').checked,
+        items: [{
+          product_id: sku,
+          sku: sku,
+          product_name_snapshot: sku,
+          pack_weight_g: Number(document.getElementById('sal_pack_g').value),
+          quantity: Number(document.getElementById('sal_qty').value),
+          unit_price: Number(document.getElementById('sal_price').value)
+        }]
+      }, res => {
+        const invText = res.sales_invoice ? ' | Invoice: ' + res.sales_invoice.sales_invoice_id : '';
+        showStatus(true, 'Order Saved: ' + res.sales_order.sales_order_id + invText + ' | Total: INR ' + res.sales_order.grand_total);
+      });
+    }
+
+    function submitReceipt(btn) {
+      runServer(btn, 'ksRecordCustomerReceiptAndAllocation', {
+        nonce: makeNonce('UI_RCPT'),
+        customer_id: document.getElementById('fin_cust_id').value,
+        sales_invoice_id: document.getElementById('fin_inv_id').value,
+        amount_received: Number(document.getElementById('fin_rcpt_amt').value),
+        payment_method_id: document.getElementById('fin_rcpt_mode').value,
+        transaction_reference: document.getElementById('fin_rcpt_ref').value
+      }, res => {
+        showStatus(true, 'Receipt Saved: ' + res.customer_payment_id + (res.allocation_id ? ' | Allocated: ' + res.allocation_id : ''));
+      });
+    }
+
+    function submitExpense(btn) {
+      runServer(btn, 'ksUiSubmitExpenseVoucher', {
+        nonce: makeNonce('UI_EXP'),
+        expense_date: document.getElementById('exp_date').value,
+        amount: Number(document.getElementById('exp_amt').value),
+        payee: document.getElementById('exp_payee').value,
+        expense_account: document.getElementById('exp_acct').value,
+        payment_account: document.getElementById('exp_pay_acct').value,
+        purpose: document.getElementById('exp_purpose').value
+      }, res => {
+        showStatus(true, 'Expense Posted! Journal Voucher: ' + res.journal_voucher_id + ' (INR ' + res.balanced_amount + ')');
+      });
+    }
+
+    // Initialize role-restricted UI on load
+    (function init() {
+      document.getElementById('userBadge').textContent = USER_CTX.name + ' (' + USER_CTX.role + ')';
+      document.getElementById('exp_date').valueAsDate = new Date();
+      const allowed = ROLE_TABS[USER_CTX.role] || [];
+      ['purchase', 'production', 'quality', 'packaging', 'sales', 'finance'].forEach(t => {
+        if (!allowed.includes(t)) {
+          document.getElementById('btn-' + t).classList.add('hidden');
+        }
+      });
+      const initial = allowed.includes(DEFAULT_TAB) ? DEFAULT_TAB : (allowed[0] || '');
+      if (initial) {
+        switchTab(initial);
+      } else {
+        showStatus(false, 'Read-only or unauthorized role: no data-entry forms permitted.');
+      }
+    })();
+  </script>
+</body>
+</html>
