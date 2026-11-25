@@ -1,0 +1,16 @@
+KAWAD SWAD ERP - MISSION 51B-1R-E2G INPUT BUNDLE
+
+This bundle contains the exact required input documents and original Phase 0/1 prompt.
+
+ACTION:
+1. Upload this ZIP to the existing Gemini Studio project.
+2. Extract the ZIP in the project workspace if Gemini cannot inspect ZIP contents directly.
+3. Verify the SHA-256 of Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip against:
+   68c80c8a0c9d64dfd80716bfe39a92c1d0541dbfcc3855a03ab1a994ea6b50d7
+4. Run the included Kawad_Swad_Mission_51B1R_E2G_Gemini_Phase_0_1_Prompt.txt exactly as written.
+5. Return one consolidated Phase 0/1 report and all requested deliverables in one response.
+
+The three baseline/audit documents and source archive are included under their exact original filenames. Do not substitute, rename, edit, or regenerate them.
+
+SCOPE:
+Phase 0 and Phase 1 only. Read-only source pinning and static design reconciliation. No implementation, code edits, tests, builds, lint, typechecks, Apps Script execution, live connections, sheet writes, schema changes, deployment, or production mutation.

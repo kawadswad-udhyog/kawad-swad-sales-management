@@ -1,0 +1,168 @@
+KAWAD SWAD ERP
+GEMINI STUDIO MISSION PROMPT
+MISSION 51B-1R-E2G
+PHASE 0 + PHASE 1 ONLY: SOURCE PINNING AND DESIGN RECONCILIATION
+
+INPUT DOCUMENTS
+1. Kawad_Swad_Mission_51B1R_E2F_Owner_Decision_and_Technical_Baseline.txt
+2. Kawad_Swad_Master_Apps_Script_Security_Repair_Blueprint_v1.0.txt
+3. Mission_51B1R_E2D_Complete_Apps_Script_Audit.txt
+4. Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip
+
+Use the exact files supplied by the Owner. Do not substitute an older archive or a similarly named file. If any input is missing, stop and report it.
+
+MISSION PURPOSE
+Prepare a complete, evidence-backed source-only reconciliation of the resolved technical design baseline against the supplied Apps Script source. Identify the exact proposed repair scope and all remaining decisions. This mission is planning and static inspection only.
+
+ROLE
+You are the source analyst and repair-design proposer. You are not authorized to implement, execute, test, deploy, or change anything.
+
+ABSOLUTE RESTRICTIONS
+- Do not edit, save, reformat, rename, delete, generate replacement or overwrite any supplied source file.
+- Do not connect to Google services, Apps Script, Google Sheets, Render, production APIs or any live system.
+- Do not execute Apps Script functions, menus, triggers, web-app requests or repair utilities.
+- Do not change Script Properties, secrets, OAuth scopes, permissions, service accounts, triggers, deployments or settings.
+- Do not create commits, branches, pushes, releases or deployments.
+- Do not run tests, builds, typechecks, lint, runtime checks or test suites.
+- Do not perform migrations, resets, cleanup, data restoration or spreadsheet writes.
+- Do not expose secrets, tokens, credentials or confidential employee information.
+- Preserve the clean/empty database boundary. Never restore pre-reset business records.
+- Google Sheets remains the authoritative core business database.
+- Apps Script remains the sole governed business-write owner.
+- FastAPI remains authentication/authorization, read/query and controlled signed-forwarding layer. It must not become a second business posting owner or directly write Sheets through an alternate path.
+- React remains UI only.
+- No schema, header, tab, ID, formula or ledger changes are authorized.
+- No assumptions may be represented as approved policy.
+
+PHASE 0: SOURCE PINNING AND COMPLETENESS
+1. Compute SHA-256 of the supplied source ZIP. Expected:
+   68c80c8a0c9d64dfd80716bfe39a92c1d0541dbfcc3855a03ab1a994ea6b50d7
+2. If the hash differs, STOP. Report actual and expected hashes. Do not proceed using an unapproved substitute.
+3. Produce a complete archive inventory with path, extension, byte size and SHA-256 for every entry.
+4. Confirm archive integrity and identify duplicate paths, unexpected files and missing expected files.
+5. Treat the archive as a supplied source snapshot, not proof of exact live-project parity.
+6. List all completeness limitations. Do not claim live completeness or active deployment identity from the ZIP.
+7. Preserve the archive unchanged.
+
+PHASE 1: DESIGN RECONCILIATION
+A. Function and write inventory
+1. Reconcile the E2D count of 95 mutation-bearing entries against the exact source.
+2. List every one of the 95 entries with file, function, source line range, mutation capability, target sheet/table where demonstrable, direct callers, callees, guard evidence and proposed classification.
+3. Inventory every public/global callable function, including functions that do not directly write but can reach a writer.
+4. Trace every HTML sidebar callback, including generic/dynamic callback helpers and their runtime function-name sources.
+5. Trace all bridge, menu, trigger, editor and internal call paths.
+6. Do not rely on token counts alone. Do not treat absence of an auth-token match as proof of vulnerability, or presence of a helper name as proof of a valid guard.
+7. If any function or call chain cannot be resolved statically, mark it UNKNOWN and explain exactly why.
+
+B. D01-D09 mapping
+For each defect D01-D09, provide:
+- exact source file and function;
+- line range or nearest precise locator;
+- supporting source excerpt or exact behavior;
+- callers and reachable mutation paths;
+- current observed behavior;
+- proposed repair;
+- acceptance criteria;
+- dependencies and unresolved evidence.
+Do not claim a defect is fixed. This is a proposal only.
+
+C. Apply E2F decisions
+Use the E2F decision baseline as the target design. Reconcile:
+- O-01 target architecture;
+- O-02 HMAC-SHA-256 signed gateway assertion, canonical signed fields, timestamp/expiry, replay handling and trusted actor context;
+- O-03 closed action registry and server-side authorization;
+- O-04 KEEP READ-ONLY / ROUTE THROUGH CENTRAL POSTING OWNER / INTERNALIZE / OWNER-ONLY ADMIN / RETIRE AFTER APPROVAL / DISABLE FROM PUBLIC ROUTE;
+- O-05 separate allowlisted reporting-output writer, unable to mutate canonical business tables;
+- O-06 CONFIRMED only after durable business write, required related records, ID allocation, idempotency, mandatory audit and complete readback; otherwise REJECTED, CONFLICT or UNKNOWN/RECOVERY_REQUIRED as appropriate;
+- O-07 authenticated gateway-only privileged write endpoint; no anonymous privileged write route;
+- O-08 isolated patch proposal only after separate Owner authorization.
+
+D. Action registry proposal
+Derive proposed write actions from actual existing UI, API and Apps Script workflows.
+For each action, show:
+- exact action key proposed;
+- source entry points and call paths;
+- fixed target table(s), only where proven;
+- approved field mapping, only where proven;
+- permission requirement and source policy evidence;
+- ID and idempotency requirements;
+- related-record transaction boundaries;
+- audit/readback requirements;
+- unresolved mappings.
+Do not invent action keys as if they already exist. Mark new names as proposed identifiers.
+Do not enable an action if its target table, fields, permissions or business workflow cannot be supported by evidence.
+
+E. Function classification
+Classify every writer and callable function using only:
+- KEEP AS READ-ONLY
+- ROUTE THROUGH CENTRAL POSTING OWNER
+- INTERNALIZE
+- OWNER-ONLY ADMIN
+- RETIRE AFTER APPROVAL
+- DISABLE FROM PUBLIC ROUTE
+- UNKNOWN / NEEDS OWNER DECISION
+Give evidence for every classification. Do not delete or edit anything.
+
+F. Authentication and transaction contract
+Provide a technical proposal for:
+- deterministic canonical request representation;
+- HMAC-SHA-256 signed fields;
+- key version and rotation approach;
+- timestamp and expiry window (propose a value and explain trade-offs, label it proposed);
+- nonce/idempotency storage and unique identity;
+- constant-time signature comparison;
+- trusted actor resolution;
+- conflict handling when same key has changed actor/action/target/payload;
+- durable allocation and readback;
+- mandatory audit behavior;
+- UNKNOWN/RECOVERY_REQUIRED reconciliation;
+- versioned response schema.
+Do not create or provision secrets. Do not implement.
+
+G. Deployment evidence
+State exactly what can and cannot be concluded from supplied source. List the separate read-only evidence required to reconcile Overview status versus Deployment Manager status. Do not access or change live settings.
+
+H. File change proposal
+List each source file that would need to change in a later isolated patch, why it changes, and which D01-D09/acceptance criteria it addresses. Identify any proposed new file and justify why it is needed. No file may be changed in this mission.
+
+I. Remaining decision register
+Separate:
+- decisions resolved by E2F;
+- business policy requiring Owner decision;
+- CA/legal/professional verification;
+- workbook/schema mapping;
+- deployment/runtime evidence;
+- technical uncertainty.
+For each pending item, give a safe default. Unresolved permissions, financial thresholds, accounting treatment and legal rules must remain disabled/pending, not guessed.
+
+REQUIRED DELIVERABLES
+1. Phase 0 source pinning report.
+2. Complete file/hash inventory.
+3. Full 95-entry mutation matrix.
+4. Complete global/callable function and reachability matrix.
+5. Sidebar dynamic callback map.
+6. D01-D09 evidence and repair mapping.
+7. Closed action registry proposal.
+8. Function classification register.
+9. Authentication/idempotency/response contract proposal.
+10. Reporting-output writer boundary.
+11. Deployment evidence gap report.
+12. File-by-file isolated patch proposal.
+13. Remaining decision register.
+14. Explicit scope-compliance statement confirming no edits, executions, tests, live connections or mutations occurred.
+
+STOP CONDITION
+After producing the reports, STOP and wait for Owner/GPT independent review.
+Do not begin Phase 2 coding or isolated patch creation.
+Do not run tests or verification.
+Do not change any live system.
+
+FINAL STATUS MUST SAY:
+Phase 0: COMPLETE or BLOCKED, with evidence.
+Phase 1: COMPLETE or BLOCKED, with evidence.
+Implementation: NOT AUTHORIZED.
+Testing: NOT AUTHORIZED.
+Production deployment/mutation: NOT AUTHORIZED.
+TX-FINAL-03: OPEN / BLOCKED until implementation and independent evidence are completed.
+
+END OF MISSION PROMPT

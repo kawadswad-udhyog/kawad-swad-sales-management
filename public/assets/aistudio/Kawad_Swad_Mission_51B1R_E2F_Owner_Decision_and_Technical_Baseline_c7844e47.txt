@@ -1,0 +1,431 @@
+KAWAD SWAD ERP
+MISSION 51B-1R-E2F
+OWNER DECISION RESOLUTION AND TECHNICAL DESIGN BASELINE
+Prepared: 24 November 2026
+Status: RECOMMENDED DECISION BASELINE FOR OWNER ADOPTION
+Scope: Resolve O-01 to O-08 from the Master Apps Script Security Repair Blueprint v1.0.
+Implementation, testing and production deployment remain NOT AUTHORIZED.
+
+======================================================================
+1. DECISION RULE
+======================================================================
+
+This document resolves technical design choices wherever the existing Kawad Swad
+policy sources provide enough direction. It does not invent accounting, tax,
+employment, approval-limit or other business policies that require Owner, CA,
+legal or other professional authority.
+
+Use these labels:
+RESOLVED DESIGN: recommended technical rule is definite.
+CONDITIONALLY RESOLVED: default is defined, but a named authority must confirm
+a specific business or professional matter.
+PENDING EVIDENCE: decision depends on source inventory or live configuration evidence.
+
+The governing policy source remains the Kawad Swad ERP Complete Master Policy
+Constitution v1.2, subject to Owner adoption. Google Sheets remains the core
+business source of truth. Apps Script owns governed business writes. FastAPI
+authenticates, authorizes, reads and forwards signed requests. React is UI only.
+No historical business records are to be restored.
+
+======================================================================
+2. O-01: TARGET ARCHITECTURE
+STATUS: RESOLVED DESIGN
+======================================================================
+
+Adopt this architecture as the target:
+
+1. Google Sheets:
+   Sole authoritative core business database.
+
+2. Apps Script:
+   Sole governed business-write owner for canonical business transactions.
+   It validates, applies approved business commands, allocates IDs, records
+   required audit evidence, and verifies durable readback.
+
+3. FastAPI:
+   Authentication, server-side role/permission checks, read/query APIs,
+   request validation, signed forwarding to Apps Script, and response handling.
+   FastAPI must not write business records directly to Sheets or maintain a
+   competing authoritative posting database.
+
+4. React:
+   Presentation and user interaction only. No trusted role, actor identity,
+   target sheet, ID or business posting authority may originate from the UI.
+
+5. MongoDB:
+   Must not be a competing or sole authoritative business store. Any permitted
+   technical cache/session use must be non-authoritative and reconstructible.
+
+6. Reads and writes:
+   Separate read/query routes from write commands. A read route must not mutate
+   business records as a side effect.
+
+7. One ordinary business posting boundary:
+   All ordinary business mutations converge on one central Apps Script posting
+   owner. Domain engines validate and prepare commands; they do not directly
+   mutate canonical business tables.
+
+8. Administrative operations:
+   Destructive reset, cleanup, migration and cutover operations are outside
+   ordinary business posting. They require a separate owner-only administrative
+   path and separate operation authorization.
+
+No schema, tab, header, ID, formula, ledger or historical data change is included
+in this architecture decision.
+
+======================================================================
+3. O-02: TRUSTED GATEWAY AUTHENTICATION AND SIGNING
+STATUS: RESOLVED DESIGN; SECRET PROVISIONING REQUIRES SEPARATE AUTHORIZATION
+======================================================================
+
+Adopt a gateway-to-Apps-Script signed request contract.
+
+A. User authentication
+- FastAPI authenticates the human user using the ERP's approved authentication
+  mechanism.
+- FastAPI resolves the user's active status and permissions from the approved
+  user/role source.
+- The browser cannot assert its own trusted actor ID, role or permission.
+- The Apps Script bridge does not trust actor_user_id, actor_role, created_by,
+  role or permission fields supplied in the business payload.
+
+B. Gateway assertion
+FastAPI forwards a signed, time-bound assertion containing:
+- contract_version
+- request_id
+- action
+- idempotency_key
+- issued_at and expiry
+- verified actor identifier
+- authenticated gateway/service identity
+- normalized payload
+- payload digest
+- signature
+
+The signature must cover a deterministic canonical representation of all
+security-relevant fields, including method, action, request ID, timestamp,
+nonce/idempotency key, actor scope and payload digest.
+
+C. Apps Script verification
+- Missing, blank, malformed, invalid, expired or replayed signatures reject.
+- Authentication occurs before any write-capable handler or sheet lookup that
+  can lead to mutation.
+- Use constant-time signature comparison.
+- Enforce a short, documented clock-skew window.
+- Replay identity is stored durably and bound to actor scope, action, target,
+  payload digest and request identity.
+- Unknown contract versions reject.
+
+D. Signing algorithm and secret handling
+- Use HMAC-SHA-256 for the initial gateway assertion contract.
+- Keep the secret only in FastAPI's protected environment/secret configuration
+  and Apps Script Script Properties; never in React, source files, logs, reports,
+  URLs or ordinary payloads.
+- Restrict Apps Script project editor access because project editors may be
+  able to access script configuration and source.
+- Secret creation, rotation and Script Properties changes are not authorized
+  by this design document. They require a separate credential-management step.
+- Do not reuse a user password or an unrelated platform credential as the HMAC
+  secret.
+- Define rotation with an overlap window and key version identifier before
+  implementation.
+
+E. Failure behavior
+Every authentication or authorization failure rejects before mutation.
+Do not fall back to unsigned requests, anonymous privileged writes or caller-
+supplied roles.
+
+======================================================================
+4. O-03: ACTION REGISTRY AND ROLE MATRIX
+STATUS: DESIGN RESOLVED; FINAL ACTION ENUMERATION PENDING SOURCE INVENTORY
+======================================================================
+
+A. Closed action registry
+- Every write action must have an explicit immutable registry entry.
+- Each entry defines: action key, domain handler, fixed target table(s), allowed
+  fields, validation schema, required permission, ID policy, idempotency policy,
+  related-record transaction contract and audit requirement.
+- The caller may supply an action and business payload only.
+- The caller cannot supply a sheet/tab/table destination or arbitrary field map.
+- Unknown, disabled, retired or unregistered actions reject by default.
+- No generic target-sheet writer or unknown-action fallback is allowed.
+
+B. Registry construction
+- Gemini must derive the proposed registry from all actual UI callbacks,
+  FastAPI routes, Apps Script global functions and the 95 mutation-bearing
+  functions identified by the E2D audit.
+- Include indirect/dynamic sidebar calls and all reachable writer call chains.
+- Map every action to the existing approved workbook table/header contract.
+- Do not invent table names, columns, fields, role names or business workflows.
+- Where mapping is unclear, mark NEEDS OWNER DECISION or NEEDS WORKBOOK MAPPING.
+- No action becomes enabled merely because it exists in source code.
+
+C. Role/permission model
+- Use the approved Users and role/permission records as the source of active
+  user identity and role assignment.
+- Use permission keys per action, not client-supplied role labels.
+- Enforce authorization in FastAPI and independently at the Apps Script
+  governed-write boundary.
+- Every externally callable Apps Script function must either enforce its own
+  server-side guard or be made internal and reachable only through the guarded
+  dispatcher.
+- Menu visibility and hidden buttons are not security controls.
+- Do not invent new roles or assign permissions to named employees.
+- Preserve the existing approved role matrix. If the workbook/policy does not
+  define a permission for an action, that action remains disabled until Owner
+  approves the permission.
+
+D. Suggested permission shape
+Use permission identifiers such as domain.action, for example sales.create or
+inventory.receipt, only after matching them to existing policy and workflows.
+These are naming examples, not approved permissions.
+
+======================================================================
+5. O-04: LEGACY, MIGRATION, RESET AND MAINTENANCE FUNCTIONS
+STATUS: RESOLVED CLASSIFICATION RULE; FUNCTION-BY-FUNCTION DECISIONS PENDING
+======================================================================
+
+Classify each function into exactly one category:
+
+1. KEEP AS READ-ONLY:
+   No mutation, no hidden side effect, authorization appropriate to data access.
+
+2. ROUTE THROUGH CENTRAL POSTING OWNER:
+   Ordinary business transaction mutation.
+
+3. INTERNALIZE:
+   Helper may remain but must not be externally callable or independently
+   reachable as an unguarded global business operation.
+
+4. OWNER-ONLY ADMIN:
+   Destructive, migration, reset, cleanup, cutover, schema or repair capability.
+   Isolated from public bridge and ordinary sidebar. Requires an explicit
+   operation ID, exact target workbook identity, target allowlist, preflight
+   fingerprint, dry-run report, separate commit authorization, expiry,
+   idempotency and audit evidence.
+
+5. RETIRE AFTER OWNER APPROVAL:
+   Duplicate or obsolete function with no approved operational use. Do not
+   delete it automatically during the security repair.
+
+6. DISABLE FROM PUBLIC ROUTE:
+   Function may remain for controlled editor/admin use but cannot be called
+   through public web-app action dispatch.
+
+Rules:
+- No automatic reset, cleanup, migration, deletion or historical restoration.
+- Do not run any destructive function during this mission.
+- Do not remove legacy functions until call sites, dependencies and operational
+  purpose are documented and Owner approves retirement.
+- All 95 write-bearing entries and all public/global callable functions must
+  receive a classification and call-chain evidence.
+
+======================================================================
+6. O-05: REPORT AND OUTPUT WRITES
+STATUS: RESOLVED DESIGN
+======================================================================
+
+Use a separate governed reporting-output writer, not the canonical business
+transaction posting owner.
+
+Rules:
+- Reporting writer is a distinct, narrowly scoped component.
+- It may write only to an explicit allowlist of report/output tabs.
+- It cannot write to canonical business tables, transaction ledgers, inventory
+  movement, accounting journals, sales records, employee records or master data.
+- It cannot allocate business IDs or alter source transactions.
+- Report outputs must be reproducible from authoritative source records.
+- Report writes require appropriate authorization and audit metadata.
+- If a report is stored as a snapshot, identify it as a derived report, not a
+  source transaction.
+- Any output destination not proven to be a report/output tab remains disabled
+  pending workbook mapping and Owner approval.
+
+======================================================================
+7. O-06: MANDATORY AUDIT FAILURE AND UNKNOWN RECOVERY
+STATUS: RESOLVED DESIGN
+======================================================================
+
+A. CONFIRMED
+Return CONFIRMED only when all required steps for the transaction are durable
+and verified:
+- business record(s) written;
+- required related records/ledgers written;
+- canonical ID allocation verified;
+- idempotency/transaction record verified;
+- mandatory audit evidence verified;
+- complete readback of IDs, values and relationship keys verified.
+
+B. Audit failure
+- If the business write has not started, reject/fail safely.
+- If the business write may have occurred but mandatory audit evidence is
+  missing or uncertain, return UNKNOWN / RECOVERY_REQUIRED.
+- Do not claim FAILED if the transaction may have committed.
+- Do not claim CONFIRMED without mandatory audit evidence.
+- Do not blindly retry by creating a new transaction.
+
+C. Recovery
+- Recovery uses the exact original request identity and idempotency key.
+- Reconcile business rows, related ledgers, allocation, audit and readback.
+- If all required durable evidence is found and consistent, mark the original
+  request CONFIRMED.
+- If no business mutation occurred and this is proven, mark REJECTED/FAILED
+  according to the response contract.
+- If state remains partial or ambiguous, keep UNKNOWN / RECOVERY_REQUIRED and
+  route to an authorized reconciliation queue.
+- Never create a duplicate transaction to resolve uncertainty.
+
+D. Reversal
+- Do not silently edit or delete a committed transaction to repair it.
+- Use approved reversal/correction transactions where the business/accounting
+  policy requires them.
+- Exact accounting treatment, approval thresholds and journal mappings remain
+  governed by Owner/CA-approved accounting policy.
+
+E. Response states
+Use a versioned response contract with at least:
+CONFIRMED, REJECTED, CONFLICT, UNKNOWN, RECOVERY_REQUIRED.
+Do not expose internal secrets or sensitive employee data in responses.
+
+======================================================================
+8. O-07: DEPLOYMENT ACCESS MODEL
+STATUS: RESOLVED TARGET; CURRENT DEPLOYMENT FACTS PENDING EVIDENCE
+======================================================================
+
+Target:
+- No anonymous/public access to a privileged write endpoint.
+- Authenticated gateway-only access for write requests.
+- Least privilege for service identities and human project editors.
+- No deployment or OAuth scope change during design or patch preparation.
+- Read-only endpoints, if any, must have their own explicit access policy and
+  must not share a privileged anonymous write route.
+
+Before any deployment decision, collect evidence for:
+- active deployment ID and version;
+- effective URL and access setting;
+- execution identity;
+- deployment owner;
+- source version/hash associated with the deployment;
+- OAuth scopes;
+- service account/editor access;
+- evidence date and collector.
+
+Reconcile the previously observed difference between the Overview status
+"Deployed" and Deployment Manager showing no active or archived deployment.
+Neither screenshot alone proves the effective deployed write endpoint.
+
+If effective access cannot be proven, deployment status remains UNKNOWN and
+production deployment is blocked. Do not change access settings to make the
+evidence appear consistent.
+
+======================================================================
+9. O-08: ISOLATED PATCH PREPARATION
+STATUS: RECOMMENDED APPROVAL BOUNDARY
+======================================================================
+
+Approve a source-only isolated patch proposal after this decision baseline is
+adopted and the Phase 0/1 evidence is complete.
+
+Allowed after separate approval:
+- work on a separate local copy/branch/package;
+- edit only approved source files;
+- preserve original archive unchanged;
+- provide full diff, changed-file list, unchanged-file hash manifest,
+  function-level authorization matrix, action registry, request/response
+  contract, rollback plan and migration-free implementation plan.
+
+Not included:
+- live Apps Script project edits;
+- Apps Script execution;
+- Google Sheet writes or schema changes;
+- Script Properties or secret provisioning;
+- OAuth scope or API enablement changes;
+- trigger or deployment changes;
+- GitHub push/merge;
+- tests, builds, typechecks, lint, runtime checks or live verification;
+- production deployment.
+
+Testing remains prohibited until development is complete and the Owner
+separately authorizes the test phase, as required by the Master Constitution.
+
+======================================================================
+10. BUSINESS POLICY ITEMS THAT MUST NOT BE INVENTED
+======================================================================
+
+These are not technical design choices and cannot responsibly be finalized by
+an AI from the available documents alone:
+
+1. Accounting treatment, chart of accounts, tax treatment and journal mapping:
+   CA/professional verification required where the policy source says so.
+
+2. Financial approval thresholds, payment limits, discount limits, credit limits,
+   write-off limits and exception authority:
+   Use existing approved policy only. If absent, the action stays disabled until
+   Owner approves a threshold.
+
+3. Employee-specific roles, permissions, salary, incentive, disciplinary or
+   confidential HR decisions:
+   Do not infer or disclose. Use the approved confidential policy and authorized
+   Owner decisions only.
+
+4. Statutory, tax, FSSAI, labour and other legal/compliance interpretations:
+   Verify against applicable law and qualified professional advice. Do not
+   encode an assumption as a system rule.
+
+5. Exact action-to-table mapping and field allowlists:
+   Must be derived from the approved workbook dictionary and physical headers,
+   not invented from function names or UI labels.
+
+6. Whether a legacy feature is still operationally required:
+   Requires dependency evidence and Owner decision before retirement.
+
+Safe default for every unresolved policy:
+DISABLED / BLOCKED, not guessed and not silently permitted.
+
+======================================================================
+11. REQUIRED GEMINI DELIVERABLES AFTER THIS BASELINE
+======================================================================
+
+Gemini Studio must now produce a source-only Phase 0/1 design reconciliation:
+1. Verify exact source archive SHA-256.
+2. Inventory every file and all 95 mutation-bearing entries.
+3. Inventory all public/global callable functions and dynamic sidebar callbacks.
+4. Map D01-D09 to exact functions, call paths and source locations.
+5. Build the complete closed action registry proposal from actual workflows.
+6. Build the function-level authorization and reachability matrix.
+7. Classify every legacy/admin/destructive function.
+8. Identify exact report/output tab destinations and separate reporting writer scope.
+9. Specify HMAC request canonicalization, timestamp window, key versioning,
+   replay record and response contract.
+10. Specify durable transaction/idempotency and UNKNOWN recovery sequence.
+11. List every required source file change and why.
+12. List all unresolved workbook, Owner, CA, legal or runtime evidence items.
+13. Stop. No coding, tests, live connections or changes.
+
+Gemini must not claim that a design proposal closes TX-FINAL-03. TX-FINAL-03
+remains OPEN/BLOCKED until approved repairs are implemented and independently
+evidenced at the required level.
+
+======================================================================
+12. FINAL DECISION REGISTER
+======================================================================
+
+O-01 Architecture: RESOLVED DESIGN.
+O-02 Gateway authentication/signing: RESOLVED DESIGN; secret provisioning
+     requires separate authorization.
+O-03 Action registry/RBAC: DESIGN RESOLVED; exact action and permission
+     enumeration awaits complete source/workbook mapping.
+O-04 Legacy/admin functions: CLASSIFICATION RULE RESOLVED; per-function
+     retain/retire decision awaits complete dependency inventory and Owner review.
+O-05 Report/output writes: RESOLVED DESIGN; exact output-tab allowlist awaits
+     workbook evidence.
+O-06 Audit failure/UNKNOWN recovery: RESOLVED DESIGN.
+O-07 Deployment access: TARGET RESOLVED; current deployment facts await evidence.
+O-08 Isolated patch: RECOMMENDED as next separately authorized activity only.
+
+Implementation: NOT AUTHORIZED.
+Testing: NOT AUTHORIZED.
+Production deployment/mutation: NOT AUTHORIZED.
+TX-FINAL-03: OPEN / BLOCKED.
+
+END OF DECISION BASELINE

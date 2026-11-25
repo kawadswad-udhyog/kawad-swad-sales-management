@@ -1,0 +1,202 @@
+KAWAD SWAD ERP
+MISSION 51B-1R-E2D
+COMPLETE OFFLINE APPS SCRIPT SECURITY, AUTHORIZATION, ENTRY-POINT AND WRITE-PATH AUDIT
+Date: 24 November 2026
+Project: Kawad_Swad_Sales_Management
+Source: Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip
+Archive SHA-256: 68c80c8a0c9d64dfd80716bfe39a92c1d0541dbfcc3855a03ab1a994ea6b50d7
+
+FINAL AUDIT VERDICT: TX-FINAL-03 = OPEN / BLOCKED. The supplied source does not establish an exclusive, enforceable Apps Script Single Write Owner contract.
+
+1. SCOPE AND METHOD
+Inspected all 43 archive entries: 40 .js files, one HTML sidebar, appsscript.json, and source inventory/hash text. Parsed 318 top-level function declarations with brace-aware extraction. Identified 95 functions containing direct Spreadsheet mutation or known writer-helper calls. Inspected WebAppBridge.js, AuthAndMenu.js, sidebar callback references, manifest, writer/allocator helpers, and reset/cutover utilities. This was an offline static review only.
+Raw static scan totals: 142 spreadsheet mutation-token matches; 214 getRange-token matches; 24 Drive/makeCopy/setTrashed-token matches; 12 PropertiesService/property-mutation matches; 25 LockService matches. These are textual pattern counts, not unique transactions or proof of live use.
+
+2. SOURCE COMPLETENESS AND MANIFEST
+Archive ZIP CRC integrity was previously checked and passed. Inventory claims a complete local clasp export, but file-by-file parity against the live editor was not independently established. Files are named .js rather than .gs in the archive; this is compatible with local export packaging but does not itself establish completeness.
+Manifest appsscript.json: V8 runtime; Asia/Kolkata timezone; exceptionLogging STACKDRIVER; webapp.executeAs USER_DEPLOYING; webapp.access ANYONE_ANONYMOUS.
+Risk interpretation: if this manifest corresponds to an active deployed version, anonymous access combined with execution as deploying user is a serious trust-boundary risk. Static manifest does not prove deployment/version identity or actual endpoint reachability. Earlier UI screenshots conflict: Overview showed project status Deployed, while deployment manager view showed no deployment. These views must be reconciled with deployment-specific evidence.
+
+3. CRITICAL WEB-APP BRIDGE FINDINGS
+File WebAppBridge.js; doPost is the HTTP entry point found in this archive.
+3.1 HMAC is optional in current source. doPost requires SALES_APPS_SCRIPT_SHARED_SECRET to exist and be at least 32 characters. It extracts signature from query or body, but compares HMAC only inside `if (providedSig)`. If signature is absent, the HMAC check is skipped and execution proceeds. This is a source-observed authentication defect. Live exploitability and deployed-source identity are unverified.
+3.2 Caller-controlled actor fields. actor_user_id and actor_role are read directly from request body. The bridge passes actorUserId/actorRole to routing, but the shown dispatcher does not authenticate the claimed identity against a trusted user/session record. The generic fallback stores caller-supplied created_by. This is a source-level trust-boundary defect unless an external authenticated envelope is enforced elsewhere; no such verification is visible in doPost.
+3.3 Generic fallback writer. ksWriteCanonicalRowByHeaders_ calls getSheetByName(targetTab), maps caller payload keys to headers, then setValues or appendRow. No target-table allowlist or per-table field allowlist is visible in this function. This is a broad arbitrary-sheet write surface if bridge dispatch can reach the fallback.
+3.4 Dispatch fallback behavior. ksRouteGovernedWrite_ has ten named action branches (raw material receipt, production order, material consumption, production output, quality decision, packaging batch, sales order, sales invoice, customer payment, journal voucher). All other actions fall through to the generic writer. There is no closed default rejection for unknown action names in the shown code.
+3.5 Replay/idempotency defect. ksFindByNonce_ searches IdAllocations by nonce only and returns allocated_id/tab_name. It does not compare action, target table, payload hash, actor, or transaction fingerprint. A matching nonce returns CONFIRMED before route execution. Bridge allocation recording is separate from IdAllocator.js. A duplicate nonce across unrelated actions/tables can therefore be misclassified as a successful replay, subject to actual sheet contents and callers.
+3.6 Allocation record write. ksRecordIdAllocation_ directly appends to IdAllocations and does not call central allocator/SafeWriter. It may silently return when sheet missing or headers absent, yet doPost still returns CONFIRMED after calling it.
+3.7 Error response. doPost catches all errors and returns REJECTED, but does not expose a stable transaction status/readback protocol in this file. No independent live call was attempted.
+
+4. AUTHENTICATION AND ROLE MODEL
+AuthAndMenu.js defines ksGetCurrentUserContext_ and ksRequireRole_. Context resolves active user by email against Users, with owner fallback. Role guard checks authenticated and allowedRoles. These are positive controls for callers that actually invoke them.
+onOpen builds role-filtered menus. Menu visibility is a user-interface convenience, not a security boundary. Global server functions may still be invoked by authorized script editors or other server-side callers.
+ksUiSubmitExpenseVoucher explicitly calls ksRequireRole_ for OWNER_ADMIN, PA, ACCOUNTS and validates nonce, amount and accounts.
+ksUiSubmitSalesEntry does not itself call ksRequireRole_; it directly calls ksCreateSalesOrder and optionally ksCreateSalesInvoice. The callee bodies must enforce roles on every route. No assumption of upstream protection is accepted without call-chain proof.
+Bridge actor_role is request-controlled in doPost and is not equivalent to ksGetCurrentUserContext_. Role checks in UI context do not authenticate web-app bridge callers.
+
+5. SIDEBAR ENTRY-POINTS
+Sidebar source uses a generic submit helper with a dynamic `[fnName]` callback, plus explicit nested callbacks. Previously identified explicit business callbacks include ksCreateInventoryLotAndReceipt, ksCreateProductionOrder, ksRecordQualityRelease, ksRecordPackagingOutput, ksUiSubmitSalesEntry, ksRecordCustomerReceiptAndAllocation, ksUiSubmitExpenseVoucher, and ksRecordProductionOutputAndLoss. The dynamic helper means the HTML itself does not provide a complete static list of every invoked server function; call sites and function-name arguments must also be enumerated.
+These are callable server-side functions from the sidebar. For each, authorization must be enforced inside the callee or a mandatory central guard. The sidebar's presence alone does not establish effective role enforcement.
+
+6. WRITE-PATH INVENTORY: ALL 95 FUNCTIONS WITH MUTATION TOKENS
+Columns: file:line | function | capability | local auth token | central helper reference | direct ks* calls.
+AccountingEngine.js:42 | ksPostBalancedJournalVoucher | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksAssertOpenFinancialPeriod_,ksLogAudit_,ksLogException_,ksNowIso_,ksRequireRole_
+AuditAndExceptions.js:11 | ksInitGovernanceTabs | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksNowIso_
+AuditAndExceptions.js:60 | ksLogAudit_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksNowIso_,ksResolveActorId_
+AuditAndExceptions.js:97 | ksLogException_ | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksNowIso_
+AuditAndExceptions.js:136 | ksRunPhaseGCoreTest | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=ksAllocateId,ksLogAudit_ | calls=ksAllocateId,ksInitGovernanceTabs,ksLogAudit_
+Code.js:98 | ksApplySafeFoundation | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksLog_,ksNotify_,ksRunPreflight
+Code.js:174 | ksWriteRows_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Code.js:190 | ksLog_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Code.js:1529 | kawadRunConsolidatedProductRecipeInvestigationV1 | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=kspriCol_,kspriGroup_,kspriNorm_,kspriRead_,kspriRowSummary_,kspriText_
+Code.js:1975 | kawadValidateAllApprovedMappings_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Code.js:2046 | kawadApplyAccountMasterRows_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Code.js:2058 | kawadApplyAccountCorrections_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Code.js:2068 | kawadApplyBatchIdRepairs_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Code.js:2078 | kawadApplyStockLinks_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Code.js:2178 | ksGenerateIdForSelectedRow | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksLog_,ksNextUniqueId_
+Code.js:2209 | ksAuditIds | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+DatabaseReconciliationFix.js:132 | ksExecuteDatabaseReconciliation | WRITE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksEnsureColumnsExist_,ksLoadFullFieldDictionaryMap_,ksLogAudit_,ksRequireRole_
+DatabaseReconciliationFix.js:219 | ksFinalizeCleanHeadersAndBaseline | DESTRUCTIVE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksLoadFullFieldDictionaryMap_,ksLogAudit_,ksPurgeTestRowsForCleanCutover,ksRequireRole_
+DatabaseReconciliationFix.js:401 | ksEnsureColumnsExist_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+DictionaryHydrator.js:14 | ksLoadDictionaryIndex_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksGetHeaderMap_
+DictionaryHydrator.js:114 | ksHydrateTableGroupFromDictionary | WRITE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksLoadDictionaryIndex_,ksLogAudit_,ksRequireRole_
+IdAllocator.js:6 | ksAllocateId | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=ksAllocateId,ksAppendAndVerifyRow_ | calls=ksAppendAndVerifyRow_,ksGetHeaderMap_,ksNowIso_
+InventoryEngine.js:27 | ksCreateInventoryLotAndReceipt | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksLogException_,ksNowIso_,ksRequireRole_
+KS_Dictionary_Semantic_Audit_v1_0.js:20 | KS_RUN_DICTIONARY_SEMANTIC_AUDIT | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Live_Schema_Reconciliation_v1_0.js:294 | KS_schemaIsGenericPlaceholder_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_P3_MD_Header_Audit.js:14 | KS_P3_MD_HEADER_AUDIT_V1_0 | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Batch1A_1D_Master_Preflight_v1_0.js:46 | KS_PHASE3_BATCH1_MASTER_PREFLIGHT | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksB1GetOutput_,ksB1ReadRegister_
+KS_Phase3_Batch1A_1D_Master_Preflight_v1_0.js:147 | ksB1GetOutput_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Empty_Reset_v1_3.js:218 | ksP3V13ExecuteEmptyDatabaseReset | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3V13GetBusinessTableNames_
+KS_Phase3_Empty_Reset_v1_4.js:218 | ksP3V14Fingerprint_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Empty_Reset_v1_4.js:294 | ksP3V14ExecuteArmedEmptyDatabaseReset | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3V13GetBusinessTableNames_,ksP3V14ArmEmptyDatabaseReset,ksP3V14Fingerprint_
+KS_Phase3_Field_Mapping_Corrected_v1_0_1.js:34 | ksP3BuildFieldMapping | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3FieldAppendLog_,ksP3FieldAssertTarget_,ksP3FieldGetOwnedTab_,ksP3FieldNorm_,ksP3FieldReadManual_,ksP3FieldRead_
+KS_Phase3_Field_Mapping_Corrected_v1_0_1.js:278 | ksP3FieldAppendLog_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Field_Mapping_Corrected_v1_0_1.js:314 | ksP3FieldGetOwnedTab_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Migration_Control_Corrected_v1_0_1.js:36 | ksP3InstallMigrationControl | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3AssertExactHeader_,ksP3AssertOwnedTabHeader_,ksP3AssertTarget_,ksP3BuildLiveInventory_,ksP3ReplaceGeneratedTab_,ksP3WriteTable_
+KS_Phase3_Migration_Control_Corrected_v1_0_1.js:249 | ksP3ReplaceGeneratedTab_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Migration_Control_Corrected_v1_0_1.js:261 | ksP3WriteTable_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Sheets_First_Master_Foundation_v1_0.js:42 | KS_P3_SHEETS_MASTER_AUDIT | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksMdAssertWorkbook_,ksMdGetOrCreate_
+KS_Phase3_Sheets_First_Master_Foundation_v1_0.js:123 | ksMdAllocate_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksMdAssertHeaders_,ksMdAssertWorkbook_
+KS_Phase3_Sheets_First_Master_Foundation_v1_0.js:193 | ksMdGetOrCreate_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+KS_Phase3_Table_Mapping_Corrected_v1_0_1.js:33 | ksP3BuildTableMapping | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3MapAssertTarget_,ksP3MapGetLog_,ksP3MapGetOwnedTab_,ksP3MapNorm_,ksP3MapReadExistingManual_,ksP3MapRead_
+KS_Phase3_Table_Mapping_Corrected_v1_0_1.js:349 | ksP3MapGetOwnedTab_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+LiveCutoverGate.js:123 | ksCleanAllLegacyScratchTabs | DESTRUCTIVE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksGetProtectedOfficialTabSet_,ksIsLegacyScratchTab_,ksLogAudit_,ksRequireRole_
+LiveCutoverGate.js:158 | ksDeleteUnwantedTabs | DESTRUCTIVE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksGetProtectedOfficialTabSet_,ksLogAudit_,ksRequireRole_
+LiveCutoverGate.js:248 | ksPurgeTestRowsForCleanCutover | DESTRUCTIVE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksLogAudit_,ksRequireRole_
+Phase 3 End-to-End Apps Script v2.0.js:87 | ks3rReport_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Phase 3 End-to-End Apps Script v2.0.js:88 | ks3rLog_ | WRITE | LOCAL AUTH TOKEN | helper=No central writer helper detected | calls=ks3rNeedHeaders_
+Phase 3 End-to-End Apps Script v2.0.js:92 | KS3R_INSTALL_CONTROLS | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ks3rLog_,ks3rSs_
+Phase 3 End-to-End Apps Script v2.0.js:115 | KS3R_APPROVE_ID_POLICY | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ks3rLog_,ks3rNeedHeaders_,ks3rSheet_,ks3rSs_
+Phase 3 End-to-End Apps Script v2.0.js:146 | ks3rReserve_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ks3rDupes_,ks3rNeedHeaders_,ks3rNonblank_,ks3rPolicyApproved_,ks3rSheet_
+Phase 3 End-to-End Apps Script v2.0.js:164 | KS3R_COMMIT_APPROVED_INTAKE | WRITE | LOCAL AUTH TOKEN | helper=No central writer helper detected | calls=ks3rHeaders_,ks3rLog_,ks3rNeedHeaders_,ks3rNonblank_,ks3rPolicyApproved_,ks3rReserve_,ks3rSheet_,ks3rSs_
+Phase 3 Header-Only Preflight Utility v1.0.js:32 | KS_P3_RUN_HEADER_ONLY_PREFLIGHT | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Phase1_Foundation.js:916 | ksP1InstallFoundation | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP1AssertTarget_,ksP1LoadData_,ksP1ValidatePayload_,ksP1WriteIdPolicy_,ksP1WriteOwnedTab_,ksP1WriteRawTab_
+Phase1_Foundation.js:1082 | ksP1WriteRawTab_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Phase2_Live_Preflight.js:26 | ksP2RunLivePreflight | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Phase2_MasterData.js:77 | ksP2InstallMasterData | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP2AppendDeploymentLog_,ksP2AssertWorkbook_,ksP2BuildRules_,ksP2InstallWarningValidations_,ksP2WriteOwnedTab_
+Phase2_MasterData.js:296 | ksP2AllocateId | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP2AssertWorkbook_,ksP2FindHeaderColumn_
+Phase2_MasterData.js:389 | ksP2CreateMasterRecord | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP2AllocateIdUnderLock_,ksP2AssertWorkbook_
+Phase2_MasterData.js:458 | ksP2AllocateIdUnderLock_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP2FindHeaderColumn_
+Phase2_MasterData.js:513 | ksP2WriteOwnedTab_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Phase2_MasterData.js:530 | ksP2AppendDeploymentLog_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Phase3_Integrated_Master_Data_v1_0.js:165 | ksP3AuditLog_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3Actor_,ksP3HeaderMap_,ksP3Now_
+Phase3_Integrated_Master_Data_v1_0.js:188 | KS_P3_RUN_MASTER_AUDIT | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3GetSheet_,ksP3GetWorkbook_,ksP3HeaderMap_,ksP3Now_
+Phase3_Integrated_Master_Data_v1_0.js:263 | ksP3AllocateIdLocked_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3GetSheet_,ksP3Now_,ksP3ReadColumnValues_,ksP3RequireHeaders_
+Phase3_Integrated_Master_Data_v1_0.js:328 | ksP3ReserveId_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3AllocateIdLocked_,ksP3AuditLog_,ksP3GetWorkbook_
+Phase3_Integrated_Master_Data_v1_0.js:358 | ksP3AppendByHeaders_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+Phase3_Integrated_Master_Data_v1_0.js:369 | ksP3CreateWithAllocatedId_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3AllocateIdLocked_,ksP3AppendByHeaders_,ksP3AuditLog_,ksP3CheckUnique_,ksP3GetSheet_,ksP3GetWorkbook_,ksP3RequireHeaders_
+Phase3_Integrated_Master_Data_v1_0.js:522 | KS_P3_UPDATE_USER_PROFILE | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3AuditLog_,ksP3GetSheet_,ksP3GetWorkbook_,ksP3Now_,ksP3Prompt_,ksP3RequireHeaders_
+ProductionAndPackagingEngine.js:12 | ksCreateProductionOrder | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksNowIso_,ksRequireRole_
+ProductionAndPackagingEngine.js:65 | ksRecordProductionConsumption | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksGetMovementLedStockBalance,ksLogAudit_,ksLogException_,ksNowIso_,ksRequireRole_
+ProductionAndPackagingEngine.js:154 | ksRecordProductionOutputAndLoss | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksCreateInventoryLotAndReceipt,ksNowIso_,ksRequireRole_
+ProductionAndPackagingEngine.js:241 | ksRecordQualityRelease | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksGetHeaderMap_,ksLogAudit_,ksNowIso_,ksRequireRole_
+ProductionAndPackagingEngine.js:315 | ksRecordPackagingOutput | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksCreateInventoryLotAndReceipt,ksGetHeaderMap_,ksNowIso_,ksRequireRole_
+ReleaseAndTests.js:20 | ksRunSection11_6EdgeCaseTestSuite | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAssertThrows_,ksCreateInventoryLotAndReceipt,ksCreateSalesOrder,ksLogAudit_,ksNowIso_,ksPostBalancedJournalVoucher,ksProcessGigWorkerPayout,ksRecordPackagingOutput,ksRecordProductionConsumption,ksRecordWorkerProductionEntry,ksRefreshAllManagementReports
+ReportsAndClosingEngine.js:11 | ksWriteReportView_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+ReportsAndClosingEngine.js:55 | ksGenerateTrialBalanceReport | WRITE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksGetHeaderMap_,ksLogAudit_,ksLogException_,ksNowIso_,ksRequireRole_,ksWriteReportView_
+ReportsAndClosingEngine.js:164 | ksGenerateStockStatusReport | WRITE | LOCAL AUTH TOKEN | helper=ksRequireRole_ | calls=ksGetHeaderMap_,ksNowIso_,ksRequireRole_,ksWriteReportView_
+SafeWriter.js:44 | ksAppendAndVerifyRow_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=ksAppendAndVerifyRow_ | calls=ksGetHeaderMap_
+SalesEngine.js:11 | ksCreateSalesOrder | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksLogException_,ksNowIso_,ksRequireRole_
+SalesEngine.js:124 | ksCreateSalesInvoice | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksNowIso_,ksRequireRole_
+SalesEngine.js:202 | ksRecordCustomerReceiptAndAllocation | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksNowIso_,ksRequireRole_
+WebAppBridge.js:5 | doPost | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=ksLogAudit_ | calls=ksBridgeJson_,ksFindByNonce_,ksHmacSha256Hex_,ksLogAudit_,ksRecordIdAllocation_,ksRouteGovernedWrite_,ksSafeEqual_
+WebAppBridge.js:131 | ksRouteGovernedWrite_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=ksWriteCanonicalRowByHeaders_ | calls=ksCreateInventoryLotAndReceipt,ksCreateProductionOrder,ksCreateSalesInvoice,ksCreateSalesOrder,ksPostBalancedJournalEntry,ksRecordCustomerPayment,ksRecordPackagingOutput,ksRecordProductionConsumption,ksRecordProductionOutput,ksRecordQualityCheckAndRelease,ksWriteCanonicalRowByHeaders_
+WebAppBridge.js:172 | ksWriteCanonicalRowByHeaders_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=ksWriteCanonicalRowByHeaders_ | calls=
+WebAppBridge.js:243 | ksRecordIdAllocation_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+WorkforceEngine.js:38 | ksHydrateWorkforceTables | WRITE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksLoadDictionaryIndex_,ksLogAudit_,ksRequireRole_
+WorkforceEngine.js:79 | ksRegisterWorkerOrEmployee | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksNowIso_,ksRequireRole_
+WorkforceEngine.js:136 | ksRecordWorkerProductionEntry | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksLogAudit_,ksNowIso_,ksRequireRole_
+WorkforceEngine.js:198 | ksVerifyWorkerProductionEntry | WRITE | LOCAL AUTH TOKEN | helper=ksLogAudit_,ksRequireRole_ | calls=ksGetHeaderMap_,ksLogAudit_,ksNowIso_,ksRequireRole_
+WorkforceEngine.js:236 | ksRecordEmployeeAdvance | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksNowIso_,ksPostBalancedJournalVoucher,ksRequireRole_
+WorkforceEngine.js:289 | ksProcessGigWorkerPayout | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksGetHeaderMap_,ksNowIso_,ksPostBalancedJournalVoucher,ksRequireRole_
+WorkforceEngine.js:400 | ksProcessFixedEmployeeSalary | WRITE | LOCAL AUTH TOKEN | helper=ksAllocateId,ksAppendAndVerifyRow_,ksRequireRole_ | calls=ksAllocateId,ksAppendAndVerifyRow_,ksNowIso_,ksPostBalancedJournalVoucher,ksRequireRole_
+ksP3PreviewEmptyDatabaseReset.js:21 | ksP3ExecuteEmptyDatabaseReset | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3GetOrCreateResetLog_
+ksP3PreviewEmptyDatabaseReset.js:155 | ksP3GetOrCreateResetLog_ | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=
+ksP3PreviewEmptyDatabaseResetV2.js:143 | ksP3V12ExecuteEmptyDatabaseReset | WRITE | NO LOCAL AUTH TOKEN DETECTED | helper=No central writer helper detected | calls=ksP3V12GetBusinessTableNames_
+
+Interpretation note: `NO LOCAL AUTH TOKEN DETECTED` means no recognized auth helper/role token was found inside that function body. It is not by itself proof of exploitability; inspect every caller/callee path. Conversely, a local auth token is not proof that its check is correct or complete.
+
+7. HIGH-IMPACT DESTRUCTIVE UTILITIES
+LiveCutoverGate.js includes ksCleanAllLegacyScratchTabs (deleteSheet), ksDeleteUnwantedTabs (deleteSheet), ksPurgeTestRowsForCleanCutover (clearContent).
+DatabaseReconciliationFix.js includes ksFinalizeCleanHeadersAndBaseline with deleteRows/setValue operations.
+Reset families include ksP3PreviewEmptyDatabaseReset.js, ksP3PreviewEmptyDatabaseResetV2.js, KS_Phase3_Empty_Reset_v1_3.js, KS_Phase3_Empty_Reset_v1_4.js and related migration/install utilities. Some functions are named preview, execute, arm, commit, install or approve. Names do not prove safety. None must be executed during audit.
+These utilities can mutate or delete sheet content/schema. They need strict owner-only authorization, explicit environment/target verification, immutable preflight evidence, dry-run separation, and a separately approved change window. None of those controls should be assumed from function names.
+
+8. WRITER AND ALLOCATOR ARCHITECTURE
+SafeWriter.js provides ksAppendAndVerifyRow_ with header mapping/readback behavior. IdAllocator.js uses ScriptLock and table + nonce checks with approved ID prefixes and SafeWriter. This is a stronger pattern, but not all writers call it.
+WebAppBridge.js independently implements generic row append/update and nonce allocation. Domain engines and legacy utilities contain direct setValue/setValues/appendRow or delete/clear operations. Therefore the source shows multiple independent write mechanisms, not a single exclusive write owner.
+Domain engine files with write-bearing functions include SalesEngine.js, AccountingEngine.js, InventoryEngine.js, ProductionAndPackagingEngine.js, WorkforceEngine.js and ReportsAndClosingEngine.js. These may be valid domain services, but must be routed through one governed posting boundary if the architecture requires Apps Script to have a single controlled writer.
+
+9. TRIGGERS, MENUS, EDITOR AND DEPLOYMENT REACHABILITY
+Source scan did not find ScriptApp.newTrigger/deleteTrigger/installTrigger calls. This does not prove no triggers are configured. Earlier owner screenshots showed zero installable triggers and repeated onOpen simple-trigger executions.
+onOpen is a simple-trigger entry point. Menus invoke global functions. Sidebar callbacks invoke server functions. Editor users can manually run global functions. doPost is the web-app entry point. These are distinct execution contexts and must be governed independently.
+Manifest says ANYONE_ANONYMOUS / USER_DEPLOYING, but effective deployed state remains unverified. Apps Script project Overview and deployment manager screenshots previously gave conflicting status evidence. Do not treat either alone as final proof.
+
+10. COMPLETE GATE ASSESSMENT
+Single exclusive Apps Script writer: NOT ESTABLISHED.
+Mandatory authenticated bridge caller: NOT ESTABLISHED; HMAC omission bypass observed.
+Trusted actor identity/role in bridge: NOT ESTABLISHED; actor fields are caller-supplied.
+Closed action allowlist: NOT ESTABLISHED; generic fallback handles all other actions.
+Approved target-table and field allowlists: NOT ESTABLISHED in generic writer.
+Replay identity bound to action/table/payload: NOT ESTABLISHED in bridge nonce lookup.
+All UI callback authorization: NOT ESTABLISHED across all callees.
+All global functions authorization: NOT ESTABLISHED.
+Destructive utilities owner-only and safely gated: NOT ESTABLISHED.
+Deployed version matches supplied archive: NOT VERIFIED.
+Live web-app reachability/effective access: NOT VERIFIED.
+Script Properties secret presence/value: NOT INSPECTED.
+Service account and Google permissions: prior screenshots show backend service account as Editor; actual effective write behavior is not established by this source audit.
+Production write execution paths: NOT LIVE-TESTED and MUST NOT be tested during this audit.
+
+11. PRIORITIZED DEFECT REGISTER
+CRITICAL C1: HMAC verification skipped when signature absent in doPost.
+HIGH H1: Bridge trusts actor_user_id and actor_role from request body without visible identity binding.
+HIGH H2: Generic fallback writer accepts caller-supplied targetTab and payload with no visible table/field allowlist.
+HIGH H3: Unknown/unmapped action names fall through to generic writer rather than fail closed.
+HIGH H4: Bridge nonce replay lookup uses nonce only, not target/action/payload fingerprint.
+HIGH H5: Bridge allocation record is a separate direct append path; missing allocation sheet/headers can be silently ignored before CONFIRMED response.
+HIGH H6: Multiple independent direct write mechanisms exist across bridge, domain engines, foundation, migration, reset and maintenance files.
+HIGH H7: Global functions and sidebar callees do not have demonstrated universal local authorization.
+HIGH H8: Destructive cleanup/reset functions exist in the same bound project; their owner-only guard and current reachability are not proven.
+HIGH H9: Manifest declares anonymous web-app access and execute-as deploying user, conditional on matching active deployment.
+
+12. REQUIRED REPAIR DESIGN, NOT IMPLEMENTATION
+A. WebAppBridge must reject missing signatures and validate exact canonical request bytes, timestamp/nonce, replay, actor identity and action scope before any sheet access or mutation.
+B. Do not trust actor_user_id/actor_role from payload. Derive identity from a verified gateway credential/claims contract and map to an approved active user/role server-side.
+C. Replace generic targetTab fallback with a closed action registry: each action maps to a fixed target, fixed schema, allowed fields, required role, idempotency policy and domain handler. Unknown actions must reject.
+D. Remove the bridge's independent allocation/replay implementation. Route all ID allocation and idempotency through one canonical allocator/transaction identity contract that binds scope + action + target + payload fingerprint.
+E. All business mutations must converge on one approved Apps Script posting/write gateway. Domain functions should validate and prepare commands; the single writer performs authorization, schema allowlist, idempotency, locking, append/update and readback.
+F. Every public/global business function and sidebar callback must have a mandatory authorization guard, or be made private/internal by architecture. Menu hiding is insufficient.
+G. Destructive reset/migration/cutover functions must be owner-only, disabled from normal UI, require explicit approved operation token and exact target fingerprint, and be separated from ordinary business write scope.
+H. Reconcile manifest and actual deployment configuration. Prefer authenticated access; never infer live access from manifest alone. Any deployment or permission change requires separate explicit authorization.
+I. Define failure semantics: no CONFIRMED until durable business write, allocation, audit evidence and complete readback are verified. Partial failures must return UNKNOWN/recovery-required rather than false confirmation.
+
+13. STOP CONDITIONS
+Do not execute any function from the source archive. Do not send test requests to the web-app endpoint. Do not modify Apps Script source, manifest, OAuth scopes, Script Properties, permissions, triggers, deployments, or Google Sheets. Do not restore pre-reset records. Do not deploy or run migrations. Implementation requires a separately approved repair specification and owner authorization.
+
+14. FINAL CONCLUSION
+The supplied Apps Script source fails to demonstrate the required Single Write Owner contract. The bridge contains material source-level authentication, identity, allowlist and replay weaknesses; multiple independent write mechanisms exist; and universal authorization and destructive-utility controls are not proven. TX-FINAL-03 must remain OPEN / BLOCKED. This audit is a static source assessment; it does not claim live exploitability or live deployment identity.
+
+END OF COMPLETE OFFLINE AUDIT

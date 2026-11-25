@@ -1,0 +1,448 @@
+KAWAD SWAD ERP
+MASTER APPS SCRIPT SECURITY & SINGLE-WRITE-OWNER REPAIR BLUEPRINT
+Mission: 51B-1R-E2E
+Prepared: 24 November 2026
+Basis:
+1. Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip
+2. Mission_51B1R_E2D_Complete_Apps_Script_Audit.txt
+3. Kawad_Swad_ERP_Complete_Master_Policy_Constitution_v1.2.txt
+
+DOCUMENT STATUS: DESIGN PROPOSAL ONLY
+IMPLEMENTATION STATUS: NOT AUTHORIZED
+TEST STATUS: NOT AUTHORIZED
+PRODUCTION DEPLOYMENT / MUTATION: NOT AUTHORIZED
+TX-FINAL-03: OPEN / BLOCKED
+
+======================================================================
+0. EXECUTIVE DECISION
+======================================================================
+
+The current supplied Apps Script source does not demonstrate one exclusive, enforceable governed write owner. It contains:
+- a web-app doPost bridge with an optional HMAC comparison when the signature is absent;
+- request-controlled actor_user_id and actor_role fields;
+- a generic fallback writer using a caller-supplied target sheet name;
+- unknown action fallback to generic writing;
+- nonce-only replay lookup in the bridge;
+- a bridge-specific direct ID allocation append path;
+- domain engine functions and direct spreadsheet mutations;
+- UI/sidebar callbacks into multiple server-side functions;
+- foundation, migration, reset, cleanup and cutover utilities that can mutate or delete sheets.
+
+This blueprint defines the target architecture and repair requirements. It is not permission to edit or execute the live project. Gemini Studio must first prepare a source-only implementation proposal or isolated patch for Owner review. No live change may occur without a separate explicit authorization.
+
+======================================================================
+1. NON-NEGOTIABLE ARCHITECTURE
+======================================================================
+
+1.1 Authoritative business database
+Google Sheets remains the authoritative business database. Do not make MongoDB, browser storage, caches, local files or another replica authoritative for business records.
+
+1.2 Single governed Apps Script write owner
+Apps Script must expose one governed business-write boundary. All ordinary business mutations must converge on this boundary. Domain modules may validate and prepare commands, but must not independently write business records.
+
+1.3 FastAPI
+FastAPI remains the authentication / authorization gateway, read/query layer and controlled request forwarder to Apps Script. It must not become a second business posting owner or directly write Google Sheets through an alternate path.
+
+1.4 React
+React remains a user interface only. It must not contain authoritative business logic or bypass backend authorization.
+
+1.5 Read and write separation
+Read/query functions may retrieve data according to authorization. Every mutation must pass through the one governed write contract. A read endpoint must not mutate as a side effect.
+
+1.6 Preserve the clean-database boundary
+Do not restore pre-reset business records. Historical backups remain preservation/reference evidence only. Do not populate the clean system with old operational records.
+
+1.7 Preserve schema
+Do not rename, delete, reorder, add, or reinterpret sheet headers, IDs, formulas, ledgers, tabs or dictionary definitions as part of this security repair unless a separately approved schema change explicitly authorizes it.
+
+======================================================================
+2. SOURCE-LEVEL DEFECT REGISTER AND REQUIRED TREATMENT
+======================================================================
+
+D01 - Missing signature can bypass HMAC comparison
+Observed source: WebAppBridge.js / doPost.
+Required treatment:
+- Reject if signature is absent, blank, malformed, expired, or invalid.
+- Authenticate before parsing into a trusted actor context and before any sheet lookup that could lead to a write.
+- Verify exact canonical request bytes or a formally specified canonical representation.
+- Include method, route/action, timestamp, nonce, request identifier and payload digest in the signed message.
+- Use constant-time signature comparison.
+- Reject stale timestamps and replayed nonces.
+- Never treat the presence of a shared secret alone as proof that a request was authenticated.
+Acceptance: every missing/invalid/expired/replayed signature rejects before any write-capable function is reached.
+
+D02 - Request-supplied actor identity and role
+Observed source: doPost reads actor_user_id and actor_role from request body.
+Required treatment:
+- Do not trust actor_user_id, actor_role, created_by, role, or permission claims supplied as ordinary payload fields.
+- Derive identity from verified authentication claims issued by the trusted gateway, or validate a cryptographically authenticated service identity and map it to an active Users record.
+- Resolve role and active status server-side from the authoritative user/role records.
+- Store the verified actor ID and role in an immutable request context passed internally to domain handlers.
+- Reject unknown, inactive, mismatched, or unauthorized actors.
+Acceptance: changing payload actor fields cannot change the effective actor or permissions.
+
+D03 - Generic arbitrary target-sheet fallback
+Observed source: ksWriteCanonicalRowByHeaders_ accepts targetTab and payload and performs append/update.
+Required treatment:
+- Remove the generic caller-directed sheet writer from externally reachable action dispatch.
+- Use a closed action registry. Every allowed action maps to a fixed domain handler, fixed target table(s), approved fields, required role and idempotency policy.
+- Never accept a raw sheet/tab name from an external caller as a write destination.
+- Reject unknown action names. No generic fallback.
+- Apply exact field allowlists and type/length/enum validation at the server boundary.
+Acceptance: caller cannot select or infer a different target tab by changing request fields; unknown action rejects.
+
+D04 - Bridge and central allocator duplication
+Observed source: ksFindByNonce_ / ksRecordIdAllocation_ differ from IdAllocator.js.
+Required treatment:
+- Remove the bridge's independent allocation and replay implementation.
+- All ID allocation must use one canonical allocator.
+- Allocation identity must bind at minimum: request scope, action, target entity/table, canonical payload fingerprint, actor identity, nonce/idempotency key and transaction identity.
+- Use ScriptLock or an equivalent proven concurrency control around allocation and commit.
+- Verify the durable allocation record before returning success.
+- Missing allocation sheet, header mismatch, incomplete append/readback or lock failure must fail closed or enter explicit UNKNOWN/recovery state.
+Acceptance: same key + same identity returns the original result; same key + changed action/table/payload/actor is rejected as conflict, never reported as successful replay.
+
+D05 - Multiple direct business-data writers
+Observed source: bridge, domain engines, legacy foundation/migration and maintenance modules contain independent sheet mutation paths.
+Required treatment:
+- Define one central posting function as the only ordinary business-record mutation owner.
+- Domain handlers produce validated commands or normalized row objects and call the central writer.
+- The central writer enforces actor, role, action, target table, schema, validation, idempotency, lock, append/update, readback and audit evidence.
+- Domain modules must not call setValue, setValues, appendRow, deleteRow, clearContent, insertSheet, deleteSheet or other mutation methods on business tables directly.
+- Explicitly separate non-business audit/report output writes from canonical business transaction writes, with documented target allowlists and authorization.
+Acceptance: static call graph shows every ordinary business mutation converges on the central writer; no alternate direct business write path remains.
+
+D06 - Incomplete authorization on callable functions
+Observed source: ksRequireRole_ exists, but authorization is not demonstrated for every global function/callback.
+Required treatment:
+- Each externally callable server function must enforce authorization itself or be made internal/private behind a single mandatory guarded dispatcher.
+- Menu visibility is not authorization.
+- Sidebar callback visibility is not authorization.
+- Editor-executable maintenance functions must have documented owner-only controls and explicit preconditions.
+- Simple trigger onOpen must remain limited to safe UI/menu setup and must not perform business writes.
+- Role checks must use server-derived actor context, not caller-supplied role strings.
+Acceptance: every callable entry point is classified and has a proven guard appropriate to its execution context.
+
+D07 - Destructive reset / migration / cleanup functions
+Observed source: LiveCutoverGate.js, DatabaseReconciliationFix.js, Phase 3 reset/migration files and other utilities.
+Required treatment:
+- Separate destructive administration tools from ordinary business runtime.
+- Require owner-only authorization, explicit approved operation ID, exact target workbook identity, exact target-tab allowlist and a preflight fingerprint.
+- Require a dry-run report and separate explicit commit action.
+- Enforce one-time operation token, expiry, idempotency and audit record.
+- Prevent destructive functions from being callable through public bridge or ordinary sidebar.
+- Do not automatically delete legacy tabs, reset records, or clean sheets as part of ordinary deployment.
+- Keep the clean-database rule: do not restore pre-reset records.
+Acceptance: no destructive operation can run through an ordinary business action or anonymous/public path; owner authorization and target identity are verified before mutation.
+
+D08 - Manifest and deployment trust boundary
+Observed source manifest: webapp.access ANYONE_ANONYMOUS and executeAs USER_DEPLOYING.
+Required treatment:
+- Reconcile manifest with actual deployment version and effective access settings.
+- Prefer authenticated access; anonymous access must not be retained for a privileged write endpoint.
+- Do not change deployment or OAuth scopes during this planning phase.
+- Treat a deployed endpoint as privileged because execute-as-deployer may grant the caller the deployer's authority.
+- Record deployment ID/version, URL, execution identity, access setting, source version and deployment owner in an evidence pack before any deployment decision.
+Acceptance: actual deployed configuration is proven and matches an approved authenticated access design.
+
+D09 - False CONFIRMED / incomplete durability
+Observed source: bridge may call allocation recorder that can silently return when allocation sheet/headers are absent, then continue to a CONFIRMED response.
+Required treatment:
+- Return CONFIRMED only after business mutation, allocation/idempotency record, audit evidence and complete readback have all been verified.
+- If request may have transmitted or partial state may exist, return UNKNOWN / RECOVERY_REQUIRED, not FAILED or CONFIRMED.
+- Recovery must reconcile the same request identity and never create a second transaction.
+- Define exact response schema and status transitions with FastAPI.
+Acceptance: no partial, missing-readback or uncertain transaction can be reported as confirmed.
+
+======================================================================
+3. TARGET REQUEST CONTRACT
+======================================================================
+
+Every write request must follow a versioned contract. The exact JSON field names and cryptographic canonicalization must be finalized by technical owner review before implementation.
+
+Required logical fields:
+- contract_version
+- request_id
+- action
+- idempotency_key / nonce
+- issued_at timestamp
+- actor credential or authenticated gateway assertion
+- payload
+- payload_fingerprint
+- signature / authentication envelope
+
+Rules:
+1. The client may propose action and payload; it cannot choose a sheet name, trusted role, or verified actor identity.
+2. The gateway authenticates the user and authorizes the action.
+3. Apps Script independently verifies the trusted gateway assertion/signature and resolves the active actor.
+4. Apps Script validates action against a closed registry.
+5. Apps Script derives the target table and schema from the registry, not the request.
+6. The canonical payload fingerprint is calculated server-side from normalized validated fields.
+7. The idempotency identity binds actor scope + action + target + payload fingerprint + nonce/request key.
+8. Same key with changed identity is a conflict.
+9. No mutation occurs until authentication, authorization, schema and idempotency checks pass.
+
+======================================================================
+4. TARGET SINGLE-WRITER FLOW
+======================================================================
+
+A. React submits a business command to FastAPI.
+B. FastAPI authenticates user and checks endpoint/action permission.
+C. FastAPI validates request shape and forwards a signed, time-bound assertion to Apps Script.
+D. Apps Script doPost verifies signature, timestamp and replay protection.
+E. Apps Script resolves trusted actor context and checks active user/role.
+F. A closed action registry resolves the fixed domain handler, target tables and field schema.
+G. Domain handler performs business validation and prepares a normalized command. It does not write directly.
+H. Central Apps Script posting owner obtains lock and checks transaction/idempotency state.
+I. Central writer allocates ID using the canonical allocator if required.
+J. Central writer writes the business record(s) and required ledger/related records according to the approved workflow contract.
+K. Central writer performs complete readback and verifies IDs, values, relationship keys and allocation state.
+L. Central writer writes audit evidence through the approved audit mechanism.
+M. Only after all required durability/readback checks pass does Apps Script return CONFIRMED.
+N. FastAPI records/returns the verified transaction result to React.
+O. If outcome is uncertain after transmission, return UNKNOWN/RECOVERY_REQUIRED and reconcile by the same identity. Never create a duplicate transaction.
+
+Important: Google Sheets remains the source of truth. Do not introduce a parallel MongoDB posting store.
+
+======================================================================
+5. TARGET MODULE RESPONSIBILITIES
+======================================================================
+
+WebAppBridge.js
+- Thin authenticated transport adapter only.
+- Verify signed envelope and replay/timestamp controls.
+- Resolve trusted actor context.
+- Dispatch only to closed action registry.
+- No generic sheet writer.
+- No direct allocation append.
+- No caller-controlled actor role.
+- No unknown-action fallback.
+
+AuthAndMenu.js
+- UI/menu construction only.
+- Shared authorization helper may be called by every server function.
+- onOpen must not write business records.
+- Menus are not the security boundary.
+- Sidebar handlers must invoke guarded business commands.
+
+SafeWriter.js
+- Central low-level write implementation, called only by the central posting owner.
+- Enforce target table and field allowlists supplied from approved registry.
+- Provide deterministic append/update and complete readback.
+- Fail closed on missing headers, schema mismatch, duplicate IDs or partial verification.
+- Do not let arbitrary modules call it as a way to bypass the posting owner.
+
+IdAllocator.js
+- Sole canonical ID allocation implementation.
+- Enforce approved prefix/table registry, locking, nonce and request identity.
+- Return a durable allocation receipt only after readback.
+- No bridge-specific alternative allocator.
+
+Domain engines
+- SalesEngine.js, AccountingEngine.js, InventoryEngine.js, ProductionAndPackagingEngine.js, WorkforceEngine.js and ReportsAndClosingEngine.js:
+  - validate domain rules;
+  - calculate/prepare normalized commands;
+  - call central posting owner;
+  - no direct mutation of canonical business tables.
+- Report generation may write to approved report/output tabs only through a separate explicitly governed reporting output path.
+
+AuditAndExceptions.js
+- Central audit event interface.
+- Audit writes must not recursively depend on business writer in a way that makes business commit ambiguous.
+- Define which audit record is mandatory for CONFIRMED and how audit failure is handled.
+- Avoid treating logging failure as proof the business write did not happen.
+
+Maintenance / migration / reset modules
+- Separate owner-only administrative package or controlled admin namespace.
+- Not registered as ordinary business actions.
+- No public bridge exposure.
+- Dry-run and explicit approval/commit gates.
+- Never restore pre-reset records.
+
+======================================================================
+6. FUNCTION INVENTORY AND CLASSIFICATION REQUIREMENTS
+======================================================================
+
+The source audit identified 95 functions with direct mutation tokens or known writer-helper references. The E2D audit report contains the file, line, function, mutation capability, local authorization-token observation and call references.
+
+Before implementation, Gemini must produce a complete machine-readable and human-readable inventory for all 95 entries and every public/global callable function, including functions that do not themselves write but can reach a writer.
+
+For each function record:
+- source file and line;
+- function name and visibility/global status;
+- entry point: doPost, sidebar, menu, simple trigger, editor, internal caller, unknown;
+- direct callers and callees;
+- target sheets/tables;
+- mutation methods;
+- local authorization check;
+- upstream guard evidence;
+- trusted actor source;
+- role requirements;
+- ID allocator used;
+- idempotency identity fields;
+- writer helper used;
+- audit behavior;
+- destructive capability;
+- reachable from public web app? source evidence / not established;
+- owner/editor executable? configuration evidence / not established;
+- classification: KEEP / ROUTE THROUGH CENTRAL WRITER / INTERNALIZE / OWNER-ONLY / DISABLE FROM PUBLIC ROUTE / RETIRE AFTER APPROVAL / NEEDS OWNER DECISION.
+
+Do not infer that `NO LOCAL AUTH TOKEN DETECTED` proves vulnerability. Trace all callers and callees. Do not infer that a local auth helper token proves a correct guard.
+
+======================================================================
+7. FILE-LEVEL REPAIR WORKSTREAMS
+======================================================================
+
+WS-01: Bridge authentication and identity
+Files: WebAppBridge.js; approved FastAPI signing/forwarding contract.
+Deliverables: mandatory signature, timestamp/replay controls, trusted actor resolution, strict request contract.
+
+WS-02: Closed action registry
+Files: WebAppBridge.js and domain action registry.
+Deliverables: explicit action list, fixed target tables, allowed fields, required roles, strict reject-default behavior.
+
+WS-03: Central posting owner
+Files: new/approved central writer module or designated existing module; SafeWriter.js; domain engines.
+Deliverables: only central posting owner may mutate canonical business tables; all business workflows route through it.
+
+WS-04: Canonical ID/idempotency
+Files: IdAllocator.js; WebAppBridge.js; transaction-related domain handlers.
+Deliverables: single allocator, identity-bound replay, lock, durable allocation readback, UNKNOWN recovery semantics.
+
+WS-05: Authorization closure
+Files: AuthAndMenu.js; all global business functions; sidebar callbacks; bridge routes.
+Deliverables: function-level guard matrix, server-derived roles, no reliance on menu hiding.
+
+WS-06: Administrative/destructive isolation
+Files: LiveCutoverGate.js; DatabaseReconciliationFix.js; reset and migration modules.
+Deliverables: owner-only isolation, dry-run/commit gate, target fingerprint, one-time approval, no public route.
+
+WS-07: Manifest/deployment evidence
+Files: appsscript.json plus deployment evidence (no file change authorized by this blueprint).
+Deliverables: active deployment identity and effective access evidence; proposed authenticated configuration for approval.
+
+WS-08: Transaction response and readback
+Files: WebAppBridge.js; domain engines; SafeWriter.js; FastAPI contract.
+Deliverables: exact CONFIRMED/REJECTED/UNKNOWN response schema and complete durability/readback conditions.
+
+======================================================================
+8. GEMINI STUDIO IMPLEMENTATION INSTRUCTIONS
+======================================================================
+
+Gemini must not start by editing the live project.
+
+Phase 0 - Preflight and source pinning
+- Treat supplied source ZIP as the exact baseline.
+- Verify archive SHA-256 equals:
+  68c80c8a0c9d64dfd80716bfe39a92c1d0541dbfcc3855a03ab1a994ea6b50d7
+- Preserve original source unchanged.
+- Produce complete file inventory and function/write matrix.
+- Identify source files missing from or newer than the archive; do not silently merge.
+- Do not connect to live Google services.
+
+Phase 1 - Design reconciliation
+- Map every finding D01-D09 to exact functions and call paths.
+- Identify all 95 write-bearing entries and all public/global entry points.
+- Produce proposed before/after architecture and file change list.
+- Identify schema or API contract impacts.
+- List unresolved Owner/CA/technical decisions.
+- STOP for Owner approval before coding.
+
+Phase 2 - Isolated patch proposal
+Only after separate Owner approval:
+- Work on a copy/branch/local source package, never directly in live Apps Script.
+- Implement only approved repair scope.
+- Preserve all sheet names, headers, IDs, formulas, ledger semantics and clean-database boundary.
+- Do not restore historical business records.
+- Do not modify production permissions, OAuth scopes, Script Properties, triggers or deployments.
+- Do not include secrets in code, logs, reports or archives.
+- Produce full changed-file diff, unchanged-file hash manifest, migration-free deployment plan and rollback plan.
+- No live deployment.
+
+Phase 3 - Static review handoff
+- Provide source diff and file-by-file explanation.
+- Provide function-level before/after authorization matrix.
+- Provide action registry and schema allowlist.
+- Provide transaction/idempotency contract.
+- Provide explicit list of remaining direct spreadsheet mutation calls and justify each.
+- Provide list of destructive/admin functions and isolation method.
+- Provide no claim of test success unless tests are later separately authorized and actually run.
+
+Phase 4 - STOP
+- Hand over patch for independent review.
+- Do not run tests/builds/typechecks/lint/runtime checks until development is complete and Owner separately authorizes the test phase.
+- Do not push, deploy, execute Apps Script, modify Google Sheets, or alter production settings.
+- Wait for further Owner instruction.
+
+======================================================================
+9. ACCEPTANCE CRITERIA
+======================================================================
+
+AC-01: Missing signature is rejected before any sheet access/write route.
+AC-02: Invalid, expired, malformed and replayed signatures are rejected.
+AC-03: Payload actor_user_id/actor_role cannot impersonate another user or role.
+AC-04: Unknown action rejects; no generic writer fallback exists.
+AC-05: External request cannot select target sheet/table or arbitrary fields.
+AC-06: All ordinary business writes converge on one central posting owner.
+AC-07: No domain engine writes canonical business tables directly.
+AC-08: Only one ID allocator/replay implementation exists for business transaction identity.
+AC-09: Idempotency binds actor scope, action, target and canonical payload fingerprint.
+AC-10: Same key/same identity returns original result; same key/changed identity conflicts.
+AC-11: All sidebar callbacks and global business functions enforce server-side authorization.
+AC-12: Menu visibility is never used as the sole authorization mechanism.
+AC-13: Destructive/reset/migration utilities are owner-only and inaccessible from ordinary/public business routes.
+AC-14: No destructive action can run without approved operation token, target identity and preflight fingerprint.
+AC-15: CONFIRMED is returned only after required business write, allocation, audit and complete readback succeed.
+AC-16: Partial/uncertain outcomes become UNKNOWN/RECOVERY_REQUIRED and reconcile using the same identity.
+AC-17: Manifest/deployment effective access is documented and approved before deployment.
+AC-18: Google Sheets remains authoritative; no competing authoritative business database is introduced.
+AC-19: Existing schema, IDs, formulas, ledgers and clean-empty-database boundary are preserved.
+AC-20: Every remaining direct mutation is inventoried, classified and explicitly approved.
+AC-21: Changed-file diff and SHA-256 manifest are supplied.
+AC-22: No live mutation/deployment occurs without separate explicit Owner authorization.
+
+======================================================================
+10. OUT-OF-SCOPE / PROHIBITED
+======================================================================
+
+- No Apps Script execution during audit or patch preparation.
+- No Google Sheet edits or business record writes.
+- No deployment, version creation, push, trigger installation or trigger execution.
+- No OAuth scope changes or API enablement.
+- No Script Properties creation or modification.
+- No Google permission or service-account role changes.
+- No reset, migration, repair, cleanup or historical data restoration.
+- No tests/builds/typechecks/lint/runtime verification until separately authorized after development.
+- No assumption that a screenshot proves active deployment identity.
+- No assumption that source presence proves runtime reachability.
+- No change to approved business policy, accounting treatment, schema or financial rules.
+
+======================================================================
+11. OWNER DECISIONS REQUIRED BEFORE IMPLEMENTATION
+======================================================================
+
+O-01: Approve the target architecture in Sections 1-5.
+O-02: Approve the exact trusted gateway authentication assertion and signing contract.
+O-03: Approve the complete allowed action registry and role matrix.
+O-04: Approve which legacy/migration/reset functions are retained, internalized, isolated or retired.
+O-05: Approve whether report/output tab writes have a separately governed writer or are included in the central posting owner.
+O-06: Approve the treatment of mandatory audit failure and transaction UNKNOWN recovery.
+O-07: Approve deployment access model after actual deployment evidence is reconciled.
+O-08: Approve isolated patch preparation only. This does not authorize live deployment.
+
+No answer to these decisions is presumed by this blueprint.
+
+======================================================================
+12. FINAL STATUS
+======================================================================
+
+Source-level audit: COMPLETE FOR THE CURRENT OFFLINE SCOPE, WITH LIVE-COMPLETENESS LIMITATIONS.
+Repair blueprint: PREPARED.
+Implementation: NOT AUTHORIZED.
+Testing: NOT AUTHORIZED.
+Production deployment/mutation: NOT AUTHORIZED.
+TX-FINAL-03: OPEN / BLOCKED until the approved design is implemented and independently evidenced.
+
+The immediate next action is Owner review of this blueprint. If approved, Gemini may prepare an isolated patch proposal only within the exact approved scope. It must not modify the live bound Apps Script project.
+
+END OF BLUEPRINT
