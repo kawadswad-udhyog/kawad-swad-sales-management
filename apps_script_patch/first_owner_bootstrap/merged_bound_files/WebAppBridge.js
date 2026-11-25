@@ -7,6 +7,16 @@ function doPost(e) {
   const lock = LockService.getScriptLock();
   try {
     // 1. Mandatory HMAC-SHA256 + contract_version="2.0" + +/-300s skew verification
+    //    Verifier implemented in WebAppBridge_BootstrapIntegration.js (`ksVerifySignedBridgeEnvelope_`).
+    if (typeof ksVerifySignedBridgeEnvelope_ !== 'function') {
+      return ksBridgeJson_({
+        status: 'REJECTED',
+        error_code: 'BRIDGE_AUTH_VERIFIER_MISSING',
+        message: 'Mandatory ksVerifySignedBridgeEnvelope_ verifier is not loaded in Apps Script project.',
+        http_status: 503,
+        retryable: false
+      });
+    }
     const auth = ksVerifySignedBridgeEnvelope_(e);
     if (!auth.ok) {
       return ksBridgeJson_(auth.errorResponse);
@@ -228,17 +238,25 @@ function ksRecordIdAllocation_(nonce, tabName, allocatedId) {
 }
 
 function ksHmacSha256Hex_(message, secret) {
-  const bytes = Utilities.computeHmacSha256Signature(message, secret);
+  const bytes = Utilities.computeHmacSha256Signature(
+    String(message || ''),
+    String(secret || ''),
+    Utilities.Charset.UTF_8
+  );
   return bytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
 }
 
 function ksSafeEqual_(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  const sa = typeof a === 'string' ? a : '';
+  const sb = typeof b === 'string' ? b : '';
+  const maxLen = Math.max(sa.length, sb.length);
+  let diff = sa.length ^ sb.length;
+  for (let i = 0; i < maxLen; i++) {
+    const ca = i < sa.length ? sa.charCodeAt(i) : 0;
+    const cb = i < sb.length ? sb.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
   }
-  return diff === 0;
+  return diff === 0 && sa.length > 0;
 }
 
 function ksBridgeJson_(obj) {

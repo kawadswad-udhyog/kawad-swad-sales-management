@@ -1,11 +1,12 @@
 /**
- * Kawad Swad ERP — Apps Script Isolated Development Module (Source-Reconciled — NOT YET MERGED)
+ * Kawad Swad ERP — Signed Bridge HMAC Verification & First-Owner Dispatch Module
  * File: WebAppBridge_BootstrapIntegration.js
  *
  * Status:
- *   ISOLATED SOURCE PACKAGE — RECONCILED AGAINST VERBATIM `WebAppBridge.js` (42/43, SHA-256
- *   `3c1e85e895fe5e685970a86586531bba7ee90aab5d2d108a8fefd971ab828287`, export lines 13912–14193).
- *   NOT MERGED into the live Apps Script project; no execution or deployment performed.
+ *   INTEGRATED BOUND APPS SCRIPT MODULE — Verified against Python `backend/app/apps_script_bridge.py`
+ *   (`sign_envelope` + `json.dumps(..., separators=(",", ":"), sort_keys=True, ensure_ascii=True)`).
+ *   Provides standalone mandatory HMAC-SHA256 verification (`ksVerifySignedBridgeEnvelope_`) for ALL
+ *   `WebAppBridge.js` `doPost(e)` traffic plus isolated pre-lock routing for `BOOTSTRAP_FIRST_OWNER`.
  *
  * Verified Exact Defects in Current Bound `WebAppBridge.js` Addressed Here:
  *   1. `WebAppBridge.js:34-49` (export lines 13949–13964):
@@ -53,6 +54,30 @@ var KS_BRIDGE_SHARED_SECRET_PROP = 'SALES_APPS_SCRIPT_SHARED_SECRET';
 var KS_BRIDGE_SUPPORTED_CONTRACT_VERSION = '2.0';
 var KS_BRIDGE_SUPPORTED_SIGNATURE_ALG = 'HMAC-SHA-256';
 var KS_BRIDGE_MAX_SKEW_SECONDS = 300;
+
+var KS_BRIDGE_ISO8601_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Self-contained constant-time string comparison for fixed-length hex digests and HMAC signatures.
+ * Never short-circuits on length mismatch or first mismatching character.
+ * Does not depend on BootstrapOwnerHandler.js so HMAC verification works standalone for all actions.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @return {boolean}
+ */
+function ksBridgeSafeEqual_(a, b) {
+  var sa = typeof a === 'string' ? a : '';
+  var sb = typeof b === 'string' ? b : '';
+  var maxLen = Math.max(sa.length, sb.length);
+  var diff = sa.length ^ sb.length;
+  for (var i = 0; i < maxLen; i++) {
+    var ca = i < sa.length ? sa.charCodeAt(i) : 0;
+    var cb = i < sb.length ? sb.charCodeAt(i) : 0;
+    diff |= (ca ^ cb);
+  }
+  return diff === 0 && sa.length > 0;
+}
 
 /**
  * Compute lowercase hexadecimal HMAC-SHA256 signature using explicit UTF-8 encoding
@@ -138,13 +163,13 @@ function ksVerifySignedBridgeEnvelope_(e) {
     };
   }
 
-  if (!outer || typeof outer !== 'object') {
+  if (!outer || typeof outer !== 'object' || Array.isArray(outer)) {
     return {
       ok: false,
       errorResponse: {
         status: 'REJECTED',
         error_code: 'INVALID_JSON_BODY',
-        message: 'JSON body must be an object.',
+        message: 'JSON body must be a JSON object.',
         http_status: 400,
         retryable: false
       }
@@ -197,7 +222,7 @@ function ksVerifySignedBridgeEnvelope_(e) {
 
   var expectedSig = ksComputeHmacSha256Hex_(outer.canonical_envelope, sharedSecret);
   var providedSig = outer.signature.trim().toLowerCase();
-  if (!ksBootstrapSafeEqual_(providedSig, expectedSig)) {
+  if (!ksBridgeSafeEqual_(providedSig, expectedSig)) {
     return {
       ok: false,
       errorResponse: {
@@ -226,13 +251,29 @@ function ksVerifySignedBridgeEnvelope_(e) {
     };
   }
 
-  if (!envelope || typeof envelope !== 'object') {
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
     return {
       ok: false,
       errorResponse: {
         status: 'REJECTED',
         error_code: 'INVALID_CANONICAL_ENVELOPE',
-        message: 'Signed canonical_envelope must decode to an object.',
+        message: 'Signed canonical_envelope must decode to a JSON object.',
+        http_status: 400,
+        retryable: false
+      }
+    };
+  }
+
+  if (
+    envelope.payload !== undefined &&
+    (!envelope.payload || typeof envelope.payload !== 'object' || Array.isArray(envelope.payload))
+  ) {
+    return {
+      ok: false,
+      errorResponse: {
+        status: 'REJECTED',
+        error_code: 'INVALID_ENVELOPE_PAYLOAD',
+        message: 'Signed envelope payload must be a JSON object.',
         http_status: 400,
         retryable: false
       }
@@ -240,7 +281,18 @@ function ksVerifySignedBridgeEnvelope_(e) {
   }
 
   // Defense-in-depth: reject if unsigned outer convenience fields disagree with signed canonical_envelope
-  var checkedFields = ['action', 'target_tab', 'nonce', 'correlation_id', 'payload_hash'];
+  var checkedFields = [
+    'action',
+    'target_tab',
+    'nonce',
+    'correlation_id',
+    'transaction_id',
+    'attempt_number',
+    'payload_hash',
+    'actor_user_id',
+    'actor_role',
+    'timestamp'
+  ];
   for (var i = 0; i < checkedFields.length; i++) {
     var f = checkedFields[i];
     if (
@@ -261,16 +313,16 @@ function ksVerifySignedBridgeEnvelope_(e) {
     }
   }
 
-  // Enforce ±300s timestamp freshness window against replay of captured envelopes
+  // Enforce strict ISO-8601 timestamp with explicit UTC/offset and ±300s freshness window
   var tsRaw = String((envelope && envelope.timestamp) || '').trim();
-  var tsMs = Date.parse(tsRaw);
+  var tsMs = KS_BRIDGE_ISO8601_TZ_RE.test(tsRaw) ? Date.parse(tsRaw) : NaN;
   if (!tsRaw || isNaN(tsMs)) {
     return {
       ok: false,
       errorResponse: {
         status: 'REJECTED',
         error_code: 'INVALID_ENVELOPE_TIMESTAMP',
-        message: 'Envelope timestamp must be a valid ISO-8601 UTC timestamp.',
+        message: 'Envelope timestamp must be a valid ISO-8601 UTC/offset timestamp.',
         http_status: 401,
         retryable: false
       }

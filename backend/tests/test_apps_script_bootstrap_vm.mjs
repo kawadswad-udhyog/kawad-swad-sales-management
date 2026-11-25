@@ -30,49 +30,16 @@ import path from 'node:path';
 import vm from 'node:vm';
 
 const ROOT = path.resolve(process.cwd());
-const MERGED_DIR = path.join(ROOT, 'apps_script_patch/first_owner_bootstrap/merged_bound_files');
-const VERBATIM_EXPORT = path.join(
-  ROOT,
-  'public/assets/aistudio/Kawad_Swad_Bound_Apps_Script_Source_COMPLETE_VERBATIM_EXPORT_c019c467.txt'
-);
+const APPS_SCRIPT_DIR = path.join(ROOT, 'apps_script');
 
-function extractVerbatimFile(filename) {
-  const raw = fs.readFileSync(VERBATIM_EXPORT, 'utf8');
-  const lines = raw.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^BEGIN FILE \d+\/\d+: (.+)$/);
-    if (m && m[1].trim() === filename) {
-      const size = parseInt(lines[i + 1].split(':')[1].trim(), 10);
-      const expectedSha = lines[i + 2].split(':')[1].trim();
-      const body = [];
-      for (let j = i + 4; j < lines.length; j++) {
-        if (lines[j].startsWith('END FILE ') && lines[j].includes(filename)) {
-          if (body.length && /^=+$/.test(body[body.length - 1])) body.pop();
-          break;
-        }
-        body.push(lines[j]);
-      }
-      let text = body.join('\n');
-      while (Buffer.byteLength(text, 'utf8') > size && text.endsWith('\n')) {
-        text = text.slice(0, -1);
-      }
-      const actualSha = crypto.createHash('sha256').update(text, 'utf8').digest('hex');
-      assert.equal(actualSha, expectedSha, `SHA-256 mismatch extracting verbatim ${filename}`);
-      return text;
-    }
-  }
-  throw new Error(`Could not find ${filename} in verbatim export`);
-}
-
-const SAFE_WRITER_SRC = extractVerbatimFile('SafeWriter.js');
 const MERGED_FILES = [
-  ['Config.js', fs.readFileSync(path.join(MERGED_DIR, 'Config.js'), 'utf8')],
-  ['SafeWriter.js', SAFE_WRITER_SRC],
-  ['IdAllocator.js', fs.readFileSync(path.join(MERGED_DIR, 'IdAllocator.js'), 'utf8')],
-  ['AuditAndExceptions.js', fs.readFileSync(path.join(MERGED_DIR, 'AuditAndExceptions.js'), 'utf8')],
-  ['BootstrapOwnerHandler.js', fs.readFileSync(path.join(MERGED_DIR, 'BootstrapOwnerHandler.js'), 'utf8')],
-  ['WebAppBridge_BootstrapIntegration.js', fs.readFileSync(path.join(MERGED_DIR, 'WebAppBridge_BootstrapIntegration.js'), 'utf8')],
-  ['WebAppBridge.js', fs.readFileSync(path.join(MERGED_DIR, 'WebAppBridge.js'), 'utf8')],
+  ['Config.js', fs.readFileSync(path.join(APPS_SCRIPT_DIR, 'Config.js'), 'utf8')],
+  ['SafeWriter.js', fs.readFileSync(path.join(APPS_SCRIPT_DIR, 'SafeWriter.js'), 'utf8')],
+  ['IdAllocator.js', fs.readFileSync(path.join(APPS_SCRIPT_DIR, 'IdAllocator.js'), 'utf8')],
+  ['AuditAndExceptions.js', fs.readFileSync(path.join(APPS_SCRIPT_DIR, 'AuditAndExceptions.js'), 'utf8')],
+  ['BootstrapOwnerHandler.js', fs.readFileSync(path.join(APPS_SCRIPT_DIR, 'BootstrapOwnerHandler.js'), 'utf8')],
+  ['WebAppBridge_BootstrapIntegration.js', fs.readFileSync(path.join(APPS_SCRIPT_DIR, 'WebAppBridge_BootstrapIntegration.js'), 'utf8')],
+  ['WebAppBridge.js', fs.readFileSync(path.join(APPS_SCRIPT_DIR, 'WebAppBridge.js'), 'utf8')],
 ];
 
 const USERS_HEADERS = [
