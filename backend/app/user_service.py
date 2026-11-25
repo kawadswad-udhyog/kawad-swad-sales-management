@@ -1353,7 +1353,6 @@ def execute_bootstrap_first_owner(
 
         now_dt = datetime.now(timezone.utc)
         now_iso_str = now_dt.isoformat()
-        effective_date_str = now_dt.date().isoformat()
         hashed_pw = _hash_bootstrap_password(raw_password, clean_digest, clean_nonce)
         valid_hash, hash_err = validate_pbkdf2_hash(hashed_pw)
         if not valid_hash:
@@ -1380,7 +1379,6 @@ def execute_bootstrap_first_owner(
             "active": "true",
             "created_at": now_iso_str,
             "updated_at": now_iso_str,
-            "effective_from": effective_date_str,
             "effective_to": "",
             "employment_type": "OWNER",
             "designation": "Owner / Managing Director",

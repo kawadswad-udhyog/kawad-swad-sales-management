@@ -1,41 +1,40 @@
 /**
- * Kawad Swad ERP — Apps Script Isolated Development Module
+ * Kawad Swad ERP — Apps Script Isolated Development Module (Reconciled Draft — NOT MERGE-READY)
  * File: WebAppBridge_BootstrapIntegration.js
  *
+ * Status:
+ *   ISOLATED SOURCE PACKAGE ONLY. NOT VERIFIED FOR LIVE MERGE because the raw bound
+ *   Apps Script archive (`Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip`) is not yet
+ *   available in this workspace.
+ *
  * Purpose:
- *   Provides the hardened HMAC-SHA256 verification and closed action dispatch integration
- *   for `WebAppBridge.js` to support `BOOTSTRAP_FIRST_OWNER` while closing Mission 51B-1R-E2D
- *   Defect D01 (mandatory signature authentication in `doPost(e)`).
+ *   Provides the hardened mandatory HMAC-SHA256 verification and closed `BOOTSTRAP_FIRST_OWNER`
+ *   dispatch hook for `WebAppBridge.js`, addressing Mission 51B-1R-E2D Critical C1 (optional HMAC
+ *   bypass) and aligning byte-for-byte with FastAPI `backend/app/apps_script_bridge.py`.
  *
- * Wire Contract Alignment with FastAPI (`backend/app/apps_script_bridge.py`):
- *   Google Apps Script `doPost(e)` does not expose custom HTTP request headers
- *   (such as `X-KS-Signature`). FastAPI therefore sends a JSON body containing:
- *     {
- *       ...top-level envelope fields...,
- *       "contract_version": "2.0",
- *       "signature_alg": "HMAC-SHA-256",
- *       "signature": "<lowercase hex HMAC-SHA256 of canonical_envelope>",
- *       "canonical_envelope": "<exact UTF-8 JSON string signed by FastAPI>"
- *     }
+ * Byte-for-Byte Signed Envelope Contract (`backend/app/apps_script_bridge.py:2818-2829`):
+ *   Python computes:
+ *     canonical_body = json.dumps(envelope, separators=(",", ":"), sort_keys=True, ensure_ascii=True, default=str)
+ *     signature = hmac.new(secret.encode("utf-8"), canonical_body.encode("utf-8"), hashlib.sha256).hexdigest()
+ *   Because `ensure_ascii=True` emits strictly 7-bit printable ASCII characters (`0x20..0x7E`),
+ *   `canonical_body.encode("utf-8")` in Python and `Utilities.computeHmacSha256Signature(
+ *   outer.canonical_envelope, sharedSecret, Utilities.Charset.UTF_8)` in Apps Script V8 hash the
+ *   exact same byte sequence without any JSON key-order or Unicode normalization drift.
  *
- *   Apps Script computes `HMAC-SHA256(canonical_envelope, KS_APPS_SCRIPT_SHARED_SECRET)`
- *   directly over the exact `canonical_envelope` string, compares it in constant time to
- *   `outer.signature`, enforces timestamp skew (`±300s`), and parses ONLY the verified
- *   `canonical_envelope` JSON before routing — eliminating Python/V8 serialization drift
- *   and guaranteeing zero unauthenticated mutations.
- *
- * IMPORTANT — PRE-MERGE VERIFICATION REQUIRED:
- *   Merge this logic into the bound project's `WebAppBridge.js` ONLY after inspecting the
- *   raw `Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip` to preserve all existing
- *   governed action routes (`CREATE_SALE`, `CREATE_USER`, `POST_JOURNAL_VOUCHER`, etc.)
- *   and confirm the exact Script Property name holding the HMAC shared secret.
+ * Script Property Alignment:
+ *   Mission 51B-1R-E2D §3.1 documents that bound `WebAppBridge.js` reads Script Property
+ *   `SALES_APPS_SCRIPT_SHARED_SECRET` (>= 32 chars). Confirm against raw `WebAppBridge.js`
+ *   once `Kawad_Swad_Bound_Apps_Script_Source_READONLY.zip` is supplied.
  */
 
-var KS_BRIDGE_SHARED_SECRET_PROP = 'KS_APPS_SCRIPT_SHARED_SECRET';
+var KS_BRIDGE_SHARED_SECRET_PROP = 'SALES_APPS_SCRIPT_SHARED_SECRET';
+var KS_BRIDGE_SUPPORTED_CONTRACT_VERSION = '2.0';
+var KS_BRIDGE_SUPPORTED_SIGNATURE_ALG = 'HMAC-SHA-256';
 var KS_BRIDGE_MAX_SKEW_SECONDS = 300;
 
 /**
- * Compute lowercase hexadecimal HMAC-SHA256 signature using Apps Script Utilities.
+ * Compute lowercase hexadecimal HMAC-SHA256 signature using explicit UTF-8 encoding
+ * matching Python `hmac.new(secret.encode("utf-8"), raw_body.encode("utf-8"), hashlib.sha256).hexdigest()`.
  *
  * @param {string} messageUtf8
  * @param {string} secretUtf8
@@ -43,8 +42,9 @@ var KS_BRIDGE_MAX_SKEW_SECONDS = 300;
  */
 function ksComputeHmacSha256Hex_(messageUtf8, secretUtf8) {
   var sigBytes = Utilities.computeHmacSha256Signature(
-    Utilities.newBlob(String(messageUtf8 || ''), 'application/json', 'envelope.json').getBytes(),
-    Utilities.newBlob(String(secretUtf8 || ''), 'text/plain', 'secret.txt').getBytes()
+    String(messageUtf8 || ''),
+    String(secretUtf8 || ''),
+    Utilities.Charset.UTF_8
   );
   var hex = [];
   for (var i = 0; i < sigBytes.length; i++) {
@@ -71,9 +71,9 @@ function ksJsonOutput_(payloadObj) {
 }
 
 /**
- * Verify mandatory HMAC-SHA256 signature and timestamp skew on incoming Web App request.
- * Fails closed on any missing secret, weak secret (<32 chars), malformed JSON, missing
- * `canonical_envelope`, signature mismatch, or timestamp outside ±300 seconds.
+ * Verify mandatory contract_version, HMAC-SHA256 signature over exact `canonical_envelope` bytes,
+ * outer-vs-signed field consistency, and ±300s timestamp freshness window.
+ * Fails closed on any missing, weak, malformed, unknown-version, expired, or forged request.
  *
  * @param {Object} e Apps Script doPost event object
  * @return {{ok: boolean, envelope?: Object, errorResponse?: Object}}
@@ -126,9 +126,46 @@ function ksVerifySignedBridgeEnvelope_(e) {
     };
   }
 
+  if (!outer || typeof outer !== 'object') {
+    return {
+      ok: false,
+      errorResponse: {
+        status: 'REJECTED',
+        error_code: 'INVALID_JSON_BODY',
+        message: 'JSON body must be an object.',
+        http_status: 400,
+        retryable: false
+      }
+    };
+  }
+
+  // Mission 51B-1R-E2F O-02: Unknown contract versions and algorithms must fail closed
+  if (String(outer.contract_version || '').trim() !== KS_BRIDGE_SUPPORTED_CONTRACT_VERSION) {
+    return {
+      ok: false,
+      errorResponse: {
+        status: 'REJECTED',
+        error_code: 'UNSUPPORTED_CONTRACT_VERSION',
+        message: 'Unsupported or missing signed bridge contract_version.',
+        http_status: 400,
+        retryable: false
+      }
+    };
+  }
+  if (String(outer.signature_alg || '').trim().toUpperCase() !== KS_BRIDGE_SUPPORTED_SIGNATURE_ALG) {
+    return {
+      ok: false,
+      errorResponse: {
+        status: 'REJECTED',
+        error_code: 'UNSUPPORTED_SIGNATURE_ALG',
+        message: 'Unsupported or missing signature_alg (HMAC-SHA-256 required).',
+        http_status: 400,
+        retryable: false
+      }
+    };
+  }
+
   if (
-    !outer ||
-    typeof outer !== 'object' ||
     typeof outer.canonical_envelope !== 'string' ||
     !outer.canonical_envelope ||
     typeof outer.signature !== 'string' ||
@@ -177,6 +214,41 @@ function ksVerifySignedBridgeEnvelope_(e) {
     };
   }
 
+  if (!envelope || typeof envelope !== 'object') {
+    return {
+      ok: false,
+      errorResponse: {
+        status: 'REJECTED',
+        error_code: 'INVALID_CANONICAL_ENVELOPE',
+        message: 'Signed canonical_envelope must decode to an object.',
+        http_status: 400,
+        retryable: false
+      }
+    };
+  }
+
+  // Defense-in-depth: reject if unsigned outer convenience fields disagree with signed canonical_envelope
+  var checkedFields = ['action', 'target_tab', 'nonce', 'correlation_id', 'payload_hash'];
+  for (var i = 0; i < checkedFields.length; i++) {
+    var f = checkedFields[i];
+    if (
+      Object.prototype.hasOwnProperty.call(outer, f) &&
+      String(outer[f] === null || outer[f] === undefined ? '' : outer[f]) !==
+      String(envelope[f] === null || envelope[f] === undefined ? '' : envelope[f])
+    ) {
+      return {
+        ok: false,
+        errorResponse: {
+          status: 'REJECTED',
+          error_code: 'OUTER_ENVELOPE_TAMPER_DETECTED',
+          message: 'Outer wire field disagreed with signed canonical_envelope (' + f + ').',
+          http_status: 401,
+          retryable: false
+        }
+      };
+    }
+  }
+
   // Enforce ±300s timestamp freshness window against replay of captured envelopes
   var tsRaw = String((envelope && envelope.timestamp) || '').trim();
   var tsMs = Date.parse(tsRaw);
@@ -212,14 +284,18 @@ function ksVerifySignedBridgeEnvelope_(e) {
 /**
  * Closed action dispatch hook to integrate inside existing `WebAppBridge.js` `doPost(e)`.
  *
- * Integration pattern inside bound `WebAppBridge.js`:
- *   function doPost(e) {
- *     var auth = ksVerifySignedBridgeEnvelope_(e);
- *     if (!auth.ok) {
- *       return ksJsonOutput_(auth.errorResponse);
- *     }
- *     return ksJsonOutput_(ksRouteGovernedWriteWithBootstrap_(auth.envelope, ksDispatchExistingGovernedAction_));
- *   }
+ * IMPORTANT — PRE-MERGE INTEGRATION REQUIREMENT:
+ *   Per Mission 51B-1R-E2D §3.4–3.6, the bound `WebAppBridge.js` currently:
+ *     - skips HMAC when signature is absent (Critical C1),
+ *     - uses nonce-only lookup `ksFindByNonce_` before routing (High H4),
+ *     - falls through unknown actions to generic `ksWriteCanonicalRowByHeaders_` (High H2/H3).
+ *   When merging into the real `WebAppBridge.js` (after raw ZIP inspection):
+ *     1. Run `ksVerifySignedBridgeEnvelope_(e)` BEFORE any nonce lookup or sheet access.
+ *     2. Route `BOOTSTRAP_FIRST_OWNER` directly to `ksBootstrapFirstOwner_(auth.envelope)`
+ *        BEFORE legacy `ksFindByNonce_` / `ksRecordIdAllocation_` so bootstrap never uses
+ *        the defective nonce-only lookup or generic fallback writer.
+ *     3. Pass all other verified actions to the existing governed dispatcher (which itself
+ *        must be hardened under Mission 51B-1R-E2G before production deployment).
  *
  * @param {Object} verifiedEnvelope
  * @param {Function=} existingDispatcher Existing bound action dispatcher from WebAppBridge.js

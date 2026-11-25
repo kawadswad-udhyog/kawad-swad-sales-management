@@ -270,6 +270,17 @@ class TransactionCoordinator:
                 CREATE INDEX IF NOT EXISTS idx_gov_tx_state_updated
                 ON governed_transactions (lifecycle_state, updated_at);
                 """)
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS owner_bootstrap_attempts (
+                    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attempted_at_epoch REAL NOT NULL,
+                    reason TEXT NOT NULL
+                );
+                """)
+                conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_owner_bootstrap_attempts_ts
+                ON owner_bootstrap_attempts (attempted_at_epoch);
+                """)
                 conn.execute("COMMIT;")
             except sqlite3.Error as e:
                 try:
@@ -1859,6 +1870,105 @@ class TransactionCoordinator:
             finally:
                 conn.close()
 
+    # ------------------------------------------------------------------
+    # Durable One-Time Owner Bootstrap Lockout (Cross-Worker & Restart-Safe)
+    # ------------------------------------------------------------------
+    def is_owner_bootstrap_rate_limited(
+        self,
+        *,
+        max_attempts: int,
+        window_seconds: float,
+    ) -> Tuple[bool, int]:
+        """
+        Atomically prune expired failed bootstrap attempts and return
+        `(is_locked, active_failure_count)` using SQLite WAL + BEGIN IMMEDIATE.
+        Survives multi-worker concurrency and FastAPI restarts on the host.
+        """
+        import time as _time
+
+        cutoff = _time.time() - max(1.0, float(window_seconds))
+        limit = max(1, int(max_attempts))
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                conn.execute(
+                    "DELETE FROM owner_bootstrap_attempts WHERE attempted_at_epoch < ?",
+                    (cutoff,),
+                )
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) AS cnt FROM owner_bootstrap_attempts;")
+                row = cur.fetchone()
+                cnt = int(row["cnt"]) if row else 0
+                conn.execute("COMMIT;")
+                return cnt >= limit, cnt
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                self._raise_storage_error("is_owner_bootstrap_rate_limited", e)
+                return True, limit
+            finally:
+                conn.close()
+
+    def record_owner_bootstrap_failure(
+        self,
+        *,
+        window_seconds: float,
+        reason: str = "INVALID_ATTEMPT",
+    ) -> int:
+        """Record a failed first-owner bootstrap attempt durably in SQLite."""
+        import time as _time
+
+        now_epoch = _time.time()
+        cutoff = now_epoch - max(1.0, float(window_seconds))
+        safe_reason = str(reason or "INVALID_ATTEMPT").strip()[:80]
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                conn.execute(
+                    "DELETE FROM owner_bootstrap_attempts WHERE attempted_at_epoch < ?",
+                    (cutoff,),
+                )
+                conn.execute(
+                    "INSERT INTO owner_bootstrap_attempts (attempted_at_epoch, reason) VALUES (?, ?)",
+                    (now_epoch, safe_reason),
+                )
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) AS cnt FROM owner_bootstrap_attempts;")
+                row = cur.fetchone()
+                cnt = int(row["cnt"]) if row else 1
+                conn.execute("COMMIT;")
+                return cnt
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                self._raise_storage_error("record_owner_bootstrap_failure", e)
+                return 0
+            finally:
+                conn.close()
+
+    def clear_owner_bootstrap_attempts(self) -> None:
+        """Clear recorded bootstrap failures after a confirmed bootstrap."""
+        with self._thread_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                conn.execute("DELETE FROM owner_bootstrap_attempts;")
+                conn.execute("COMMIT;")
+            except sqlite3.Error as e:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                self._raise_storage_error("clear_owner_bootstrap_attempts", e)
+            finally:
+                conn.close()
+
     def reset_store(self):
         """Empties all coordinator tables (for test teardown)."""
         with self._thread_lock:
@@ -1869,6 +1979,7 @@ class TransactionCoordinator:
                 conn.execute("DELETE FROM credit_reservations;")
                 conn.execute("DELETE FROM idempotency_locks;")
                 conn.execute("DELETE FROM governed_transactions;")
+                conn.execute("DELETE FROM owner_bootstrap_attempts;")
                 conn.execute("COMMIT;")
             except Exception as e:
                 conn.execute("ROLLBACK;")

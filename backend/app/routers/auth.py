@@ -30,8 +30,10 @@ from app.auth import (
     _USER_REVOKED_AT,
     security,
 )
+from app.accounting.transaction_coordinator import tx_coordinator
 from app.permissions import ui_role, role_v2_of
 from app.timeutil import now_iso
+from app.transaction_safety import CoordinatorDurabilityError
 from app.user_service import execute_bootstrap_first_owner
 
 router = APIRouter(tags=["Authentication"])
@@ -41,8 +43,8 @@ _LOGIN_ATTEMPTS: Dict[str, List[float]] = {}
 _MAX_FAILED_ATTEMPTS = SALES_LOGIN_MAX_ATTEMPTS
 _LOCKOUT_WINDOW_SECONDS = SALES_LOGIN_LOCKOUT_SECONDS
 
-# Strict brute-force protection for one-time owner bootstrap verification
-_BOOTSTRAP_ATTEMPTS: List[float] = []
+# Strict durable brute-force limits for one-time owner bootstrap verification
+# (persisted in SQLite WAL via tx_coordinator across workers and process restarts)
 _BOOTSTRAP_MAX_FAILED_ATTEMPTS = SALES_OWNER_BOOTSTRAP_MAX_ATTEMPTS
 _BOOTSTRAP_LOCKOUT_SECONDS = SALES_OWNER_BOOTSTRAP_LOCKOUT_SECONDS
 
@@ -292,11 +294,23 @@ async def bootstrap_first_owner(req: OwnerSetupRequest, request: Request):
     - Enforces zero existing rows in BOTH Users and AuthUsers before delegating to Apps Script.
     - Never stores plain-text passwords or exposes secrets/hashes in responses or logs.
     """
-    global _BOOTSTRAP_ATTEMPTS
+    try:
+        is_locked, _ = tx_coordinator.is_owner_bootstrap_rate_limited(
+            max_attempts=_BOOTSTRAP_MAX_FAILED_ATTEMPTS,
+            window_seconds=_BOOTSTRAP_LOCKOUT_SECONDS,
+        )
+    except CoordinatorDurabilityError as dur_exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "REJECTED",
+                "error_code": dur_exc.error_code,
+                "message": "Durable bootstrap rate-limit coordinator unavailable; initialization blocked fail-closed.",
+                "retryable": False,
+            },
+        ) from dur_exc
 
-    now_ts = time.time()
-    _BOOTSTRAP_ATTEMPTS = [t for t in _BOOTSTRAP_ATTEMPTS if now_ts - t < _BOOTSTRAP_LOCKOUT_SECONDS]
-    if len(_BOOTSTRAP_ATTEMPTS) >= _BOOTSTRAP_MAX_FAILED_ATTEMPTS:
+    if is_locked:
         duration_label = _format_lockout_duration(_BOOTSTRAP_LOCKOUT_SECONDS)
         raise HTTPException(
             status_code=getattr(status, "HTTP_429_TOO_MANY_REQUESTS", 429),
@@ -308,10 +322,27 @@ async def bootstrap_first_owner(req: OwnerSetupRequest, request: Request):
             },
         )
 
+    def _record_bootstrap_failure_safe(reason: str) -> None:
+        try:
+            tx_coordinator.record_owner_bootstrap_failure(
+                window_seconds=_BOOTSTRAP_LOCKOUT_SECONDS,
+                reason=reason,
+            )
+        except CoordinatorDurabilityError as dur_exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "status": "REJECTED",
+                    "error_code": dur_exc.error_code,
+                    "message": "Durable bootstrap rate-limit coordinator unavailable; initialization blocked fail-closed.",
+                    "retryable": False,
+                },
+            ) from dur_exc
+
     # Reject any attempt to pass bootstrap token via URL query parameters
     query_params = getattr(request, "query_params", None) or {}
     if any(k.lower() in {"bootstrap_token", "token", "secret"} for k in query_params.keys()):
-        _BOOTSTRAP_ATTEMPTS.append(now_ts)
+        _record_bootstrap_failure_safe("TOKEN_IN_QUERY")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -346,7 +377,7 @@ async def bootstrap_first_owner(req: OwnerSetupRequest, request: Request):
         provided_token.encode("utf-8"),
         configured_secret.encode("utf-8"),
     ):
-        _BOOTSTRAP_ATTEMPTS.append(now_ts)
+        _record_bootstrap_failure_safe("INVALID_TOKEN")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -385,7 +416,10 @@ async def bootstrap_first_owner(req: OwnerSetupRequest, request: Request):
         nonce=idempotency_key,
         request=request,
     )
-    _BOOTSTRAP_ATTEMPTS.clear()
+    try:
+        tx_coordinator.clear_owner_bootstrap_attempts()
+    except CoordinatorDurabilityError:
+        pass
     return OwnerSetupResponse(**result)
 
 

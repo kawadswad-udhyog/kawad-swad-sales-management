@@ -89,13 +89,11 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
         db.memory_store.clear()
         for tab in ("Users", "AuthUsers", "IdAllocations", "AuditLog", "RevokedTokens"):
             db.memory_store[tab] = []
-        auth_router._BOOTSTRAP_ATTEMPTS.clear()
         auth_router._LOGIN_ATTEMPTS.clear()
         self.sim = LocalAppsScriptSimulator().start()
 
     def tearDown(self):
         self.sim.stop()
-        auth_router._BOOTSTRAP_ATTEMPTS.clear()
         auth_router._LOGIN_ATTEMPTS.clear()
 
     def _run(self, coro):
@@ -303,6 +301,33 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
                 self._run(auth_router.bootstrap_first_owner(self._valid_req(), req_second))
         self.assertEqual(dup_ctx.exception.status_code, 409)
         self.assertEqual(dup_ctx.exception.detail["error_code"], "OWNER_ALREADY_INITIALIZED")
+
+    def test_09_apps_script_recovery_required_quarantines_non_retryable_409(self):
+        from tests.v2_test_harness import _FakeHTTPResponse
+
+        def _fake_recovery_required(_req):
+            return _FakeHTTPResponse({
+                "status": "RECOVERY_REQUIRED",
+                "correlation_id": "",
+                "nonce": "BOOTSTRAP-RECOVERY-001",
+                "action": "BOOTSTRAP_FIRST_OWNER",
+                "target_tab": "Users",
+                "allocated_id": "USR-000001",
+                "error_code": "PARTIAL_BOOTSTRAP_WRITE_AUTHUSERS_FAILED",
+                "message": "Users row written but AuthUsers write failed; manual reconciliation required.",
+                "http_status": 409,
+                "retryable": False,
+            })
+
+        req = self._make_bootstrap_request(nonce="BOOTSTRAP-RECOVERY-001")
+        with patch.dict(os.environ, self._valid_env(), clear=False):
+            with patch.object(self.sim, "_dispatch_http_request", side_effect=_fake_recovery_required):
+                with self.assertRaises(HTTPException) as ctx:
+                    self._run(auth_router.bootstrap_first_owner(self._valid_req(), req))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(ctx.exception.detail["error_code"], "PARTIAL_BOOTSTRAP_WRITE_AUTHUSERS_FAILED")
+        self.assertFalse(ctx.exception.detail["retryable"])
 
     def _make_bootstrap_request(
         self,

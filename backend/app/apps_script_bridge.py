@@ -3232,6 +3232,58 @@ class AppsScriptBridge:
                 int(data.get("http_status") or 422),
                 retryable=bool(data.get("retryable", False)),
             )
+        if outcome == "RECOVERY_REQUIRED":
+            rec_err_code = str(data.get("error_code") or "APPS_SCRIPT_RECOVERY_REQUIRED")
+            rec_msg = str(
+                data.get("message")
+                or "Recovery required: Apps Script reported a partial or unverified write state. Do NOT retry blindly."
+            )
+            rec_alloc = str(data.get("allocated_id") or "").strip() or None
+            conflict_res = _worker_cas_transition(
+                lifecycle_state=TransactionState.RECOVERY_REQUIRED,
+                bridge_status="RECOVERY_REQUIRED",
+                failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                error_code=rec_err_code,
+                allocated_id=rec_alloc,
+                message=rec_msg,
+                recovery_decision="QUARANTINED_BY_APPS_SCRIPT",
+                step_event={"step": "APPS_SCRIPT_RECOVERY_REQUIRED", "error_code": rec_err_code},
+                reason=rec_msg,
+                evidence={"error_code": rec_err_code, "allocated_id": rec_alloc},
+            )
+            if conflict_res is not None:
+                return conflict_res
+            audit_ok = self._record_tx_audit(
+                actor_user_id=actor_user_id,
+                action=clean_action,
+                target_tab=clean_tab,
+                entity_id=str(rec_alloc or clean_nonce),
+                transaction_id=tx_id,
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                lifecycle_state=TransactionState.RECOVERY_REQUIRED.value,
+                failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                error_code=rec_err_code,
+                attempt_number=attempt_no,
+                reason=rec_msg,
+            )
+            return BridgeResult(
+                status="RECOVERY_REQUIRED",
+                correlation_id=corr_id,
+                nonce=clean_nonce,
+                allocated_id=rec_alloc,
+                error_code=rec_err_code,
+                message=rec_msg,
+                retryable=False,
+                http_status=409,
+                payload_hash=payload_hash,
+                transaction_id=tx_id,
+                transaction_state=TransactionState.RECOVERY_REQUIRED.value,
+                failure_category=FailureCategory.RECOVERY_REQUIRED.value,
+                attempt_number=attempt_no,
+                audit_logged=audit_ok,
+                recovery_decision="QUARANTINED_BY_APPS_SCRIPT",
+            )
         if outcome != "CONFIRMED":
             return _transition_unknown(
                 str(data.get("error_code") or "APPS_SCRIPT_UNCONFIRMED_STATUS"),
