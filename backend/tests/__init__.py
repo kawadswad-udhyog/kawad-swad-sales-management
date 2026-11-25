@@ -30,6 +30,8 @@ if "fastapi" not in sys.modules:
                 self.detail = detail
                 self.headers = headers
         class status:
+            HTTP_200_OK = 200
+            HTTP_201_CREATED = 201
             HTTP_400_BAD_REQUEST = 400
             HTTP_401_UNAUTHORIZED = 401
             HTTP_403_FORBIDDEN = 403
@@ -59,8 +61,20 @@ if "fastapi" not in sys.modules:
         class BackgroundTasks:
             def add_task(self, *args, **kwargs): pass
         class Request:
-            def __init__(self, headers=None):
+            def __init__(self, scope=None, headers=None, query_params=None):
+                import urllib.parse as _urlparse
                 raw = dict(headers or {})
+                qp = dict(query_params or {})
+                if isinstance(scope, dict):
+                    for k, v in scope.get("headers") or []:
+                        ks = k.decode("latin-1") if isinstance(k, (bytes, bytearray)) else str(k)
+                        vs = v.decode("latin-1") if isinstance(v, (bytes, bytearray)) else str(v)
+                        raw[ks] = vs
+                    qs = scope.get("query_string") or b""
+                    qs_str = qs.decode("latin-1") if isinstance(qs, (bytes, bytearray)) else str(qs)
+                    if qs_str:
+                        for qk, qv in _urlparse.parse_qsl(qs_str, keep_blank_values=True):
+                            qp[qk] = qv
                 class _CIHeaders(dict):
                     def get(self, key, default=None):
                         kl = str(key).lower()
@@ -72,6 +86,7 @@ if "fastapi" not in sys.modules:
                         kl = str(key).lower()
                         return any(str(k).lower() == kl for k in self.keys())
                 self.headers = _CIHeaders(raw)
+                self.query_params = qp
         @staticmethod
         def Depends(f): return f
         @staticmethod

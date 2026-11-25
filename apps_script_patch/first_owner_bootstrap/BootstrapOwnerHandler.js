@@ -680,6 +680,16 @@ function ksBootstrapFirstOwner_(envelope) {
       var orphanedUid = ksFindFirstNonBlankColumnValue_(usersSheet, usersHeaderCheck.headers, 'user_id') ||
         ksFindFirstNonBlankColumnValue_(authSheet, authHeaderCheck.headers, 'user_id') ||
         '';
+      if (!orphanedUid && prevInProgressNonce) {
+        var allocCrashRows = ksFindRowsByColumn_(allocSheet, allocHeaderCheck.headers, 'nonce', prevInProgressNonce);
+        for (var ci = 0; ci < allocCrashRows.length; ci++) {
+          var candAllocId = String(allocCrashRows[ci].allocated_id || '').trim();
+          if (candAllocId) {
+            orphanedUid = candAllocId;
+            break;
+          }
+        }
+      }
       ksQuarantineBootstrapState_(
         props,
         prevInProgressNonce || nonce,
@@ -707,7 +717,18 @@ function ksBootstrapFirstOwner_(envelope) {
         if (prevHash && payloadHash && ksBootstrapSafeEqual_(payloadHash, prevHash)) {
           var existingUserRows = ksFindRowsByColumn_(usersSheet, usersHeaderCheck.headers, 'user_id', prevUid);
           var existingAuthRows = ksFindRowsByColumn_(authSheet, authHeaderCheck.headers, 'user_id', prevUid);
-          if (existingUserRows.length === 1 && existingAuthRows.length === 1) {
+          var existingAuditRows = ksFindRowsByColumn_(auditSheet, auditHeaderCheck.headers, 'related_record_id', prevNonce);
+          var replayAuditVerified = false;
+          for (var ai = 0; ai < existingAuditRows.length; ai++) {
+            if (
+              String(existingAuditRows[ai].action || '').trim() === 'BOOTSTRAP_FIRST_OWNER' &&
+              String(existingAuditRows[ai].entity_id || '').trim() === prevUid
+            ) {
+              replayAuditVerified = true;
+              break;
+            }
+          }
+          if (existingUserRows.length === 1 && existingAuthRows.length === 1 && replayAuditVerified) {
             return ksBootstrapResponse_(envelope, 'CONFIRMED', {
               allocated_id: prevUid,
               record: existingUserRows[0],
@@ -718,7 +739,7 @@ function ksBootstrapFirstOwner_(envelope) {
           return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
             allocated_id: prevUid,
             error_code: 'BOOTSTRAP_REPLAY_STATE_INCONSISTENT',
-            message: 'Bootstrap completion latch exists but Users/AuthUsers read-back is inconsistent.',
+            message: 'Bootstrap completion latch exists but Users/AuthUsers/AuditLog read-back is inconsistent.',
             http_status: 409,
             retryable: false
           });
@@ -828,33 +849,38 @@ function ksBootstrapFirstOwner_(envelope) {
 
     var nowIso = new Date().toISOString();
 
+    var userId = '';
+
     // 5B. Durable Write-Ahead IN_PROGRESS marker strictly BEFORE the first ID allocation or sheet write.
-    //     If GAS terminates this execution abruptly at any point from Step 6 through Step 9, the next
+    //     If GAS terminates this execution abruptly at any point from Step 6 through Step 10, the next
     //     request holding ScriptLock detects this marker at Step 0B and quarantines into RECOVERY_REQUIRED.
-    ksAssertScriptLockHeld_(lock, 'BEFORE_SET_IN_PROGRESS');
-    props.setProperties({
-      KS_OWNER_BOOTSTRAP_IN_PROGRESS: 'true',
-      KS_OWNER_BOOTSTRAP_IN_PROGRESS_NONCE: nonce,
-      KS_OWNER_BOOTSTRAP_IN_PROGRESS_PAYLOAD_HASH: payloadHash,
-      KS_OWNER_BOOTSTRAP_IN_PROGRESS_STARTED_AT: nowIso
-    }, false);
-
-    // 6. Canonical ID allocation via caller-locked `ksAllocateIdLocked_` (ScriptLock NEVER released!)
-    var userAlloc;
+    //     Every unexpected exception from Step 5B onward is caught by the outer post-mutation try/catch
+    //     so NO post-mutation error can ever downgrade to REJECTED/FAILED or emit a false CONFIRMED.
     try {
-      userAlloc = ksBootstrapAllocateCanonicalIdLocked_(lock, 'Users', nonce);
-    } catch (userAllocErr) {
-      ksQuarantineBootstrapState_(props, nonce, payloadHash, '', 'USER_ID_ALLOCATION_FAILED');
-      return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
-        allocated_id: null,
-        error_code: 'USER_ID_ALLOCATION_FAILED',
-        message: 'Users ID allocation failed after entering bootstrap transaction; quarantined for Owner inspection.',
-        http_status: 409,
-        retryable: false
-      });
-    }
+      ksAssertScriptLockHeld_(lock, 'BEFORE_SET_IN_PROGRESS');
+      props.setProperties({
+        KS_OWNER_BOOTSTRAP_IN_PROGRESS: 'true',
+        KS_OWNER_BOOTSTRAP_IN_PROGRESS_NONCE: nonce,
+        KS_OWNER_BOOTSTRAP_IN_PROGRESS_PAYLOAD_HASH: payloadHash,
+        KS_OWNER_BOOTSTRAP_IN_PROGRESS_STARTED_AT: nowIso
+      }, false);
 
-    var userId = userAlloc.allocated_id;
+      // 6. Canonical ID allocation via caller-locked `ksAllocateIdLocked_` (ScriptLock NEVER released!)
+      var userAlloc;
+      try {
+        userAlloc = ksBootstrapAllocateCanonicalIdLocked_(lock, 'Users', nonce);
+      } catch (userAllocErr) {
+        ksQuarantineBootstrapState_(props, nonce, payloadHash, '', 'USER_ID_ALLOCATION_FAILED');
+        return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
+          allocated_id: null,
+          error_code: 'USER_ID_ALLOCATION_FAILED',
+          message: 'Users ID allocation failed after entering bootstrap transaction; quarantined for Owner inspection.',
+          http_status: 409,
+          retryable: false
+        });
+      }
+
+      userId = userAlloc.allocated_id;
     if (!/^USR-[A-Z0-9_-]{3,}$/.test(userId)) {
       ksQuarantineBootstrapState_(props, nonce, payloadHash, userId, 'INVALID_USER_ID_PREFIX');
       return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
@@ -1034,11 +1060,35 @@ function ksBootstrapFirstOwner_(envelope) {
     props.deleteProperty(KS_BOOTSTRAP_PROP_TOKEN_HASH);
     props.deleteProperty(KS_BOOTSTRAP_PROP_EXPIRES_AT);
 
-    return ksBootstrapResponse_(envelope, 'CONFIRMED', {
-      allocated_id: userId,
-      record: userRecord,
-      message: 'Initial Owner account created, audited, and verified in Google Sheets.'
-    });
+      return ksBootstrapResponse_(envelope, 'CONFIRMED', {
+        allocated_id: userId,
+        record: userRecord,
+        message: 'Initial Owner account created, audited, and verified in Google Sheets.'
+      });
+    } catch (unexpectedPostMutationErr) {
+      // Blocker B1 guarantee: ANY unexpected exception after entering the bootstrap mutation phase
+      // MUST produce RECOVERY_REQUIRED (never REJECTED/FAILED and never false CONFIRMED).
+      // Partial records and audit evidence are preserved untouched; one-time token is burned.
+      try {
+        ksQuarantineBootstrapState_(
+          props,
+          nonce,
+          payloadHash,
+          userId || '',
+          'UNEXPECTED_POST_MUTATION_EXCEPTION'
+        );
+      } catch (_quarantineErr) {
+        // Best-effort quarantine: IN_PROGRESS remains persisted in Script Properties so the next
+        // execution under ScriptLock immediately quarantines at Step 0B.
+      }
+      return ksBootstrapResponse_(envelope, 'RECOVERY_REQUIRED', {
+        allocated_id: userId || null,
+        error_code: 'UNEXPECTED_POST_MUTATION_EXCEPTION',
+        message: 'An unexpected error occurred after entering the first-owner bootstrap transaction. Partial records and audit evidence are preserved; state is quarantined for Owner reconciliation.',
+        http_status: 409,
+        retryable: false
+      });
+    }
   } finally {
     // Single and ONLY release point for ScriptLock across the entire bootstrap transaction.
     if (lock.hasLock()) {

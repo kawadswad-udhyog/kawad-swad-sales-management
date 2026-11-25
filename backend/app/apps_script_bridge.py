@@ -74,17 +74,93 @@ from app.transaction_safety import (
 logger = logging.getLogger("kawad_swad.apps_script_bridge")
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Fail-closed redirect blocker so signed HMAC envelopes are never forwarded across HTTP redirects."""
+_APPS_SCRIPT_ECHO_SCHEME = "https"
+_APPS_SCRIPT_ECHO_HOST = "script.googleusercontent.com"
+_APPS_SCRIPT_ECHO_PATH = "/macros/echo"
+_MAX_APPS_SCRIPT_ECHO_REDIRECTS = 1
+
+
+def _is_allowed_apps_script_echo_url(url: str) -> bool:
+    """
+    Strictly allow ONLY Google Apps Script's response echo endpoint:
+      https://script.googleusercontent.com/macros/echo[?...]
+
+    Rejects non-HTTPS schemes, userinfo tricks, non-standard ports, subdomains/suffixes,
+    alternate paths, fragments, and any other host (e.g., accounts.google.com).
+    """
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != _APPS_SCRIPT_ECHO_SCHEME:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    if (parsed.hostname or "").lower() != _APPS_SCRIPT_ECHO_HOST:
+        return False
+    if port not in (None, 443):
+        return False
+    if parsed.path != _APPS_SCRIPT_ECHO_PATH:
+        return False
+    if parsed.fragment:
+        return False
+    return True
+
+
+class _AppsScriptEchoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """
+    Allowlisted redirect handler for Google Apps Script Web App responses.
+
+    Google Apps Script Web Apps execute doPost(e) to completion and always return
+    HTTP 302 Found pointing to https://script.googleusercontent.com/macros/echo?...
+    to deliver the JSON response body.
+
+    Security guarantees:
+    1. Follows ONLY a single redirect hop (max 1) to https://script.googleusercontent.com/macros/echo.
+    2. Converts the redirected request strictly to GET with data=None.
+    3. Strips ALL original headers (POST body, X-KS-Signature, HMAC headers, bootstrap token,
+       Authorization, Cookie, Content-Type) so no secret or signed envelope ever leaves the
+       initial POST to script.google.com.
+    4. Fails closed (raises HTTPError) for every other redirect destination or chained redirect.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._echo_redirects_followed: int = 0
+        self.followed_echo_redirect: bool = False
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        resolved_url = urllib.parse.urljoin(req.full_url, str(newurl or "").strip())
+        if (
+            code in (301, 302, 303, 307, 308)
+            and self._echo_redirects_followed < _MAX_APPS_SCRIPT_ECHO_REDIRECTS
+            and _is_allowed_apps_script_echo_url(resolved_url)
+        ):
+            self._echo_redirects_followed += 1
+            self.followed_echo_redirect = True
+            return urllib.request.Request(
+                resolved_url,
+                data=None,
+                method="GET",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "KawadSwadERP-Bridge/2.0",
+                },
+            )
         raise urllib.error.HTTPError(
-            newurl,
+            resolved_url,
             code,
             f"HTTP {code} redirect blocked on signed Apps Script bridge request.",
             headers,
             fp,
         )
+
+
+# Preserve alias for backwards compatibility with any test/internal references.
+_NoRedirectHandler = _AppsScriptEchoRedirectHandler
 
 
 @dataclass
@@ -2841,7 +2917,8 @@ class AppsScriptBridge:
                 "X-KS-Payload-Hash": payload_hash,
             },
         )
-        opener = urllib.request.build_opener(_NoRedirectHandler)
+        redirect_handler = _AppsScriptEchoRedirectHandler()
+        opener = urllib.request.build_opener(redirect_handler)
 
         def _build_transition_conflict_result(exc: InvalidStateTransitionError) -> BridgeResult:
             latest = None
@@ -2929,10 +3006,65 @@ class AppsScriptBridge:
                 data: Dict[str, Any] = parsed
         except urllib.error.HTTPError as http_err:
             code = http_err.code
+            if redirect_handler.followed_echo_redirect:
+                # The initial POST already executed doPost(e) on Apps Script and redirected to the
+                # allowlisted echo endpoint. Any HTTP error while fetching the echo response means
+                # the transaction outcome is UNCERTAIN — NEVER classify a potentially committed
+                # write as FAILED/REJECTED.
+                logger.warning(
+                    "Post-redirect Apps Script echo HTTP %s for action=%s corr=%s — classifying as UNKNOWN",
+                    code,
+                    clean_action,
+                    corr_id,
+                )
+                err_code = f"APPS_SCRIPT_ECHO_HTTP_{code}"
+                msg = (
+                    f"Apps Script executed request and redirected to echo endpoint, but echo retrieval "
+                    f"returned HTTP {code}. Outcome is unconfirmed; do NOT submit a new transaction. "
+                    "Check status and recover using the same nonce."
+                )
+                conflict_res = _worker_cas_transition(
+                    lifecycle_state=TransactionState.UNKNOWN,
+                    bridge_status="PENDING_UNKNOWN",
+                    failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
+                    error_code=err_code,
+                    message=msg,
+                )
+                if conflict_res is not None:
+                    return conflict_res
+                audit_ok = self._record_tx_audit(
+                    actor_user_id=actor_user_id,
+                    action=clean_action,
+                    target_tab=clean_tab,
+                    entity_id=clean_nonce,
+                    transaction_id=tx_id,
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    lifecycle_state=TransactionState.UNKNOWN.value,
+                    failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
+                    error_code=err_code,
+                    attempt_number=attempt_no,
+                    reason=msg,
+                )
+                return BridgeResult(
+                    status="PENDING_UNKNOWN",
+                    correlation_id=corr_id,
+                    nonce=clean_nonce,
+                    error_code=err_code,
+                    message=msg,
+                    retryable=True,
+                    http_status=504,
+                    payload_hash=payload_hash,
+                    transaction_id=tx_id,
+                    transaction_state=TransactionState.UNKNOWN.value,
+                    failure_category=FailureCategory.WRITE_OUTCOME_UNKNOWN.value,
+                    attempt_number=attempt_no,
+                    audit_logged=audit_ok,
+                )
             if 300 <= code < 400:
-                logger.warning("Blocked HTTP %s redirect from Apps Script bridge action=%s corr=%s", code, clean_action, corr_id)
+                logger.warning("Blocked disallowed HTTP %s redirect from Apps Script bridge action=%s corr=%s", code, clean_action, corr_id)
                 err_code = f"APPS_SCRIPT_REDIRECT_BLOCKED_{code}"
-                msg = f"Apps Script endpoint attempted HTTP {code} redirect; blocked for HMAC envelope safety."
+                msg = f"Apps Script endpoint attempted disallowed HTTP {code} redirect; blocked for HMAC envelope safety."
                 conflict_res = _worker_cas_transition(
                     lifecycle_state=TransactionState.FAILED,
                     bridge_status="REJECTED",

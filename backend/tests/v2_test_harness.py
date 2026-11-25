@@ -1006,7 +1006,7 @@ class LocalAppsScriptSimulator:
             up.setdefault("created_at", now_s)
             self._append_row("Users", up)
             self._append_row("AuthUsers", {
-                "auth_id": self._alloc_id("AuthUsers", explicit_prefix="AUT"),
+                "auth_id": self._alloc_id("AuthUsers", explicit_prefix="AUTH"),
                 "user_id": uid,
                 "username": up.get("username", ""),
                 "role": up.get("role", "SALESMAN"),
@@ -1950,7 +1950,7 @@ class LocalAppsScriptSimulator:
 
         if self._current_nonce:
             self._append_row("IdAllocations", {
-                "allocation_id": self._alloc_id("IdAllocations", explicit_prefix="ALC"),
+                "allocation_id": self._alloc_id("IdAllocations", explicit_prefix="ALLOC"),
                 "tab_name": "Users",
                 "allocated_id": uid,
                 "nonce": self._current_nonce,
@@ -1973,7 +1973,7 @@ class LocalAppsScriptSimulator:
         user_rec["user_id"] = uid
         self._append_row("Users", user_rec)
         auth_rec = dict(payload.get("auth_user") or payload.get("auth_record") or {
-            "auth_id": self._alloc_id("AuthUsers", explicit_prefix="AUT"),
+            "auth_id": self._alloc_id("AuthUsers", explicit_prefix="AUTH"),
             "user_id": uid,
             "username": user_rec.get("username", ""),
             "role": user_rec.get("role", "SALESMAN"),
@@ -1984,7 +1984,7 @@ class LocalAppsScriptSimulator:
             "created_at": user_rec.get("created_at") or now_iso(),
         })
         auth_rec["user_id"] = uid
-        auth_rec.setdefault("auth_id", self._alloc_id("AuthUsers", explicit_prefix="AUT"))
+        auth_rec.setdefault("auth_id", self._alloc_id("AuthUsers", explicit_prefix="AUTH"))
         self._append_row("AuthUsers", auth_rec)
         return {"allocated_id": uid, "record": user_rec}
 

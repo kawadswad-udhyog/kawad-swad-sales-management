@@ -222,7 +222,7 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
         self.assertEqual(res.status, "CONFIRMED")
         self.assertTrue(res.user_id.startswith("USR-"))
         self.assertEqual(res.username, "kawad.owner")
-        self.assertEqual(res.role, "OWNER")
+        self.assertEqual(res.role, "OWNER_ADMIN")
         self.assertEqual(res.canonical_role, "OWNER_ADMIN")
         self.assertFalse(res.must_change_password)
         self.assertFalse(res.is_replay)
@@ -259,19 +259,23 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
             auth_router.login(LoginRequest(username="kawad.owner", password=_OWNER_PASSWORD), bg)
         )
         self.assertEqual(token_resp.user_id, res.user_id)
-        self.assertEqual(token_resp.role, "OWNER")
+        self.assertEqual(token_resp.role, "OWNER_ADMIN")
         self.assertFalse(token_resp.must_change_password)
 
         from fastapi.security import HTTPAuthorizationCredentials
+        from app.permissions import is_owner, require_owner, role_v2_of
 
         current = self._run(
             get_current_user(
                 HTTPAuthorizationCredentials(scheme="Bearer", credentials=token_resp.access_token)
             )
         )
+        self.assertTrue(is_owner(current))
+        self.assertEqual(role_v2_of(current), "OWNER_ADMIN")
+        require_owner(current)
         me = self._run(auth_router.get_me(current))
         self.assertEqual(me["user_id"], res.user_id)
-        self.assertEqual(me["role"], "OWNER")
+        self.assertEqual(me["role"], "OWNER_ADMIN")
         self.assertFalse(me["must_change_password"])
 
         # Same nonce + identical payload -> idempotent replay, zero duplicate rows
@@ -328,6 +332,206 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
         self.assertEqual(ctx.exception.detail["status"], "RECOVERY_REQUIRED")
         self.assertEqual(ctx.exception.detail["error_code"], "PARTIAL_BOOTSTRAP_WRITE_AUTHUSERS_FAILED")
         self.assertFalse(ctx.exception.detail["retryable"])
+
+    def test_10_b2_allowlisted_apps_script_302_echo_redirect_and_header_stripping(self):
+        import urllib.error
+        import urllib.request
+        from app.apps_script_bridge import (
+            _AppsScriptEchoRedirectHandler,
+            _is_allowed_apps_script_echo_url,
+        )
+
+        # 1. URL allowlist checks (strictly https://script.googleusercontent.com/macros/echo)
+        allowed_echo = "https://script.googleusercontent.com/macros/echo?user_content_key=abc123&lib=xyz789"
+        self.assertTrue(_is_allowed_apps_script_echo_url(allowed_echo))
+        self.assertTrue(_is_allowed_apps_script_echo_url("https://script.googleusercontent.com:443/macros/echo?k=1"))
+
+        disallowed_urls = [
+            "http://script.googleusercontent.com/macros/echo?user_content_key=abc",
+            "https://accounts.google.com/ServiceLogin?continue=https://script.google.com",
+            "https://script.googleusercontent.com/other/path?k=1",
+            "https://script.googleusercontent.com/macros/echo/extra?k=1",
+            "https://script.googleusercontent.com.evil.com/macros/echo?k=1",
+            "https://evil.com/macros/echo?k=1",
+            "https://script.googleusercontent.com:8443/macros/echo?k=1",
+            "https://script.googleusercontent.com@evil.com/macros/echo?k=1",
+            "https://script.googleusercontent.com/macros/echo?k=1#frag",
+            "https://127.0.0.1/macros/echo?k=1",
+            "",
+        ]
+        for bad_url in disallowed_urls:
+            self.assertFalse(_is_allowed_apps_script_echo_url(bad_url), f"Should reject {bad_url}")
+
+        # 2. Verify POST -> GET conversion and complete stripping of secrets/HMAC headers/body
+        handler = _AppsScriptEchoRedirectHandler()
+        orig_req = urllib.request.Request(
+            "https://script.google.com/macros/s/AKfycbTestDeployment/exec",
+            data=b'{"bootstrap_token_digest":"secret","password_hash":"hash"}',
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-KS-Signature": "deadbeef" * 8,
+                "X-KS-Bootstrap-Token": _VALID_BOOTSTRAP_SECRET,
+                "X-KS-Idempotency-Key": "NONCE-302-001",
+                "Authorization": "Bearer super-secret-jwt",
+                "Cookie": "session=secret-cookie",
+            },
+        )
+        redirected_req = handler.redirect_request(orig_req, None, 302, "Found", {}, allowed_echo)
+        self.assertEqual(redirected_req.get_method(), "GET")
+        self.assertIsNone(redirected_req.data)
+        self.assertEqual(redirected_req.full_url, allowed_echo)
+        self.assertTrue(handler.followed_echo_redirect)
+
+        lower_headers = {k.lower(): v for k, v in redirected_req.header_items()}
+        for forbidden_hdr in (
+            "x-ks-signature",
+            "x-ks-bootstrap-token",
+            "x-ks-idempotency-key",
+            "x-ks-correlation-id",
+            "x-ks-transaction-id",
+            "x-ks-payload-hash",
+            "authorization",
+            "cookie",
+            "content-type",
+        ):
+            self.assertNotIn(forbidden_hdr, lower_headers, f"Header {forbidden_hdr} leaked across redirect")
+
+        # 3. Verify 2nd chained redirect hop is blocked fail-closed even to echo URL
+        with self.assertRaises(urllib.error.HTTPError) as hop2_ctx:
+            handler.redirect_request(redirected_req, None, 302, "Found", {}, allowed_echo)
+        self.assertEqual(hop2_ctx.exception.code, 302)
+
+        # 4. Verify disallowed destination raises HTTPError immediately on first hop
+        handler2 = _AppsScriptEchoRedirectHandler()
+        with self.assertRaises(urllib.error.HTTPError) as bad_ctx:
+            handler2.redirect_request(
+                orig_req,
+                None,
+                302,
+                "Found",
+                {},
+                "https://accounts.google.com/ServiceLogin",
+            )
+        self.assertEqual(bad_ctx.exception.code, 302)
+        self.assertFalse(handler2.followed_echo_redirect)
+
+    def test_11_b2_post_redirect_echo_failure_is_unknown_never_failed(self):
+        import urllib.error
+        import urllib.request
+        from app.apps_script_bridge import _AppsScriptEchoRedirectHandler, apps_script_bridge
+        from app.transaction_safety import TransactionState
+
+        # Simulate: POST -> script.google.com returned 302 -> script.googleusercontent.com/macros/echo,
+        # handler followed echo redirect, then GET /macros/echo returned HTTP 403/500.
+        # Because doPost(e) already ran, FastAPI MUST classify outcome as PENDING_UNKNOWN / UNKNOWN
+        # (NEVER FAILED / REJECTED).
+        class _EchoFailingOpener:
+            def __init__(self, handler):
+                self._handler = handler
+
+            def open(self, req, timeout=None):
+                self._handler.followed_echo_redirect = True
+                raise urllib.error.HTTPError(
+                    "https://script.googleusercontent.com/macros/echo?user_content_key=expired",
+                    403,
+                    "Forbidden",
+                    {},
+                    None,
+                )
+
+        def _fake_build_opener(handler):
+            self.assertIsInstance(handler, _AppsScriptEchoRedirectHandler)
+            return _EchoFailingOpener(handler)
+
+        with patch.object(urllib.request, "build_opener", side_effect=_fake_build_opener):
+            res = apps_script_bridge.execute_governed_write(
+                action="BOOTSTRAP_FIRST_OWNER",
+                target_tab="Users",
+                payload={"username": "kawad.owner", "full_name": "Rajesh Kawad"},
+                actor_user_id="SYSTEM_BOOTSTRAP",
+                actor_role="OWNER_ADMIN",
+                nonce="BOOT-ECHO-FAIL-001",
+                id_field="user_id",
+            )
+        self.assertEqual(res.status, "PENDING_UNKNOWN")
+        self.assertEqual(res.transaction_state, TransactionState.UNKNOWN.value)
+        self.assertEqual(res.error_code, "APPS_SCRIPT_ECHO_HTTP_403")
+        self.assertTrue(res.retryable)
+
+    def test_12_b2_disallowed_redirect_stays_rejected_failed(self):
+        import urllib.error
+        import urllib.request
+        from app.apps_script_bridge import apps_script_bridge
+        from app.transaction_safety import TransactionState
+
+        class _DisallowedRedirectOpener:
+            def open(self, req, timeout=None):
+                raise urllib.error.HTTPError(
+                    "https://accounts.google.com/ServiceLogin",
+                    302,
+                    "HTTP 302 redirect blocked on signed Apps Script bridge request.",
+                    {},
+                    None,
+                )
+
+        with patch.object(urllib.request, "build_opener", return_value=_DisallowedRedirectOpener()):
+            res = apps_script_bridge.execute_governed_write(
+                action="BOOTSTRAP_FIRST_OWNER",
+                target_tab="Users",
+                payload={"username": "kawad.owner", "full_name": "Rajesh Kawad"},
+                actor_user_id="SYSTEM_BOOTSTRAP",
+                actor_role="OWNER_ADMIN",
+                nonce="BOOT-BAD-REDIR-001",
+                id_field="user_id",
+            )
+        self.assertEqual(res.status, "REJECTED")
+        self.assertEqual(res.transaction_state, TransactionState.FAILED.value)
+        self.assertEqual(res.error_code, "APPS_SCRIPT_REDIRECT_BLOCKED_302")
+        self.assertFalse(res.retryable)
+
+    def test_13_b2_302_echo_redirect_commits_confirmed_end_to_end(self):
+        import urllib.request
+        from app.apps_script_bridge import _AppsScriptEchoRedirectHandler, apps_script_bridge
+        from app.transaction_safety import TransactionState
+
+        observed_echo_requests = []
+        echo_url = "https://script.googleusercontent.com/macros/echo?user_content_key=confirmed123&lib=ks"
+
+        class _Sim302Opener:
+            def __init__(self, handler, sim):
+                self._handler = handler
+                self._sim = sim
+
+            def open(self, req, timeout=None):
+                # Step 1: Execute doPost(e) in simulator on initial POST (as Google Apps Script does)
+                post_resp = self._sim._dispatch_http_request(req)
+                # Step 2: Simulate Google Apps Script returning HTTP 302 -> /macros/echo
+                echo_req = self._handler.redirect_request(req, None, 302, "Found", {"Location": echo_url}, echo_url)
+                observed_echo_requests.append(echo_req)
+                # Step 3: Return the JSON response from the GET echo request
+                return post_resp
+
+        def _build_302_opener(handler):
+            self.assertIsInstance(handler, _AppsScriptEchoRedirectHandler)
+            return _Sim302Opener(handler, self.sim)
+
+        req = self._make_bootstrap_request(nonce="BOOT-302-CONFIRMED-001")
+        with patch.dict(os.environ, self._valid_env(), clear=False):
+            with patch.object(urllib.request, "build_opener", side_effect=_build_302_opener):
+                res = self._run(auth_router.bootstrap_first_owner(self._valid_req(), req))
+
+        self.assertEqual(res.status, "CONFIRMED")
+        self.assertTrue(res.user_id.startswith("USR-"))
+        self.assertEqual(len(observed_echo_requests), 1)
+        echo_req = observed_echo_requests[0]
+        self.assertEqual(echo_req.get_method(), "GET")
+        self.assertIsNone(echo_req.data)
+        self.assertEqual(echo_req.full_url, echo_url)
+        hdrs = {k.lower() for k, _ in echo_req.header_items()}
+        self.assertNotIn("x-ks-signature", hdrs)
+        self.assertNotIn("authorization", hdrs)
+        self.assertNotIn("x-ks-bootstrap-token", hdrs)
 
     def _make_bootstrap_request(
         self,

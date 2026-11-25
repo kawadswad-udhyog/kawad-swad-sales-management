@@ -330,7 +330,43 @@ function ksDispatchBootstrapFirstOwner_(verifiedEnvelope) {
     });
   }
 
-  return ksBootstrapFirstOwner_(verifiedEnvelope);
+  try {
+    return ksBootstrapFirstOwner_(verifiedEnvelope);
+  } catch (dispatchErr) {
+    // Defense-in-depth (Blocker B1): Never let a post-mutation exception bubble into
+    // WebAppBridge.js's generic catch(err) -> status: 'REJECTED'.
+    var postMutationUncertain = true;
+    var recoveredUid = null;
+    try {
+      var p = PropertiesService.getScriptProperties();
+      var inProg = String(p.getProperty(KS_BOOTSTRAP_PROP_IN_PROGRESS) || '').trim().toLowerCase() === 'true';
+      var recReq = String(p.getProperty(KS_BOOTSTRAP_PROP_RECOVERY_REQUIRED) || '').trim().toLowerCase() === 'true';
+      var completed = String(p.getProperty(KS_BOOTSTRAP_PROP_COMPLETED) || '').trim().toLowerCase() === 'true';
+      recoveredUid = String(p.getProperty(KS_BOOTSTRAP_PROP_USER_ID) || '').trim() || null;
+      if (!inProg && !recReq && !completed) {
+        postMutationUncertain = false;
+      }
+    } catch (_propErr) {
+      postMutationUncertain = true;
+    }
+
+    if (postMutationUncertain) {
+      return ksBootstrapResponse_(verifiedEnvelope, 'RECOVERY_REQUIRED', {
+        allocated_id: recoveredUid,
+        error_code: 'BOOTSTRAP_DISPATCH_POST_MUTATION_EXCEPTION',
+        message: 'Unexpected error occurred during first-owner bootstrap with uncertain/quarantined state. Partial records are preserved for Owner reconciliation.',
+        http_status: 409,
+        retryable: false
+      });
+    }
+
+    return ksBootstrapResponse_(verifiedEnvelope, 'REJECTED', {
+      error_code: 'BOOTSTRAP_DISPATCH_PREMUTATION_ERROR',
+      message: 'First-owner bootstrap failed before any sheet mutation occurred.',
+      http_status: 500,
+      retryable: false
+    });
+  }
 }
 
 /*
