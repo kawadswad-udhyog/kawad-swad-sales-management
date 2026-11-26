@@ -1,0 +1,230 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-01
+STAGE 0: SOURCE AND ENVIRONMENT PREFLIGHT REPORT
+================================================================================
+Mission ID:        KS-RELEASE-01
+Generated At:      2026-11-26T18:05:00Z (2026-11-26T10:05:00-08:00)
+Authoring Role:    Implementation & Engineering Agent (NOT Independent Auditor)
+Stage Status:      PREFLIGHT COMPLETED (Baseline Recorded Prior to Any Edits)
+
+--------------------------------------------------------------------------------
+1. REPOSITORY, BRANCH, COMMIT & WORKSPACE IDENTITY
+--------------------------------------------------------------------------------
+GitHub Repository: https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git
+Remote Branch:     main (verified read-only via `git ls-remote` & shallow clone)
+Remote HEAD:       f7ccebffdacb96081f498b304dc009326bbcee44
+Commit Timestamp:  2026-11-25 22:58:34 +0530
+Commit Subject:    docs: update project screenshots
+                   (Note: Commit f7ccebf also includes the hardened HMAC-SHA256
+                   files apps_script/WebAppBridge.js,
+                   apps_script/WebAppBridge_BootstrapIntegration.js,
+                   apps_script_patch/first_owner_bootstrap/*,
+                   backend/tests/test_cross_language_hmac.py, and updated
+                   test_apps_script_bootstrap_vm.mjs.)
+Prior Commit:      b263219094a4d2a5ae0675dbe9d20e375cfc0632
+                   (feat: implement core ERP modules and governance — materialized
+                   complete 45-file apps_script/ directory.)
+
+Active Workspace:  /app/applet (AI Studio container workspace)
+Local .git State:  NOT PRESENT (.git directory does not exist in /app/applet;
+                   GitHub push credentials are not present in this sandbox).
+Working-Tree Diff
+vs GitHub main:    ZERO source differences across all tracked files.
+                   Only workspace-local untracked file: `bun.lock` (25,375 bytes).
+                   `public/assets/aistudio/` (6 uploaded reference .txt files)
+                   is present in BOTH GitHub main (f7ccebf) and /app/applet.
+
+Protected Branch Constraint (Section 4.1):
+  Because /app/applet lacks a local .git repository and GitHub push credentials,
+  cutting and pushing remote branch `release/ks-source-reconciliation-01` from
+  `f7ccebffdacb96081f498b304dc009326bbcee44` is classified as BLOCKED (EXTERNAL
+  OWNER / LOCAL GIT STEP) from within this sandbox. All Stage 1 edits are
+  performed non-destructively against baseline f7ccebf, preserved with full
+  before/after checksums, and packaged into a reproducible release candidate ZIP
+  (`KS_RELEASE_01_RELEASE_CANDIDATE.zip`) ready to commit directly onto
+  `release/ks-source-reconciliation-01`.
+
+--------------------------------------------------------------------------------
+2. GOVERNING DOCUMENTS & AUDIT ARTIFACT VERIFICATION
+--------------------------------------------------------------------------------
+Requested Governing Document Check:
+  [NOT BUNDLED VERBATIM] kawad_swad_erp_master_manual_source_of_truth.md
+  [NOT BUNDLED VERBATIM] Kawad_Swad_Google_Sheets_Master_Database_and_Policy_Blueprint_v2.0.txt
+    -> Provenance notice already documented in docs/MASTER_POLICY_CONSTITUTION_V1_2.md:3.
+
+Verified In-Repo Authoritative Governance & Audit Artifacts:
+  [PRESENT] docs/MASTER_POLICY_CONSTITUTION_V1_2.md (POL-001 through POL-028, Sec 1-27)
+  [PRESENT] docs/MASTER_REGISTERS_AND_DECISIONS.md
+  [PRESENT] docs/SALES_MANAGEMENT_SCHEMA.md
+  [PRESENT] docs/SYSTEM_ARCHITECTURE_AND_OPERATIONS.md
+  [PRESENT] docs/PHASE1_DATABASE_REPAIR_AND_APPS_SCRIPT_AUDIT_REPORT.md
+  [PRESENT] apps_script_patch/first_owner_bootstrap/PACKAGE_MANIFEST.md
+  [PRESENT] apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+  [PRESENT] apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+  [PRESENT] public/assets/aistudio/Kawad_Swad_Bound_Apps_Script_Source_COMPLETE_VERBATIM_EXPORT_c019c467.txt
+  [PRESENT] public/assets/aistudio/Mission_51B1R_E2D_Complete_Apps_Script_Audit_94dae3ba.txt
+  [PRESENT] public/assets/aistudio/Kawad_Swad_Master_Apps_Script_Security_Repair_Blueprint_v1.0_0963dfa1.txt
+  [PRESENT] public/assets/aistudio/Kawad_Swad_Mission_51B1R_E2F_Owner_Decision_and_Technical_Baseline_c7844e47.txt
+
+Merged Package <-> Audit Alignment Check (Baseline f7ccebf):
+  All 6 merged First-Owner Apps Script files in
+  `apps_script_patch/first_owner_bootstrap/merged_bound_files/` match
+  `MERGED_SHA256_MANIFEST.md`, `apps_script/SOURCE_INVENTORY_AND_SHA256.txt`,
+  AND current working-tree `apps_script/` byte-for-byte at baseline f7ccebf:
+    - Config.js                            7d7fcbb3c66ac79ba3fb9529580ab9a5e5fb6f07a10579f51f98b7b4bd2a7bb9
+    - IdAllocator.js                       efa484e78cfaf1711135d53f1bf05cb75cb2c17ce588a69a68205c292d5b6d8e
+    - AuditAndExceptions.js                4dfe6f38f91ba493b75e45bb6ca92576f64b07f81a7866eb4a64113f154ee770
+    - BootstrapOwnerHandler.js             15e9026762a86855778928dbcb69686e72c4f6c86b657094e8d79708366084af
+    - WebAppBridge_BootstrapIntegration.js 9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f
+    - WebAppBridge.js                      aee3ca8f4ffac50175e1b46e80b5e0750fdfbe4d5bcd7d3b04220e007c7efc49
+
+Preliminary Finding on the 4 Audit-Identified Files (to verify deeply in Stage 1):
+  1. IdAllocator.js:        `ksAllocateIdLocked_()` IS PRESENT in current source (lines 16-99).
+  2. AuditAndExceptions.js: `ksLogAuditStrictLocked_()` IS PRESENT in current source (lines 180-237).
+  3. Config.js:             `AUTH_USERS: 'AuthUsers'` (line 24) and `AuthUsers: 'AUTH'` (line 46) ARE PRESENT.
+  4. WebAppBridge.js:       Matches merged_bound_files/WebAppBridge.js at f7ccebf,
+                            HOWEVER fresh security inspection against Section 4.2.D
+                            identified 6 genuine non-bootstrap bridge defects (W1-W6)
+                            requiring minimal surgical correction in Stage 1:
+                              W1: Legacy bridge path calls ksLogAudit_ without callerHoldsLock:true
+                                  (prematurely releasing ScriptLock before flush) and without
+                                  strict audit enforcement.
+                              W2: ksFindByNonce_ ignores tab_name (cross-table nonce collision).
+                              W3: Missing target-table allowlist & protected governance/scratch/AuthUsers guard.
+                              W4: Missing mandatory actor_user_id / actor_role validation.
+                              W5: ksWriteCanonicalRowByHeaders_ lacks flush + read-back verification.
+                              W6: ksRecordIdAllocation_ writes ALLOC-<Date.now()>, corrupting
+                                  IdAllocator.js's 7-digit monotonic ALLOC-0000001 sequence.
+
+--------------------------------------------------------------------------------
+3. SOURCE DIRECTORY MAP & FILE COUNTS
+--------------------------------------------------------------------------------
+/app/applet/
+  apps_script/                         45 files (42 .js, 1 .html, 1 appsscript.json, 1 manifest)
+  apps_script_patch/                   13 files (first_owner_bootstrap isolated & merged_bound_files)
+  backend/app/                         39 Python files (FastAPI API, bridge, RBAC, accounting, calculations)
+  backend/tests/                       73 Python/MJS test files
+  src/                                 65 TypeScript/TSX frontend files (React 18 + Vite 6 + Tailwind 4)
+  scripts/                              9 verification/acceptance/hygiene scripts
+  docs/                                29 governance, architecture, schema & mission reports
+  .github/workflows/                    1 workflow (phase-4-2a-security.yml)
+  public/assets/aistudio/               6 uploaded reference text files (excluded from release ZIP)
+  render.yaml, .env.example, package.json, package-lock.json, requirements.txt, vite.config.ts
+
+Component Versions:
+  Frontend:    package.json v1.0.0 (React 18.3.1, Vite 6.0.7, TypeScript 5.7.2, Tailwind 4.3.3)
+  Backend:     FastAPI Python (runtime in sandbox: Python 3.11.2; CI targets Python 3.12)
+  Apps Script: Bound Google Apps Script project (KS_CONFIG.VERSION = '2.0.0-dev', V8 runtime)
+
+--------------------------------------------------------------------------------
+4. BASELINE SHA-256 CHECKSUMS (PRE-STAGE-1, COMMIT f7ccebf)
+--------------------------------------------------------------------------------
+4dfe6f38f91ba493b75e45bb6ca92576f64b07f81a7866eb4a64113f154ee770      8362  apps_script/AuditAndExceptions.js
+15e9026762a86855778928dbcb69686e72c4f6c86b657094e8d79708366084af     45474  apps_script/BootstrapOwnerHandler.js
+7d7fcbb3c66ac79ba3fb9529580ab9a5e5fb6f07a10579f51f98b7b4bd2a7bb9      4911  apps_script/Config.js
+efa484e78cfaf1711135d53f1bf05cb75cb2c17ce588a69a68205c292d5b6d8e      4909  apps_script/IdAllocator.js
+6c7492e06e65b7585e5dc266746264e9e1ef49302d0de4c8472ac0547b5bc24b      3274  apps_script/SafeWriter.js
+aee3ca8f4ffac50175e1b46e80b5e0750fdfbe4d5bcd7d3b04220e007c7efc49     10514  apps_script/WebAppBridge.js
+9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f     17760  apps_script/WebAppBridge_BootstrapIntegration.js
+468928af3d7ab2b62309df74de96ec5f1a25773d0798896e31583e05e39e1b32       204  apps_script/appsscript.json
+e34a70a5b933cf81795dfbb2b679d7642ef37d3967550880fe957e45deb4b307     23464  apps_script/ErpSidebar.html
+1b893db582a0b2c8f2acef74201c4f925d31f1fee740831e74baf16b6498da1d      6918  apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+d1f8bd07330e626371a969bc0c9cfb0ce534977e4ddbba87d7fffd7f7c6bbec8    204713  backend/app/apps_script_bridge.py
+1b8ef7bd3cb0229de33d3f4cb0b84f8d388b3a274710bd9bdecb0cf86669067a     41841  backend/app/action_registry.py
+7b7e6f9935cfa0118da509c9136ae245d0399416a91ca1e78b339d3c23a7f527     20379  backend/app/auth.py
+471c9f41cca4d74ea7872ada976aba1a2e4449ef437d7792fa9407d0a7f3dc3e     12064  backend/app/config.py
+0ac440d89b4e24c8bb27e780a2d784be9abbc025435b2491856fa57f42d09fbd     14230  backend/app/main.py
+304622273a20d46ff7f0dbabdff10781751404f9c7a047d564f9f4486d7ca218     28081  backend/app/permissions.py
+535de648844d140d8ca36b8431eae15568c0bf37e5830ab95103ccfbf47b615c     54503  backend/app/schema_registry.py
+60630af8363e3449bbf4d543ebb046dab2b624575cd67add63554df30d5be2c5    107735  backend/app/sheets.py
+e7faab34c793a96c23d1d37963e9fa73ae31fb5681c09c991b872111b27ebf6b     17308  backend/app/routers/auth.py
+7189e1937389a45f8339ddf4e502b57e037f7b4c8aaf0850d26e5c9eb40ff279     65759  backend/app/routers/v2_erp.py
+6dae24b67027633ef698e1d0409e96a52e0470f575a4da9e7791fea948fa6d29    109940  src/services/api.ts
+8d2277f3adac44de74453178378e3257f09e1e660bbd188781b51cf4123600b5     58374  src/context/StoreContext.tsx
+eb3607938cd3acfa0e7a5f7795c25c6759af3b6af3444883546bd35381a36223     12295  src/utils/permissions.ts
+13ae5f8b93f03f99cf8bb48fadd4d594faeb520e36e381900e09fd2e078485be      2269  render.yaml
+4bf9eb756d9b3e4bb56da6e962bdb5d21d094884e0b136af05061c3fa6e3e661      2850  .env.example
+1c93f99c5a74576be85119c0468dd82a63e158b3ff1f3fd255cb1df49eac97ca       695  package.json
+51a92fff4a509bc5fe213ed9e99322b8c7d50108dce5cc01ae70c8272f575861     52108  package-lock.json
+5f20f783c7bbb3e34da1171397629b5128dc3f557924b8ea5871d1d27949791e       152  requirements.txt
+5f20f783c7bbb3e34da1171397629b5128dc3f557924b8ea5871d1d27949791e       152  backend/requirements.txt
+
+--------------------------------------------------------------------------------
+5. DEPLOYMENT CONFIGURATION SUMMARY (ZERO SECRETS EXPOSED)
+--------------------------------------------------------------------------------
+Defined in `render.yaml` & `.env.example`:
+  1. Frontend (Render Static Site):
+     - Service name: `kawad-swad-sales-frontend`
+     - Build: `npm ci && npm run build` | Publish: `./dist`
+     - Rewrites `/api/*`, `/health`, `/auth/*` -> `https://kawad-swad-sales-dev.onrender.com/...`
+     - Env var: `VITE_API_URL` (sync: false)
+     [DEPLOYMENT READINESS FINDING]: render.yaml currently points static rewrites
+     and backend service name to `-dev` (`kawad-swad-sales-dev`) while setting
+     `SALES_ENV=production` and including `http://localhost:3000` in
+     `SALES_CORS_ORIGINS`. Must be confirmed/reconciled by Owner before G3.
+  2. Backend (Render Web Service):
+     - Service name: `kawad-swad-sales-dev` (Python, rootDir: `backend`)
+     - Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+     - Persistent disk: `kawad-swad-tx-coord-disk` mounted at `/var/data/kawad_swad` (1 GB)
+     - Single-instance lock: `WEB_CONCURRENCY=1`, `SALES_INSTANCE_COUNT=1`
+     - Required secret/env mappings (values NOT stored in repo):
+       `SALES_GOOGLE_SPREADSHEET_ID`, `SALES_GOOGLE_SERVICE_ACCOUNT_FILE`
+       (`/etc/secrets/sales-service-account.json`), `SALES_JWT_SECRET`,
+       `SALES_APPS_SCRIPT_ENABLED=true`, `SALES_APPS_SCRIPT_WEBAPP_URL`,
+       `SALES_APPS_SCRIPT_SHARED_SECRET`, `TRANSACTION_DB_PATH`,
+       `KS_ERP_LOCK_DIR`, `KS_ERP_STATE_DIR`, `SALES_TX_LEASE_SECONDS=90`.
+     - Temporary one-time bootstrap window vars (disabled by default):
+       `SALES_OWNER_BOOTSTRAP_ENABLED`, `SALES_OWNER_BOOTSTRAP_SECRET`,
+       `SALES_OWNER_BOOTSTRAP_EXPIRES_AT`.
+  3. Bound Google Apps Script Project (`apps_script/`):
+     - Manifest `apps_script/appsscript.json`: Asia/Kolkata, V8 runtime,
+       `webapp.executeAs=USER_DEPLOYING`, `webapp.access=ANYONE_ANONYMOUS`
+       (all requests fail closed unless HMAC-SHA256 verified by `ksVerifySignedBridgeEnvelope_`).
+     - Required Script Properties (provisioned out-of-band by Owner):
+       `SALES_APPS_SCRIPT_SHARED_SECRET`, and during bootstrap window only:
+       `KS_OWNER_BOOTSTRAP_TOKEN_HASH`, `KS_OWNER_BOOTSTRAP_EXPIRES_AT`.
+  4. Authoritative Database:
+     - Google Sheets workbook (ID provided via Render secret env var; not in repo).
+     - Live production credentials/URLs/IDs are NOT present in this sandbox.
+
+--------------------------------------------------------------------------------
+6. AVAILABLE TEST COMMANDS
+--------------------------------------------------------------------------------
+- Apps Script VM Security Suite:
+    node backend/tests/test_apps_script_bootstrap_vm.mjs
+- Cross-Language Python <-> Apps Script HMAC & Bridge Suite:
+    PYTHONPATH=backend SALES_TESTING=1 python3 -m unittest backend/tests/test_cross_language_hmac.py -v
+- Full Backend Unit/Integration Suite:
+    PYTHONPATH=backend SALES_TESTING=1 python3 -m unittest discover -s backend/tests -p 'test_*.py'
+- Frontend TypeScript Check & Production Build:
+    npm run lint   (tsc --noEmit)
+    npm run build  (tsc && vite build)
+- Frontend Contract Test Suites:
+    for f in scripts/test_*.ts; do bun "$f"; done
+- Frontend Playwright Static/Login/Workforce Checks:
+    node scripts/test_login_page_upgrade.cjs
+    node scripts/verify_usability_workforce_upgrade.cjs
+- Release Candidate ZIP Hygiene Verification:
+    python3 scripts/verify_package_hygiene.py KS_RELEASE_01_RELEASE_CANDIDATE.zip
+
+--------------------------------------------------------------------------------
+7. PREFLIGHT BLOCKERS & LIMITATIONS RECORDED BEFORE STAGE 1
+--------------------------------------------------------------------------------
+1. [ENVIRONMENT LIMITATION] No local `.git` metadata or GitHub push credentials
+   in `/app/applet`. Remote branch `release/ks-source-reconciliation-01` cannot
+   be pushed directly from this sandbox; Owner must commit/push the verified
+   release candidate onto `release/ks-source-reconciliation-01` from baseline
+   `f7ccebffdacb96081f498b304dc009326bbcee44`.
+2. [ENVIRONMENT LIMITATION] No live Google Sheets, Apps Script (`clasp`), or
+   Render API credentials in sandbox; Stage 2 execution & First Owner creation
+   require Gate G1/G2/G3 approvals plus Owner-controlled production credentials.
+3. [PRE-EXISTING WORKSPACE ARTIFACT] `public/assets/aistudio/` exists in workspace
+   and on GitHub `main` (`f7ccebf`), causing `test_accidental_aistudio_prompt_artifact_removed`
+   to fail on the live workspace tree. It will be strictly excluded from
+   `KS_RELEASE_01_RELEASE_CANDIDATE.zip` (and `verify_package_hygiene.py` will
+   verify 0 violations on the ZIP), while preserving the workspace reference files
+   non-destructively.
+4. [STAGE 1 REMEDIATION TARGET] `apps_script/WebAppBridge.js` contains 6 genuine
+   security/integrity defects (W1-W6) on the non-bootstrap governed bridge path
+   that must be corrected surgically in Stage 1 and re-tested.
+================================================================================

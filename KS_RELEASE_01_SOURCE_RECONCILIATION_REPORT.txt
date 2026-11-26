@@ -1,0 +1,172 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-01
+STAGE 1: SOURCE RECONCILIATION REPORT
+================================================================================
+Mission ID:          KS-RELEASE-01
+Generated At:        2026-11-26T18:13:00Z
+Authoring Role:      Implementation & Engineering Agent (NOT Independent Auditor)
+Baseline Commit:     f7ccebffdacb96081f498b304dc009326bbcee44 (GitHub main)
+Target Branch Name:  release/ks-source-reconciliation-01
+                     [STATUS: BLOCKED FOR DIRECT PUSH FROM SANDBOX — No .git or
+                     GitHub push credentials in /app/applet; full reconciled tree
+                     is packaged in KS_RELEASE_01_RELEASE_CANDIDATE.zip for clean
+                     commit onto release/ks-source-reconciliation-01 from f7ccebf.]
+Gate G1 Status:      REQUIRES GPT INDEPENDENT REVIEW
+
+--------------------------------------------------------------------------------
+1. RECONCILIATION SUMMARY OF THE FOUR AUDIT-IDENTIFIED APPS SCRIPT FILES
+--------------------------------------------------------------------------------
+Every one of the four files flagged by the prior audit was inspected line-by-line
+against: (a) current working-tree source (`apps_script/`), (b) approved merged
+package (`apps_script_patch/first_owner_bootstrap/merged_bound_files/`),
+(c) verbatim original bound export (`Kawad_Swad_Bound_Apps_Script_Source_COMPLETE_VERBATIM_EXPORT_c019c467.txt`),
+(d) governing policy controls (`docs/MASTER_POLICY_CONSTITUTION_V1_2.md`,
+`backend/app/action_registry.py`, `backend/app/apps_script_bridge.py`), and
+(e) all callers across the 42-file bound Apps Script project.
+
+File 1: apps_script/Config.js
+  - Prior Audit Finding:  Reported loss of AUTH_USERS: 'AuthUsers' and AuthUsers: 'AUTH'.
+  - Actual Source Check:  ALREADY PRESENT & RECONCILED at baseline f7ccebf:
+                            - Line 24: `AUTH_USERS: 'AuthUsers'` inside frozen KS_CONFIG.TABS.
+                            - Line 46: `AuthUsers: 'AUTH'` inside frozen KS_CONFIG.ID_PREFIXES.
+                          Matches approved merged Config.js byte-for-byte (4,911 bytes,
+                          SHA-256: 7d7fcbb3c66ac79ba3fb9529580ab9a5e5fb6f07a10579f51f98b7b4bd2a7bb9).
+  - Policy Verification:  No duplicate/conflicting mappings; all existing ERP tables and
+                          REQUIRED_HEADERS preserved; Object.freeze prevents runtime mutation.
+  - Stage 1 Action:       NO CHANGE NEEDED (preserved verbatim).
+
+File 2: apps_script/AuditAndExceptions.js
+  - Prior Audit Finding:  Reported loss of ksLogAuditStrictLocked_().
+  - Actual Source Check:  ALREADY PRESENT & RECONCILED at baseline f7ccebf:
+                            - Lines 180-237: `ksLogAuditStrictLocked_(action, entityType, entityId, opts)`.
+                            - Lines 60-96: backward-compatible `ksLogAudit_()` forwarding
+                              `callerHoldsLock` to `ksAllocateId()`.
+                          Matches approved merged AuditAndExceptions.js byte-for-byte (8,362 bytes,
+                          SHA-256: 4dfe6f38f91ba493b75e45bb6ca92576f64b07f81a7866eb4a64113f154ee770).
+  - Policy Verification:  Requires caller-held ScriptLock (`LOCK_OWNERSHIP_VIOLATION`), allocates
+                          `AUD-*` via `ksAllocateIdLocked_` without releasing caller lock,
+                          never swallows errors, verifies write via `ksAppendAndVerifyRow_`.
+  - Stage 1 Action:       NO CHANGE NEEDED (preserved verbatim).
+
+File 3: apps_script/IdAllocator.js
+  - Prior Audit Finding:  Reported loss of ksAllocateIdLocked_().
+  - Actual Source Check:  `ksAllocateIdLocked_()` WAS ALREADY PRESENT at baseline f7ccebf
+                          (lines 16-99, 4,909 bytes, SHA-256: efa484e7...).
+  - New Stage 1 Defect Found During Reconciliation Testing (Defect I1):
+                          Line 62 parsed existing `allocation_id` values via `/(\d+)$/`.
+                          Because legacy `WebAppBridge.js` previously wrote `ALLOC-<Date.now()>`
+                          (13-digit epoch timestamps), any historical epoch row in `IdAllocations`
+                          would cause `maxAllocSeq` to jump from 1 to >1,764,000,000,000,
+                          permanently corrupting the 7-digit monotonic `ALLOC-0000001` sequence.
+  - Minimal Safe Fix:     Tightened line 63 regex to `/^ALLOC-(\d{1,9})$/` (1-9 digits after
+                          `ALLOC-`), preserving 100% of monotonic 7-digit sequences up to 999,999,999
+                          while ignoring any legacy 13-digit epoch timestamp rows.
+  - Post-Reconciliation:  5,044 bytes | SHA-256: c2066daea436b7f6704d2e2562eac927abff4131d2dafe2f834bdc8a0786b845.
+                          Synced identically to `merged_bound_files/IdAllocator.js` and manifests.
+
+File 4: apps_script/WebAppBridge.js
+  - Prior Audit Finding:  Current source differed from approved merged implementation.
+  - Actual Source Check:  At baseline f7ccebf, `apps_script/WebAppBridge.js` matched
+                          `merged_bound_files/WebAppBridge.js` (10,514 bytes, SHA-256: aee3ca8f...)
+                          and already contained mandatory HMAC verification (`ksVerifySignedBridgeEnvelope_`)
+                          and isolated pre-lock `BOOTSTRAP_FIRST_OWNER` dispatch.
+  - New Stage 1 Defects Found Against Section 4.2.D & Governing Policies (Defects W1-W6):
+      W1 [CRITICAL — Lock Ownership & Mandatory Audit]:
+         Non-bootstrap `doPost(e)` acquired `lock.waitLock(20000)` (line 52), then called
+         `ksLogAudit_()` WITHOUT `{ callerHoldsLock: true }` (line 73), causing `ksAllocateId()`
+         to call `lock.releaseLock()` BEFORE `SpreadsheetApp.flush()` (line 82). Furthermore,
+         `ksLogAudit_()` swallowed exceptions instead of failing safely on audit failure, and
+         did not verify an audit logger existed before mutating sheets.
+         -> Fix: Added pre-write `MANDATORY_AUDIT_LOGGER_MISSING` (HTTP 503) guard; invoked
+            `ksLogAuditStrictLocked_()` (with `callerHoldsLock: true` and deterministic
+            `audit_nonce: 'AUD_BRIDGE_' + nonce`) while holding `ScriptLock`; added
+            `businessWriteAttempted` tracking so any post-write failure (allocation, audit,
+            readback, flush) returns `RECOVERY_REQUIRED` (HTTP 409, `BRIDGE_POST_WRITE_FAILURE`)
+            instead of false `CONFIRMED` or misleading clean `REJECTED`.
+      W2 [HIGH — Cross-Table Nonce Collision]:
+         `ksFindByNonce_(nonce)` matched only `nonce` without validating `tab_name`. Replaying
+         a nonce already bound to `Customers` against `Products` falsely returned `CONFIRMED`.
+         -> Fix: Added `existing.tab_name && existing.tab_name !== targetTab` check returning
+            fail-closed `REJECTED` (`NONCE_TARGET_TAB_CONFLICT`, HTTP 409, `retryable: false`).
+      W3 [HIGH — Missing Target-Table Allowlist & Protected Governance/Scratch/AuthUsers Guard]:
+         `ksWriteCanonicalRowByHeaders_` accepted any worksheet name in `target_tab`, enabling
+         direct writes to immutable governance tabs (`AuditLog`, `IdAllocations`, `ExceptionRegister`),
+         forbidden legacy scratch tabs (`KS_P1_*`, `DBV5_*`, etc. per POL-003), arbitrary `AuthUsers`
+         mutations, or rogue non-ERP tabs.
+         -> Fix: Added `ksValidateBridgeTargetTab_(action, targetTab)` enforcing:
+            - `GOVERNANCE_TAB_WRITE_FORBIDDEN` (403) on `AuditLog`, `IdAllocations`, `ExceptionRegister`;
+            - `SCRATCH_TAB_FORBIDDEN` (403) on `/^(?:KS_P1_|KS_P2_|KS_P3_|DBV5_|DB_)/i`;
+            - `AUTH_USERS_ACTION_FORBIDDEN` (403) on `AuthUsers` except explicit auth actions
+              (`REVOKE_USER_SESSIONS`, `CHANGE_PASSWORD`, `RESET_PASSWORD`);
+            - `UNAPPROVED_TARGET_TAB` (403) outside the explicit canonical allowlist covering all
+              55 `backend/app/action_registry.py` target tabs plus all non-governance Blueprint v2
+              `Config.js` tabs.
+      W4 [HIGH — Missing Mandatory Actor Attribution]:
+         Non-bootstrap `doPost(e)` allowed empty `actor_user_id` or `actor_role`, falling back
+         to `'FASTAPI_GATEWAY'`.
+         -> Fix: Rejected missing `actor_user_id` or `actor_role` with `MISSING_ACTOR_IDENTITY`
+            (HTTP 401, `retryable: false`) before lock acquisition or dispatch.
+      W5 [MEDIUM — Missing Write Read-Back Verification]:
+         `ksWriteCanonicalRowByHeaders_` wrote rows via `appendRow`/`setValues` and returned the
+         in-memory payload without flushing and verifying sheet read-back.
+         -> Fix: Writes to explicit `targetRow`, calls `SpreadsheetApp.flush()`, reads back the
+            exact written row, verifies primary key and `nonce` match (`READBACK_VERIFICATION_FAILED`),
+            and returns the authoritative sheet read-back object.
+      W6 [MEDIUM — Non-Monotonic `ALLOC-<Date.now()>` Sequence Corruption]:
+         `ksRecordIdAllocation_` wrote `'ALLOC-' + Date.now()` without read-back verification,
+         corrupting `IdAllocator.js`'s 7-digit monotonic `ALLOC-0000001` sequence.
+         -> Fix: Computes monotonic `'ALLOC-' + String(maxAllocSeq + 1).padStart(7, '0')`
+            (ignoring legacy >9-digit epoch rows), writes to explicit row, flushes, and verifies
+            `allocation_id` and `nonce` read-back.
+  - Post-Reconciliation:  21,272 bytes | SHA-256: ab8459084cd25616d631adb3dd014c99cae3a6bc895efa644f2a724e3becf52d.
+                          Synced identically to `merged_bound_files/WebAppBridge.js` and manifests.
+
+--------------------------------------------------------------------------------
+2. COMPLETE FIRST OWNER CREATION PATH TRACE (END-TO-END)
+--------------------------------------------------------------------------------
+1. Client / Operator -> `POST /api/auth/bootstrap-first-owner` (`backend/app/routers/auth.py:372+`)
+   - Enforces `SALES_OWNER_BOOTSTRAP_ENABLED=true`, valid `SALES_OWNER_BOOTSTRAP_SECRET`,
+     non-expired `SALES_OWNER_BOOTSTRAP_EXPIRES_AT`, SQLite-persisted rate limiting,
+     mandatory `X-KS-Idempotency-Key` nonce, strong password policy, and empty Users/AuthUsers check.
+2. Backend Service -> `execute_bootstrap_first_owner` (`backend/app/user_service.py`)
+   -> `apps_script_bridge.delegate_governed_write("BOOTSTRAP_FIRST_OWNER", "Users", ...)`
+   - Acquires durable SQLite WAL transaction gate (`transaction_coordinator.py`).
+   - Builds canonical JSON envelope (`separators=(",",":")`, `sort_keys=True`, `ensure_ascii=True`).
+   - Signs canonical bytes with `SALES_APPS_SCRIPT_SHARED_SECRET` (HMAC-SHA256).
+   - Transmits `wire_envelope` (`contract_version="2.0"`, `signature_alg="HMAC-SHA-256"`,
+     `signature`, `canonical_envelope`) via `_AppsScriptEchoRedirectHandler` (allows ONLY
+     single GET hop to `https://script.googleusercontent.com/macros/echo` with secrets/body stripped).
+3. Apps Script Entry -> `WebAppBridge.js::doPost(e)`
+   - Step 1: Fail-closed `BRIDGE_AUTH_VERIFIER_MISSING` (503) check -> `ksVerifySignedBridgeEnvelope_(e)`
+     (`WebAppBridge_BootstrapIntegration.js:118`): verifies shared secret >=32 chars, contract v2.0,
+     HMAC-SHA-256 constant-time (`ksBridgeSafeEqual_`), non-array JSON objects, outer-vs-signed tamper
+     check across all 10 scalar fields, strict ISO-8601 UTC/offset timestamp within +/-300s skew.
+   - Step 1A: Validates `action`, `target_tab`, `nonce`, `correlation_id`, `actor_user_id`, `actor_role`.
+   - Step 1B: Routes `action === 'BOOTSTRAP_FIRST_OWNER'` directly to `ksDispatchBootstrapFirstOwner_(req)`
+     BEFORE legacy `ScriptLock` / `ksFindByNonce_`.
+4. Bootstrap Execution -> `BootstrapOwnerHandler.js::ksBootstrapFirstOwner_(envelope)`
+   - Acquires ONE uninterrupted `ScriptLock` for the entire transaction.
+   - Verifies one-time bootstrap window (`KS_OWNER_BOOTSTRAP_TOKEN_HASH`, `KS_OWNER_BOOTSTRAP_EXPIRES_AT`),
+     completion/recovery/in-progress latches, and zero existing Users/AuthUsers rows.
+   - Sets `KS_OWNER_BOOTSTRAP_IN_PROGRESS` quarantine marker prior to any sheet write.
+   - Allocates `USR-*` and `AUTH-*` via `ksAllocateIdLocked_` (`IdAllocator.js`, caller-locked).
+   - Writes & verifies `Users` and `AuthUsers` via `ksAppendAndVerifyRow_` (`SafeWriter.js`).
+   - Writes mandatory `AuditLog` (`AUD-*`) via `ksLogAuditStrictLocked_` (`AuditAndExceptions.js`, caller-locked).
+   - Flushes, performs full read-back verification across `Users`, `AuthUsers`, and `AuditLog`,
+     sets completion latch, deletes temporary bootstrap token/expiry properties, and releases `ScriptLock`.
+   - Any unexpected post-mutation exception returns `RECOVERY_REQUIRED` (HTTP 409) preserving partial records.
+5. Backend Read-Back Verification -> `apps_script_bridge.py`
+   - Verifies response echo fields (`action`, `target_tab`, `nonce`, `correlation_id`, `allocated_id`),
+     confirms `Users` (`role=OWNER_ADMIN`, `active=True`) and `AuthUsers` (`user_id=allocated_id`)
+     via fresh Google Sheets read-back before returning `CONFIRMED`.
+
+--------------------------------------------------------------------------------
+3. PRESERVATION OF UNRELATED FUNCTIONALITY
+--------------------------------------------------------------------------------
+- 38 of 44 bound Apps Script project files (including `Code.js`, `SafeWriter.js`,
+  `AuthAndMenu.js`, `SalesEngine.js`, `InventoryEngine.js`, `ProductionAndPackagingEngine.js`,
+  `AccountingEngine.js`, `WorkforceEngine.js`, `ErpSidebar.html`, `appsscript.json`) remain
+  100% byte-identical to the verified baseline.
+- Zero backend application (`backend/app/`) or frontend (`src/`) source files were modified.
+- Zero Google Sheets schemas, headers, business records, or production settings were modified.
+================================================================================

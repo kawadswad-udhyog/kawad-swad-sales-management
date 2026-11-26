@@ -183,6 +183,10 @@ if (input.stubLegacyRoute) {
     return { allocated_id: 'CUST-20261125-00001', record: payload };
   };
   ctx.ksRecordIdAllocation_ = (nonce, tab, id) => { legacyCalls.push(['ksRecordIdAllocation_', nonce, tab, id]); };
+  ctx.ksLogAuditStrictLocked_ = (action, tab, id, opts) => {
+    legacyCalls.push(['ksLogAuditStrictLocked_', action, tab, id, Boolean(opts && opts.callerHoldsLock)]);
+    return { audit_id: 'AUD-20261126-00001', row: 2, record: {} };
+  };
 }
 
 if (input.stubBootstrapHandler) {
@@ -495,6 +499,323 @@ class TestCrossLanguageHmacAuthentication(unittest.TestCase):
         self.assertEqual(out_weak["result"]["status"], "REJECTED")
         self.assertEqual(out_weak["result"]["error_code"], "BRIDGE_NOT_CONFIGURED")
         self.assertEqual(out_weak["result"]["http_status"], 503)
+
+    def _run_real_sheet_bridge_scenario(self, requests_list, *, initial_sheets=None, corrupt_readback_tab=None, fail_audit_tab=False):
+        """Runs real Apps Script modules (Config, SafeWriter, IdAllocator, AuditAndExceptions, WebAppBridge_BootstrapIntegration, WebAppBridge) against an in-memory Google Sheets workbook."""
+        script = r"""
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
+
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const sheetsData = {};
+for (const [name, rows] of Object.entries(input.initialSheets)) {
+  sheetsData[name] = rows.map(r => r.slice());
+}
+
+function makeSheet(name) {
+  return {
+    getName() { return name; },
+    getLastRow() { return sheetsData[name].length; },
+    getLastColumn() { return sheetsData[name].length ? sheetsData[name][0].length : 0; },
+    getDataRange() {
+      const rows = sheetsData[name];
+      return { getValues() { return rows.map(r => r.slice()); } };
+    },
+    getRange(row, col, numRows, numCols) {
+      const r0 = row - 1, c0 = col - 1;
+      return {
+        getValues() {
+          const out = [];
+          for (let r = 0; r < numRows; r++) {
+            const src = sheetsData[name][r0 + r] || [];
+            const line = [];
+            for (let c = 0; c < numCols; c++) {
+              let v = c0 + c < src.length ? src[c0 + c] : '';
+              if (input.corruptReadbackTab === name && r0 + r >= 1 && c0 + c === 0) {
+                v = 'CORRUPTED-ID';
+              }
+              line.push(v);
+            }
+            out.push(line);
+          }
+          return out;
+        },
+        setValues(vals) {
+          if (input.failAuditTab && name === 'AuditLog') {
+            throw new Error('SIMULATED_AUDIT_SHEET_WRITE_FAILURE');
+          }
+          for (let r = 0; r < vals.length; r++) {
+            while (sheetsData[name].length <= r0 + r) sheetsData[name].push([]);
+            for (let c = 0; c < vals[r].length; c++) {
+              sheetsData[name][r0 + r][c0 + c] = vals[r][c];
+            }
+          }
+        }
+      };
+    },
+    appendRow(row) {
+      if (input.failAuditTab && name === 'AuditLog') {
+        throw new Error('SIMULATED_AUDIT_SHEET_WRITE_FAILURE');
+      }
+      sheetsData[name].push(row.slice());
+    }
+  };
+}
+
+let locked = false;
+const lockEvents = [];
+let flushCount = 0;
+
+const sandbox = {
+  console,
+  Date,
+  Math,
+  JSON,
+  Object,
+  Array,
+  String,
+  Number,
+  Boolean,
+  RegExp,
+  Error,
+  parseInt,
+  isNaN,
+  PropertiesService: {
+    getScriptProperties() {
+      return { getProperty(k) { return input.scriptProps[k] ?? null; } };
+    }
+  },
+  LockService: {
+    getScriptLock() {
+      return {
+        waitLock(ms) { lockEvents.push(['waitLock', ms]); locked = true; },
+        hasLock() { return locked; },
+        releaseLock() { lockEvents.push(['releaseLock']); locked = false; },
+      };
+    }
+  },
+  SpreadsheetApp: {
+    getActiveSpreadsheet() {
+      return {
+        getSheetByName(n) { return Object.prototype.hasOwnProperty.call(sheetsData, n) ? makeSheet(n) : null; }
+      };
+    },
+    flush() { lockEvents.push(['flush', locked]); flushCount++; }
+  },
+  Utilities: {
+    Charset: { UTF_8: 'UTF-8' },
+    computeHmacSha256Signature(msg, secret) {
+      const buf = crypto.createHmac('sha256', Buffer.from(String(secret), 'utf8')).update(Buffer.from(String(msg), 'utf8')).digest();
+      return Array.from(buf, b => (b > 127 ? b - 256 : b));
+    },
+    formatDate(d, tz, fmt) {
+      if (fmt === 'yyyyMMdd') return '20261126';
+      return new Date(d).toISOString();
+    },
+    getUuid() { return 'uuid-fixed-001'; }
+  },
+  ContentService: {
+    MimeType: { JSON: 'application/json' },
+    createTextOutput(text) { return { getContent() { return text; }, setMimeType() { return this; } }; }
+  },
+  Session: { getActiveUser() { return { getEmail() { return 'owner@kawadswad.test'; } }; } },
+};
+
+const ctx = vm.createContext(sandbox);
+for (const fname of ['Config.js', 'SafeWriter.js', 'IdAllocator.js', 'AuditAndExceptions.js', 'WebAppBridge_BootstrapIntegration.js', 'WebAppBridge.js']) {
+  vm.runInContext(fs.readFileSync(path.join(input.appsDir, fname), 'utf8'), ctx, { filename: fname });
+}
+
+const responses = [];
+for (const wireBody of input.requests) {
+  const out = ctx.doPost({ postData: { contents: wireBody } });
+  responses.push(JSON.parse(out.getContent()));
+}
+process.stdout.write(JSON.stringify({ responses, sheetsData, lockEvents, flushCount, locked }));
+"""
+        sheets = initial_sheets or {
+            "IdAllocations": [
+                ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
+                # Legacy 13-digit epoch timestamp row to verify W6 does NOT jump sequence
+                ["ALLOC-1764000000000", "Customers", "CUST-OLD-00001", "LEGACY-EPOCH-NONCE", "2026-11-20T00:00:00Z"],
+            ],
+            "AuditLog": [[
+                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
+                "entity_id", "field_changed", "old_value", "new_value", "reason",
+                "approved_by_user_id", "related_record_id"
+            ]],
+            "Customers": [[
+                "customer_id", "customer_type", "shop_name", "shopkeeper_name", "mobile",
+                "alternate_mobile", "address", "locality_area", "city", "map_location",
+                "active", "created_at", "notes", "gstin", "nonce"
+            ]],
+            "AuthUsers": [["auth_id", "user_id", "username", "password_hash", "must_change_password", "nonce"]],
+        }
+        proc = subprocess.run(
+            ["node", "-e", script],
+            input=json.dumps({
+                "appsDir": self.APPS_DIR,
+                "scriptProps": {"SALES_APPS_SCRIPT_SHARED_SECRET": SHARED_SECRET},
+                "initialSheets": sheets,
+                "requests": requests_list,
+                "corruptReadbackTab": corrupt_readback_tab,
+                "failAuditTab": fail_audit_tab,
+            }),
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            timeout=15,
+            check=True,
+        )
+        return json.loads(proc.stdout)
+
+    def test_10_stage1_real_sheet_bridge_lock_ownership_monotonic_alloc_strict_audit_and_replay(self):
+        wire1, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-CUST-STAGE1-001",
+            actor_user_id="USR-20261126-00001",
+            actor_role="OWNER_ADMIN",
+            payload={"customer_id": "CUST-20261126-00001", "shop_name": "Kawad Mart", "active": True},
+        )
+        # Replay exact same nonce + tab -> must return CONFIRMED idempotent_replay=True without duplicate rows
+        out = self._run_real_sheet_bridge_scenario([wire1, wire1])
+        r1, r2 = out["responses"]
+        self.assertEqual(r1["status"], "CONFIRMED")
+        self.assertEqual(r1["allocated_id"], "CUST-20261126-00001")
+        self.assertEqual(r1["record"]["shop_name"], "Kawad Mart")
+        self.assertEqual(r2["status"], "CONFIRMED")
+        self.assertTrue(r2["idempotent_replay"])
+        self.assertEqual(r2["allocated_id"], "CUST-20261126-00001")
+        # Exactly 1 new customer row + 1 header
+        self.assertEqual(len(out["sheetsData"]["Customers"]), 2)
+        # W6: Monotonic ALLOC-0000001 (ignoring legacy 13-digit epoch timestamp) + ALLOC-0000002 for AuditLog
+        alloc_ids = [row[0] for row in out["sheetsData"]["IdAllocations"][2:]]
+        self.assertEqual(alloc_ids, ["ALLOC-0000001", "ALLOC-0000002"])
+        # W1: Strict AuditLog written with canonical AUD-* ID and actor_user_id
+        self.assertEqual(len(out["sheetsData"]["AuditLog"]), 2)
+        self.assertTrue(out["sheetsData"]["AuditLog"][1][0].startswith("AUD-"))
+        self.assertEqual(out["sheetsData"]["AuditLog"][1][2], "USR-20261126-00001")
+        # W1: Every flush during the first write occurred while ScriptLock was HELD (locked=True)
+        flushes = [ev for ev in out["lockEvents"] if ev[0] == "flush"]
+        self.assertGreaterEqual(len(flushes), 4)
+        self.assertTrue(all(ev[1] is True for ev in flushes), f"Lock released prematurely before flush: {out['lockEvents']}")
+        self.assertFalse(out["locked"])
+
+    def test_11_stage1_w1_mandatory_audit_missing_and_post_write_audit_failure_quarantine(self):
+        # 11a: Missing audit logger fails closed BEFORE lock/write
+        wire_ok, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-NO-AUDIT-001",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload={"customer_id": "CUST-1"},
+        )
+        out_missing = _run_apps_script_vm({
+            "appsDir": self.APPS_DIR,
+            "loadFiles": ["WebAppBridge_BootstrapIntegration.js", "WebAppBridge.js"],
+            "scriptProps": {"SALES_APPS_SCRIPT_SHARED_SECRET": SHARED_SECRET},
+            "mode": "doPost",
+            "event": {"postData": {"contents": wire_ok}},
+        })
+        self.assertEqual(out_missing["result"]["status"], "REJECTED")
+        self.assertEqual(out_missing["result"]["error_code"], "MANDATORY_AUDIT_LOGGER_MISSING")
+        self.assertEqual(out_missing["result"]["http_status"], 503)
+        self.assertEqual(out_missing["lockCalls"], [])
+
+        # 11b: AuditLog failure AFTER business row write MUST quarantine as RECOVERY_REQUIRED (never CONFIRMED/REJECTED)
+        out_audit_fail = self._run_real_sheet_bridge_scenario([wire_ok], fail_audit_tab=True)
+        res = out_audit_fail["responses"][0]
+        self.assertEqual(res["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(res["error_code"], "BRIDGE_POST_WRITE_FAILURE")
+        self.assertEqual(res["http_status"], 409)
+        self.assertFalse(res["retryable"])
+        self.assertFalse(out_audit_fail["locked"])
+
+    def test_12_stage1_w2_cross_table_nonce_collision_rejected(self):
+        wire_cust, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-COLLISION-NONCE-01",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload={"customer_id": "CUST-20261126-00010", "shop_name": "Alpha"},
+        )
+        wire_prod, _, _ = _python_build_wire_envelope(
+            action="CREATE_PRODUCT",
+            target_tab="Products",
+            nonce="KS-COLLISION-NONCE-01",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload={"product_id": "PRD-20261126-00010", "sku": "SKU-1"},
+        )
+        out = self._run_real_sheet_bridge_scenario([wire_cust, wire_prod])
+        self.assertEqual(out["responses"][0]["status"], "CONFIRMED")
+        self.assertEqual(out["responses"][1]["status"], "REJECTED")
+        self.assertEqual(out["responses"][1]["error_code"], "NONCE_TARGET_TAB_CONFLICT")
+        self.assertEqual(out["responses"][1]["http_status"], 409)
+
+    def test_13_stage1_w3_w4_target_tab_allowlist_governance_scratch_authusers_and_actor_checks(self):
+        cases = [
+            ("AuditLog", "CREATE_CUSTOMER", "USR-1", "OWNER_ADMIN", "GOVERNANCE_TAB_WRITE_FORBIDDEN", 403),
+            ("IdAllocations", "CREATE_CUSTOMER", "USR-1", "OWNER_ADMIN", "GOVERNANCE_TAB_WRITE_FORBIDDEN", 403),
+            ("ExceptionRegister", "CREATE_CUSTOMER", "USR-1", "OWNER_ADMIN", "GOVERNANCE_TAB_WRITE_FORBIDDEN", 403),
+            ("KS_P1_ScratchTab", "CREATE_CUSTOMER", "USR-1", "OWNER_ADMIN", "SCRATCH_TAB_FORBIDDEN", 403),
+            ("DBV5_LegacyTemp", "CREATE_CUSTOMER", "USR-1", "OWNER_ADMIN", "SCRATCH_TAB_FORBIDDEN", 403),
+            ("AuthUsers", "UPDATE_CUSTOMER", "USR-1", "OWNER_ADMIN", "AUTH_USERS_ACTION_FORBIDDEN", 403),
+            ("ArbitraryRogueSheet", "CREATE_CUSTOMER", "USR-1", "OWNER_ADMIN", "UNAPPROVED_TARGET_TAB", 403),
+            ("Customers", "CREATE_CUSTOMER", "", "OWNER_ADMIN", "MISSING_ACTOR_IDENTITY", 401),
+            ("Customers", "CREATE_CUSTOMER", "USR-1", "", "MISSING_ACTOR_IDENTITY", 401),
+        ]
+        reqs = [
+            _python_build_wire_envelope(
+                action=act,
+                target_tab=tab,
+                nonce=f"KS-GUARD-{idx}",
+                actor_user_id=uid,
+                actor_role=role,
+                payload={"x": 1},
+            )[0]
+            for idx, (tab, act, uid, role, _, _) in enumerate(cases)
+        ]
+        # Also verify authorized CHANGE_PASSWORD on AuthUsers IS permitted
+        reqs.append(
+            _python_build_wire_envelope(
+                action="CHANGE_PASSWORD",
+                target_tab="AuthUsers",
+                nonce="KS-AUTH-OK-01",
+                actor_user_id="USR-1",
+                actor_role="OWNER_ADMIN",
+                payload={"auth_id": "AUTH-20261126-00001", "user_id": "USR-1", "must_change_password": False},
+            )[0]
+        )
+        out = self._run_real_sheet_bridge_scenario(reqs)
+        for idx, (tab, act, uid, role, expected_code, expected_http) in enumerate(cases):
+            r = out["responses"][idx]
+            self.assertEqual(r["status"], "REJECTED", f"Case {tab}/{act} failed: {r}")
+            self.assertEqual(r["error_code"], expected_code, f"Case {tab}/{act} failed: {r}")
+            self.assertEqual(r["http_status"], expected_http, f"Case {tab}/{act} failed: {r}")
+        # Authorized CHANGE_PASSWORD on AuthUsers succeeds
+        self.assertEqual(out["responses"][-1]["status"], "CONFIRMED")
+        self.assertEqual(len(out["sheetsData"]["AuthUsers"]), 2)
+
+    def test_14_stage1_w5_readback_verification_mismatch_quarantines(self):
+        wire_cust, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-READBACK-FAIL-01",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload={"customer_id": "CUST-20261126-00099", "shop_name": "Verify Test"},
+        )
+        out = self._run_real_sheet_bridge_scenario([wire_cust], corrupt_readback_tab="Customers")
+        res = out["responses"][0]
+        self.assertEqual(res["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(res["error_code"], "BRIDGE_POST_WRITE_FAILURE")
+        self.assertIn("READBACK_VERIFICATION_FAILED", res["message"])
 
 
 if __name__ == "__main__":

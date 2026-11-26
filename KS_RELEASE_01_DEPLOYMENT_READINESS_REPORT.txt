@@ -1,0 +1,203 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-01
+STAGE 2: DEPLOYMENT READINESS REPORT (NON-PRODUCTION PREPARATION ONLY)
+================================================================================
+Mission ID:        KS-RELEASE-01
+Generated At:      2026-11-26T18:14:00Z
+Execution Status:  NOT DEPLOYED — STOPPED AT GATE G1 (REQUIRES GPT REVIEW G1/G2
+                   AND EXPLICIT OWNER AUTHORIZATION G3 BEFORE ANY LIVE CHANGE)
+Secret Hygiene:    ZERO secret values included in this report or release ZIP.
+
+--------------------------------------------------------------------------------
+1. DEPLOYMENT INVENTORY & TARGET ARCHITECTURE
+--------------------------------------------------------------------------------
+Component 1: Google Sheets Master Workbook (Authoritative Business Database)
+  - Role:            Single source of truth for all ERP business records (POL-001).
+  - Baseline State:  Clean empty-database baseline (0 historical business records
+                     restored; Users & AuthUsers empty prior to Gate G5).
+  - Access Control:  Google Service Account JSON mounted at backend
+                     `/etc/secrets/sales-service-account.json` (read-only query
+                     and read-back verification); bound Apps Script executes as
+                     `USER_DEPLOYING` (`appsscript.json`).
+  - Current Status:  EXTERNAL TO SANDBOX — Live workbook ID & clean-baseline
+                     verification require Owner confirmation before G3.
+
+Component 2: Bound Google Apps Script Web App (`apps_script/`, 44 project files)
+  - Role:            Single governed write owner (POL-002), HMAC-SHA256 verifier,
+                     ScriptLock serializer, monotonic ID allocator, strict AuditLog
+                     writer, and isolated First-Owner bootstrap executor.
+  - Runtime:         V8, Timezone `Asia/Kolkata`, `webapp.executeAs=USER_DEPLOYING`,
+                     `webapp.access=ANYONE_ANONYMOUS` (mandatory HMAC-SHA256
+                     fail-closed verification at `WebAppBridge.js:194-205`).
+  - Required Script Properties (provisioned out-of-band by Owner; NEVER in repo):
+      [Permanent]
+        * `SALES_APPS_SCRIPT_SHARED_SECRET` (>= 32 chars random secret; must
+          match backend env var identically; never reuse JWT or bootstrap secret).
+      [Temporary — First-Owner Bootstrap Window ONLY; auto-deleted upon completion]
+        * `KS_OWNER_BOOTSTRAP_TOKEN_HASH` (64-char lowercase hex SHA-256 of
+          `SALES_OWNER_BOOTSTRAP_SECRET`).
+        * `KS_OWNER_BOOTSTRAP_EXPIRES_AT` (short UTC ISO-8601 window, e.g. +15m).
+  - Current Live Version: UNKNOWN FROM SANDBOX — Owner must record current Apps
+                     Script deployment ID & version number before Stage 2 cutover.
+
+Component 3: FastAPI Backend Service (`backend/`, hosted on Render Web Service)
+  - Build Command:   `pip install -r requirements.txt` (rootDir: `backend`)
+  - Start Command:   `uvicorn main:app --host 0.0.0.0 --port $PORT`
+  - Persistent Disk: `kawad-swad-tx-coord-disk` mounted at `/var/data/kawad_swad` (1 GB)
+                     for durable SQLite WAL idempotency coordinator & rate limits.
+  - Concurrency:     `WEB_CONCURRENCY=1`, `SALES_INSTANCE_COUNT=1` (mandatory
+                     single-instance invariant for host-local WAL coordinator).
+  - Required Production Environment Variables (zero values printed):
+      * `SALES_ENV=production`
+      * `SALES_GOOGLE_SPREADSHEET_ID` (live clean-baseline workbook ID)
+      * `SALES_GOOGLE_SERVICE_ACCOUNT_FILE=/etc/secrets/sales-service-account.json`
+      * `SALES_JWT_SECRET` (>= 32 chars random secret, distinct from all others)
+      * `SALES_CORS_ORIGINS` (exact production frontend origin ONLY)
+      * `SALES_TOKEN_HOURS=8`
+      * `WEB_CONCURRENCY=1`
+      * `SALES_INSTANCE_COUNT=1`
+      * `TRANSACTION_DB_PATH=/var/data/kawad_swad/kawad_swad_tx_coord.db`
+      * `KS_ERP_LOCK_DIR=/var/data/kawad_swad/locks`
+      * `KS_ERP_STATE_DIR=/var/data/kawad_swad/state`
+      * `SALES_TX_LEASE_SECONDS=90`
+      * `SALES_TX_ALLOW_VOLATILE_COORD=false`
+      * `SALES_APPS_SCRIPT_ENABLED=true`
+      * `SALES_APPS_SCRIPT_WEBAPP_URL` (new verified Apps Script Web App `/exec` URL)
+      * `SALES_APPS_SCRIPT_SHARED_SECRET` (matches Apps Script property identically)
+      * `SALES_OWNER_BOOTSTRAP_ENABLED=false` (set `true` ONLY during Gate G5 window,
+        alongside `SALES_OWNER_BOOTSTRAP_SECRET` & `SALES_OWNER_BOOTSTRAP_EXPIRES_AT`,
+        then immediately unset/disable after Gate G5 confirmation).
+  - Health Endpoints: `GET /health`, `GET /api/health` (must return 200 OK).
+
+Component 4: React 18 + Vite 6 Frontend (`src/`, hosted on Render Static Site)
+  - Build Command:   `npm ci && npm run build`
+  - Publish Dir:     `./dist`
+  - Routing:         Same-origin rewrites `/api/*`, `/health`, `/auth/*` -> production
+                     FastAPI backend URL; `/*` -> `/index.html`.
+  - Env Vars:        Leave `VITE_API_URL` unset when using same-origin Render rewrites,
+                     OR set explicitly to the verified production backend HTTPS URL.
+
+--------------------------------------------------------------------------------
+2. PRE-DEPLOYMENT VERIFICATION CHECKLIST & BLOCKERS IDENTIFIED
+--------------------------------------------------------------------------------
+[PASSED]   Release candidate matches reconciled source byte-for-byte (SHA-256 verified).
+[PASSED]   Zero production secrets, keys, `.env`, or runtime `.db` files in source or ZIP.
+[PASSED]   Frontend TypeScript check (`tsc --noEmit`) & Vite production build succeed.
+[PASSED]   Persistent WAL coordinator & single-instance settings present in `render.yaml`.
+[PASSED]   Health check endpoints and rollback procedures defined.
+
+[BLOCKER — MUST RESOLVE BEFORE GATE G3]:
+  1. `render.yaml` Production Target Mismatch (`SEC-DEPLOY-01`):
+     - Lines 9, 12, 15, 24 currently route static site rewrites to
+       `https://kawad-swad-sales-dev.onrender.com` and name the backend service
+       `kawad-swad-sales-dev`, while `.env.example` prohibits routing production
+       to `-dev`.
+     - Line 44 sets `SALES_CORS_ORIGINS: https://kawad-swad-sales-frontend.onrender.com,http://localhost:3000`
+       (includes development origin `http://localhost:3000` in production config).
+     -> Required Action Before G3: Owner must confirm whether production uses a
+        dedicated production Render service URL and remove `http://localhost:3000`
+        from production `SALES_CORS_ORIGINS`.
+  2. Git Branch Materialization (`release/ks-source-reconciliation-01`):
+     - Sandbox lacks `.git` / GitHub push credentials. Owner must push reconciled
+       files from `KS_RELEASE_01_RELEASE_CANDIDATE.zip` onto branch
+       `release/ks-source-reconciliation-01` branched from `f7ccebf`.
+  3. Live Production Baseline Snapshot & Credentials:
+     - Owner must record current deployed Render service commits, current Apps
+       Script deployment ID/version, and confirm live Google Sheets workbook is
+       clean empty-database baseline (0 rows in Users/AuthUsers/business tabs).
+
+--------------------------------------------------------------------------------
+3. JUSTIFIED ORDERED DEPLOYMENT PLAN (EXECUTE ONLY AFTER G1 + G2 + G3)
+--------------------------------------------------------------------------------
+Why this order is mandatory:
+  The FastAPI backend signs every governed write using contract v2.0 HMAC-SHA256
+  and depends on the Apps Script Web App `/exec` URL and `ksVerifySignedBridgeEnvelope_`
+  being active BEFORE backend traffic (and before First Owner bootstrap) is enabled.
+  Meanwhile, the Frontend must only point to a live, verified Backend.
+  Therefore, the safest zero-broken-window deployment order is:
+
+  STEP 1 — Pre-Deployment Snapshot & Rollback Preservation (Zero Live Edits)
+    - Record current Render backend/frontend commit IDs & env var names.
+    - Record current Apps Script deployment ID/version and export current live
+      Apps Script snapshot as rollback archive.
+    - Verify live Google Sheets workbook baseline (clean empty-database baseline;
+      no historical business records; `IdAllocations`, `AuditLog`, `Users`,
+      `AuthUsers`, `ExceptionRegister` Row-1 headers intact).
+    - Record UTC deployment start timestamp.
+
+  STEP 2 — Deploy Bound Google Apps Script (`apps_script/` — 44 verified files)
+    - Upload the exact SHA-256-verified 44 files from `KS_RELEASE_01_RELEASE_CANDIDATE.zip`
+      (`apps_script/`), preserving the existing bound Spreadsheet link.
+    - Verify Script Property `SALES_APPS_SCRIPT_SHARED_SECRET` (>= 32 chars) is set.
+    - Ensure temporary bootstrap properties (`KS_OWNER_BOOTSTRAP_*`) are NOT set yet.
+    - Create a new versioned Web App deployment (`executeAs=USER_DEPLOYING`,
+      `access=ANYONE_ANONYMOUS`) and record exact Deployment ID, Version, and `/exec` URL.
+    - Negative smoke test: POST an unsigned request `{}` to `/exec` -> MUST return
+      `REJECTED` (`UNSUPPORTED_CONTRACT_VERSION` / `MISSING_OR_MALFORMED_HMAC_ENVELOPE`,
+      zero sheet writes).
+
+  STEP 3 — Deploy FastAPI Backend (Render Web Service)
+    - Verify persistent disk `/var/data/kawad_swad` is mounted, `WEB_CONCURRENCY=1`,
+      `SALES_INSTANCE_COUNT=1`, `SALES_ENV=production`, `SALES_CORS_ORIGINS` has
+      production frontend origin only, `SALES_APPS_SCRIPT_ENABLED=true`,
+      `SALES_APPS_SCRIPT_WEBAPP_URL` points to Step 2 `/exec` URL, and
+      `SALES_APPS_SCRIPT_SHARED_SECRET` matches Step 2.
+    - Keep `SALES_OWNER_BOOTSTRAP_ENABLED=false` during initial deployment.
+    - Deploy exact approved commit/release candidate; record commit hash & deploy ID.
+    - Verify `GET /health` -> HTTP 200 OK and zero startup durability/schema errors.
+
+  STEP 4 — Deploy React Frontend (Render Static Site)
+    - Confirm Render rewrites (`/api/*`, `/health`, `/auth/*`) target the verified
+      production Backend URL (not `-dev`).
+    - Deploy exact approved commit/release candidate; verify build succeeds and
+      static assets load cleanly with zero console errors.
+
+  STEP 5 — Non-Mutating Integration & Authentication Smoke Tests (Gate G4)
+    - Verify Frontend loads Login page cleanly over HTTPS.
+    - Verify unauthenticated `GET /api/auth/me` -> HTTP 401.
+    - Verify invalid login attempt -> HTTP 401 (no stack trace, no secret leak).
+    - Verify `POST /api/auth/bootstrap-first-owner` while disabled -> HTTP 403/404.
+    - Verify live Google Sheets workbook remains 100% clean (zero unintended writes,
+      zero test records).
+
+  STEP 6 — Controlled One-Time First Owner Bootstrap (Gate G5 — Owner-Authorized Only)
+    - ONLY after Steps 1-5 pass and Owner supplies explicit Owner identity & password:
+      1. Generate fresh one-time `SALES_OWNER_BOOTSTRAP_SECRET` (>= 32 chars) and
+         short UTC expiry (`+15 min`).
+      2. Compute SHA-256 hex digest -> set `KS_OWNER_BOOTSTRAP_TOKEN_HASH` and
+         `KS_OWNER_BOOTSTRAP_EXPIRES_AT` in Apps Script Properties.
+      3. Set `SALES_OWNER_BOOTSTRAP_ENABLED=true`, `SALES_OWNER_BOOTSTRAP_SECRET`,
+         `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` on Backend and restart single instance.
+      4. Execute ONE authorized `POST /api/auth/bootstrap-first-owner` with unique
+         `X-KS-Idempotency-Key` and Owner-supplied identity (NEVER fabricated).
+      5. Verify response `status=CONFIRMED`, `USR-*` allocated ID, `Users` row
+         (`role=OWNER_ADMIN`, `active=true`), `AuthUsers` row (`AUTH-*`), `AuditLog`
+         row (`AUD-*`), and Apps Script auto-deletion of bootstrap token properties.
+      6. IMMEDIATELY set `SALES_OWNER_BOOTSTRAP_ENABLED=false` and unset
+         `SALES_OWNER_BOOTSTRAP_SECRET` & `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` on Backend.
+      7. Verify real production login (`POST /api/auth/login` -> `GET /api/auth/me`)
+         as the created `OWNER_ADMIN` via Frontend UI, verify Owner administrative
+         access, verify unauthorized request rejection, verify duplicate bootstrap
+         attempt is rejected (`409 OWNER_ALREADY_INITIALIZED` / disabled), and verify
+         zero duplicate Owner rows in Sheets.
+
+--------------------------------------------------------------------------------
+4. ROLLBACK PROCEDURE & MANDATORY TRIGGERS
+--------------------------------------------------------------------------------
+Immediate Stop & Rollback Triggers (Section 12):
+  Authentication failure, privilege escalation, unauthorized access, missing AuditLog
+  records, duplicate IDs, unverified writes, Google Sheets connectivity failure,
+  wrong production config (`-dev` routing or localhost CORS), broken Frontend<->Backend
+  communication, unexpected workbook mutations, or critical 5xx errors.
+
+Rollback Steps (NEVER delete or overwrite business records):
+  1. Immediately disable `SALES_OWNER_BOOTSTRAP_ENABLED=false` (if open) and remove
+     any temporary bootstrap Script Properties.
+  2. Roll back Render Frontend & Backend to the Step 1 recorded previous release
+     deployment via Render dashboard instant rollback.
+  3. Revert Apps Script Web App deployment pointer to the Step 1 recorded previous
+     deployment version (preserving all sheet data & AuditLog rows verbatim).
+  4. Re-verify `GET /health`, auth rejection, and Google Sheets integrity.
+  5. Document trigger, affected component, restored versions, verification results,
+     and remaining risks in a Rollback Report.
+================================================================================

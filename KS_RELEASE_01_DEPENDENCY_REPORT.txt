@@ -1,0 +1,119 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-01
+STAGE 1: DEPENDENCY, CALLER & INTEGRATION VERIFICATION REPORT
+================================================================================
+Mission ID:      KS-RELEASE-01
+Generated At:    2026-11-26T18:13:00Z
+Scope:           All 42 Apps Script .js modules, appsscript.json, ErpSidebar.html,
+                 backend/app/ integration bridge, and src/ frontend API contracts.
+
+--------------------------------------------------------------------------------
+1. GLOBAL SYMBOL COLLISION & SYNTAX AUDIT (42 APPS SCRIPT .JS FILES)
+--------------------------------------------------------------------------------
+- All 42 `.js` files parsed cleanly via Node.js V8 `vm.Script` (0 syntax errors).
+- `apps_script/appsscript.json` parsed cleanly as valid JSON.
+- Duplicate top-level function declarations involving any of the 6 reconciled files
+  (`Config.js`, `IdAllocator.js`, `AuditAndExceptions.js`, `WebAppBridge.js`,
+  `BootstrapOwnerHandler.js`, `WebAppBridge_BootstrapIntegration.js`): ZERO (0).
+
+--------------------------------------------------------------------------------
+2. CALLER & DEPENDENCY MAP FOR THE FOUR RECONCILED FILES
+--------------------------------------------------------------------------------
+A. Config.js (`KS_CONFIG`, `ksNowIso_`, `ksGetActorEmail_`)
+   - Keys verified present & frozen:
+       KS_CONFIG.TABS.AUTH_USERS = 'AuthUsers' (line 24)
+       KS_CONFIG.ID_PREFIXES.AuthUsers = 'AUTH' (line 46)
+       KS_CONFIG.TABS.USERS = 'Users' (line 23), ID_PREFIXES.Users = 'USR' (line 45)
+       KS_CONFIG.TABS.AUDIT_LOG = 'AuditLog' (line 16), ID_PREFIXES.AuditLog = 'AUD' (line 33)
+       KS_CONFIG.TABS.ID_ALLOCATIONS = 'IdAllocations' (line 15), ID_PREFIXES.IdAllocations = 'ALLOC' (line 32)
+       KS_CONFIG.TABS.EXCEPTION_REGISTER = 'ExceptionRegister' (line 17), ID_PREFIXES.ExceptionRegister = 'EXC' (line 34)
+   - Direct Dependents:
+       IdAllocator.js, AuditAndExceptions.js, SafeWriter.js, BootstrapOwnerHandler.js,
+       WebAppBridge.js (calls ksNowIso_ if available), AccountingEngine.js, SalesEngine.js,
+       InventoryEngine.js, ProductionAndPackagingEngine.js, WorkforceEngine.js,
+       ReportsAndClosingEngine.js, SchemaRegistry.js, ReleaseAndTests.js.
+
+B. IdAllocator.js (`ksAllocateIdLocked_`, `ksAllocateId`)
+   - Depends on:
+       KS_CONFIG (Config.js), ksNowIso_ (Config.js), ksGetHeaderMap_ & ksAppendAndVerifyRow_ (SafeWriter.js),
+       LockService, SpreadsheetApp, Utilities.
+   - Caller-Locked Callers (MUST hold ScriptLock; lock never released internally):
+       1. BootstrapOwnerHandler.js -> `ksAllocateIdLocked_('Users', ...)` & `ksAllocateIdLocked_('AuthUsers', ...)`
+       2. AuditAndExceptions.js:203 -> `ksLogAuditStrictLocked_()` calls `ksAllocateIdLocked_(KS_CONFIG.TABS.AUDIT_LOG, auditNonce)`
+       3. AuditAndExceptions.js:66  -> `ksLogAudit_()` forwards `{ callerHoldsLock: Boolean(o.callerHoldsLock) }`
+   - Legacy 2-Arg Callers (retain original internal waitLock + releaseLock behavior):
+       - AuditAndExceptions.js:106 (`ksLogException_`), :143-144 (`ksRunPhaseGCoreTest`)
+       - ProductionAndPackagingEngine.js:24, 88, 89, 183, 208, 256, 345, 390
+       - SalesEngine.js:26, 51, 131, 167, 215, 247
+       - WorkforceEngine.js:94, 160, 245, 337, 428
+       - ReleaseAndTests.js:27, 28
+       - AccountingEngine.js / InventoryEngine.js (via 2-arg ksAllocateId)
+   - Signature Compatibility:
+       `ksAllocateId(targetTabName, nonce, opts)` — 3rd parameter `opts` is optional;
+       all 2-arg legacy callers execute unchanged.
+
+C. AuditAndExceptions.js (`ksLogAuditStrictLocked_`, `ksLogAudit_`, `ksLogException_`, `ksInitGovernanceTabs`)
+   - Depends on:
+       KS_CONFIG, ksNowIso_, ksGetActorEmail_ (Config.js);
+       ksAllocateId, ksAllocateIdLocked_ (IdAllocator.js);
+       ksGetHeaderMap_, ksAppendAndVerifyRow_ (SafeWriter.js).
+   - Strict Caller-Locked Callers:
+       1. BootstrapOwnerHandler.js -> `ksLogAuditStrictLocked_('BOOTSTRAP_FIRST_OWNER', ...)`
+       2. WebAppBridge.js:272 -> `ksLogAuditStrictLocked_(action, targetTab, allocatedId, auditOpts)`
+   - Legacy Best-Effort Callers (behavior preserved):
+       LiveCutoverGate.js (:140, :194, :276, :350), ProductionAndPackagingEngine.js (:51, :140, :300),
+       ReleaseAndTests.js (:137), ReportsAndClosingEngine.js (:145), SalesEngine.js (:107, :189, :270),
+       SchemaRegistry.js (:112), WorkforceEngine.js (:60, :123, :185, :219).
+
+D. WebAppBridge.js (`doPost`, `ksValidateBridgeTargetTab_`, `ksRouteGovernedWrite_`,
+   `ksWriteCanonicalRowByHeaders_`, `ksFindByNonce_`, `ksRecordIdAllocation_`,
+   `ksHmacSha256Hex_`, `ksSafeEqual_`, `ksBridgeJson_`)
+   - Depends on:
+       1. WebAppBridge_BootstrapIntegration.js:
+          - `ksVerifySignedBridgeEnvelope_(e)` (mandatory; fails closed 503 if absent)
+          - `ksDispatchBootstrapFirstOwner_(req)` (for BOOTSTRAP_FIRST_OWNER)
+       2. BootstrapOwnerHandler.js:
+          - `ksBootstrapFirstOwner_(verifiedEnvelope)` (called by ksDispatchBootstrapFirstOwner_)
+       3. AuditAndExceptions.js:
+          - `ksLogAuditStrictLocked_` (mandatory; fails closed 503 before write if absent)
+       4. IdAllocator.js + SafeWriter.js + Config.js (used by ksLogAuditStrictLocked_ & domain engines)
+       5. Optional specialized domain engines (routed via `typeof ... === 'function'` guards):
+          `ksCreateInventoryLotAndReceipt`, `ksCreateProductionOrder`, `ksRecordProductionConsumption`,
+          `ksRecordProductionOutput`, `ksRecordQualityCheckAndRelease`, `ksRecordPackagingOutput`,
+          `ksCreateSalesOrder`, `ksCreateSalesInvoice`, `ksRecordCustomerPayment`, `ksPostBalancedJournalEntry`.
+   - External Upstream Caller:
+       `backend/app/apps_script_bridge.py` (`AppsScriptBridge.execute_governed_write`,
+       128 governed actions in `backend/app/action_registry.py` spanning 55 canonical tabs).
+   - Target-Tab Allowlist Alignment:
+       All 55 target tabs from `backend/app/action_registry.py` are explicitly registered in
+       `KS_BRIDGE_ALLOWED_TARGET_TABS`, plus all non-governance Blueprint v2 `Config.js` tabs.
+       Immutable governance tabs (`AuditLog`, `IdAllocations`, `ExceptionRegister`) and legacy
+       scratch tabs (`KS_P1_*`, `KS_P2_*`, `KS_P3_*`, `DBV5_*`, `DB_*`) are explicitly blocked.
+
+--------------------------------------------------------------------------------
+3. CROSS-LAYER ARCHITECTURE & DATABASE AUTHORITY CHECK
+--------------------------------------------------------------------------------
+- Frontend (`src/`):
+    React 18 SPA -> calls FastAPI `/api/*` via `src/services/api.ts` with mandatory
+    `X-KS-Idempotency-Key` nonces and payload fingerprinting; zero direct Google Sheets writes;
+    zero local business database.
+- Backend (`backend/app/`):
+    FastAPI service -> reads Google Sheets via Service Account (`sheets.py`), validates RBAC &
+    business rules, coordinates local WAL idempotency leases (`transaction_coordinator.py` —
+    operational transaction ledger only, NOT a competing business database), and delegates ALL
+    mutations via HMAC-SHA256 signed envelopes to Apps Script `doPost(e)`.
+- Apps Script (`apps_script/`):
+    Sole governed write owner for Google Sheets; verifies HMAC, serializes via `ScriptLock`,
+    allocates monotonic non-recycled IDs, writes with read-back verification, and writes
+    mandatory `AuditLog` entries.
+- Google Sheets:
+    Single authoritative business database (clean empty-database baseline preserved).
+
+--------------------------------------------------------------------------------
+4. MODULE LOADING ORDER VERIFICATION
+--------------------------------------------------------------------------------
+- Google Apps Script loads all `.js` files in a shared global V8 scope; top-level `function`
+  declarations hoist across files, while `const`/`var` constants (`KS_CONFIG`,
+  `KS_BRIDGE_*`) are read inside function bodies at request execution time (never at parse-time
+  cross-file initialization). Verified by loading in multiple file orders inside Node VM tests.
+================================================================================

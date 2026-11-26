@@ -1,0 +1,127 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-01
+STAGE 1: RECONCILED SOURCE TEST EXECUTION REPORT
+================================================================================
+Mission ID:        KS-RELEASE-01
+Generated At:      2026-11-26T18:16:00Z
+Tested Source:     ACTUAL RECONCILED WORKING TREE (/app/applet) — NOT isolated
+                   historical fixtures. Every Apps Script VM & cross-language
+                   test loaded files directly from `/app/applet/apps_script/`.
+Authoring Role:    Implementation & Engineering Agent (NOT Independent Auditor)
+Gate G1 Status:    REQUIRES GPT INDEPENDENT REVIEW
+
+--------------------------------------------------------------------------------
+1. APPS SCRIPT & CROSS-LANGUAGE TEST RESULTS (Section 5.1 & 5.4)
+--------------------------------------------------------------------------------
+[PASSED] 1A. Apps Script V8 Syntax & Global Symbol Collision Check
+  Command:  node -e '... new vm.Script(...) on all apps_script/*.js + JSON.parse(appsscript.json) ...'
+  Result:   42/42 .js files + appsscript.json parsed with 0 syntax errors;
+            0 duplicate top-level function declarations involving the 6 integrated files.
+
+[PASSED] 1B. Merged Apps Script VM Security Suite
+  Command:  node backend/tests/test_apps_script_bootstrap_vm.mjs
+  Result:   7/7 SUITES PASSED (loaded directly from `apps_script/`):
+            - PASS 1: Frozen Config.js (AUTH_USERS/AuthUsers), lock-ownership guards, legacy callers
+            - PASS 2: Mandatory HMAC-SHA256, contract_version 2.0, tamper & +/-300s skew rejection
+            - PASS 3: Happy path, uninterrupted ScriptLock, canonical USR/AUTH/AUD IDs, replay & B3
+            - PASS 4 (B1): Step 8 unexpected flush exception quarantined as RECOVERY_REQUIRED
+            - PASS 5 (B1): Step 10 completion-latch exception quarantined as RECOVERY_REQUIRED
+            - PASS 6: Abrupt timeout IN_PROGRESS quarantine + B4 IdAllocations forensic fallback
+            - PASS 7: Concurrent ScriptLock contention rejected cleanly
+
+[PASSED] 1C. Cross-Language Python <-> Apps Script HMAC & Real-Sheet Bridge Suite
+  Command:  PYTHONPATH=backend SALES_TESTING=1 python3 -m unittest backend/tests/test_cross_language_hmac.py -v
+  Result:   14/14 PASSED in 4.105s (0 failures, 0 errors, 0 skipped):
+            - test_01: Python HMAC-SHA256 matches Apps Script byte-for-byte (ASCII & Unicode/Devanagari/INR)
+            - test_02: Standalone ksVerifySignedBridgeEnvelope_ without BootstrapOwnerHandler.js
+            - test_03: Z, +05:30 IST, and now_iso() UTC timestamps accepted
+            - test_04: BOOTSTRAP_FIRST_OWNER isolated pre-lock from legacy nonce/route flow
+            - test_05: Non-bootstrap governed action authenticates & routes with strict audit
+            - test_06: Missing/empty/short/non-hex/wrong-secret/bit-flipped sigs & bad version/alg rejected
+            - test_07: Expired (>300s), future (>300s), and timezone-less timestamps rejected
+            - test_08: Outer-field tampering (6 fields), array JSON, non-object payload rejected
+            - test_09: Missing verifier (503) & weak secret <32 chars (503) fail closed
+            - test_10: [STAGE 1 W1/W5/W6/I1] Real-sheet CREATE_CUSTOMER + replay: uninterrupted ScriptLock
+                       across all flushes, monotonic ALLOC-0000001/ALLOC-0000002 (ignoring legacy
+                       ALLOC-1764000000000 epoch row), strict AuditLog AUD-* with actor_user_id
+            - test_11: [STAGE 1 W1] Missing audit logger fails closed (503) pre-write; post-write
+                       AuditLog failure quarantines as RECOVERY_REQUIRED (409)
+            - test_12: [STAGE 1 W2] Cross-table nonce collision (Customers -> Products) rejected (409)
+            - test_13: [STAGE 1 W3/W4] Governance tabs, scratch tabs, unauthorized AuthUsers action,
+                       unapproved tab, and blank actor_user_id/actor_role rejected; authorized
+                       CHANGE_PASSWORD on AuthUsers confirmed
+            - test_14: [STAGE 1 W5] Sheet read-back mismatch triggers READBACK_VERIFICATION_FAILED
+                       and quarantines as RECOVERY_REQUIRED (409)
+
+--------------------------------------------------------------------------------
+2. BACKEND TEST RESULTS (Section 5.2)
+--------------------------------------------------------------------------------
+[PASSED] 2A. Core First-Owner, Auth, RBAC & Transaction Safety Suite
+  Command:  PYTHONPATH=backend SALES_TESTING=1 python3 -m unittest \
+            backend/tests/test_first_owner_bootstrap.py \
+            backend/tests/test_owner_setup.py \
+            backend/tests/test_user_system_phase2.py \
+            backend/tests/test_mission51b1_transaction_safety.py \
+            backend/tests/test_tx_final_07_response_mismatch.py \
+            backend/tests/test_tx_final_08_readback_completeness.py
+  Result:   52/52 PASSED in 4.672s (0 failures, 0 errors, 0 skipped).
+
+[FAILED — 1 PRE-EXISTING WORKSPACE HYGIENE TEST] 2B. Full Backend Regression Discovery Suite
+  Command:  PYTHONPATH=backend SALES_TESTING=1 python3 -m unittest discover -s backend/tests -p 'test_*.py'
+  Result:   723 tests executed in 64.974s:
+            - PASSED:  721
+            - SKIPPED:   1 (pre-existing environment-conditional skip in backend suite)
+            - FAILED:    1
+  Exact Failure Detail (NOT hidden):
+    FAIL: test_accidental_aistudio_prompt_artifact_removed
+          (test_mission51b1_round2_integrity.TestMission51B1Round2PackageHygiene)
+    Location: backend/tests/test_mission51b1_round2_integrity.py:1299
+    Assertion: self.assertFalse(os.path.exists(os.path.join(REPO_ROOT, "public", "assets", "aistudio")))
+    Root Cause: Pre-existing uploaded reference `.txt` attachments remain in
+                `public/assets/aistudio/` (also tracked on GitHub main @ f7ccebf).
+                Preserved non-destructively in workspace; strictly excluded from
+                `KS_RELEASE_01_RELEASE_CANDIDATE.zip` (verified 0 violations by
+                `scripts/verify_package_hygiene.py`).
+
+--------------------------------------------------------------------------------
+3. FRONTEND VALIDATION, BUILD & CONTRACT TESTS (Section 5.3)
+--------------------------------------------------------------------------------
+[PASSED] 3A. TypeScript Typecheck (`npm run lint` / `tsc --noEmit`)
+  Result:   0 errors.
+
+[PASSED] 3B. Vite Production Build (`npm run build` / `tsc && vite build`)
+  Result:   Build succeeded cleanly (`dist/` generated with 0 errors).
+
+[PASSED] 3C. Frontend TypeScript Contract & Transaction Safety Suites (`bun scripts/test_*.ts`)
+  Result:   85/85 PASSED (0 failures):
+            - scripts/test_mission51b1_frontend_transaction_safety.ts:        5/5 PASSED
+            - scripts/test_mission51b1rf2_transaction_identity_closure.ts:   39/39 PASSED
+            - scripts/test_mission51b1rf_persistence_and_fingerprint.ts:     18/18 PASSED
+            - scripts/test_phase1_6_frontend_contracts.ts:                   17/17 PASSED
+            - scripts/test_tx_final_04_frontend_unknown_safety.ts:            6/6 PASSED
+
+[PASSED] 3D. Frontend Playwright Login & Workforce Verification Suites
+  Commands: node scripts/test_login_page_upgrade.cjs
+            node scripts/verify_usability_workforce_upgrade.cjs
+  Result:   ALL scenarios PASSED (desktop/tablet/mobile login, empty validation,
+            password visibility toggle, invalid credentials 401 handling, remember
+            username without password persistence, Enter-key launch, role workspace
+            switcher, 7-step registration wizard, mobile viewport).
+
+[NOTE — PRE-EXISTING MOCK HARNESS DRIFT] 3E. scripts/run_frontend_acceptance_audit.cjs
+  Status:   FAILED on pre-existing mock-harness assertions unrelated to Stage 1
+            (legacy header strings and StockView mock missing `loadingPasses` array);
+            security assertions for unauthorized sessionStorage view restoration
+            and logout credential purge PASSED.
+
+--------------------------------------------------------------------------------
+4. LIVE / PRODUCTION CROSS-SYSTEM TESTS (Section 5.4, Stage 2 & Gate G4/G5)
+--------------------------------------------------------------------------------
+[NOT RUN / BLOCKED] Live Google Sheets Workbook Connectivity & Write Smoke Test
+[NOT RUN / BLOCKED] Live Render Backend/Frontend Deployment Verification
+[NOT RUN / BLOCKED] Live First Owner Bootstrap & Production Login Verification
+  Reason:   Strictly prohibited prior to Gate G1 (GPT review), Gate G2 (GPT audit),
+            and Gate G3 (Owner authorization); live production credentials are not
+            present in this sandbox. Isolated in-memory end-to-end tests passed
+            (Section 1B, 1C, 2A, 3C).
+================================================================================

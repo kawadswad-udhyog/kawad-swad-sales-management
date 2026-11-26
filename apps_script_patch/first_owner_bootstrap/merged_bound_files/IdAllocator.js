@@ -58,8 +58,9 @@ function ksAllocateIdLocked_(targetTabName, nonce) {
         };
       }
 
-      // Track highest sequence numbers so IDs are never recycled (POL-002)
-      const allocMatch = String(data[i][idxAllocId] || '').match(/(\d+)$/);
+      // Track highest monotonic sequence numbers so IDs are never recycled (POL-002)
+      // Match 1-9 digit ALLOC-* sequences so any legacy 13-digit epoch timestamp cannot corrupt numbering
+      const allocMatch = String(data[i][idxAllocId] || '').trim().match(/^ALLOC-(\d{1,9})$/);
       if (allocMatch) maxAllocSeq = Math.max(maxAllocSeq, parseInt(allocMatch[1], 10));
 
       if (rowTab === targetTabName) {

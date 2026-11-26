@@ -1,0 +1,91 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-01
+STAGE 1: RECONCILIATION CHANGELOG
+================================================================================
+Mission ID:        KS-RELEASE-01
+Baseline Commit:   f7ccebffdacb96081f498b304dc009326bbcee44 (GitHub main)
+Target Branch:     release/ks-source-reconciliation-01
+Generated At:      2026-11-26T18:13:00Z
+
+--------------------------------------------------------------------------------
+SUMMARY OF FILES MODIFIED IN STAGE 1
+--------------------------------------------------------------------------------
+1. apps_script/WebAppBridge.js
+   - Before (f7ccebf): 10,514 bytes | sha256=aee3ca8f4ffac50175e1b46e80b5e0750fdfbe4d5bcd7d3b04220e007c7efc49
+   - After  (RC-01):   21,272 bytes | sha256=ab8459084cd25616d631adb3dd014c99cae3a6bc895efa644f2a724e3becf52d
+   - Changes:
+     * [W1] Added fail-closed pre-write audit logger guard (`MANDATORY_AUDIT_LOGGER_MISSING`, 503).
+     * [W1] Replaced un-locked best-effort `ksLogAudit_()` call with `ksLogAuditStrictLocked_()`
+            (forwarding `callerHoldsLock: true` and deterministic `audit_nonce: 'AUD_BRIDGE_' + nonce`)
+            so `ScriptLock` is never released prematurely prior to `SpreadsheetApp.flush()` and
+            audit failures cannot be silently swallowed.
+     * [W1] Added `businessWriteAttempted` tracking so any post-write exception (allocation,
+            audit, read-back, flush) returns `RECOVERY_REQUIRED` (HTTP 409, `BRIDGE_POST_WRITE_FAILURE`)
+            rather than false `CONFIRMED` or misleading clean `REJECTED`.
+     * [W2] Enforced target-tab binding on `ksFindByNonce_()` replay checks; cross-table nonce
+            reuse now rejects fail-closed with `NONCE_TARGET_TAB_CONFLICT` (HTTP 409).
+     * [W3] Added `ksValidateBridgeTargetTab_(action, targetTab)` with explicit allowlist of all
+            55 `backend/app/action_registry.py` target tabs + canonical Blueprint v2 tabs; blocked
+            immutable governance tabs (`AuditLog`, `IdAllocations`, `ExceptionRegister`), legacy
+            scratch tab prefixes (`KS_P1_*`, `KS_P2_*`, `KS_P3_*`, `DBV5_*`, `DB_*`), and
+            unauthorized `AuthUsers` actions (allowing only `REVOKE_USER_SESSIONS`,
+            `CHANGE_PASSWORD`, `RESET_PASSWORD`).
+     * [W4] Required non-empty `actor_user_id` and `actor_role` on all governed bridge requests
+            (`MISSING_ACTOR_IDENTITY`, HTTP 401); removed `'FASTAPI_GATEWAY'` anonymous fallback.
+     * [W5] Hardened `ksWriteCanonicalRowByHeaders_()` with explicit row targeting,
+            `SpreadsheetApp.flush()`, authoritative sheet read-back verification of primary ID
+            and `nonce` (`READBACK_VERIFICATION_FAILED`), and returned sheet read-back values.
+     * [W6] Replaced `'ALLOC-' + Date.now()` in `ksRecordIdAllocation_()` with monotonic 7-digit
+            `ALLOC-0000001` allocation (ignoring legacy >9-digit epoch rows) plus flush and
+            read-back verification of `allocation_id` and `nonce`.
+
+2. apps_script/IdAllocator.js
+   - Before (f7ccebf): 4,909 bytes | sha256=efa484e78cfaf1711135d53f1bf05cb75cb2c17ce588a69a68205c292d5b6d8e
+   - After  (RC-01):   5,044 bytes | sha256=c2066daea436b7f6704d2e2562eac927abff4131d2dafe2f834bdc8a0786b845
+   - Changes:
+     * [I1] Tightened `allocation_id` sequence regex on line 63 from `/(\d+)$/` to
+            `/^ALLOC-(\d{1,9})$/` so any legacy 13-digit epoch timestamp row cannot corrupt the
+            7-digit monotonic `ALLOC-0000001` sequence.
+     * Preserved `ksAllocateIdLocked_()` and backward-compatible `ksAllocateId()` unchanged.
+
+3. apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+   - Synchronized byte-for-byte with `apps_script/WebAppBridge.js`.
+
+4. apps_script_patch/first_owner_bootstrap/merged_bound_files/IdAllocator.js
+   - Synchronized byte-for-byte with `apps_script/IdAllocator.js`.
+
+5. apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+   - Updated byte counts and SHA-256 digests for `WebAppBridge.js` and `IdAllocator.js`.
+
+6. apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+   - Updated byte counts and SHA-256 digests for `WebAppBridge.js` and `IdAllocator.js`.
+
+7. backend/tests/test_cross_language_hmac.py
+   - Extended from 9 to 14 cross-language Python <-> Apps Script VM tests adding full real-sheet
+     in-memory workbook verification of W1-W6 & I1 (lock ownership across flush, monotonic ALLOC
+     numbering, strict AuditLog enforcement, post-write quarantine, cross-table nonce conflict,
+     target-tab allowlist/governance/scratch/AuthUsers guards, mandatory actor identity, and
+     read-back mismatch quarantine).
+
+--------------------------------------------------------------------------------
+FILES VERIFIED RECONCILED WITH ZERO CHANGES NEEDED
+--------------------------------------------------------------------------------
+- apps_script/Config.js                  (4,911 bytes, sha256=7d7fcbb3...)
+- apps_script/AuditAndExceptions.js      (8,362 bytes, sha256=4dfe6f38...)
+- apps_script/BootstrapOwnerHandler.js   (45,474 bytes, sha256=15e90267...)
+- apps_script/WebAppBridge_BootstrapIntegration.js (17,760 bytes, sha256=9a70528e...)
+- All 38 remaining bound Apps Script files, all backend/app/*.py files, all src/* files.
+
+--------------------------------------------------------------------------------
+RELEASE ARTIFACTS ADDED (MISSION KS-RELEASE-01)
+--------------------------------------------------------------------------------
+- KS_RELEASE_01_PREFLIGHT_REPORT.txt
+- KS_RELEASE_01_SOURCE_RECONCILIATION_REPORT.txt
+- KS_RELEASE_01_TEST_REPORT.txt
+- KS_RELEASE_01_SECURITY_REPORT.txt
+- KS_RELEASE_01_CHANGELOG.txt
+- KS_RELEASE_01_DEPENDENCY_REPORT.txt
+- KS_RELEASE_01_SHA256_MANIFEST.txt
+- KS_RELEASE_01_DEPLOYMENT_READINESS_REPORT.txt
+- KS_RELEASE_01_RELEASE_CANDIDATE.zip
+================================================================================

@@ -1,0 +1,102 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-01
+STAGE 1: SECURITY AUDIT & CONTROL VERIFICATION REPORT
+================================================================================
+Mission ID:        KS-RELEASE-01
+Generated At:      2026-11-26T18:13:00Z
+Authoring Role:    Implementation & Engineering Agent (NOT Independent Auditor)
+Audit Authority:   Independent technical & security sign-off belongs to GPT (Gate G2).
+
+--------------------------------------------------------------------------------
+1. SECURITY CONTROLS VERIFIED IN RECONCILED RELEASE CANDIDATE
+--------------------------------------------------------------------------------
+1. Mandatory Request Authentication & HMAC-SHA256 Signing:
+   - `WebAppBridge.js:194-205` enforces fail-closed `BRIDGE_AUTH_VERIFIER_MISSING` (HTTP 503)
+     if `ksVerifySignedBridgeEnvelope_` is missing.
+   - `WebAppBridge_BootstrapIntegration.js:118-346` enforces:
+       * `SALES_APPS_SCRIPT_SHARED_SECRET` >= 32 characters (fail-closed HTTP 503).
+       * Exact `contract_version === "2.0"` and `signature_alg === "HMAC-SHA-256"` (HTTP 400).
+       * Strict 64-hex signature verified via standalone constant-time `ksBridgeSafeEqual_()`
+         with explicit UTF-8 HMAC-SHA256 over exact `canonical_envelope` bytes (HTTP 401).
+       * Non-array JSON objects for both outer wire envelope and inner `canonical_envelope`,
+         plus object check on `envelope.payload` (HTTP 400).
+       * Outer-vs-signed tamper detection across all 10 scalar envelope fields (HTTP 401).
+       * Strict ISO-8601 UTC/offset regex (`KS_BRIDGE_ISO8601_TZ_RE`) and +/-300s clock skew (HTTP 401).
+
+2. Mandatory Actor Attribution & Zero Anonymous Privileged Writes:
+   - `WebAppBridge.js:230-241` rejects any request missing `actor_user_id` or `actor_role`
+     with `MISSING_ACTOR_IDENTITY` (HTTP 401) before lock acquisition or write execution.
+   - Removed `'FASTAPI_GATEWAY'` anonymous fallback on `AuditLog` entries.
+   - Backend enforces JWT authentication + 12-role default-deny RBAC (`backend/app/permissions.py`),
+     Owner-only authority boundaries (`POL-012`), confidential payroll redaction (`POL-013`),
+     and read-only `AUDITOR` lock (`POL-014`).
+
+3. Target-Table Allowlisting & Governance/Scratch/AuthUsers Isolation:
+   - `WebAppBridge.js::ksValidateBridgeTargetTab_` blocks:
+       * Immutable governance tabs (`AuditLog`, `IdAllocations`, `ExceptionRegister`) -> 403.
+       * Legacy scratch tab prefixes (`KS_P1_*`, `KS_P2_*`, `KS_P3_*`, `DBV5_*`, `DB_*`) -> 403.
+       * Unauthorized `AuthUsers` writes (permits only `REVOKE_USER_SESSIONS`,
+         `CHANGE_PASSWORD`, `RESET_PASSWORD`) -> 403.
+       * Any tab outside the explicit canonical ERP allowlist -> 403.
+
+4. Uninterrupted ScriptLock Ownership, Idempotency & Monotonic Non-Recycled IDs:
+   - `IdAllocator.js::ksAllocateIdLocked_` refuses execution unless caller holds `ScriptLock`
+     (`LOCK_OWNERSHIP_VIOLATION`), never acquires/releases locks internally, never recycles IDs,
+     returns `EXISTING_IDEMPOTENT` on same `(tab_name, nonce)`, verifies writes via
+     `ksAppendAndVerifyRow_`, and matches `/^ALLOC-(\d{1,9})$/` (immune to legacy epoch rows).
+   - `WebAppBridge.js` checks `existing.tab_name !== targetTab` on replay and rejects cross-table
+     nonce collisions (`NONCE_TARGET_TAB_CONFLICT`, HTTP 409).
+   - `WebAppBridge.js::ksRecordIdAllocation_` allocates monotonic `ALLOC-0000001` IDs with
+     flush and read-back verification.
+
+5. Mandatory Strict Audit Logging & Post-Write Quarantine:
+   - `AuditAndExceptions.js::ksLogAuditStrictLocked_` requires caller-held `ScriptLock`,
+     allocates `AUD-*` via `ksAllocateIdLocked_` without releasing lock, never swallows errors,
+     and verifies `AuditLog` read-back via `ksAppendAndVerifyRow_`.
+   - `WebAppBridge.js` verifies an audit logger is loaded before mutating any tab (HTTP 503),
+     executes `ksLogAuditStrictLocked_` while holding `ScriptLock`, and quarantines any
+     post-write error (allocation, audit, read-back, flush) as `RECOVERY_REQUIRED` (HTTP 409).
+
+6. First-Owner Bootstrap Isolation & One-Time Protection:
+   - `BOOTSTRAP_FIRST_OWNER` executes pre-lock via `ksDispatchBootstrapFirstOwner_` ->
+     `ksBootstrapFirstOwner_` under a single uninterrupted `ScriptLock`, requiring SHA-256
+     hashed bootstrap token (`KS_OWNER_BOOTSTRAP_TOKEN_HASH`), active expiry window, zero
+     existing `Users`/`AuthUsers` rows, `IN_PROGRESS` timeout quarantine marker, mandatory
+     `Users`+`AuthUsers`+`AuditLog` read-back before `CONFIRMED`, and automatic deletion of
+     temporary bootstrap properties upon confirmation or quarantine.
+
+7. Transport Redirect Protection (Backend):
+   - `backend/app/apps_script_bridge.py` (`_AppsScriptEchoRedirectHandler`) allows ONLY a
+     single GET hop to `https://script.googleusercontent.com/macros/echo`, stripping the POST
+     body, `X-KS-Signature`, and all authorization/secret headers; rejects all other 3xx hops
+     fail-closed.
+
+8. Secret Hygiene & Clean-Database Invariants:
+   - Zero hardcoded credentials, JWT secrets, service-account JSON keys, or bootstrap tokens
+     in source code or release candidate ZIP.
+   - Zero fabricated business records or historical data restoration.
+   - Google Sheets remains the sole authoritative business database; backend SQLite WAL stores
+     only transient idempotency/rate-limit coordination metadata.
+
+--------------------------------------------------------------------------------
+2. REMAINING SECURITY FINDINGS / KNOWN LIMITATIONS (FOR GPT & OWNER REVIEW)
+--------------------------------------------------------------------------------
+- [SEC-DEPLOY-01 — HIGH (Deployment Config, Pre-G3)]:
+  `render.yaml` currently routes static frontend `/api/*` rewrites to
+  `https://kawad-swad-sales-dev.onrender.com` and includes `http://localhost:3000` in
+  `SALES_CORS_ORIGINS` alongside `SALES_ENV=production`. Before G3/G4 production cutover,
+  Owner must confirm/set dedicated production backend URL and remove `http://localhost:3000`
+  from production `SALES_CORS_ORIGINS`.
+- [SEC-HYGIENE-01 — LOW (Workspace Reference Folder)]:
+  `public/assets/aistudio/` (6 uploaded reference `.txt` documents) remains present in the
+  working directory and GitHub `main` (`f7ccebf`). It is strictly excluded from
+  `KS_RELEASE_01_RELEASE_CANDIDATE.zip` (verified 0 violations by `verify_package_hygiene.py`),
+  and should be removed from the GitHub repository branch once Owner no longer needs those
+  reference files in-tree.
+- [SEC-BRIDGE-01 — LOW (Future Workstream)]:
+  Apps Script `WebAppBridge.js` relies on FastAPI as the authenticated RBAC enforcement layer
+  for fine-grained role-to-action checks on ordinary CRUD actions (while enforcing HMAC,
+  actor attribution, target-tab allowlist, AuthUsers action allowlist, nonce-tab binding,
+  strict audit, and read-back verification in Apps Script). Full Apps Script-side 12-role RBAC
+  mirroring remains a planned post-release hardening enhancement.
+================================================================================
