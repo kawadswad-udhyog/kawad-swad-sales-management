@@ -736,6 +736,85 @@ function ksFindAuditReplayMetadata_(nonce, allocatedId) {
   return null;
 }
 
+/**
+ * Authoritative global Web App HTTP GET entry point (read-only health/status).
+ *
+ * Security guarantees:
+ *  - Strictly read-only: NEVER mutates sheets, NEVER reads business/auth rows,
+ *    NEVER exposes secrets, hashes, tokens, or Spreadsheet IDs.
+ *  - Rejects any write or governed action attempted via GET query parameters
+ *    (fail-closed HTTP 405 METHOD_NOT_ALLOWED); all mutations require signed POST.
+ */
+function doGet(e) {
+  try {
+    const params = (e && e.parameter && typeof e.parameter === 'object') ? e.parameter : {};
+    const requestedAction = String(params.action || '').trim().toUpperCase();
+
+    if (
+      requestedAction &&
+      requestedAction !== 'HEALTH' &&
+      requestedAction !== 'STATUS' &&
+      requestedAction !== 'PING'
+    ) {
+      return ksBridgeJson_({
+        ok: false,
+        status: 'REJECTED',
+        error_code: 'METHOD_NOT_ALLOWED',
+        http_status: 405,
+        retryable: false,
+        message: 'Governed ERP actions require signed HTTP POST requests with HMAC-SHA256 authentication.'
+      });
+    }
+
+    const verifierLoaded = typeof ksVerifySignedBridgeEnvelope_ === 'function';
+    const strictAuditLoaded = typeof ksLogAuditStrictLocked_ === 'function';
+    const bootstrapHandlerLoaded =
+      typeof ksDispatchBootstrapFirstOwner_ === 'function' &&
+      typeof ksBootstrapFirstOwner_ === 'function';
+
+    let secretConfigured = false;
+    try {
+      const secretProp =
+        (typeof KS_BRIDGE_SHARED_SECRET_PROP === 'string' && KS_BRIDGE_SHARED_SECRET_PROP) ||
+        'SALES_APPS_SCRIPT_SHARED_SECRET';
+      const secretVal = String(PropertiesService.getScriptProperties().getProperty(secretProp) || '').trim();
+      secretConfigured = secretVal.length >= 32;
+    } catch (_propErr) {
+      secretConfigured = false;
+    }
+
+    const bridgeReady = verifierLoaded && strictAuditLoaded && secretConfigured;
+    const nowIso = typeof ksNowIso_ === 'function' ? ksNowIso_() : new Date().toISOString();
+
+    return ksBridgeJson_({
+      ok: true,
+      status: bridgeReady ? 'HEALTHY' : 'DEGRADED',
+      service: 'kawad-swad-erp-apps-script-bridge',
+      contract_version:
+        (typeof KS_BRIDGE_SUPPORTED_CONTRACT_VERSION === 'string' && KS_BRIDGE_SUPPORTED_CONTRACT_VERSION) || '2.0',
+      auth_mode:
+        (typeof KS_BRIDGE_SUPPORTED_SIGNATURE_ALG === 'string' && KS_BRIDGE_SUPPORTED_SIGNATURE_ALG) || 'HMAC-SHA-256',
+      methods: {
+        GET: 'read-only health/status',
+        POST: 'signed governed bridge & bootstrap'
+      },
+      bridge_ready: bridgeReady,
+      verifier_loaded: verifierLoaded,
+      strict_audit_loaded: strictAuditLoaded,
+      bootstrap_handler_loaded: bootstrapHandlerLoaded,
+      timestamp: nowIso
+    });
+  } catch (_err) {
+    return ksBridgeJson_({
+      ok: false,
+      status: 'ERROR',
+      error_code: 'BRIDGE_HEALTH_CHECK_ERROR',
+      http_status: 500,
+      message: 'Apps Script Web App status probe encountered an internal error.'
+    });
+  }
+}
+
 function doPost(e) {
   const lock = LockService.getScriptLock();
   let action = '';

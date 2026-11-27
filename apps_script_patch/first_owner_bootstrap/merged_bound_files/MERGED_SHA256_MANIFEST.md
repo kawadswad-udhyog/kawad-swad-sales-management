@@ -4,5 +4,5 @@
 - `IdAllocator.js` | bytes=5044 | sha256=`c2066daea436b7f6704d2e2562eac927abff4131d2dafe2f834bdc8a0786b845`
 - `AuditAndExceptions.js` | bytes=10341 | sha256=`04350e26bfe571d538347d6b32393f1ce2cc323177884ef6551cff55bbc76394`
 - `BootstrapOwnerHandler.js` | bytes=45474 | sha256=`15e9026762a86855778928dbcb69686e72c4f6c86b657094e8d79708366084af`
-- `WebAppBridge_BootstrapIntegration.js` | bytes=17760 | sha256=`9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f`
-- `WebAppBridge.js` | bytes=48176 | sha256=`776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6`
+- `WebAppBridge_BootstrapIntegration.js` | bytes=15836 | sha256=`621221586f073c1564b884abead5d1917fbfe06acc9500d935016f603c5331fa`
+- `WebAppBridge.js` | bytes=51155 | sha256=`2bd8cec4018f596d2e0308ebfc88a0801016abd7f87696097f15885afe2fd081`

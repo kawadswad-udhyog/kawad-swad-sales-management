@@ -422,55 +422,8 @@ function ksDispatchBootstrapFirstOwner_(verifiedEnvelope) {
 }
 
 /*
- * ============================================================================
- * EXACT SURGICAL MERGE PATCH FOR BOUND `WebAppBridge.js` `doPost(e)`
- * (Reference: verbatim `WebAppBridge.js:6-124`, export lines 13921–14039)
- * ============================================================================
- *
- *   function doPost(e) {
- *     const lock = LockService.getScriptLock();
- *     try {
- *       // 1. Mandatory HMAC-SHA256 + contract_version="2.0" + ±300s skew check
- *       //    (Replaces WebAppBridge.js lines 9–50 / export lines 13924–13965)
- *       const auth = ksVerifySignedBridgeEnvelope_(e);
- *       if (!auth.ok) {
- *         return ksBridgeJson_(auth.errorResponse);
- *       }
- *       const req = auth.envelope;
- *
- *       const action = String(req.action || '').trim().toUpperCase();
- *       const targetTab = String(req.target_tab || '').trim();
- *       const nonce = String(req.nonce || '').trim();
- *       const correlationId = String(req.correlation_id || '').trim();
- *       const actorUserId = String(req.actor_user_id || '').trim();
- *       const actorRole = String(req.actor_role || '').trim().toUpperCase();
- *       const payload = req.payload || {};
- *
- *       if (!action || !targetTab || !nonce || !correlationId) {
- *         return ksBridgeJson_({
- *           status: 'REJECTED',
- *           correlation_id: correlationId,
- *           nonce: nonce,
- *           action: action,
- *           target_tab: targetTab,
- *           error_code: 'MISSING_ENVELOPE_FIELDS',
- *           message: 'action, target_tab, nonce, and correlation_id are all required.'
- *         });
- *       }
- *
- *       // 1B. Isolated pre-lock route for BOOTSTRAP_FIRST_OWNER
- *       //     (Inserted strictly BEFORE WebAppBridge.js line 71 / export line 13986)
- *       if (action === 'BOOTSTRAP_FIRST_OWNER') {
- *         return ksBridgeJson_(ksDispatchBootstrapFirstOwner_(req));
- *       }
- *
- *       // 2..5. Existing governed action flow (WebAppBridge.js lines 71–124 unchanged)
- *       lock.waitLock(20000);
- *       ...
- *     } catch (err) {
- *       ...
- *     } finally {
- *       if (lock.hasLock()) lock.releaseLock();
- *     }
- *   }
+ * Global Web App entry points (HTTP GET and HTTP POST) live exclusively in
+ * `WebAppBridge.js`, which delegates HMAC verification to
+ * `ksVerifySignedBridgeEnvelope_` and `BOOTSTRAP_FIRST_OWNER` dispatch to
+ * `ksDispatchBootstrapFirstOwner_` defined above.
  */
