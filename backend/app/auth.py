@@ -539,7 +539,11 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     authoritative_role = _validate_authoritative_role(row.get("role"), user_id)
     authoritative_uid = str(row.get("user_id") or user_id).strip()
     authoritative_username = str(row.get("username") or "").strip()
-    authoritative_full_name = str(row.get("full_name") or authoritative_username or authoritative_uid).strip()
+    authoritative_full_name = resolve_user_full_name(
+        authoritative_uid,
+        auth_row=row,
+        fallback=authoritative_username or authoritative_uid,
+    )
 
     payload["user_id"] = authoritative_uid
     payload["role"] = authoritative_role
@@ -547,6 +551,31 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     payload["username"] = authoritative_username
     payload["must_change_password"] = str(row.get("must_change_password", "false")).strip().lower() == "true"
     return payload
+
+
+def resolve_user_full_name(user_id: str, auth_row: Optional[Dict[str, Any]] = None, fallback: str = "") -> str:
+    """Resolve display full_name from AuthUsers or Users profile table (best-effort, non-fatal)."""
+    if isinstance(auth_row, dict):
+        direct = str(auth_row.get("full_name") or "").strip()
+        if direct:
+            return direct
+    uid_clean = str(user_id or "").strip().lower()
+    if uid_clean:
+        try:
+            from app.sheets import db
+            users_rows = db.get_records("Users")
+            if isinstance(users_rows, list):
+                for urow in users_rows:
+                    if not isinstance(urow, dict):
+                        continue
+                    if str(urow.get("user_id") or "").strip().lower() == uid_clean:
+                        name = str(urow.get("full_name") or "").strip()
+                        if name:
+                            return name
+                        break
+        except Exception:
+            pass
+    return str(fallback or user_id or "").strip()
 
 
 async def require_sheets_connection() -> bool:

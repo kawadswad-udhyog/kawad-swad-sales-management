@@ -30,10 +30,19 @@ class OwnerSetupResponse(BaseModel):
     nonce: Optional[str] = None
     is_replay: bool = False
 
+class OwnerBootstrapStatusResponse(BaseModel):
+    initialized: bool
+    bootstrap_enabled: bool
+    status: str  # INITIALIZED | BOOTSTRAP_READY | BOOTSTRAP_DISABLED | STORAGE_UNAVAILABLE
+    error_code: Optional[str] = None
+    message: str
+    storage_ready: bool = True
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: str
+    username: str = ""
     full_name: str
     role: str
     must_change_password: bool = False

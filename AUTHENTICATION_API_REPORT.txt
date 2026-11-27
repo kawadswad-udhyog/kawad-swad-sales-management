@@ -1,0 +1,40 @@
+KAWAD SWAD ERP — KS-DEV-01
+AUTHENTICATION API REPORT
+==================================================
+
+Scope: Development Environment Only (`backend/app/routers/auth.py`, `backend/app/auth.py`, `backend/app/models.py`, `src/services/api.ts`).
+
+1. AUTHENTICATION ENDPOINTS
+- `GET /api/auth/bootstrap-status` (alias: `GET /auth/bootstrap-status`)
+  - Auth: Public read-only status probe (zero secrets or user details exposed).
+  - Response (`OwnerBootstrapStatusResponse`): `{ initialized, bootstrap_enabled, status, error_code, message, storage_ready }`.
+  - Status values: `INITIALIZED`, `BOOTSTRAP_READY`, `BOOTSTRAP_DISABLED`, `STORAGE_UNAVAILABLE` (fails closed).
+- `POST /api/auth/bootstrap-owner`
+  - Auth: One-time `X-KS-Bootstrap-Token` header + mandatory `X-KS-Idempotency-Key` header; requires server env `SALES_OWNER_BOOTSTRAP_ENABLED=true`, unique secret >= 32 chars, and unexpired UTC `SALES_OWNER_BOOTSTRAP_EXPIRES_AT`.
+  - Behavior: Creates sole First Owner (`OWNER_ADMIN`) via signed Apps Script bridge (`BOOTSTRAP_FIRST_OWNER`) with PBKDF2-SHA256 password hashing. Returns HTTP 201 (`OwnerSetupResponse`), HTTP 409 (`OWNER_ALREADY_INITIALIZED`) if any user already exists, HTTP 403 on disabled/expired/invalid token, HTTP 400 on query-string token, HTTP 422 on missing nonce, HTTP 429 on rate limit.
+- `POST /api/auth/login` (alias: `POST /auth/login`)
+  - Request (`LoginRequest`): `{ username, password }`.
+  - Behavior: Enforces brute-force lockout (HTTP 429), fresh `AuthUsers` lookup, ambiguity check (HTTP 403), fail-closed `is_account_active()` check (HTTP 403), legacy hash check (HTTP 403), constant-time PBKDF2-SHA256 verification (HTTP 401), authoritative role validation, and `LOGIN` audit logging.
+  - Response (`TokenResponse`): `{ access_token, token_type: "bearer", user_id, username, full_name, role, must_change_password }`.
+  - Enhancement in KS-DEV-01: Added canonical `username` field to `TokenResponse` and resolved display `full_name` from `Users` via `resolve_user_full_name()` when `AuthUsers` does not carry `full_name`.
+- `GET /api/auth/me` (alias: `GET /auth/me`)
+  - Auth: `Authorization: Bearer <jwt>` verified via `get_current_user()`.
+  - Behavior: Validates JWT signature and `exp`, loads fresh `AuthUsers` row, verifies account active status (HTTP 401 if deactivated), verifies fail-closed token revocation against memory + `RevokedTokens` sheet + `sessions_revoked_at` (HTTP 401 if revoked), resolves authoritative role strictly from `AuthUsers` (never JWT claims), and resolves real `full_name` from `Users`.
+  - Response: `{ user_id, full_name, username, role, must_change_password }`.
+- `POST /api/auth/logout` (alias: `POST /auth/logout`)
+  - Auth: `Authorization: Bearer <jwt>`.
+  - Behavior: Revokes active token in memory (`_REVOKED_TOKENS`) and delegates persistent `REVOKE_TOKEN` to Apps Script (`RevokedTokens`), logs `LOGOUT` audit entry.
+- `POST /api/auth/change-password`
+  - Auth: `Authorization: Bearer <jwt>`.
+  - Behavior: Verifies current password, writes new PBKDF2-SHA256 hash via Apps Script (`CHANGE_PASSWORD`), revokes prior sessions.
+
+2. PROTECTED API ENFORCEMENT
+- Protected endpoints (`/api/auth/me`, `/api/dashboard`, `/api/workspace`, `/api/audit`, `/api/users`, etc.) enforce `Depends(get_current_user)`.
+- Missing, malformed, expired, or revoked Bearer tokens are rejected with HTTP 401.
+- Role-restricted endpoints (e.g., `/api/audit`) reject unauthorized roles with HTTP 403.
+
+3. SECURITY CONTROLS VERIFIED
+- Passwords hashed server-side with PBKDF2-SHA256 (100,000 iterations) and constant-time comparison.
+- Zero plaintext passwords, hashes, JWTs, or bootstrap secrets logged or leaked in API responses or AuditLog.
+- Authoritative role always resolved server-side from `AuthUsers`; client-supplied roles are ignored/rejected.
+- Existing security guards (`test_owner_setup.py`, `test_phase4_2a_security_guards.py`, `test_first_owner_bootstrap.py`) remain intact and passing.

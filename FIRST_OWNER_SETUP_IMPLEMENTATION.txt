@@ -1,0 +1,35 @@
+KAWAD SWAD ERP — KS-DEV-01
+FIRST OWNER SETUP IMPLEMENTATION
+==================================================
+
+Scope: Development Environment Only (No production mutations, no production deployments, no release-candidate ZIP).
+
+1. ARCHITECTURE PRESERVED
+- Authoritative Business Database: Google Sheets (`Users`, `AuthUsers`, `AuditLog`, `IdAllocations`, `RevokedTokens`).
+- Controlled Write Layer: Apps Script single-write-owner gateway (`BOOTSTRAP_FIRST_OWNER` in `apps_script/BootstrapOwnerHandler.js`).
+- No competing database (no MongoDB or local user store) introduced.
+
+2. EXISTING BACKEND CAPABILITIES REUSED & COMPLETED
+- `POST /api/auth/bootstrap-owner` (`backend/app/routers/auth.py` -> `execute_bootstrap_first_owner` in `backend/app/user_service.py`):
+  - Fails closed by default unless `SALES_OWNER_BOOTSTRAP_ENABLED=true`, `SALES_OWNER_BOOTSTRAP_SECRET` (>= 32 chars, unique from JWT and Apps Script HMAC secrets), and unexpired UTC `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` are configured in server environment variables.
+  - Requires header `X-KS-Bootstrap-Token` (constant-time `hmac.compare_digest` verification; query-string tokens rejected with HTTP 400).
+  - Requires header `X-KS-Idempotency-Key` (HTTP 422 if absent).
+  - Enforces durable SQLite WAL rate limiting (HTTP 429 on lockout).
+  - Enforces strict zero-row precondition across BOTH `Users` and `AuthUsers` (HTTP 409 `OWNER_ALREADY_INITIALIZED` on any duplicate or post-init attempt).
+  - Deterministically hashes password using PBKDF2-SHA256 (`pbkdf2:sha256:100000$<salt>$<dk>`); plaintext password is never persisted, logged, or returned.
+  - Forces canonical role `OWNER_ADMIN` server-side regardless of caller input.
+  - Delegates creation through signed Apps Script bridge (`BOOTSTRAP_FIRST_OWNER`) with `AuditLog` recording.
+- CLI fallback preserved: `backend/scripts/initialize_first_owner.py` (masked `getpass` input against `POST /api/auth/bootstrap-owner`).
+
+3. TARGETED KS-DEV-01 ADDITIONS FOR FIRST OWNER SETUP
+- Added safe read-only discovery endpoint `GET /api/auth/bootstrap-status` (and `/auth/bootstrap-status`) in `backend/app/routers/auth.py` + `OwnerBootstrapStatusResponse` in `backend/app/models.py`:
+  - Returns only non-secret status booleans (`initialized`, `bootstrap_enabled`, `status`, `storage_ready`, `message`).
+  - Fails closed (`initialized=True, bootstrap_enabled=False, storage_ready=False`) if Google Sheets storage cannot be read or returns malformed data.
+  - Never exposes secrets, hashes, usernames, or user records.
+- Added frontend API helpers `fetchOwnerBootstrapStatus()` and `submitOwnerBootstrap()` in `src/services/api.ts`.
+- Wired `bootstrapStatus`, `refreshBootstrapStatus()`, and `bootstrapOwnerAccount()` in `src/context/StoreContext.tsx` (replacing the prior hardcoded stub) using `X-KS-Bootstrap-Token` and `X-KS-Idempotency-Key` headers.
+- Added gated "First Owner Setup" mode inside `src/components/LoginModal.tsx`:
+  - Rendered ONLY when backend reports `initialized=false`, `storage_ready=true`, and `bootstrap_enabled=true`.
+  - When uninitialized and bootstrap is disabled on the server, displays clear Owner server environment setup guidance without exposing any form.
+  - Validates strong password (>= 12 chars), confirmation match, username format, and required one-time bootstrap token.
+  - Immediately clears sensitive fields from state on completion, switches to Staff Sign In with the new username pre-filled, and hides setup permanently once `initialized=true`.

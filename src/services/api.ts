@@ -1345,7 +1345,9 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
 
     const isLoginEndpoint = path.includes('/login');
     const isLogoutEndpoint = path.includes('/logout');
-    if (res.status === 401 && !isLoginEndpoint) {
+    const isBootstrapEndpoint =
+      path.includes('/bootstrap-owner') || path.includes('/bootstrap-status');
+    if (res.status === 401 && !isLoginEndpoint && !isBootstrapEndpoint) {
       const isLocalToken = Boolean(token && token.startsWith('ks-local-jwt-'));
       if (!isLocalToken) {
         setAuthToken('');
@@ -3271,6 +3273,99 @@ export async function createV2JournalVoucher(
 ): Promise<Record<string, any>> {
   return postV2GovernedAction('/api/v2/accounting/journals', payload);
 }
+
+// =============================================================================
+// First Owner Gated Bootstrap API (KS-DEV-01)
+// =============================================================================
+
+export interface OwnerBootstrapStatus {
+  initialized: boolean;
+  bootstrap_enabled: boolean;
+  status: 'INITIALIZED' | 'BOOTSTRAP_READY' | 'BOOTSTRAP_DISABLED' | 'STORAGE_UNAVAILABLE';
+  error_code?: string | null;
+  message: string;
+  storage_ready: boolean;
+}
+
+export interface OwnerBootstrapRequestPayload {
+  username: string;
+  full_name: string;
+  password: string;
+  email?: string;
+  mobile?: string;
+  notes?: string;
+}
+
+export interface OwnerBootstrapResponse {
+  success: boolean;
+  status: string;
+  message: string;
+  user_id: string;
+  username: string;
+  full_name: string;
+  role: string;
+  canonical_role: string;
+  must_change_password: boolean;
+  created_at: string;
+  transaction_id?: string | null;
+  correlation_id?: string | null;
+  nonce?: string | null;
+  is_replay?: boolean;
+}
+
+export async function fetchOwnerBootstrapStatus(): Promise<OwnerBootstrapStatus | null> {
+  try {
+    return await apiRequest<OwnerBootstrapStatus>('/api/auth/bootstrap-status', {
+      method: 'GET',
+      timeoutMs: 12000,
+      silent: true,
+    });
+  } catch (err: unknown) {
+    if (err instanceof ApiHttpError && err.status === 404) {
+      try {
+        return await apiRequest<OwnerBootstrapStatus>('/auth/bootstrap-status', {
+          method: 'GET',
+          timeoutMs: 12000,
+          silent: true,
+        });
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+export async function submitOwnerBootstrap(
+  payload: OwnerBootstrapRequestPayload,
+  bootstrapToken: string,
+  idempotencyKey?: string
+): Promise<OwnerBootstrapResponse> {
+  const cleanToken = String(bootstrapToken || '').trim();
+  if (!cleanToken) {
+    throw new Error('One-time server bootstrap token is required.');
+  }
+  const nonce = (idempotencyKey || createSubmissionNonce('BOOTSTRAP-OWNER')).trim();
+  return apiRequest<OwnerBootstrapResponse>('/api/auth/bootstrap-owner', {
+    method: 'POST',
+    headers: {
+      'X-KS-Bootstrap-Token': cleanToken,
+      'X-KS-Idempotency-Key': nonce,
+    },
+    idempotencyKey: nonce,
+    body: JSON.stringify({
+      username: payload.username.trim(),
+      full_name: payload.full_name.trim(),
+      password: payload.password,
+      email: (payload.email || '').trim(),
+      mobile: (payload.mobile || '').trim(),
+      notes: (payload.notes || '').trim(),
+    }),
+    timeoutMs: 30000,
+    silent: true,
+  });
+}
+
 
 
 

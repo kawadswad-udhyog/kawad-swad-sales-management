@@ -1,0 +1,62 @@
+KAWAD SWAD ERP — KS-DEV-01
+FIRST LOGIN TEST REPORT
+==================================================
+
+Test Environment: Local Development / Isolated Offline Testing (`SALES_TESTING=1`, Vite dev server on `http://localhost:3000`, real Python backend auth/bootstrap/dashboard/workspace routers on loopback `127.0.0.1:18000` with `LocalAppsScriptSimulator`). Zero production services or Google Sheets were modified.
+
+1. MANDATORY 12 SCENARIOS — EXECUTED RESULTS (BOTH BACKEND UNIT + LIVE CHROMIUM E2E)
+
+  Scenario 1: First Owner setup succeeds
+    - Backend Unit (`test_ks_dev_01_first_login.py`): PASS (HTTP 201, USR-xxxxxx allocated, PBKDF2 hash stored, role=OWNER_ADMIN, zero secrets leaked)
+    - Live Browser E2E (`test_ks_dev_01_e2e_login.cjs`): PASS (Gated First Owner Setup UI created Owner via real backend, displayed confirmation, permanently hid setup tab)
+
+  Scenario 2: Second Owner setup is rejected
+    - Backend Unit: PASS (HTTP 409 `OWNER_ALREADY_INITIALIZED`; `Users` and `AuthUsers` count remained 1; `bootstrap-status` returned `INITIALIZED`)
+    - Live Browser E2E: PASS (HTTP 409 `OWNER_ALREADY_INITIALIZED`)
+
+  Scenario 3: Incorrect password is rejected
+    - Backend Unit: PASS (HTTP 401)
+    - Live Browser E2E: PASS (HTTP 401; Login UI displayed clear invalid credentials notice)
+
+  Scenario 4: Correct password succeeds
+    - Backend Unit: PASS (HTTP 200, Bearer JWT, canonical `username`, real `full_name`, role=`OWNER_ADMIN`)
+    - Live Browser E2E: PASS (Owner authenticated via `POST /api/auth/login` and transitioned to Dashboard)
+
+  Scenario 5: Inactive user cannot log in
+    - Backend Unit: PASS (HTTP 403 `"Account is deactivated or inactive"`; deactivated active user's existing token also rejected with HTTP 401)
+    - Live Browser E2E: PASS (HTTP 403; Login UI displayed Access Restricted / deactivated account message)
+
+  Scenario 6: Unauthorized user cannot access protected routes
+    - Backend Unit: PASS (Unauthenticated calls rejected 401; `FIELD_SALESMAN` blocked from Owner-only `/api/audit` with HTTP 403)
+    - Live Browser E2E: PASS (Unauthenticated browser locked to Login screen; Executive Dashboard inaccessible)
+
+  Scenario 7: Owner can access authorized dashboard
+    - Backend Unit: PASS (`GET /api/dashboard` and `GET /api/workspace` returned HTTP 200 for `OWNER_ADMIN`)
+    - Live Browser E2E: PASS (Executive Control Center rendered Owner identity `Rajesh Kawad (@owner.dev)` and `OWNER_ADMIN` badge cleanly on both desktop 1440x900 and mobile 390x844 with zero page errors)
+
+  Scenario 8: Refresh preserves a valid session
+    - Backend Unit: PASS (`GET /api/auth/me` validated Bearer token and restored real identity & `OWNER_ADMIN` role)
+    - Live Browser E2E: PASS (`page.reload()` re-verified session via `GET /api/auth/me` and restored Owner Dashboard)
+
+  Scenario 9: Expired session is rejected
+    - Backend Unit: PASS (Expired JWT rejected with HTTP 401 `"Session expired or invalid token"`)
+    - Live Browser E2E: PASS (Expired JWT rejected 401 on reload, storage cleared, returned cleanly to Login screen)
+
+  Scenario 10: Logout terminates the session
+    - Backend Unit: PASS (`POST /api/auth/logout` returned `ok: true` and revoked token in memory + `RevokedTokens`)
+    - Live Browser E2E: PASS (Clicking Header Sign Out cleared client token/state, returned to Login, and revoked JWT server-side)
+
+  Scenario 11: Logged-out user cannot revisit protected pages
+    - Backend Unit: PASS (Reusing revoked token on `get_current_user` rejected with HTTP 401 `"Session has been logged out and revoked"`)
+    - Live Browser E2E: PASS (Reload after logout stayed on Login screen; revoked token rejected with HTTP 401 on `/api/auth/me`)
+
+  Scenario 12: Direct API access without authentication is rejected
+    - Backend Unit: PASS (`get_current_user(None)` and forged tokens rejected with HTTP 401)
+    - Live Browser E2E: PASS (Unauthenticated `GET /api/auth/me`, `/api/dashboard`, `/api/workspace` all returned HTTP 401)
+
+2. FULL TEST & BUILD SUITE SUMMARY
+- Backend Auth & Security Suites (`tests.test_ks_dev_01_first_login`, `tests.test_first_owner_bootstrap`, `tests.test_owner_setup`, `tests.test_phase4_2a_security_guards`): 34/34 PASSED (1.524s)
+- Live Headless Chromium E2E Suite (`scripts/test_ks_dev_01_e2e_login.cjs`): 12/12 PASSED, 0 uncaught page errors
+- Frontend Transaction Safety Regression Suite (`scripts/test_mission51b1rf2_transaction_identity_closure.ts`): 39/39 PASSED, 0 FAILED
+- Static Security Scan (secret logging, password storage, DOM injection): CLEAN
+- Production TypeScript & Vite Build (`compile_applet`) + ESLint/Typecheck (`lint_applet`): Verified clean on final check.

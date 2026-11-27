@@ -14,7 +14,13 @@ from app.config import (
     SALES_OWNER_BOOTSTRAP_LOCKOUT_SECONDS,
     get_owner_bootstrap_config,
 )
-from app.models import LoginRequest, OwnerSetupRequest, OwnerSetupResponse, TokenResponse
+from app.models import (
+    LoginRequest,
+    OwnerBootstrapStatusResponse,
+    OwnerSetupRequest,
+    OwnerSetupResponse,
+    TokenResponse,
+)
 from app.sheets import db
 from app.auth import (
     verify_password,
@@ -26,6 +32,7 @@ from app.auth import (
     password_needs_reset,
     revoke_token,
     require_sheets_connection,
+    resolve_user_full_name,
     _validate_authoritative_role,
     _USER_REVOKED_AT,
     security,
@@ -74,7 +81,7 @@ def _token_for(row: dict) -> TokenResponse:
     username = raw_username or user_id
     authoritative_role = _validate_authoritative_role(row.get("role"), user_id)
     role = ui_role(authoritative_role)
-    full_name = str(row.get("full_name") or raw_username or user_id)
+    full_name = resolve_user_full_name(user_id, auth_row=row, fallback=raw_username or user_id)
     must_change = str(row.get("must_change_password", "false")).strip().lower() == "true"
     token = create_access_token({
         "sub": user_id,
@@ -88,9 +95,76 @@ def _token_for(row: dict) -> TokenResponse:
         access_token=token,
         token_type="bearer",
         user_id=user_id,
+        username=username,
         full_name=full_name,
         role=role,
         must_change_password=must_change,
+    )
+
+
+@router.get("/api/auth/bootstrap-status", response_model=OwnerBootstrapStatusResponse)
+@router.get("/auth/bootstrap-status", response_model=OwnerBootstrapStatusResponse)
+async def get_owner_bootstrap_status():
+    """
+    Safe read-only status endpoint indicating whether initial First-Owner setup is
+    required and whether the server's one-time bootstrap window is currently enabled.
+
+    Fails closed when storage cannot be verified and NEVER exposes secrets, hashes,
+    usernames, emails, or user directory details.
+    """
+    try:
+        users_rows = db.get_records("Users", fresh=True)
+        auth_rows = db.get_records("AuthUsers", fresh=True)
+    except Exception:
+        return OwnerBootstrapStatusResponse(
+            initialized=True,
+            bootstrap_enabled=False,
+            status="STORAGE_UNAVAILABLE",
+            error_code="STORAGE_UNAVAILABLE",
+            message="Unable to verify account initialization status from Google Sheets storage.",
+            storage_ready=False,
+        )
+
+    if not isinstance(users_rows, list) or not isinstance(auth_rows, list):
+        return OwnerBootstrapStatusResponse(
+            initialized=True,
+            bootstrap_enabled=False,
+            status="STORAGE_UNAVAILABLE",
+            error_code="STORAGE_MALFORMED",
+            message="Authentication storage returned malformed data. Initialization status locked.",
+            storage_ready=False,
+        )
+
+    has_users = any(isinstance(r, dict) and any(str(v or "").strip() for v in r.values()) for r in users_rows)
+    has_auth = any(isinstance(r, dict) and any(str(v or "").strip() for v in r.values()) for r in auth_rows)
+    if has_users or has_auth:
+        return OwnerBootstrapStatusResponse(
+            initialized=True,
+            bootstrap_enabled=False,
+            status="INITIALIZED",
+            error_code=None,
+            message="System is initialized. Sign in with your assigned credentials.",
+            storage_ready=True,
+        )
+
+    cfg = get_owner_bootstrap_config()
+    if cfg.get("ready"):
+        return OwnerBootstrapStatusResponse(
+            initialized=False,
+            bootstrap_enabled=True,
+            status="BOOTSTRAP_READY",
+            error_code=None,
+            message="No accounts exist yet. One-time First Owner initialization is enabled with the server bootstrap token.",
+            storage_ready=True,
+        )
+
+    return OwnerBootstrapStatusResponse(
+        initialized=False,
+        bootstrap_enabled=False,
+        status="BOOTSTRAP_DISABLED",
+        error_code=str(cfg.get("error_code") or "OWNER_BOOTSTRAP_DISABLED"),
+        message="No accounts exist yet. Enable the one-time owner bootstrap window in server environment variables to initialize the First Owner account.",
+        storage_ready=True,
     )
 
 

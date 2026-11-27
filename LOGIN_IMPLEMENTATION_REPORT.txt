@@ -1,0 +1,41 @@
+KAWAD SWAD ERP — KS-DEV-01
+LOGIN IMPLEMENTATION REPORT
+==================================================
+
+Scope: Development Environment Only.
+
+1. LOGIN SCREEN (`src/components/LoginModal.tsx`)
+- Preserves the Kawad Swad Udhyog split desktop and responsive mobile design system (`#F8F6F0` background, `#0F2C23` heritage green, `#D8B468` gold accent).
+- Provides:
+  - User ID / Username input and Password input with accessible show/hide toggle.
+  - "Remember User ID on this device" checkbox (persists username only; never stores passwords).
+  - Loading state (`Signing In…`) with duplicate-submission guard.
+  - Distinct, accurate error classification:
+    - Uninitialized system ("No login accounts exist yet") -> `Initialization Required` guidance.
+    - Inactive / deactivated / legacy / ambiguous account (HTTP 403) -> `Access Restricted` alert.
+    - Invalid username or password (HTTP 401) -> `Authentication Notice` alert.
+    - Brute-force lockout or API quota limit (HTTP 429) -> `Connection Notice` alert.
+    - Unreachable / standby / timeout / 5xx server error -> `Connection Notice` alert.
+  - Gated First Owner Setup tab shown exclusively when the server reports `initialized=false` and `bootstrap_enabled=true`.
+
+2. SESSION LIFECYCLE & PROTECTED ROUTING (`src/context/StoreContext.tsx`, `src/App.tsx`)
+- Login (`POST /api/auth/login`):
+  - Requires valid Bearer `access_token` plus authoritative `user_id` and `role` from backend; fails closed if role/identity is missing (removed legacy fallback to `SALESMAN` / `FIELD_SALESMAN`).
+  - Hydrates real `full_name` and canonical `username` returned by the server.
+  - Never stores user profile data in `localStorage['ks_user']`.
+- Session Restoration Across Browser Refresh (`GET /api/auth/me`):
+  - On mount, verifies stored Bearer token directly against `/api/auth/me`.
+  - Valid token restores the authenticated Owner Dashboard seamlessly across reloads.
+  - Expired, revoked, malformed, or deactivated sessions (HTTP 401 or 403) immediately clear `ks_token`, `ks_user`, `ks_current_view`, and all in-memory business state, returning the user to the Login screen.
+- Clean Logout (`POST /api/auth/logout`):
+  - Dispatches authenticated revocation request to `/api/auth/logout` with active Bearer token.
+  - Clears `ks_token`, `ks_user`, `sessionStorage['ks_current_view']`, `currentUser`, capabilities, workspace preview overrides, and business state.
+  - Multi-tab logout synchronization preserved via `storage` and `ks_auth_expired` events.
+- Protected Route Enforcement (`src/App.tsx`):
+  - When `!currentUser`, only `LoginModal` can render; no ERP module, dashboard, or data view is accessible.
+  - Logout resets any active workspace preview override and returns to default view state.
+
+3. OWNER DASHBOARD LANDING (`src/views/DashboardView.tsx`, `src/components/Header.tsx`)
+- Authenticated Owner lands directly on the Executive Control Center (`Business Overview`).
+- Displays the Owner's real full name (`full_name`), `@username`, and authoritative `OWNER_ADMIN` role badge clearly on both desktop (1440x900) and mobile (390x844) viewports without auth or sync warning errors.
+- Header Sign Out control (`button[title="Sign out"]`) remains accessible across viewports.

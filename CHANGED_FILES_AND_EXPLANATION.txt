@@ -1,0 +1,53 @@
+KAWAD SWAD ERP — KS-DEV-01
+CHANGED FILES AND EXPLANATION
+==================================================
+
+Modified Application Files:
+
+1. backend/app/models.py
+   - Added `OwnerBootstrapStatusResponse` model for safe read-only initialization status discovery.
+   - Added backward-compatible `username: str = ""` field to `TokenResponse`.
+
+2. backend/app/auth.py
+   - Added `resolve_user_full_name()` helper and integrated it into `get_current_user()` so `GET /api/auth/me` resolves the authenticated user's real display `full_name` from `Users` when `AuthUsers` omits `full_name`.
+
+3. backend/app/routers/auth.py
+   - Updated `_token_for()` to return canonical `username` and resolved `full_name` via `resolve_user_full_name()`.
+   - Added fail-closed read-only `GET /api/auth/bootstrap-status` (and `/auth/bootstrap-status`) returning non-secret initialization status booleans so the frontend can safely detect when gated First Owner setup is active.
+
+4. src/services/api.ts
+   - Exempted `/bootstrap-owner` and `/bootstrap-status` from firing `ks_auth_expired` events on 401.
+   - Exported `OwnerBootstrapStatus`, `OwnerBootstrapRequestPayload`, `OwnerBootstrapResponse`, `fetchOwnerBootstrapStatus()`, and `submitOwnerBootstrap()` (transmitting `X-KS-Bootstrap-Token` and `X-KS-Idempotency-Key` headers only).
+
+5. src/context/StoreContext.tsx
+   - Added `bootstrapStatus`, `refreshBootstrapStatus()`, and wired `bootstrapOwnerAccount()` to `submitOwnerBootstrap()`.
+   - Hardened `login()` and `checkSession()` to fail closed when authoritative `user_id` or `role` is absent (removed legacy `SALESMAN` / `FIELD_SALESMAN` defaults), terminate invalid sessions on both HTTP 401 and 403, and avoid displaying transient sync warning banners during normal login/refresh.
+   - Hardened `logout()` to clear `sessionStorage['ks_current_view']`, `ks_token`, `ks_user`, `syncError`, and business state cleanly alongside server revocation.
+
+6. src/components/LoginModal.tsx
+   - Added gated one-time "First Owner Setup" mode visible strictly when the server reports `initialized=false` and `bootstrap_enabled=true` (plus clear Owner configuration guidance when uninitialized and disabled).
+   - Fixed error classification order so uninitialized system, inactive/deactivated account (403), invalid credentials (401), rate limiting (429), and server connection errors each display accurate messages.
+
+7. src/views/DashboardView.tsx
+   - Displayed the authenticated Owner's identity (`full_name`, `@username`) and authoritative `OWNER_ADMIN` role badge in the Executive Control Center header on both desktop and mobile viewports.
+
+8. src/App.tsx
+   - Reset `activeWorkspaceOverride`, `isPreviewingEmployeePortal`, and `currentView` immediately when `currentUser` becomes `null` on logout.
+
+Added Development Test Files:
+
+9. backend/tests/test_ks_dev_01_first_login.py
+   - Offline unit & integration test suite covering all 12 mandatory KS-DEV-01 Stage F scenarios plus `GET /api/auth/bootstrap-status`.
+
+10. scripts/ks_dev_01_python_test_server.py
+    - Loopback-only (`127.0.0.1:18000`) offline test runner under `SALES_TESTING=1` dispatching HTTP requests to the real Python backend auth/bootstrap/dashboard/workspace routers for browser E2E verification.
+
+11. scripts/test_ks_dev_01_e2e_login.cjs
+    - Playwright headless Chromium end-to-end test suite validating all 12 KS-DEV-01 scenarios and desktop/mobile responsiveness against the live Vite dev server and real Python backend auth logic.
+
+Added Deliverable Reports (KS-DEV-01 Stage H):
+- FIRST_OWNER_SETUP_IMPLEMENTATION.txt
+- LOGIN_IMPLEMENTATION_REPORT.txt
+- AUTHENTICATION_API_REPORT.txt
+- FIRST_LOGIN_TEST_REPORT.txt
+- CHANGED_FILES_AND_EXPLANATION.txt

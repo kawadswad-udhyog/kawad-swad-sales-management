@@ -700,14 +700,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {/* Top Banner / Summary */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
         <div>
-          <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">
-            Executive Control Center
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">
+              Executive Control Center
+            </span>
+            {currentUser && (
+              <span
+                data-testid="owner-role-badge"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-900 border border-emerald-200"
+              >
+                <ShieldCheck size={11} className="text-emerald-700" />
+                {String(currentUser.role || '').toUpperCase() === 'OWNER'
+                  ? 'OWNER_ADMIN'
+                  : String(currentUser.role || 'OWNER_ADMIN').toUpperCase()}
+              </span>
+            )}
           </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight leading-tight m-0">
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight leading-tight m-0 mt-0.5">
             Business Overview
           </h1>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1 mb-0 max-w-xl">
-            Live operational status across sales, manufacturing, inventory, team, and finance.
+          <p
+            data-testid="owner-identity-summary"
+            className="text-xs sm:text-sm text-slate-500 mt-1 mb-0 max-w-xl"
+          >
+            {currentUser
+              ? `Signed in as ${currentUser.full_name} (@${currentUser.username || currentUser.user_id}) · Live operational status across sales, manufacturing, inventory, team, and finance.`
+              : 'Live operational status across sales, manufacturing, inventory, team, and finance.'}
           </p>
         </div>
 

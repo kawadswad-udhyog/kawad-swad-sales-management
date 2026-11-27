@@ -20,12 +20,18 @@ import {
 } from '../types';
 import {
   apiRequest,
+  ApiHttpError,
   getAuthToken,
   setAuthToken,
   getApiBaseUrl,
   setApiBaseUrl,
   fetchBackendHealth,
   fetchV2Capabilities,
+  fetchOwnerBootstrapStatus,
+  submitOwnerBootstrap,
+  createSubmissionNonce,
+  OwnerBootstrapStatus,
+  OwnerBootstrapResponse,
 } from '../services/api';
 
 export interface CompanyStockItem {
@@ -231,7 +237,23 @@ export interface StoreContextType {
   checkHealth: () => Promise<{ backendConnected: boolean; sheetsConnected: boolean; persistentWrites: boolean; error?: string }>;
   reconnectGoogleSheets: () => Promise<{ success: boolean; message: string }>;
   verifyGoogleSheetsTabs: () => Promise<{ connected: boolean; all_tabs_accessible: boolean; error?: string; tabs?: Record<string, any> }>;
-  bootstrapOwnerAccount: (username: string, password: string, fullName?: string) => Promise<{ success: boolean; message: string }>;
+  bootstrapStatus: OwnerBootstrapStatus | null;
+  refreshBootstrapStatus: () => Promise<OwnerBootstrapStatus | null>;
+  bootstrapOwnerAccount: (input: {
+    username: string;
+    fullName: string;
+    password: string;
+    bootstrapToken: string;
+    email?: string;
+    mobile?: string;
+    notes?: string;
+    idempotencyKey?: string;
+  }) => Promise<{
+    success: boolean;
+    message: string;
+    errorCode?: string;
+    data?: OwnerBootstrapResponse;
+  }>;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
@@ -274,6 +296,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [persistentWritesEnabled, setPersistentWritesEnabled] = useState<boolean>(false);
   const [appsScriptBridgeConfigured, setAppsScriptBridgeConfigured] = useState<boolean>(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [bootstrapStatus, setBootstrapStatus] = useState<OwnerBootstrapStatus | null>(null);
 
   const clearSyncError = () => setSyncError(null);
 
@@ -379,12 +402,68 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, []);
 
-  const bootstrapOwnerAccount = useCallback(async (_username: string, _password: string, _fullName?: string) => {
-    return {
-      success: false,
-      message: 'Public Owner setup is disabled for security. Run backend/scripts/bootstrap_owner.py from a trusted owner-controlled environment.',
-    };
+  const refreshBootstrapStatus = useCallback(async (): Promise<OwnerBootstrapStatus | null> => {
+    const status = await fetchOwnerBootstrapStatus();
+    if (status) {
+      setBootstrapStatus(status);
+    }
+    return status;
   }, []);
+
+  const bootstrapOwnerAccount = useCallback(
+    async (input: {
+      username: string;
+      fullName: string;
+      password: string;
+      bootstrapToken: string;
+      email?: string;
+      mobile?: string;
+      notes?: string;
+      idempotencyKey?: string;
+    }): Promise<{
+      success: boolean;
+      message: string;
+      errorCode?: string;
+      data?: OwnerBootstrapResponse;
+    }> => {
+      try {
+        const nonce = input.idempotencyKey || createSubmissionNonce('BOOTSTRAP-OWNER');
+        const res = await submitOwnerBootstrap(
+          {
+            username: input.username,
+            full_name: input.fullName,
+            password: input.password,
+            email: input.email,
+            mobile: input.mobile,
+            notes: input.notes,
+          },
+          input.bootstrapToken,
+          nonce
+        );
+        await refreshBootstrapStatus();
+        return {
+          success: true,
+          message: res.message || 'First Owner account initialized successfully.',
+          data: res,
+        };
+      } catch (err: unknown) {
+        const errorCode = err instanceof ApiHttpError ? err.errorCode : undefined;
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'First Owner initialization failed. Verify server configuration and bootstrap token.';
+        if (errorCode === 'OWNER_ALREADY_INITIALIZED' || (err instanceof ApiHttpError && err.status === 409)) {
+          void refreshBootstrapStatus();
+        }
+        return {
+          success: false,
+          message,
+          errorCode,
+        };
+      }
+    },
+    [refreshBootstrapStatus]
+  );
 
   const updateBackendUrl = (url: string) => {
     setApiBaseUrl(url);
@@ -399,12 +478,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     setAuthToken('');
     if (typeof window !== 'undefined') {
-      localStorage.removeItem('ks_user');
-      localStorage.removeItem('ks_token');
+      try {
+        localStorage.removeItem('ks_user');
+        localStorage.removeItem('ks_token');
+        sessionStorage.removeItem('ks_current_view');
+      } catch {
+        // Safe fallback if storage is restricted
+      }
     }
     setCurrentUser(null);
     setCapabilities(null);
     setAppsScriptBridgeConfigured(false);
+    setSyncError(null);
     clearBusinessState();
   }, [clearBusinessState]);
 
@@ -467,8 +552,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     let res: {
       access_token: string;
       token_type?: string;
-      user?: { user_id: string; full_name?: string; role?: string };
+      user?: { user_id: string; username?: string; full_name?: string; role?: string };
       user_id?: string;
+      username?: string;
       full_name?: string;
       role?: string;
     } | null = null;
@@ -477,8 +563,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       res = await apiRequest<{
         access_token: string;
         token_type?: string;
-        user?: { user_id: string; full_name?: string; role?: string };
+        user?: { user_id: string; username?: string; full_name?: string; role?: string };
         user_id?: string;
+        username?: string;
         full_name?: string;
         role?: string;
       }>('/api/auth/login', {
@@ -488,24 +575,21 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         silent: true,
       });
     } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes('404')) {
-        try {
-          res = await apiRequest<{
-            access_token: string;
-            token_type?: string;
-            user?: { user_id: string; full_name?: string; role?: string };
-            user_id?: string;
-            full_name?: string;
-            role?: string;
-          }>('/auth/login', {
-            method: 'POST',
-            body: JSON.stringify({ username: cleanUsername, password }),
-            timeoutMs: 20000,
-            silent: true,
-          });
-        } catch (fallbackErr) {
-          throw fallbackErr;
-        }
+      if (err instanceof ApiHttpError && err.status === 404) {
+        res = await apiRequest<{
+          access_token: string;
+          token_type?: string;
+          user?: { user_id: string; username?: string; full_name?: string; role?: string };
+          user_id?: string;
+          username?: string;
+          full_name?: string;
+          role?: string;
+        }>('/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ username: cleanUsername, password }),
+          timeoutMs: 20000,
+          silent: true,
+        });
       } else {
         throw err;
       }
@@ -515,18 +599,22 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       throw new Error('Authentication failed: No valid access token received from server.');
     }
 
+    const authoritativeRole = String(res.user?.role || res.role || '').trim();
+    const resolvedUserId = String(res.user?.user_id || res.user_id || '').trim();
+    if (!authoritativeRole || !resolvedUserId) {
+      setAuthToken('');
+      throw new Error('Authentication failed: Server returned incomplete account role or identity.');
+    }
+
     setAuthToken(res.access_token);
-    const userPayload = res.user || {
-      user_id: res.user_id || cleanUsername,
-      full_name: res.full_name || cleanUsername,
-      role: res.role || 'SALESMAN',
-    };
+    const resolvedUsername = String(res.user?.username || res.username || cleanUsername).trim();
+    const resolvedFullName = String(res.user?.full_name || res.full_name || resolvedUsername).trim();
 
     const newUser: User = {
-      user_id: userPayload.user_id || cleanUsername,
-      full_name: userPayload.full_name || cleanUsername,
-      username: cleanUsername,
-      role: (userPayload.role || 'FIELD_SALESMAN') as User['role'],
+      user_id: resolvedUserId,
+      full_name: resolvedFullName,
+      username: resolvedUsername,
+      role: authoritativeRole as User['role'],
       mobile: '',
       email: '',
       active: true,
@@ -536,12 +624,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     setCurrentUser(newUser);
     if (typeof window !== 'undefined') {
-      localStorage.removeItem('ks_user');
+      try {
+        localStorage.removeItem('ks_user');
+      } catch {
+        // Safe fallback
+      }
     }
     setIsBackendConnected(true);
-    setSyncError('Signed in. Loading your latest workspace data…');
+    setSyncError(null);
     setIsRefreshing(true);
-    void Promise.all([loadInitialData(userPayload.role), refreshCapabilities()]).finally(() =>
+    void Promise.all([loadInitialData(authoritativeRole), refreshCapabilities()]).finally(() =>
       setIsRefreshing(false)
     );
   };
@@ -699,19 +791,36 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         try {
           me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/api/auth/me', { silent: true });
         } catch (err: unknown) {
-          if (err instanceof Error && err.message.includes('404')) {
+          if (err instanceof ApiHttpError && err.status === 404) {
             me = await apiRequest<{ user_id: string; full_name?: string; username?: string; role?: string; must_change_password?: boolean }>('/auth/me', { silent: true });
           } else {
             throw err;
           }
         }
 
-        const realUsername = me.username || me.user_id;
+        const authoritativeRole = String(me?.role || '').trim();
+        const verifiedUserId = String(me?.user_id || '').trim();
+        if (!verifiedUserId || !authoritativeRole) {
+          setAuthToken('');
+          if (typeof window !== 'undefined') {
+            try {
+              localStorage.removeItem('ks_user');
+              sessionStorage.removeItem('ks_current_view');
+            } catch {
+              // ignore
+            }
+          }
+          setCurrentUser(null);
+          clearBusinessState();
+          return;
+        }
+
+        const realUsername = String(me.username || verifiedUserId).trim();
         const verifiedUser: User = {
-          user_id: me.user_id,
-          full_name: me.full_name || realUsername,
+          user_id: verifiedUserId,
+          full_name: String(me.full_name || realUsername).trim(),
           username: realUsername,
-          role: (me.role || 'FIELD_SALESMAN') as User['role'],
+          role: authoritativeRole as User['role'],
           mobile: '',
           email: '',
           active: true,
@@ -720,21 +829,41 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         };
         setCurrentUser(verifiedUser);
         if (typeof window !== 'undefined') {
-          localStorage.removeItem('ks_user');
+          try {
+            localStorage.removeItem('ks_user');
+          } catch {
+            // ignore
+          }
         }
         setIsBackendConnected(true);
-        setSyncError('Session verified. Loading live workspace data…');
+        setSyncError(null);
         setIsRefreshing(true);
-        void Promise.all([loadInitialData(me.role), refreshCapabilities()]).finally(() =>
+        void Promise.all([loadInitialData(authoritativeRole), refreshCapabilities()]).finally(() =>
           setIsRefreshing(false)
         );
       } catch (e: unknown) {
         console.warn('Session verification warning:', e);
         const msg = e instanceof Error ? e.message.toLowerCase() : '';
-        if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('session expired')) {
+        const status = e instanceof ApiHttpError ? e.status : undefined;
+        if (
+          status === 401 ||
+          status === 403 ||
+          msg.includes('401') ||
+          msg.includes('403') ||
+          msg.includes('unauthorized') ||
+          msg.includes('forbidden') ||
+          msg.includes('deactivated') ||
+          msg.includes('inactive') ||
+          msg.includes('session expired')
+        ) {
           setAuthToken('');
           if (typeof window !== 'undefined') {
-            localStorage.removeItem('ks_user');
+            try {
+              localStorage.removeItem('ks_user');
+              sessionStorage.removeItem('ks_current_view');
+            } catch {
+              // ignore
+            }
           }
           setCurrentUser(null);
           clearBusinessState();
@@ -1586,6 +1715,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         checkHealth,
         reconnectGoogleSheets,
         verifyGoogleSheetsTabs,
+        bootstrapStatus,
+        refreshBootstrapStatus,
         bootstrapOwnerAccount,
       }}
     >

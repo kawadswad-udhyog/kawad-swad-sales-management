@@ -78,9 +78,16 @@ const MainAppContent: React.FC = () => {
     return 'dashboard';
   });
 
-  // Ensure currentView is always valid and authorized for the active workspace
+  // Ensure currentView is always valid and authorized for the active workspace,
+  // and clear any workspace overrides immediately upon logout.
   useEffect(() => {
-    if (currentUser && activeWorkspace) {
+    if (!currentUser) {
+      setActiveWorkspaceOverride(null);
+      setIsPreviewingEmployeePortal(false);
+      setCurrentView('dashboard');
+      return;
+    }
+    if (activeWorkspace) {
       if (!activeWorkspace.allowedViews.includes(currentView)) {
         setCurrentView(activeWorkspace.defaultView);
         if (typeof window !== 'undefined') {
