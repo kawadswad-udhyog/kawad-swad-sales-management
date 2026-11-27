@@ -1,0 +1,346 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-03
+LIVE WORKBOOK PHYSICAL ROW-1 HEADER AUDIT & OWNER RECONCILIATION SPECIFICATION
+================================================================================================
+Generated At (UTC)          : 2026-11-27T06:04:41Z
+Mission ID                  : KS-RELEASE-03
+Live Physical Verification  : BLOCKED (No live Google Sheets credentials / spreadsheet ID in sandbox;
+                              live sheet inspection prohibited under Gate G1 / Section 12 Hard Stop)
+Fabricated Live Data        : ZERO (All headers below are extracted strictly from repository source code)
+
+------------------------------------------------------------------------------------------------
+1. SANDBOX CREDENTIAL & ACCESS AUDIT (REDACTED — ZERO SECRET OUTPUT)
+------------------------------------------------------------------------------------------------
+  SALES_SHEET_ID                                       : NOT_SET
+  GOOGLE_SHEETS_SPREADSHEET_ID                         : NOT_SET
+  GOOGLE_SERVICE_ACCOUNT_JSON                          : NOT_SET
+  GOOGLE_APPLICATION_CREDENTIALS                       : NOT_SET
+  SALES_APPS_SCRIPT_BRIDGE_URL                         : NOT_SET
+  SALES_APPS_SCRIPT_BRIDGE_SECRET                      : NOT_SET
+  SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON      : NOT_SET
+  Local service-account / credentials JSON files       : NONE FOUND
+  Live Google Sheets API call attempted                : NO (Section 12 Hard Stop + Credentials Absent)
+
+  AUDIT VERDICT FOR STAGE C:
+  - Physical live Row-1 headers on the production Google Spreadsheet CANNOT be verified inside
+    this sandbox. Therefore Stage C Live Workbook Verification is honestly recorded as BLOCKED.
+  - Backend schema_registry.py enforces a fail-closed write guard on ALL 36 unverified tabs
+    (12 CONFLICTING_CORE_SCHEMA_TABS + 24 PENDING_OWNER_MAPPING_TABS) so NO silent column shift
+    or data corruption can occur if deployed before Owner header confirmation.
+
+------------------------------------------------------------------------------------------------
+2. 12 CONFLICTING_CORE_SCHEMA_TABS — EXACT REPOSITORY HEADER COMPARISON
+------------------------------------------------------------------------------------------------
+Each tab below has declared field variances between backend/app/sheets.py::REQUIRED_TABS,
+backend router write payloads (backend/app/schema_registry.py::SCHEMA_HEADER_VARIANCES),
+and apps_script/Code.js::KS_SCHEMA_JSON (when present in Blueprint v2.0).
+
+[01/12] TAB: CustomRoles
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (7 cols)   : role_id, role_name, description, permissions_json, created_by, created_at, updated_at
+  Blueprint KS_SCHEMA (8 cols): role_id, role_name, description, permissions_json, created_by, created_at, updated_at, updated_by
+  Diff (In BP only)          : updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (7 cols): role_id, role_name, description, permissions_json, created_by, created_at, updated_at
+  Technical Notes            : users.py DELETE_CUSTOM_ROLE transmits soft-delete flags deleted/active which are omitted from REQUIRED_TABS['CustomRoles'].
+
+[02/12] TAB: Customers
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (13 cols)   : customer_id, customer_type, shop_name, shopkeeper_name, mobile, alternate_mobile, address, locality_area, city, gstin, map_location, active, created_at
+  Blueprint KS_SCHEMA (16 cols): customer_id, customer_type, shop_name, shopkeeper_name, mobile, alternate_mobile, address, locality_area, city, gstin, map_location, active, created_at, created_by, updated_at, updated_by
+  Diff (In BP only)          : created_by, updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (13 cols): customer_id, customer_type, shop_name, shopkeeper_name, mobile, alternate_mobile, address, locality_area, city, gstin, map_location, active, created_at
+  Technical Notes            : customers.py reads/writes notes which is omitted from REQUIRED_TABS['Customers'].
+
+[03/12] TAB: Expenses
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (19 cols)   : expense_id, expense_datetime, salesman_user_id, submitted_by_user_id, category, amount, payment_mode, description, receipt_image_url, receipt_link_or_file_ref, approval_status, approved_by_user_id, approval_datetime, approved_datetime, cash_reducing_expense, related_closing_id, rejection_reason, created_at, notes
+  Blueprint KS_SCHEMA (22 cols): expense_id, expense_datetime, salesman_user_id, submitted_by_user_id, category, amount, payment_mode, description, receipt_image_url, receipt_link_or_file_ref, approval_status, approved_by_user_id, approval_datetime, approved_datetime, cash_reducing_expense, related_closing_id, rejection_reason, created_at, notes, created_by, updated_at, updated_by
+  Diff (In BP only)          : created_by, updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (19 cols): expense_id, expense_datetime, salesman_user_id, submitted_by_user_id, category, amount, payment_mode, description, receipt_image_url, receipt_link_or_file_ref, approval_status, approved_by_user_id, approval_datetime, approved_datetime, cash_reducing_expense, related_closing_id, rejection_reason, created_at, notes
+  Technical Notes            : expenses.py passes governance flag post_accounting_journal inside REVIEW_EXPENSE update payload.
+
+[04/12] TAB: PackagingBatches
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (30 cols)   : packaging_id, packaging_date, product_id, product_name_snapshot, bulk_kg_used, packets_200g, packets_500g, packets_1000g, total_packets, expected_kg, difference_kg, difference_status, status, notes, created_at, created_by, batch_allocations_json, bulk_cost, bulk_cost_per_kg, packaging_material_cost, packaging_labor_cost, total_finished_cost, packing_loss_kg, loss_reason, discrepancy_approved, discrepancy_explanation, discrepancy_approved_by, discrepancy_approved_at, reference, cost_status
+  Blueprint KS_SCHEMA (32 cols): packaging_id, packaging_date, product_id, product_name_snapshot, bulk_kg_used, packets_200g, packets_500g, packets_1000g, total_packets, expected_kg, difference_kg, difference_status, status, notes, created_at, created_by, batch_allocations_json, bulk_cost, bulk_cost_per_kg, packaging_material_cost, packaging_labor_cost, total_finished_cost, packing_loss_kg, loss_reason, discrepancy_approved, discrepancy_explanation, discrepancy_approved_by, discrepancy_approved_at, reference, cost_status, updated_at, updated_by
+  Diff (In BP only)          : updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (30 cols): packaging_id, packaging_date, product_id, product_name_snapshot, bulk_kg_used, packets_200g, packets_500g, packets_1000g, total_packets, expected_kg, difference_kg, difference_status, status, notes, created_at, created_by, batch_allocations_json, bulk_cost, bulk_cost_per_kg, packaging_material_cost, packaging_labor_cost, total_finished_cost, packing_loss_kg, loss_reason, discrepancy_approved, discrepancy_explanation, discrepancy_approved_by, discrepancy_approved_at, reference, cost_status
+  Technical Notes            : production.py RECORD_PACKAGING_BATCH writes recipe/bulk linkage fields omitted from REQUIRED_TABS['PackagingBatches'].
+
+[05/12] TAB: ProductionBatches
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (22 cols)   : production_id, production_date, product_id, product_name_snapshot, quantity_kg, wastage_kg, net_quantity_kg, flour_base_used_kg, benchmark_yield_kg, actual_yield_ratio, yield_variance_kg, recipe_id, status, notes, created_at, created_by, approved_by, approved_at, approval_notes, materials_issued, material_issue_txn_id, recipe_version
+  Blueprint KS_SCHEMA (24 cols): production_id, production_date, product_id, product_name_snapshot, quantity_kg, wastage_kg, net_quantity_kg, flour_base_used_kg, benchmark_yield_kg, actual_yield_ratio, yield_variance_kg, recipe_id, status, notes, created_at, created_by, approved_by, approved_at, approval_notes, materials_issued, material_issue_txn_id, recipe_version, updated_at, updated_by
+  Diff (In BP only)          : updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (22 cols): production_id, production_date, product_id, product_name_snapshot, quantity_kg, wastage_kg, net_quantity_kg, flour_base_used_kg, benchmark_yield_kg, actual_yield_ratio, yield_variance_kg, recipe_id, status, notes, created_at, created_by, approved_by, approved_at, approval_notes, materials_issued, material_issue_txn_id, recipe_version
+  Technical Notes            : production.py CREATE_PRODUCTION_BATCH includes extended reconciliation & ingredient columns omitted from REQUIRED_TABS['ProductionBatches'].
+
+[06/12] TAB: Products
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (10 cols)   : product_id, sku, product_name, category, variant, pack_weight_g, selling_unit, retail_pack_only, active, notes
+  Blueprint KS_SCHEMA (14 cols): product_id, sku, product_name, category, variant, pack_weight_g, selling_unit, retail_pack_only, active, notes, created_at, created_by, updated_at, updated_by
+  Diff (In BP only)          : created_at, created_by, updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (10 cols): product_id, sku, product_name, category, variant, pack_weight_g, selling_unit, retail_pack_only, active, notes
+  Technical Notes            : products.py accepts/writes optional recipe_id linkage omitted from REQUIRED_TABS['Products'].
+
+[07/12] TAB: RawMaterials
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (9 cols)   : raw_material_id, material_name, current_stock, unit, rate_per_unit, rate_status, category, created_at, created_by
+  Blueprint KS_SCHEMA (11 cols): raw_material_id, material_name, current_stock, unit, rate_per_unit, rate_status, category, created_at, created_by, updated_at, updated_by
+  Diff (In BP only)          : updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (9 cols): raw_material_id, material_name, current_stock, unit, rate_per_unit, rate_status, category, created_at, created_by
+  Technical Notes            : production.py writes active/notes and opening-stock verification metadata beyond the 9 columns in REQUIRED_TABS['RawMaterials'].
+
+[08/12] TAB: SalaryIncentives
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (12 cols)   : incentive_id, period_month, salesman_user_id, salesman_name, qualifying_kg_sold, base_rate_per_kg, incentive_amount, approved_by_user_id, status, paid_at, notes, created_at
+  Blueprint KS_SCHEMA (15 cols): incentive_id, period_month, salesman_user_id, salesman_name, qualifying_kg_sold, base_rate_per_kg, incentive_amount, approved_by_user_id, status, paid_at, notes, created_at, created_by, updated_at, updated_by
+  Diff (In BP only)          : created_by, updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (12 cols): incentive_id, period_month, salesman_user_id, salesman_name, qualifying_kg_sold, base_rate_per_kg, incentive_amount, approved_by_user_id, status, paid_at, notes, created_at
+  Technical Notes            : salary.py reads/writes record_id, period_start/period_end, calculated_amount/approved_amount whereas REQUIRED_TABS['SalaryIncentives'] lists legacy columns (incentive_id, period_month, incentive_amount).
+
+[09/12] TAB: Sales
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (23 cols)   : sale_id, bill_number, idempotency_key, txn_status, sale_datetime, sales_type, customer_id, customer_name_snapshot, customer_mobile, customer_gstin, entered_by_user_id, salesman_user_id, delivery_status, payment_status, payment_method, payment_reference, subtotal, discount_amount, tax_amount, bill_total, bill_status, created_at, notes
+  Blueprint KS_SCHEMA        : NOT IN KS_SCHEMA_JSON (Operational Extension Table)
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (23 cols): sale_id, bill_number, idempotency_key, txn_status, sale_datetime, sales_type, customer_id, customer_name_snapshot, customer_mobile, customer_gstin, entered_by_user_id, salesman_user_id, delivery_status, payment_status, payment_method, payment_reference, subtotal, discount_amount, tax_amount, bill_total, bill_status, created_at, notes
+  Technical Notes            : sales.py writes cash_collected, credit_amount, and owner_credit_approval_id beyond REQUIRED_TABS['Sales'].
+
+[10/12] TAB: ShopVisits
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (9 cols)   : visit_id, visit_datetime, salesman_user_id, customer_id, customer_name_snapshot, purpose, outcome, notes, created_at
+  Blueprint KS_SCHEMA        : NOT IN KS_SCHEMA_JSON (Operational Extension Table)
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (9 cols): visit_id, visit_datetime, salesman_user_id, customer_id, customer_name_snapshot, purpose, outcome, notes, created_at
+  Technical Notes            : visits.py uses shop_name_snapshot/visit_outcome/order_taken/follow_up_date/next_action whereas REQUIRED_TABS['ShopVisits'] lists customer_name_snapshot/purpose/outcome.
+
+[11/12] TAB: Suppliers
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (12 cols)   : supplier_id, supplier_name, contact_person, mobile, email, address, city, gstin, active, created_at, created_by, notes
+  Blueprint KS_SCHEMA (14 cols): supplier_id, supplier_name, contact_person, mobile, email, address, city, gstin, active, created_at, created_by, notes, updated_at, updated_by
+  Diff (In BP only)          : updated_at, updated_by
+  Diff (In REQUIRED only)    : NONE
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (12 cols): supplier_id, supplier_name, contact_person, mobile, email, address, city, gstin, active, created_at, created_by, notes
+  Technical Notes            : purchasing.py create/update supplier writes 14 logical fields including payment_terms and opening_balance whereas REQUIRED_TABS['Suppliers'] has 12 columns. Reconcile physical Row-1 headers against workbook before strict header pruning.
+
+[12/12] TAB: Workers
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Backend Write Guard        : FAIL-CLOSED unless physical headers match OR approved via SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON
+  REQUIRED_TABS (7 cols)   : worker_id, worker_name, mobile, daily_wage, active, notes, created_at
+  Blueprint KS_SCHEMA        : NOT IN KS_SCHEMA_JSON (Operational Extension Table)
+  Declared Missing/Extra     : See notes
+  Expected Reconciled Target (7 cols): worker_id, worker_name, mobile, daily_wage, active, notes, created_at
+  Technical Notes            : production.py CREATE_WORKER records created_by which is omitted from REQUIRED_TABS['Workers'].
+
+------------------------------------------------------------------------------------------------
+3. 24 PENDING_OWNER_MAPPING_TABS — EXACT REPOSITORY SPECIFICATION
+------------------------------------------------------------------------------------------------
+These 24 tabs are hard-blocked for backend writes in schema_registry.py::PENDING_OWNER_MAPPING_TABS
+until the Owner confirms physical tab existence and Row-1 headers in the live Google Workbook.
+
+[01/24] TAB: AssetsMaintenance
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(1)=RECORD_ASSET_MAINTENANCE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[02/24] TAB: ComplianceRecords
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(1)=RECORD_COMPLIANCE_ITEM
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[03/24] TAB: DBV5_FIELD_DICTIONARY_3074
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[04/24] TAB: DistributionDispatches
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[05/24] TAB: EmployeeAdvances
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(1)=DISBURSE_APPROVED_ADVANCE
+  Blueprint KS_SCHEMA (14 cols): employee_advance_id, employee_id, period_start, period_end, record_date, quantity_or_days, amount, approval_status, approved_by, payment_status, created_at, created_by, updated_at, updated_by
+
+[06/24] TAB: Employees
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Blueprint KS_SCHEMA (20 cols): employee_id, employee_code, full_name, mobile, email, designation, department, employment_type, joining_date, exit_date, employment_status, reporting_manager_id, address, emergency_contact, bank_details_reference, active, created_at, created_by, updated_at, updated_by
+
+[07/24] TAB: ExceptionRegister
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[08/24] TAB: MarketplaceSettlements
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(1)=RECORD_MARKETPLACE_SETTLEMENT
+  Blueprint KS_SCHEMA (18 cols): settlement_id, channel_id, settlement_reference, period_start, period_end, gross_sales, fees, refunds, deductions, net_settlement, bank_reference, settlement_date, reconciled_by, status, created_at, created_by, updated_at, updated_by
+
+[09/24] TAB: MaterialConsumptions
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[10/24] TAB: PackagingMaterials
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Blueprint KS_SCHEMA (13 cols): packaging_material_id, material_name, material_type, unit, specification, supplier_id, rate_per_unit, minimum_stock, active, created_at, created_by, updated_at, updated_by
+
+[11/24] TAB: PackagingOutputs
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(1)=RECORD_PACKAGING_BATCH
+  Blueprint KS_SCHEMA (13 cols): packaging_output_id, packaging_batch_id, product_id, sku, product_lot_id, pack_weight_g, packet_count, net_weight_kg, recorded_by, created_at, created_by, updated_at, updated_by
+
+[12/24] TAB: PaymentAllocations
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Blueprint KS_SCHEMA (11 cols): allocation_id, payment_id, supplier_bill_id, allocated_amount, allocation_date, allocated_by, notes, created_at, created_by, updated_at, updated_by
+
+[13/24] TAB: ProductSKUs
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[14/24] TAB: ProductionLosses
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[15/24] TAB: ProductionOutputs
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(1)=RECORD_PRODUCTION_OUTPUT
+  Blueprint KS_SCHEMA (13 cols): production_output_id, production_batch_id, product_id, output_lot_id, output_type, quantity, unit, quality_status, recorded_by, created_at, created_by, updated_at, updated_by
+
+[16/24] TAB: ProductionWorkEntries
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[17/24] TAB: QualityChecks_FGQC
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[18/24] TAB: QualityChecks_IPQC
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[19/24] TAB: RPT_SalesAndReceivables
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[20/24] TAB: RPT_StockStatus
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[21/24] TAB: RPT_TrialBalance
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=NO | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=NO
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Expected Columns           : System/Report or Consolidated Contract (confirm physical Row-1 in workbook)
+
+[22/24] TAB: SalaryPayments
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Blueprint KS_SCHEMA (15 cols): salary_payment_id, party_type, party_id, reference_type, reference_id, transaction_date, payment_method, amount, reference_number, status, recorded_by, created_at, created_by, updated_at, updated_by
+
+[23/24] TAB: SalesOrderItems
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(0)=NONE
+  Blueprint KS_SCHEMA (16 cols): sales_order_item_id, sales_order_id, product_id, sku, product_name_snapshot, pack_weight_g, quantity, unit_price, discount_amount, tax_rate, line_total, inventory_lot_id, created_at, created_by, updated_at, updated_by
+
+[24/24] TAB: SalesOrders
+  Physical Live Row-1 Status : BLOCKED (Requires Owner export)
+  Registry Presence          : Blueprint218=YES | REQUIRED_TABS=NO | EXTENDED_V2=NO | BridgeAllow=YES
+  Bound Actions              : Backend(0)=NONE | Bridge(1)=CREATE_SALES_ORDER
+  Blueprint KS_SCHEMA (21 cols): sales_order_id, order_number, order_datetime, channel_id, customer_id, customer_name_snapshot, customer_phone_snapshot, billing_address_json, shipping_address_json, subtotal, discount_amount, tax_amount, shipping_amount, grand_total, payment_status, fulfilment_status, external_order_id, created_by, created_at, updated_at, updated_by
+
+------------------------------------------------------------------------------------------------
+4. EXACT READ-ONLY OWNER EXPORT PROCEDURE (ZERO WRITES — SAFE FOR PRODUCTION WORKBOOK)
+------------------------------------------------------------------------------------------------
+To unblock Stage C and close both (a) the 1-tab 255-vs-256 delta and (b) all 36 header checks,
+the Owner should run the following strictly READ-ONLY Google Apps Script snippet from the bound
+spreadsheet's Apps Script editor (or export via read-only Google Sheets API token):
+
+  function ksExportReadOnlyWorkbookHeadersForAudit() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
+    var out = {
+      exported_at_utc: new Date().toISOString(),
+      tab_count: sheets.length,
+      tabs: []
+    };
+    for (var i = 0; i < sheets.length; i++) {
+      var sh = sheets[i];
+      var lastCol = sh.getLastColumn();
+      var headers = lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String) : [];
+      out.tabs.push({ name: sh.getName(), row_count: sh.getLastRow(), col_count: lastCol, row1_headers: headers });
+    }
+    Logger.log(JSON.stringify(out));
+  }
+
+Notes:
+  1. This function performs ZERO writes (no setValue/setValues/appendRow/insertSheet).
+  2. It exports ONLY tab names, row/column counts, and Row-1 column headers (ZERO business rows, ZERO PII).
+  3. Provide the resulting JSON output to the reconciliation script to verify all 255+ tab names
+     and generate an audited SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON proposal for Owner sign-off.
+
+================================================================================================
+END OF KS_RELEASE_03_WORKBOOK_HEADER_AUDIT.txt
+================================================================================================

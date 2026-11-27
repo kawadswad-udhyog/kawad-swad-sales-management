@@ -1133,6 +1133,207 @@ process.stdout.write(JSON.stringify({ responses, sheetsData, lockEvents, flushCo
                 with self.assertRaises(RuntimeError, msg=f"Expected fail-closed for production CORS={bad_cors}"):
                     cfg.assert_runtime_config()
 
+    def test_21_stage_d1_missing_payload_hash_rejected_and_orphan_nonce_without_audit_quarantines(self):
+        # 21a: Non-bootstrap governed write with empty or non-hex payload_hash MUST fail closed (HTTP 400)
+        wire_no_hash, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-NOHASH-001",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload_hash="",
+            payload={"customer_id": "CUST-NH-1", "shop_name": "NoHash"},
+        )
+        out_no_hash = self._run_real_sheet_bridge_scenario([wire_no_hash])
+        self.assertEqual(out_no_hash["responses"][0]["status"], "REJECTED")
+        self.assertEqual(out_no_hash["responses"][0]["error_code"], "MISSING_OR_INVALID_PAYLOAD_HASH")
+        self.assertEqual(out_no_hash["responses"][0]["http_status"], 400)
+
+        # 21b: Nonce present in IdAllocations WITHOUT matching AuditLog record MUST quarantine as RECOVERY_REQUIRED
+        orphan_sheets = {
+            "Users": [
+                ["user_id", "full_name", "username", "role", "active"],
+                ["USR-1", "Owner Test", "owner1", "OWNER_ADMIN", True],
+            ],
+            "IdAllocations": [
+                ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
+                ["ALLOC-0000001", "Customers", "CUST-ORPHAN-1", "KS-ORPHAN-NONCE-1", "2026-11-26T00:00:00Z"],
+            ],
+            "AuditLog": [[
+                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
+                "entity_id", "field_changed", "old_value", "new_value", "reason",
+                "approved_by_user_id", "related_record_id"
+            ]],
+            "Customers": [["customer_id", "shop_name", "nonce"]],
+        }
+        wire_replay_orphan, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-ORPHAN-NONCE-1",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload_hash="e" * 64,
+            payload={"customer_id": "CUST-ORPHAN-1", "shop_name": "Orphan"},
+        )
+        out_orphan = self._run_real_sheet_bridge_scenario([wire_replay_orphan], initial_sheets=orphan_sheets)
+        r_orphan = out_orphan["responses"][0]
+        self.assertEqual(r_orphan["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(r_orphan["error_code"], "NONCE_AUDIT_METADATA_MISSING")
+        self.assertEqual(r_orphan["http_status"], 409)
+        self.assertFalse(r_orphan["retryable"])
+
+    def test_22_stage_d2_missing_users_active_column_fails_closed(self):
+        no_active_sheets = {
+            "Users": [
+                ["user_id", "full_name", "username", "role"],
+                ["USR-1", "Owner Test", "owner1", "OWNER_ADMIN"],
+            ],
+            "IdAllocations": [["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"]],
+            "AuditLog": [[
+                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
+                "entity_id", "field_changed", "old_value", "new_value", "reason",
+                "approved_by_user_id", "related_record_id"
+            ]],
+            "Customers": [["customer_id", "shop_name", "nonce"]],
+        }
+        wire_cust, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-NO-ACTIVE-COL-1",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload={"customer_id": "CUST-NA-1", "shop_name": "Blocked"},
+        )
+        out = self._run_real_sheet_bridge_scenario([wire_cust], initial_sheets=no_active_sheets)
+        self.assertEqual(out["responses"][0]["status"], "REJECTED")
+        self.assertEqual(out["responses"][0]["error_code"], "ACTOR_DIRECTORY_INVALID_SCHEMA")
+        self.assertEqual(out["responses"][0]["http_status"], 503)
+
+    def test_23_stage_d3_plain_decimal_readback_normalization_parity(self):
+        script = r"""
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const ctx = vm.createContext({ Date, Math, JSON, Object, Array, String, Number, Boolean, RegExp, Error, isFinite });
+vm.runInContext(fs.readFileSync(path.join(input.appsDir, 'WebAppBridge.js'), 'utf8'), ctx);
+const fn = ctx.ksNormalizeReadbackVal_;
+process.stdout.write(JSON.stringify({
+  int_100: fn(100),
+  str_100_00: fn('100.00'),
+  str_0_50: fn('0.50'),
+  float_0_5: fn(0.5),
+  int_10: fn(10),
+  zero_padded: fn('0010'),
+  sci_sku: fn('1E2'),
+  bool_true: fn(true),
+  num_1: fn(1),
+  bool_false: fn(false),
+  num_0: fn(0),
+  empty: fn(''),
+  null_val: fn(null),
+}));
+"""
+        proc = subprocess.run(
+            ["node", "-e", script],
+            input=json.dumps({"appsDir": self.APPS_DIR}),
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            timeout=15,
+            check=True,
+        )
+        res = json.loads(proc.stdout)
+        self.assertEqual(res["int_100"], "100")
+        self.assertEqual(res["str_100_00"], "100")
+        self.assertEqual(res["str_0_50"], "0.5")
+        self.assertEqual(res["float_0_5"], "0.5")
+        self.assertEqual(res["int_10"], "10")
+        self.assertNotEqual(res["int_10"], res["int_100"])
+        self.assertEqual(res["zero_padded"], "0010")
+        self.assertEqual(res["sci_sku"], "1E2")
+        self.assertEqual(res["bool_true"], "true")
+        self.assertNotEqual(res["bool_true"], res["num_1"])
+        self.assertEqual(res["bool_false"], "false")
+        self.assertNotEqual(res["bool_false"], res["num_0"])
+        self.assertEqual(res["empty"], "")
+        self.assertEqual(res["null_val"], "")
+        self.assertNotEqual(res["empty"], res["num_0"])
+
+    def test_24_stage_d4_self_vs_cross_user_token_and_session_revocation_real_roles(self):
+        sheets = {
+            "Users": [
+                ["user_id", "full_name", "username", "role", "active"],
+                ["USR-1", "Owner Test", "owner1", "OWNER_ADMIN", True],
+                ["USR-SALES-1", "Ramesh Salesman", "ramesh.s", "FIELD_SALESMAN", True],
+            ],
+            "IdAllocations": [["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"]],
+            "AuditLog": [[
+                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
+                "entity_id", "field_changed", "old_value", "new_value", "reason",
+                "approved_by_user_id", "related_record_id"
+            ]],
+            "RevokedTokens": [["jti", "user_id", "revoked_at", "expires_at", "reason", "nonce"]],
+            "AuthUsers": [["auth_id", "user_id", "username", "password_hash", "sessions_revoked_at", "nonce"]],
+        }
+        # Self REVOKE_TOKEN by FIELD_SALESMAN -> CONFIRMED
+        w_self_tok, _, _ = _python_build_wire_envelope(
+            action="REVOKE_TOKEN",
+            target_tab="RevokedTokens",
+            nonce="KS-RVK-SELF-1",
+            actor_user_id="USR-SALES-1",
+            actor_role="FIELD_SALESMAN",
+            payload={"jti": "jti-1", "user_id": "USR-SALES-1", "reason": "Logout"},
+        )
+        # Cross-user REVOKE_TOKEN by FIELD_SALESMAN -> REJECTED (SELF_TOKEN_REVOKE_MISMATCH)
+        w_cross_tok, _, _ = _python_build_wire_envelope(
+            action="REVOKE_TOKEN",
+            target_tab="RevokedTokens",
+            nonce="KS-RVK-CROSS-1",
+            actor_user_id="USR-SALES-1",
+            actor_role="FIELD_SALESMAN",
+            payload={"jti": "jti-2", "user_id": "USR-1", "reason": "Hijack"},
+        )
+        # Self REVOKE_USER_SESSIONS by FIELD_SALESMAN -> CONFIRMED
+        w_self_sess, _, _ = _python_build_wire_envelope(
+            action="REVOKE_USER_SESSIONS",
+            target_tab="AuthUsers",
+            nonce="KS-SESS-SELF-1",
+            actor_user_id="USR-SALES-1",
+            actor_role="FIELD_SALESMAN",
+            payload={"user_id": "USR-SALES-1", "sessions_revoked_at": "2026-11-26T00:00:00Z"},
+        )
+        # Cross-user REVOKE_USER_SESSIONS by FIELD_SALESMAN -> REJECTED (INSUFFICIENT_ROLE_FOR_AUTH_USERS)
+        w_cross_sess, _, _ = _python_build_wire_envelope(
+            action="REVOKE_USER_SESSIONS",
+            target_tab="AuthUsers",
+            nonce="KS-SESS-CROSS-1",
+            actor_user_id="USR-SALES-1",
+            actor_role="FIELD_SALESMAN",
+            payload={"user_id": "USR-1", "sessions_revoked_at": "2026-11-26T00:00:00Z"},
+        )
+        # Synthetic actor_role="AUTH" rejected by authoritative Users check (ACTOR_ROLE_MISMATCH)
+        w_synth_auth, _, _ = _python_build_wire_envelope(
+            action="REVOKE_TOKEN",
+            target_tab="RevokedTokens",
+            nonce="KS-RVK-SYNTH-1",
+            actor_user_id="USR-SALES-1",
+            actor_role="AUTH",
+            payload={"jti": "jti-3", "user_id": "USR-SALES-1", "reason": "Legacy"},
+        )
+        out = self._run_real_sheet_bridge_scenario(
+            [w_self_tok, w_cross_tok, w_self_sess, w_cross_sess, w_synth_auth],
+            initial_sheets=sheets,
+        )
+        self.assertEqual(out["responses"][0]["status"], "CONFIRMED")
+        self.assertEqual(out["responses"][1]["status"], "REJECTED")
+        self.assertEqual(out["responses"][1]["error_code"], "SELF_TOKEN_REVOKE_MISMATCH")
+        self.assertEqual(out["responses"][2]["status"], "CONFIRMED")
+        self.assertEqual(out["responses"][3]["status"], "REJECTED")
+        self.assertEqual(out["responses"][3]["error_code"], "INSUFFICIENT_ROLE_FOR_AUTH_USERS")
+        self.assertEqual(out["responses"][4]["status"], "REJECTED")
+        self.assertEqual(out["responses"][4]["error_code"], "ACTOR_ROLE_MISMATCH")
+
 
 if __name__ == "__main__":
     unittest.main()

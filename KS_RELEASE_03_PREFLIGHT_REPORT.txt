@@ -1,0 +1,97 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-03
+STAGE A PREFLIGHT, PRIOR-ARTIFACT PRESERVATION & WORKSPACE INTEGRITY REPORT
+================================================================================
+Generated At (UTC)   : 2026-11-27T06:06:00Z
+Mission ID           : KS-RELEASE-03 (Final Release Verification & Deployment Readiness)
+Previous Missions    : KS-RELEASE-01, KS-RELEASE-02
+Gate Status          : SUBMITTED FOR INDEPENDENT GPT REVIEW (G2) / REQUIRES OWNER APPROVAL (G3)
+Hard Stop Compliance : STRICTLY OBSERVED (Zero deployments, zero live Render/Sheets/Apps Script mutations)
+
+--------------------------------------------------------------------------------
+1. PRIOR ARTIFACT PRESERVATION & HONEST LOSS DISCLOSURE
+--------------------------------------------------------------------------------
+Every surviving KS-RELEASE-01 and KS-RELEASE-02 deliverable in the workspace was
+verified untouched (preserved verbatim without modification or deletion).
+
+A. Preserved KS-RELEASE-01 Reports (8 of 8 text reports intact):
+  53f8030ecf72d01d8b32efeb06d60c59518e48ee35e9d350c5703581eb7601fa  KS_RELEASE_01_CHANGELOG.txt
+  552362ac01a02b2adc993383ceaf6c190aee76fe7866f771181f32fba12356c3  KS_RELEASE_01_DEPENDENCY_REPORT.txt
+  a79f79157b98d85b4783eee857bdca7fbbfff91f65551cb3acb2e1ab5f7f9690  KS_RELEASE_01_DEPLOYMENT_READINESS_REPORT.txt
+  ad7ba6744d0b02d5fb8caa02fe41974048a0a5f7ca03e59213c9f36e0389ac9b  KS_RELEASE_01_PREFLIGHT_REPORT.txt
+  ddbf98c04aacc06a96de7a9f998fa888a314593d781672296b056cbdf8e60351  KS_RELEASE_01_SECURITY_REPORT.txt
+  8de6700cec3a3a29f7a31e4e8184a9f4444cf106cd3421414fe9ea7ecb62dbb3  KS_RELEASE_01_SHA256_MANIFEST.txt
+  eeb2d0870a565d4fa0918f2a28455a7235ce3f53ea04221c7f1bc69b8894c12e  KS_RELEASE_01_SOURCE_RECONCILIATION_REPORT.txt
+  226f3cc273f3d6436b5572ff357f7af19690098d0a269abcf82c62faf969e699  KS_RELEASE_01_TEST_REPORT.txt
+
+B. Preserved KS-RELEASE-02 Reports & Git Artifacts (11 of 11 intact):
+  f28d4be0b8e38ec35ef9624ebbb74bd9cf5d40e38fa1340c7b9b1743bfd3a7ef  KS_RELEASE_02_CHANGELOG.txt
+  f6d323af731c34993bc62fb116bc19f1352c55039aa1b34f3765939de3fe926b  KS_RELEASE_02_DATABASE_ALLOWLIST_AUDIT.txt
+  8b5c76dee893de8d66093b88a2c526d2da750af40e6500620763f77d186d73d9  KS_RELEASE_02_DEPENDENCY_REPORT.txt
+  dc656c00877cc26c79c1131e28df9dcb0875f71a95d2c651e42fb037ec50d924  KS_RELEASE_02_DEPLOYMENT_READINESS_REPORT.txt
+  44c423de8af85a98ea27981f9b32d3b38c135a8681df0a50ca59704fb45d2623  KS_RELEASE_02_FROM_DA87C0D.bundle
+  3ea4f1db09fa9c2da6f2fdfec31f9e5ef54ab72b73f9c380ae49802b77bf6bc4  KS_RELEASE_02_FROM_DA87C0D.patch
+  d03efc17f6c4af4289656d8e683d5ac5daa6e8611c72684d0f02ba9b1b215462  KS_RELEASE_02_PREFLIGHT_REPORT.txt
+  8ca273e9af12cb35bd8b1eb70a17232226b1f2f3a944d2e52ab8ba5efcf79d82  KS_RELEASE_02_SECURITY_REPORT.txt
+  9f598aeee844503cacb578eba4991b204bde4ad4a0f0f8f6767500412553504f  KS_RELEASE_02_SHA256_MANIFEST.txt
+  aa8f85a04b93d5603119f8201539fdf03e59463491d8e0eb8908d65e731ca13f  KS_RELEASE_02_SOURCE_RECONCILIATION_REPORT.txt
+  edd396ca663d417ef71984e662c8c7ae62a4872c34eb1ca3a92b810926f78f31  KS_RELEASE_02_TEST_REPORT.txt
+
+C. HONEST DISCLOSURE — MISSING PRIOR ARCHIVES (*.zip):
+  - KS_RELEASE_01_RELEASE_CANDIDATE.zip : NOT PRESENT in workspace at mission start.
+  - KS_RELEASE_02_RELEASE_CANDIDATE.zip : NOT PRESENT in workspace at mission start.
+  - Root Cause: The sandbox container snapshot persistence filter omits `*.zip` files
+    across session snapshots while preserving all text reports, `.patch`, `.bundle`,
+    and source trees.
+  - Integrity Verification Performed: Before any KS-RELEASE-03 edits were made, ALL
+    420 source files indexed in `KS_RELEASE_02_SHA256_MANIFEST.txt` were verified
+    against disk with 100% SHA-256 parity (420/420 exact matches), and
+    `KS_RELEASE_02_FROM_DA87C0D.bundle` passed `git bundle verify` cleanly.
+  - Governance Compliance: We DID NOT fabricate or retroactively regenerate a fake
+    `KS_RELEASE_02_RELEASE_CANDIDATE.zip`. The absence is transparently disclosed here.
+
+--------------------------------------------------------------------------------
+2. REPOSITORY HYGIENE, ARCHITECTURE & STATIC SECURITY PREFLIGHT
+--------------------------------------------------------------------------------
+  Check                                       | Result
+  --------------------------------------------+---------------------------------------------
+  public/assets/aistudio/ present             | FALSE (clean — 0 files)
+  dist/assets/aistudio/ present               | FALSE (clean — 0 files)
+  MongoDB drivers / imports (pymongo/motor)   | 0 hits (Google Sheets is sole authoritative DB)
+  Hardcoded secret/key material scan          | 0 hits (verified across apps_script, backend, src)
+  Local .env / service-account JSON files     | 0 found (only .env.example present)
+  npm audit (production & dev dependencies)   | 0 vulnerabilities (info/low/mod/high/crit = 0)
+  Apps Script bound vs patch sync parity      | 100% BYTE-IDENTICAL across all 6 integrated files
+    apps_script/WebAppBridge.js               | 4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145 (45,799 B)
+    merged_bound_files/WebAppBridge.js        | 4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145 (45,799 B)
+    apps_script/AuditAndExceptions.js         | 04350e26bfe571d538347d6b32393f1ce2cc323177884ef6551cff55bbc76394 (10,341 B)
+    apps_script/BootstrapOwnerHandler.js      | 15e9026762a86855778928dbcb69686e72c4f6c86b657094e8d79708366084af (45,474 B)
+    apps_script/Config.js                     | 7d7fcbb3c66ac79ba3fb9529580ab9a5e5fb6f07a10579f51f98b7b4bd2a7bb9 (4,911 B)
+    apps_script/IdAllocator.js                | c2066daea436b7f6704d2e2562eac927abff4131d2dafe2f834bdc8a0786b845 (5,044 B)
+    apps_script/WebAppBridge_BootstrapIntegration.js | 9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f (17,760 B)
+
+--------------------------------------------------------------------------------
+3. GIT BASELINE DISCOVERY (STAGE G PREVIEW)
+--------------------------------------------------------------------------------
+  - Remote repository: https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git
+  - Verified remote HEAD (`origin/main`): 2fc7a23e822680c6fae8fd0d709b26206388258f
+    ("feat: implement deterministic CORS origin resolution")
+  - History chain: f7ccebf -> da87c0d -> 2fc7a23 (origin/main already incorporates ALL
+    KS-RELEASE-02 source-code changes; zero source diff vs rc2-verify).
+  - KS-RELEASE-03 local release branch `release/ks-release-03` is anchored cleanly on
+    `2fc7a23e822680c6fae8fd0d709b26206388258f` at commit `13d7cb05818cdc56ef1f3759380288cd516119d5`.
+  - Remote push: BLOCKED (no GitHub push credentials in sandbox; Section 12 prohibits
+    unauthorized remote modifications). Verified `.patch` and `.bundle` exported.
+
+--------------------------------------------------------------------------------
+4. PREFLIGHT BLOCKERS CARRIED HONESTLY INTO INDEPENDENT GPT G2 REVIEW
+--------------------------------------------------------------------------------
+  1. Stage C Live Physical Workbook Verification: BLOCKED (no live Google Sheets access).
+  2. Production Render Backend URL: OWNER INPUT REQUIRED (only dev URL verified in repo).
+  3. Remote Git Push: BLOCKED (non-interactive sandbox + Owner authorization required).
+  4. Prior KS_RELEASE_02_RELEASE_CANDIDATE.zip: Absent across snapshot (disclosed above).
+  5. Backend unittest `uvicorn` subprocess test: 1 honest skip in test environment.
+
+================================================================================
+END OF KS_RELEASE_03_PREFLIGHT_REPORT.txt
+================================================================================

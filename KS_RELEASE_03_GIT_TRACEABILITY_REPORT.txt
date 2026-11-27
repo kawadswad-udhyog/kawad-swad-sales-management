@@ -1,0 +1,96 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-03
+STAGE G GIT TRACEABILITY, ANCESTRY & OWNER TRANSFER REPORT
+================================================================================
+Generated At (UTC)   : 2026-11-27T06:06:00Z
+Mission ID           : KS-RELEASE-03
+Repository           : https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git
+Remote Push Status   : BLOCKED (No GitHub write credentials in sandbox; Section 12
+                       Hard Stop prohibits pushing to GitHub without Owner G3 approval)
+
+--------------------------------------------------------------------------------
+1. VERIFIED GIT COMMIT ANCESTRY CHAIN
+--------------------------------------------------------------------------------
+  [1] f7ccebffdacb96081f498b304dc009326bbcee44  (Prior Baseline — docs: update project screenshots)
+       |
+       v
+  [2] da87c0db91219e4674c2360043d4f3095083f32e  (KS-RELEASE-02 Parent — chore: update application screenshots)
+       |
+       +---> [KS-RELEASE-02 Bundle Branch] 452d6dc400ab56b8ed56551e68d3a7c15af06fdb
+       |     (Preserved in KS_RELEASE_02_FROM_DA87C0D.bundle — verified `git bundle verify` OK)
+       |
+       v
+  [3] 2fc7a23e822680c6fae8fd0d709b26206388258f  (CURRENT GitHub origin/main HEAD)
+       ("feat: implement deterministic CORS origin resolution")
+       NOTE: Verified via `git diff --stat origin/main rc2-verify` that `2fc7a23`
+       ALREADY incorporates 100% of KS-RELEASE-02 source-code changes (0 source
+       file diffs; only the 11 KS_RELEASE_02_* report/patch/bundle files differed).
+       |
+       v
+  [4] 13d7cb05818cdc56ef1f3759380288cd516119d5  (KS-RELEASE-03 Local Branch: `release/ks-release-03`)
+       ("security(bridge,auth): harden KS-RELEASE-03 bridge replay, actor schema, readback parity, and revocation roles")
+       Diff vs origin/main (2fc7a23): 8 files changed, 512 insertions(+), 103 deletions(-)
+
+--------------------------------------------------------------------------------
+2. EXACT 8 FILES IN KS-RELEASE-03 COMMIT (`13d7cb05818cdc56ef1f3759380288cd516119d5`)
+--------------------------------------------------------------------------------
+  SHA-256                                                          | File Path
+  -----------------------------------------------------------------+--------------------------------------------------------------------------
+  4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145 | apps_script/WebAppBridge.js
+  c232cce0a5704610cf44dde934f04cfd14c2d8a2ac1670fa6de9df127a1c4c4f | apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+  4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145 | apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+  86ac2411a2afedd36abb5aaf00748c758163fb4e9769885053b6b57bfee065a4 | apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+  e011db2f107cff7a9be0cf4713622507274930d57a436d9b23e4074110f4950f | backend/app/auth.py
+  e01bde9754a7c14b1004665ba838b6008d0c4642ce80cb8b912a2416135678a0 | backend/app/routers/auth.py
+  724b6f3dbbcb9be3b2e171ae0865234843fa6acfcf96bfb05e8e25643b080e1b | backend/tests/test_cross_language_hmac.py
+  f045b7c5f4caf116de4bab5dc0ab2932a645b58e978c4f12d0096a9000259c8e | backend/tests/test_first_owner_bootstrap.py
+
+  Note on Screenshot PNGs in Workspace:
+  Running the Stage H Playwright browser audit regenerated 8 PNG screenshots under
+  `public/screenshots/` (`01_desktop_navigation.png`, `02_pa_workspace_1440x900.png`,
+  `02_wizard_step1.png`, `03_wizard_step2.png`, `04_salesman_mobile_390x844.png`,
+  `04_wizard_step4_salary.png`, `05_wizard_step6_review.png`, `06_mobile_viewport.png`).
+  Those binary screenshots were intentionally EXCLUDED from commit `13d7cb05` so the
+  Git transfer patch/bundle contains strictly the 8 audited code/test/manifest files.
+
+--------------------------------------------------------------------------------
+3. VERIFIED KS-RELEASE-03 TRANSFER ARTIFACTS (ANCHORED ON `origin/main` = `2fc7a23`)
+--------------------------------------------------------------------------------
+  Artifact                         | Bytes  | SHA-256
+  ---------------------------------+--------+------------------------------------------------------------------
+  KS_RELEASE_03_FROM_2FC7A23.patch | 39,235 | b8a0977630def153e50333816c89b22697cfb34f4432409368f261bc693878d4
+  KS_RELEASE_03_FROM_2FC7A23.bundle|  5,416 | 573783b62222507590d4af15ef86b0d9b52796800034070668ff7c34aedaa8cc
+
+  Independent Clean-Clone Verification Results:
+  - `git apply --check KS_RELEASE_03_FROM_2FC7A23.patch` on clean `2fc7a23` : PASS
+  - `git bundle verify KS_RELEASE_03_FROM_2FC7A23.bundle` on clean `2fc7a23`: PASS
+    (`The bundle contains this ref: 13d7cb05818cdc56ef1f3759380288cd516119d5 refs/heads/release/ks-release-03`)
+    (`The bundle requires this ref: 2fc7a23e822680c6fae8fd0d709b26206388258f`)
+  - Fetched commit SHA match check: `13d7cb05818cdc56ef1f3759380288cd516119d5` == HEAD (EXACT MATCH)
+  - Note: Preserved `KS_RELEASE_02_FROM_DA87C0D.patch` and `.bundle` remain intact
+    and untouched in workspace root for historical audit continuity.
+
+--------------------------------------------------------------------------------
+4. SAFE NON-FORCE-PUSH OWNER TRANSFER PROCEDURE (AFTER GPT G2 + OWNER G3 APPROVAL)
+--------------------------------------------------------------------------------
+  Option A — Recommended (Git Bundle preserves exact commit SHA `13d7cb05...`):
+    1. git fetch origin main
+    2. git checkout main && git pull --ff-only origin main
+       # Verify HEAD == 2fc7a23e822680c6fae8fd0d709b26206388258f
+    3. git bundle verify KS_RELEASE_03_FROM_2FC7A23.bundle
+    4. git fetch KS_RELEASE_03_FROM_2FC7A23.bundle release/ks-release-03:release/ks-release-03
+    5. git checkout release/ks-release-03
+    6. git log -n 2 --stat
+    7. git push -u origin release/ks-release-03
+       # Open Pull Request `release/ks-release-03 -> main` (NO force-push required).
+
+  Option B — Alternative (Unified Diff Patch):
+    1. git checkout -b release/ks-release-03 2fc7a23e822680c6fae8fd0d709b26206388258f
+    2. git apply --check KS_RELEASE_03_FROM_2FC7A23.patch
+    3. git apply KS_RELEASE_03_FROM_2FC7A23.patch
+    4. git commit -am "security(bridge,auth): harden KS-RELEASE-03 bridge replay, actor schema, readback parity, and revocation roles"
+    5. git push -u origin release/ks-release-03
+
+================================================================================
+END OF KS_RELEASE_03_GIT_TRACEABILITY_REPORT.txt
+================================================================================

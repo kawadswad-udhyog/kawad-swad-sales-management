@@ -452,13 +452,13 @@ function ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, p
   }
 
   if (targetTab === 'AuthUsers') {
-    if (action === 'CHANGE_PASSWORD') {
+    if (action === 'CHANGE_PASSWORD' || action === 'REVOKE_USER_SESSIONS') {
       if (canonicalRole !== 'OWNER_ADMIN' && (!targetUserId || targetUserId !== actorUserId)) {
         return {
           ok: false,
           error_code: 'INSUFFICIENT_ROLE_FOR_AUTH_USERS',
           http_status: 403,
-          message: 'Non-owner actor "' + actorUserId + '" may only change their own password.'
+          message: 'Non-owner actor "' + actorUserId + '" may only execute "' + action + '" for their own AuthUsers record.'
         };
       }
     } else if (canonicalRole !== 'OWNER_ADMIN') {
@@ -467,6 +467,17 @@ function ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, p
         error_code: 'INSUFFICIENT_ROLE_FOR_AUTH_USERS',
         http_status: 403,
         message: 'Role "' + canonicalRole + '" is not authorized for "' + action + '" on AuthUsers.'
+      };
+    }
+  }
+
+  if (targetTab === 'RevokedTokens' && action === 'REVOKE_TOKEN') {
+    if (canonicalRole !== 'OWNER_ADMIN' && (!targetUserId || targetUserId !== actorUserId)) {
+      return {
+        ok: false,
+        error_code: 'SELF_TOKEN_REVOKE_MISMATCH',
+        http_status: 403,
+        message: 'Non-owner actor "' + actorUserId + '" may only revoke their own session token.'
       };
     }
   }
@@ -529,12 +540,12 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
     ? headers.indexOf('active')
     : (headers.indexOf('is_active') !== -1 ? headers.indexOf('is_active') : headers.indexOf('status'));
 
-  if (uidIdx === -1 || roleIdx === -1) {
+  if (uidIdx === -1 || roleIdx === -1 || activeIdx === -1) {
     return {
       ok: false,
       error_code: 'ACTOR_DIRECTORY_INVALID_SCHEMA',
       http_status: 503,
-      message: 'Users directory must contain user_id and role headers.'
+      message: 'Users directory must contain user_id, role, and active headers.'
     };
   }
 
@@ -542,7 +553,7 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
   for (let i = 1; i < data.length; i++) {
     const rowUid = String(data[i][uidIdx] || '').trim();
     if (rowUid === actorUserId) {
-      const rawActive = activeIdx !== -1 ? String(data[i][activeIdx]).trim().toUpperCase() : 'TRUE';
+      const rawActive = String(data[i][activeIdx] === null || data[i][activeIdx] === undefined ? '' : data[i][activeIdx]).trim().toUpperCase();
       const isActive = (rawActive === 'TRUE' || rawActive === 'YES' || rawActive === 'ACTIVE' || rawActive === '1');
       if (!isActive) {
         return {
@@ -593,13 +604,48 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
   };
 }
 
+const KS_PLAIN_DECIMAL_RE = /^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)$/;
+
+function ksFormatPlainDecimal_(rawStr) {
+  let s = String(rawStr || '').trim();
+  let sign = '';
+  if (s.charAt(0) === '+' || s.charAt(0) === '-') {
+    sign = s.charAt(0) === '-' ? '-' : '';
+    s = s.slice(1);
+  }
+  if (s.charAt(0) === '.') {
+    s = '0' + s;
+  }
+  if (s.indexOf('.') !== -1) {
+    s = s.replace(/0+$/, '').replace(/\.$/, '');
+  }
+  if (!s || /^0+$/.test(s)) {
+    return '0';
+  }
+  return sign + s;
+}
+
 function ksNormalizeReadbackVal_(val) {
-  if (val === undefined || val === null) return '';
   if (typeof val === 'boolean') return val ? 'true' : 'false';
+  if (val === undefined || val === null) return '';
   if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'number') {
+    if (isFinite(val)) {
+      const numStr = String(val);
+      if (KS_PLAIN_DECIMAL_RE.test(numStr)) {
+        return ksFormatPlainDecimal_(numStr);
+      }
+      return numStr;
+    }
+    return String(val).trim();
+  }
   const s = String(val).trim();
+  if (!s) return '';
   const lower = s.toLowerCase();
   if (lower === 'true' || lower === 'false') return lower;
+  if (KS_PLAIN_DECIMAL_RE.test(s)) {
+    return ksFormatPlainDecimal_(s);
+  }
   return s;
 }
 
@@ -708,6 +754,20 @@ function doPost(e) {
       return ksBridgeJson_(ksDispatchBootstrapFirstOwner_(req));
     }
 
+    if (!payloadHash || !/^[0-9a-f]{16,128}$/.test(payloadHash)) {
+      return ksBridgeJson_({
+        status: 'REJECTED',
+        correlation_id: correlationId,
+        nonce: nonce,
+        action: action,
+        target_tab: targetTab,
+        error_code: 'MISSING_OR_INVALID_PAYLOAD_HASH',
+        message: 'A valid hex payload_hash is mandatory for all governed bridge writes.',
+        http_status: 400,
+        retryable: false
+      });
+    }
+
     // 1C. Fail-closed target-table allowlist, action->tab binding, governance/control/scratch & role guard (W3)
     const tabCheck = ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, payload);
     if (!tabCheck.ok) {
@@ -775,46 +835,58 @@ function doPost(e) {
         });
       }
       const auditMeta = ksFindAuditReplayMetadata_(nonce, existing.allocated_id);
-      if (auditMeta) {
-        if (auditMeta.action && auditMeta.action !== action) {
-          return ksBridgeJson_({
-            status: 'REJECTED',
-            correlation_id: correlationId,
-            nonce: nonce,
-            action: action,
-            target_tab: targetTab,
-            error_code: 'NONCE_ACTION_CONFLICT',
-            message: 'Nonce "' + nonce + '" is already bound to action "' + auditMeta.action + '", cannot replay as "' + action + '".',
-            http_status: 409,
-            retryable: false
-          });
-        }
-        if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
-          return ksBridgeJson_({
-            status: 'REJECTED',
-            correlation_id: correlationId,
-            nonce: nonce,
-            action: action,
-            target_tab: targetTab,
-            error_code: 'NONCE_ACTOR_CONFLICT',
-            message: 'Nonce "' + nonce + '" is already bound to a different actor; cross-actor replay rejected.',
-            http_status: 409,
-            retryable: false
-          });
-        }
-        if (auditMeta.payload_hash && payloadHash && auditMeta.payload_hash !== payloadHash) {
-          return ksBridgeJson_({
-            status: 'REJECTED',
-            correlation_id: correlationId,
-            nonce: nonce,
-            action: action,
-            target_tab: targetTab,
-            error_code: 'NONCE_PAYLOAD_HASH_CONFLICT',
-            message: 'Nonce "' + nonce + '" was previously executed with a different payload_hash; mutated replay rejected.',
-            http_status: 409,
-            retryable: false
-          });
-        }
+      if (!auditMeta) {
+        return ksBridgeJson_({
+          status: 'RECOVERY_REQUIRED',
+          correlation_id: correlationId,
+          nonce: nonce,
+          action: action,
+          target_tab: targetTab,
+          allocated_id: existing.allocated_id,
+          error_code: 'NONCE_AUDIT_METADATA_MISSING',
+          message: 'Nonce "' + nonce + '" exists in IdAllocations without a matching confirmed AuditLog record; quarantined for Owner reconciliation.',
+          http_status: 409,
+          retryable: false
+        });
+      }
+      if (auditMeta.action && auditMeta.action !== action) {
+        return ksBridgeJson_({
+          status: 'REJECTED',
+          correlation_id: correlationId,
+          nonce: nonce,
+          action: action,
+          target_tab: targetTab,
+          error_code: 'NONCE_ACTION_CONFLICT',
+          message: 'Nonce "' + nonce + '" is already bound to action "' + auditMeta.action + '", cannot replay as "' + action + '".',
+          http_status: 409,
+          retryable: false
+        });
+      }
+      if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
+        return ksBridgeJson_({
+          status: 'REJECTED',
+          correlation_id: correlationId,
+          nonce: nonce,
+          action: action,
+          target_tab: targetTab,
+          error_code: 'NONCE_ACTOR_CONFLICT',
+          message: 'Nonce "' + nonce + '" is already bound to a different actor; cross-actor replay rejected.',
+          http_status: 409,
+          retryable: false
+        });
+      }
+      if (auditMeta.payload_hash && (!payloadHash || auditMeta.payload_hash !== payloadHash)) {
+        return ksBridgeJson_({
+          status: 'REJECTED',
+          correlation_id: correlationId,
+          nonce: nonce,
+          action: action,
+          target_tab: targetTab,
+          error_code: 'NONCE_PAYLOAD_HASH_CONFLICT',
+          message: 'Nonce "' + nonce + '" was previously executed with a different payload_hash; mutated or hashless replay rejected.',
+          http_status: 409,
+          retryable: false
+        });
       }
       return ksBridgeJson_({
         status: 'CONFIRMED',

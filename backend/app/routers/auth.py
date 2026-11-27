@@ -201,7 +201,12 @@ async def logout(
     user_id = str(current_user.get("user_id") or "")
     persisted = True
     if credentials and credentials.credentials:
-        persisted = revoke_token(credentials.credentials, user_id, reason="User logged out")
+        persisted = revoke_token(
+            credentials.credentials,
+            user_id,
+            reason="User logged out",
+            actor_role=str(current_user.get("role") or ""),
+        )
     db.log_audit(user_id, "LOGOUT", "AuthUsers", user_id, reason="User logged out and session revoked")
     if not persisted:
         return {

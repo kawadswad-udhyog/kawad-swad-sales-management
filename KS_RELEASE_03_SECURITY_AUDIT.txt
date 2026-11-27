@@ -1,0 +1,164 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-03
+STAGE D DEEP SECURITY AUDIT & STAGE E FRONTEND INTEGRITY VERIFICATION REPORT
+================================================================================
+Generated At (UTC)   : 2026-11-27T06:06:00Z
+Mission ID           : KS-RELEASE-03
+Audit Scope          : Full source-level security audit of Apps Script bridge,
+                       First-Owner bootstrap, FastAPI auth/RBAC/bridge client,
+                       and Stage E frontend defensive-fix verification.
+Gate Status          : SUBMITTED FOR INDEPENDENT GPT REVIEW (G2)
+
+--------------------------------------------------------------------------------
+1. STAGE D DEEP AUDIT — 4 NEW DEFECTS DISCOVERED & REMEDIATED IN KS-RELEASE-03
+--------------------------------------------------------------------------------
+During line-by-line audit of `apps_script/WebAppBridge.js`, `backend/app/auth.py`,
+and `backend/app/routers/auth.py`, four genuine security/functional defects were
+identified, surgically fixed in source, synchronized to `merged_bound_files/`,
+and locked down with four new cross-language regression tests (`test_21`–`test_24`
+in `backend/tests/test_cross_language_hmac.py`):
+
+[D-1] HIGH — Fail-Closed Replay Verification & Mandatory `payload_hash`
+  - Location     : `apps_script/WebAppBridge.js` (lines 760–895)
+  - Vulnerability:
+      (a) Governed bridge writes previously accepted empty/missing `payload_hash`.
+      (b) If a replay nonce existed in `IdAllocations` without a corresponding
+          `AuditLog` record (e.g., partial crash or orphan allocation), replay
+          handling did not fail closed to quarantine (`RECOVERY_REQUIRED`).
+      (c) Replay matching did not reject missing/corrupted audit `payload_hash`
+          metadata when comparing replay payload digests.
+  - Remediation  :
+      (a) Require valid hex `payload_hash` on all non-bootstrap governed bridge
+          writes; reject missing/malformed values with HTTP 400
+          `MISSING_OR_INVALID_PAYLOAD_HASH` (line 764).
+      (b) Quarantine orphan `IdAllocations` nonces lacking matching `AuditLog`
+          metadata with HTTP 409 `NONCE_AUDIT_METADATA_MISSING`, status
+          `RECOVERY_REQUIRED`, `retryable: false` (line 846).
+      (c) Enforce strict `payload_hash` match on idempotent replay; reject
+          missing or differing hashes with HTTP 409 `NONCE_PAYLOAD_HASH_CONFLICT`
+          (line 885).
+  - Proof        : `test_21_missing_payload_hash_and_orphan_nonce_fail_closed` (PASS).
+
+[D-2] HIGH — Fail-Closed `Users.active` Schema Check in Actor Verification
+  - Location     : `apps_script/WebAppBridge.js :: ksVerifyBridgeActor_()` (lines 504–555)
+  - Vulnerability:
+      When resolving the actor's row in the authoritative `Users` sheet, if the
+      `active` column header was missing (`activeIdx === -1`), the code defaulted
+      the user to active (`'TRUE'`), failing open on schema corruption.
+  - Remediation  :
+      Require `activeIdx !== -1` in `Users` headers. If missing, fail closed
+      immediately with HTTP 503 `ACTOR_DIRECTORY_INVALID_SCHEMA` (lines 528, 546).
+  - Proof        : `test_22_actor_directory_missing_active_column_fails_closed` (PASS).
+
+[D-3] MEDIUM — Cross-Language Plain-Decimal Read-Back Normalization Parity
+  - Location     : `apps_script/WebAppBridge.js :: ksNormalizeReadbackVal_()` (lines 628, 1116–1117)
+  - Defect       :
+      Google Sheets frequently formats numeric cells written as `'100.00'` or
+      `100.0` back as `100` (or `'0.50'` as `0.5`). Without strict plain-decimal
+      canonicalization matching Python `apps_script_bridge.py::_normalize_scalar`,
+      post-write read-back verification could trigger false-positive quarantines
+      while needing to preserve zero-padded codes (`'0010'`) and scientific
+      strings (`'1E2'`).
+  - Remediation  :
+      Canonicalized plain decimals in `ksNormalizeReadbackVal_()` so `100`,
+      `'100.00'`, and `100.0` normalize identically (`'100'`), `'0.50'` == `0.5`,
+      while strictly preserving `'0010'`, `'1E2'`, rejecting `'10'` == `'100'`,
+      `true` == `1`, and `''` == `0`.
+  - Proof        : `test_23_plain_decimal_readback_parity_without_false_quarantine` (PASS).
+
+[D-4] HIGH — Governed Logout & Token/Session Revocation Role Authorization Bug
+  - Location     : `backend/app/auth.py` (lines 125–270), `backend/app/routers/auth.py`
+                   (lines 208, 273), `apps_script/WebAppBridge.js` (lines 455–485)
+  - Defect       :
+      (a) `backend/app/auth.py` previously sent synthetic `actor_role="AUTH"` on
+          governed `REVOKE_TOKEN` and `REVOKE_USER_SESSIONS` bridge writes,
+          causing Apps Script `ksVerifyBridgeActor_()` to reject EVERY legitimate
+          logout with `403 ACTOR_ROLE_MISMATCH`.
+      (b) `WebAppBridge.js` needed strict self-vs-admin scoping on `RevokedTokens`
+          and `AuthUsers::REVOKE_USER_SESSIONS` so non-owner actors can revoke
+          ONLY their own token/sessions while cross-user revocation remains
+          strictly restricted to `OWNER_ADMIN` (and `AUDITOR` remains blocked
+          from all writes).
+  - Remediation  :
+      (a) Added `_resolve_revocation_actor_role()` in `backend/app/auth.py`
+          (line 125) and passed real `actor_role=str(current_user.get("role") or "")`
+          from `backend/app/routers/auth.py:208` so revocation calls transmit the
+          user's real authoritative role.
+      (b) Hardened `apps_script/WebAppBridge.js` (lines 459, 467, 478) to allow
+          a verified non-owner actor to execute `REVOKE_USER_SESSIONS` (on
+          `AuthUsers`) and `REVOKE_TOKEN` (on `RevokedTokens`) strictly when the
+          target `user_id` matches the authenticated `actor_user_id`; cross-user
+          attempts by non-owners fail closed with HTTP 403
+          (`SELF_TOKEN_REVOKE_MISMATCH` / `INSUFFICIENT_ROLE_FOR_AUTH_USERS`).
+  - Proof        : `test_24_self_vs_cross_user_token_and_session_revocation` (PASS).
+
+--------------------------------------------------------------------------------
+2. COMPREHENSIVE CONTROL VERIFICATION MATRIX (SECTIONS A–F)
+--------------------------------------------------------------------------------
+  [A] Cryptographic Transport & Canonical HMAC-SHA256 Signing
+      - Python (`backend/app/apps_script_bridge.py`) and Apps Script
+        (`apps_script/WebAppBridge_BootstrapIntegration.js`) sign identical
+        canonical UTF-8 JSON (`sort_keys=True`, compact separators `(",", ":")`,
+        `ensure_ascii=True`).
+      - Constant-time HMAC digest verification enforced; `contract_version`,
+        `signature_alg` (`HMAC-SHA256`), timestamp, and bounded clock-skew
+        window validated BEFORE route dispatch.
+      - HTTP 302 redirect handling in Python strictly allowlists
+        `https://script.googleusercontent.com/macros/echo`, converts redirected
+        request to GET, and strips POST body, bootstrap token, HMAC headers, and
+        Authorization headers.
+
+  [B] ScriptLock Ownership & Concurrency Safety
+      - Single uninterrupted `LockService.getScriptLock()` acquisition and one
+        normal release path across the full bootstrap and bridge write lifecycle.
+      - `ksAllocateIdLocked_()` (`IdAllocator.js`), `ksLogAuditStrictLocked_()`
+        and `ksLogExceptionLocked_()` (`AuditAndExceptions.js`) NEVER acquire or
+        release a caller-owned ScriptLock.
+      - Legacy callers of `ksAllocateId()` and `ksLogAudit_()` preserve their
+        original standalone lock behavior.
+
+  [C] Post-Mutation Failure Quarantine & Anti-False-Confirmed Invariant
+      - Bootstrap `IN_PROGRESS` marker written before business mutations; any
+        unexpected post-mutation exception returns `RECOVERY_REQUIRED` (never
+        `REJECTED`, `FAILED`, or false `CONFIRMED`).
+      - Read-back verification of `Users`, `AuthUsers`, and `AuditLog` (for
+        bootstrap) and target row + `AuditLog` (for general bridge writes) MUST
+        succeed before `CONFIRMED` is returned.
+      - Partial writes and audit evidence are preserved without auto-deletion or
+        duplicate Owner creation.
+
+  [D] Database Table Allowlist & Privilege Escalation Boundaries
+      - Governance-only deny list (3 tabs: `AuditLog`, `ExceptionRegister`,
+        `IdAllocations`) -> HTTP 403 `GOVERNANCE_TAB_WRITE_FORBIDDEN`.
+      - Protected control-table deny list (4 tabs: `BackupRegister`,
+        `DBV5_FIELD_DICTIONARY_3074`, `START_HERE`, `SystemConfig`) -> HTTP 403
+        `CONTROL_TABLE_WRITE_FORBIDDEN`.
+      - Scratch-tab regex deny (`KS_BRIDGE_FORBIDDEN_SCRATCH_RE`) -> HTTP 403.
+      - `AuthUsers` restricted strictly to `CHANGE_PASSWORD`, `RESET_PASSWORD`,
+        `REVOKE_USER_SESSIONS` (plus dedicated bootstrap route).
+      - `SECURITY_NO_CACHE_TABS` (`AuthUsers`, `RevokedTokens`, `Users`, etc.)
+        never cached in memory; `password_hash` never exposed to API responses.
+
+  [E] Authentication, Session Revocation & RBAC Enforcement
+      - PBKDF2-HMAC-SHA256 password hashing with random salt + constant-time verify.
+      - Signed JWT access tokens with `jti` checked against `RevokedTokens` and
+        user-level revocation timestamps (`AuthUsers`).
+      - `AUDITOR` role strictly read-only across both FastAPI (`permissions.py`)
+        and Apps Script (`WebAppBridge.js`).
+      - Deterministic CORS resolution (`resolve_cors_origins`) strips localhost
+        and wildcard origins whenever `SALES_ENV=production`.
+
+  [F] Stage E — Frontend Defensive Fix & Playwright Audit Verification
+      - Inspected `src/views/StockView.tsx` (lines 182–197),
+        `src/views/ReportsView.tsx` (lines 240–245), and
+        `scripts/run_frontend_acceptance_audit.cjs`.
+      - Confirmed real defensive null/array-shape guards preventing uncaught
+        runtime `TypeError`s on empty/partial backend responses.
+      - Confirmed ZERO weakened, skipped, or suppressed assertions in Playwright
+        acceptance, login, and workforce usability suites.
+      - All 3 Playwright suites passed against live `http://localhost:3000` with
+        `consoleErrors: []`.
+
+================================================================================
+END OF KS_RELEASE_03_SECURITY_AUDIT.txt
+================================================================================

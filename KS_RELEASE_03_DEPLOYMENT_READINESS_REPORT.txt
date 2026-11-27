@@ -1,0 +1,96 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-03
+STAGE F DEPLOYMENT READINESS, CONFIGURATION MATRIX & ROLLBACK PLAN
+================================================================================
+Generated At (UTC)   : 2026-11-27T06:06:00Z
+Mission ID           : KS-RELEASE-03
+Deployment Authorized: NO (STRICT SECTION 12 HARD STOP IN EFFECT)
+Gate Status          : G1 Evidence Prepared -> Awaiting Independent GPT Review (G2)
+                       and Explicit Owner Production Authorization (G3)
+
+--------------------------------------------------------------------------------
+1. STAGE F — 7-ROW ENVIRONMENT & RENDER CONFIGURATION MATRIX
+--------------------------------------------------------------------------------
+Every hostname below was verified directly in `render.yaml`, `public/_redirects`,
+`src/services/api.ts`, and `backend/app/main.py`. Unverified production hostnames
+are NEVER invented and are explicitly flagged `OWNER INPUT REQUIRED`.
+
+  # | Configuration Surface             | Dev / Staging (Verified in Repo)                    | Production Target Status
+  --+-----------------------------------+-----------------------------------------------------+--------------------------------------------------
+  1 | Render Backend Service Hostname   | `https://kawad-swad-sales-dev.onrender.com`         | **OWNER INPUT REQUIRED** (Not defined in repo;
+    |                                   | (`render.yaml:24`, `main.py:240,246,291,301`)       | DO NOT reuse dev URL for live production DB)
+  2 | Stale / Blocked Backend Hostname  | `kawad-swad-sales-backend.onrender.com`             | **HARD-BLOCKED** in `src/services/api.ts:123`
+    |                                   |                                                     | (Must NEVER be re-enabled)
+  3 | Render Frontend Static Site       | `https://kawad-swad-sales-frontend.onrender.com`    | **OWNER INPUT REQUIRED** (Confirm dedicated prod
+    |                                   | (`render.yaml:3,44`, `src/services/api.ts:132`)     | frontend domain or confirm promotion of origin)
+  4 | Frontend Proxy / Rewrites         | `render.yaml:9-15` & `public/_redirects:2-4`        | Must point to confirmed Production Backend URL
+    | (`/api/*`, `/health`, `/auth/*`)  | currently rewrite to `kawad-swad-sales-dev`         | BEFORE production frontend deploy (G3)
+  5 | Backend CORS (`SALES_CORS_ORIGINS`)| `https://kawad-swad-sales-frontend.onrender.com`   | Set `SALES_ENV=production` + exact prod origin(s);
+    |                                   | (`resolve_cors_origins` strips localhost/wildcards) | localhost & `*` are automatically rejected
+  6 | Google Sheets & Apps Script Bridge| Separate dev workbook + dev Apps Script deployment  | **OWNER INPUT REQUIRED** (Dedicated Prod Sheet ID,
+    | (`SALES_SHEET_ID`, Bridge URL/Key)| (Zero live creds stored in repo/sandbox)            | Prod Apps Script `/exec` URL, 32+ byte HMAC key)
+  7 | First-Owner Bootstrap Window      | Disabled by default (`SALES_OWNER_BOOTSTRAP_ENABLED`| Keep `false` normally; enable ONLY during bounded
+    | (`SALES_OWNER_BOOTSTRAP_*`)       | unset/`false`); requires short expiry + secret      | Owner-authorized G3 bootstrap window, then disable
+
+  DEV vs PROD ISOLATION CHECK:
+  - Current `render.yaml` and `public/_redirects` are wired strictly to the dev
+    backend (`kawad-swad-sales-dev.onrender.com`). Deploying them unmodified as
+    production would route live frontend traffic to the dev backend.
+  - Therefore Production Backend URL, Production Frontend Origin, Production Sheet ID,
+    and Production Apps Script Bridge URL are mandatory Owner G3 inputs before cutover.
+
+--------------------------------------------------------------------------------
+2. MANDATORY PRE-PRODUCTION GATE CHECKLIST (G1 -> G2 -> G3)
+--------------------------------------------------------------------------------
+  [G1] Implementation & Evidence Package (THIS SUBMISSION — NOT SELF-APPROVED)
+       - All 4 Stage D security defects (D-1..D-4) fixed & synchronized across
+         `apps_script/` and `merged_bound_files/`.
+       - All automated Apps Script VM (7/7), Cross-Language HMAC (24/24),
+         Backend (732/733, 1 honest uvicorn skip), Frontend build/lint/Bun (85/85),
+         and Playwright browser (3/3 suites, 0 console errors) checks PASS.
+       - Git patch/bundle cleanly verified atop `origin/main` (`2fc7a23`).
+       - Honest disclosure of all BLOCKED items (Stage C live headers, remote push,
+         lost prior RC2 `.zip`, Production Render Backend URL).
+
+  [G2] Independent GPT Technical & Security Acceptance (REQUIRED NEXT STEP)
+       - Independent audit of `KS_RELEASE_03_RELEASE_CANDIDATE.zip`, SHA-256
+         manifest, `KS_RELEASE_03_FROM_2FC7A23.patch/.bundle`, and all 9 reports.
+       - Verification of D-1..D-4 fixes and Stage B/C/F/G disclosures.
+
+  [G3] Explicit Owner Authorization & Controlled Execution Steps (BLOCKED UNTIL APPROVED)
+       1. Owner runs read-only `ksExportReadOnlyWorkbookHeadersForAudit()` on live
+          Google Workbook to close Stage C (36 write-blocked tabs + 1-tab 255-vs-256 delta).
+       2. Owner provides Production Render Backend URL, Production Frontend Origin,
+          Production Sheet ID, and Production Apps Script Web App URL.
+       3. Owner applies `KS_RELEASE_03_FROM_2FC7A23.bundle` to GitHub via PR (no force push).
+       4. Owner deploys bound Apps Script files (preserving Script Properties & triggers),
+          verifies SHA-256 manifest, and deploys Backend + Frontend with `SALES_ENV=production`.
+       5. Owner runs bounded one-time First-Owner bootstrap window, verifies login
+          + self-logout (`REVOKE_TOKEN` / `REVOKE_USER_SESSIONS`), and disables bootstrap flag.
+
+--------------------------------------------------------------------------------
+3. CONTROLLED ROLLBACK PLAN
+--------------------------------------------------------------------------------
+  - Git / Backend / Frontend Rollback:
+    * Revert GitHub PR (restores `origin/main` to `2fc7a23e822680c6fae8fd0d709b26206388258f`)
+      and trigger Render rollback to prior known-good deployment image.
+  - Apps Script Rollback:
+    * Re-select prior versioned Apps Script Web App deployment in Google Apps Script
+      Manage Deployments (immutable versions; zero data deletion).
+  - Google Sheets Data Safety:
+    * NEVER delete partial rows or `AuditLog` / `ExceptionRegister` / `IdAllocations`
+      records. Follow `RECOVERY_REQUIRED` quarantine inspection runbook.
+
+--------------------------------------------------------------------------------
+4. SECTION 12 HARD STOP ATTESTATION
+--------------------------------------------------------------------------------
+  During Mission KS-RELEASE-03, ZERO of the following prohibited actions occurred:
+  - NO backend, frontend, or Apps Script deployment.
+  - NO live Render service, environment variable, or redirect mutation.
+  - NO live Google Sheets read/write or production Script Properties change.
+  - NO First-Owner creation in production.
+  - NO production permission change or historical data restoration.
+
+================================================================================
+END OF KS_RELEASE_03_DEPLOYMENT_READINESS_REPORT.txt
+================================================================================

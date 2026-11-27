@@ -122,7 +122,29 @@ def _token_identifier(token: str, payload: Optional[Dict[str, Any]] = None) -> s
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
 
 
-def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_failure: bool = False) -> bool:
+def _resolve_revocation_actor_role(
+    actor_user_id: str,
+    explicit_role: Optional[str] = None,
+    token_payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Resolve the authoritative non-synthetic role for governed token/session revocation writes."""
+    if explicit_role and str(explicit_role).strip():
+        return str(explicit_role).strip().upper()
+    row, err = _auth_row_for(actor_user_id, fresh=False)
+    if err is None and isinstance(row, dict) and str(row.get("role") or "").strip():
+        return str(row.get("role")).strip().upper()
+    if token_payload and str(token_payload.get("role") or "").strip():
+        return str(token_payload.get("role")).strip().upper()
+    return ""
+
+
+def revoke_token(
+    token: str,
+    user_id: str,
+    reason: str = "Logout",
+    raise_on_failure: bool = False,
+    actor_role: Optional[str] = None,
+) -> bool:
     """Revoke a single active JWT token (in-memory + Apps Script governed persistence)."""
     payload = decode_access_token(token)
     token_id = _token_identifier(token, payload)
@@ -134,6 +156,23 @@ def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_fail
     exp_iso = ""
     if payload and payload.get("exp"):
         exp_iso = datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()
+
+    resolved_role = _resolve_revocation_actor_role(
+        user_id,
+        explicit_role=actor_role,
+        token_payload=payload,
+    )
+    if not resolved_role:
+        logger.warning(
+            "Unable to resolve authoritative actor_role for REVOKE_TOKEN user=%s; token revoked in memory only.",
+            user_id,
+        )
+        if raise_on_failure:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Authoritative actor role is required for governed token revocation.",
+            )
+        return False
 
     from app.apps_script_bridge import apps_script_bridge
 
@@ -150,7 +189,7 @@ def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_fail
             },
             nonce=f"RVK-{token_id[:24]}",
             actor_user_id=user_id,
-            actor_role="AUTH",
+            actor_role=resolved_role,
             invalidate_tabs=["RevokedTokens"],
         )
         if res.status != "CONFIRMED" and raise_on_failure:
@@ -181,6 +220,8 @@ def revoke_all_user_sessions(
     reason: str = "Security revocation",
     raise_on_failure: bool = False,
     nonce: Optional[str] = None,
+    actor_user_id: Optional[str] = None,
+    actor_role: Optional[str] = None,
 ) -> bool:
     """Invalidate all active sessions across all devices via Apps Script governed write."""
     clean_id = str(user_id or "").strip().lower()
@@ -189,6 +230,23 @@ def revoke_all_user_sessions(
     _USER_REVOKED_AT[clean_id] = now_epoch
     reason_hash = hashlib.sha256(str(reason or "").encode("utf-8")).hexdigest()[:8].upper()
     stable_nonce = str(nonce or "").strip() or f"REVOKE-SESS-{user_id}-{reason_hash}-{now_iso_str[:16]}"
+    effective_actor_id = str(actor_user_id or user_id or "").strip()
+    resolved_role = _resolve_revocation_actor_role(
+        effective_actor_id,
+        explicit_role=actor_role,
+    )
+    if not resolved_role:
+        logger.warning(
+            "Unable to resolve authoritative actor_role for REVOKE_USER_SESSIONS actor=%s target=%s; revoked in memory only.",
+            effective_actor_id,
+            user_id,
+        )
+        if raise_on_failure:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Authoritative actor role is required for governed session revocation.",
+            )
+        return False
 
     from app.apps_script_bridge import apps_script_bridge
 
@@ -202,8 +260,8 @@ def revoke_all_user_sessions(
                 "reason": reason,
             },
             nonce=stable_nonce,
-            actor_user_id=user_id,
-            actor_role="AUTH",
+            actor_user_id=effective_actor_id,
+            actor_role=resolved_role,
             invalidate_tabs=["AuthUsers"],
         )
         if res.status != "CONFIRMED" and raise_on_failure:

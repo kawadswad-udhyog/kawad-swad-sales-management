@@ -213,8 +213,9 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
     def test_08_end_to_end_bootstrap_login_replay_conflict_and_no_secret_leak(self):
         nonce = "BOOTSTRAP-OWNER-E2E-001"
         req = self._make_bootstrap_request(nonce=nonce)
+        valid_env = self._valid_env()
 
-        with patch.dict(os.environ, self._valid_env(), clear=False):
+        with patch.dict(os.environ, valid_env, clear=False):
             res = self._run(auth_router.bootstrap_first_owner(self._valid_req(), req))
 
         # Verify response contract & Owner decisions
@@ -279,7 +280,7 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
         self.assertFalse(me["must_change_password"])
 
         # Same nonce + identical payload -> idempotent replay, zero duplicate rows
-        with patch.dict(os.environ, self._valid_env(), clear=False):
+        with patch.dict(os.environ, valid_env, clear=False):
             replay = self._run(auth_router.bootstrap_first_owner(self._valid_req(), req))
         self.assertTrue(replay.is_replay)
         self.assertEqual(replay.user_id, res.user_id)
@@ -287,7 +288,7 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
         self.assertEqual(len(db.memory_store["AuthUsers"]), 1)
 
         # Same nonce + modified payload -> 409 IDEMPOTENCY_PAYLOAD_CONFLICT
-        with patch.dict(os.environ, self._valid_env(), clear=False):
+        with patch.dict(os.environ, valid_env, clear=False):
             with self.assertRaises(HTTPException) as conflict_ctx:
                 self._run(
                     auth_router.bootstrap_first_owner(
@@ -300,7 +301,7 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
 
         # Fresh nonce after initialization -> permanently rejected 409 OWNER_ALREADY_INITIALIZED
         req_second = self._make_bootstrap_request(nonce="BOOTSTRAP-OWNER-SECOND-NEW")
-        with patch.dict(os.environ, self._valid_env(), clear=False):
+        with patch.dict(os.environ, valid_env, clear=False):
             with self.assertRaises(HTTPException) as dup_ctx:
                 self._run(auth_router.bootstrap_first_owner(self._valid_req(), req_second))
         self.assertEqual(dup_ctx.exception.status_code, 409)

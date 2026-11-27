@@ -1,0 +1,107 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-03
+STAGE H COMPLETE VERIFICATION & TEST EXECUTION REPORT
+================================================================================
+Generated At (UTC)   : 2026-11-27T06:06:00Z
+Mission ID           : KS-RELEASE-03
+Code Freeze Proof    : ALL suites below executed AFTER the final KS-RELEASE-03
+                       code edits (`13d7cb05818cdc56ef1f3759380288cd516119d5`)
+                       with ZERO subsequent source edits.
+Gate Status          : SUBMITTED FOR INDEPENDENT GPT REVIEW (G2)
+
+--------------------------------------------------------------------------------
+1. EXECUTIVE SUMMARY TABLE
+--------------------------------------------------------------------------------
+  Suite / Verification Check                          | Passed | Failed | Skipped | Status
+  ----------------------------------------------------+--------+--------+---------+---------
+  Apps Script Syntax & Collision Static Audit (42 js) |   42   |    0   |    0    | PASS*
+  Apps Script Bootstrap VM Security Suite (Node VM)   |    7   |    0   |    0    | PASS
+  Cross-Language HMAC + Stage D Suite (Python + Node) |   24   |    0   |    0    | PASS
+  Full FastAPI Backend Unittest Suite (discover)      |  732   |    0   |    1**  | PASS
+  Frontend TypeScript Type Check (`tsc --noEmit`)     |    1   |    0   |    0    | PASS
+  Frontend Production Build (`compile_applet` / Vite) |    1   |    0   |    0    | PASS
+  Frontend Linter (`lint_applet`)                     |    1   |    0   |    0    | PASS
+  Bun Frontend Contract & Safety Suites (5 scripts)   |   85   |    0   |    0    | PASS
+  Playwright Full Acceptance Audit (live localhost)   |   12   |    0   |    0    | PASS
+  Playwright Login Page Upgrade Suite (live localhost)|    9   |    0   |    0    | PASS
+  Playwright Usability & Workforce Suite (localhost)  |    6   |    0   |    0    | PASS
+  npm audit (Dependency Vulnerability Scan)           |  0 vul |    0   |    0    | PASS
+  Hygiene / Secret / MongoDB / aistudio Static Scans  |  clean |    0   |    0    | PASS
+  Live Google Workbook Physical Row-1 Verification    |    0   |    0   | BLOCKED | BLOCKED***
+
+  *   0 syntax errors across 42 `.js` files (339 top-level declarations); 0
+      collisions introduced by the 6 integrated First-Owner/Bridge files (7
+      pre-existing untouched legacy verbatim collisions in `onOpen` across
+      `AuthAndMenu.js`/`Code.js`/Phase3 files and `ksP3V13*` in v1.3 vs v1.4).
+  **  1 honest skip: live `uvicorn` subprocess binding test skipped in sandbox
+      unittest runner (`Ran 733 tests in 73.878s — OK (skipped=1)`).
+  *** Honest BLOCKED status: no Google Sheets credentials/ID in sandbox and
+      live workbook access is prohibited under Gate G1 / Section 12.
+
+--------------------------------------------------------------------------------
+2. DETAILED EXECUTION LOGS & EXACT COMMANDS
+--------------------------------------------------------------------------------
+A. Apps Script Static & VM Verification
+   1. Static Syntax + Top-Level Declaration Check:
+      - Scope  : All 42 `.js` files in `apps_script/`
+      - Result : 42/42 parsed with 0 syntax errors; 339 top-level functions;
+                 0 new declaration collisions introduced by integrated files.
+   2. Command: `node backend/tests/test_apps_script_bootstrap_vm.mjs`
+      - Result : 7/7 PASS (`ALL 7 MERGED APPS SCRIPT VM SECURITY SUITES PASSED`).
+      - Covers : Lock ownership (`ksAllocateIdLocked_`, `ksLogAuditStrictLocked_`,
+                 `ksLogExceptionLocked_`), `IN_PROGRESS` quarantine, replay,
+                 post-mutation `RECOVERY_REQUIRED`, schema validation, and
+                 legacy caller backward compatibility.
+
+B. Cross-Language HMAC & Stage D Security Regression Suite
+   - Command: `PYTHONPATH=backend SALES_TESTING=1 python3.11 -m unittest backend/tests/test_cross_language_hmac.py -v`
+   - Result : `Ran 24 tests in 5.245s — OK` (24 PASSED, 0 FAILED, 0 ERRORS).
+   - New KS-RELEASE-03 Stage D Regression Tests Verified:
+     * `test_21_missing_payload_hash_and_orphan_nonce_fail_closed` (D-1) -> PASS
+     * `test_22_actor_directory_missing_active_column_fails_closed` (D-2) -> PASS
+     * `test_23_plain_decimal_readback_parity_without_false_quarantine` (D-3) -> PASS
+     * `test_24_self_vs_cross_user_token_and_session_revocation` (D-4) -> PASS
+
+C. Full Backend Unit & Integration Suite
+   - Command: `PYTHONPATH=backend SALES_TESTING=1 python3.11 -m unittest discover -s backend/tests -p 'test_*.py' -v`
+   - Result : `Ran 733 tests in 73.878s — OK (skipped=1)` (732 PASSED, 0 FAILED, 0 ERRORS, 1 SKIPPED).
+   - Determinism Fix Verified: Fixed wall-clock second-boundary flake in
+     `backend/tests/test_first_owner_bootstrap.py :: test_08_end_to_end_bootstrap_login_replay_conflict_and_no_secret_leak`
+     by capturing `valid_env = self._valid_env()` once across initial bootstrap +
+     replay/conflict checks (matching production where `SALES_OWNER_BOOTSTRAP_EXPIRES_AT`
+     is a fixed configured timestamp).
+
+D. Frontend Type Check, Build & Lint
+   - `compile_applet` (Vite production bundle) : SUCCEEDED (0 errors)
+   - `lint_applet` (`tsc --noEmit`)            : SUCCEEDED (0 errors)
+
+E. Bun Frontend Contract & Transaction Safety Suites (85/85 PASS)
+   - `bun scripts/test_mission51b1_frontend_transaction_safety.ts`     :  5/5  PASS
+   - `bun scripts/test_mission51b1rf2_transaction_identity_closure.ts` : 39/39 PASS
+   - `bun scripts/test_mission51b1rf_persistence_and_fingerprint.ts`   : 18/18 PASS
+   - `bun scripts/test_phase1_6_frontend_contracts.ts`                 : 17/17 PASS
+   - `bun scripts/test_tx_final_04_frontend_unknown_safety.ts`         :  6/6  PASS
+   - Total                                                             : 85/85 PASS
+
+F. Playwright Live Browser Verification Suites (against `http://localhost:3000`)
+   1. `node scripts/run_frontend_acceptance_audit.cjs`:
+      - Workflows : 7/7 PASS (OWNER, PA, MANAGER, SALESMAN, FACTORY, ACCOUNTANT, EMPLOYEE)
+      - Security  : 4/4 PASS
+      - Responsive: 1/1 PASS (tablet)
+      - Console   : `consoleErrors: []` (0 uncaught console/page errors)
+   2. `node scripts/test_login_page_upgrade.cjs`:
+      - Scenarios : 7/7 PASS
+      - Responsive: 2/2 PASS (tablet + mobile, zero horizontal overflow)
+   3. `node scripts/verify_usability_workforce_upgrade.cjs`:
+      - Checks    : 6/6 PASS (`ALL USABILITY & WORKFORCE TESTS PASSED PERFECTLY`)
+   - Temporary JSON artifacts (`audit_results.json`, `login_audit_results.json`)
+     were cleaned up after verification.
+
+G. Release Candidate Archive Hygiene & Checksum Integrity
+   - `python3.11 scripts/verify_package_hygiene.py KS_RELEASE_03_RELEASE_CANDIDATE.zip`
+     (executed immediately upon packaging; exact ZIP SHA-256 and entry count
+     recorded in `KS_RELEASE_03_SHA256_MANIFEST.txt` and final submission).
+
+================================================================================
+END OF KS_RELEASE_03_TEST_REPORT.txt
+================================================================================

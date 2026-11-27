@@ -1,0 +1,91 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-03
+CONSOLIDATED RELEASE CHANGELOG (KS-RELEASE-01 -> KS-RELEASE-02 -> KS-RELEASE-03)
+================================================================================
+Generated At (UTC)   : 2026-11-27T06:06:00Z
+Mission ID           : KS-RELEASE-03
+Git Base (`main`)    : 2fc7a23e822680c6fae8fd0d709b26206388258f
+Local Release Commit : 13d7cb05818cdc56ef1f3759380288cd516119d5 (`release/ks-release-03`)
+
+--------------------------------------------------------------------------------
+1. KS-RELEASE-03 CHANGES (DELTA OVER `origin/main` `2fc7a23` / KS-RELEASE-02)
+--------------------------------------------------------------------------------
+Scope: 8 modified source/test/manifest files (+512 / -103 lines) plus 10
+KS-RELEASE-03 audit deliverables and Git transfer artifacts (`.patch` + `.bundle`).
+
+A. Apps Script Bridge Hardening (`apps_script/WebAppBridge.js` &
+   byte-identical mirror `apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js`):
+   - [D-1] Require valid hex `payload_hash` on all non-bootstrap governed bridge
+     writes (`MISSING_OR_INVALID_PAYLOAD_HASH`, HTTP 400).
+   - [D-1] Quarantine orphan `IdAllocations` replay nonces lacking a matching
+     `AuditLog` record as `RECOVERY_REQUIRED` (`NONCE_AUDIT_METADATA_MISSING`,
+     HTTP 409, `retryable: false`) instead of auto-confirming replay.
+   - [D-1] Reject replays with missing or mismatched audit `payload_hash`
+     (`NONCE_PAYLOAD_HASH_CONFLICT`, HTTP 409).
+   - [D-2] Fail closed in `ksVerifyBridgeActor_()` when `Users.active` header is
+     missing (`ACTOR_DIRECTORY_INVALID_SCHEMA`, HTTP 503) instead of defaulting active.
+   - [D-3] Add strict plain-decimal canonicalization to `ksNormalizeReadbackVal_()`
+     matching Python `apps_script_bridge.py::_normalize_scalar` (`100` == `'100.00'`
+     == `100.0`, `'0.50'` == `0.5`, while preserving `'0010'` and `'1E2'`).
+   - [D-4] Allow verified non-owner actors to run `REVOKE_USER_SESSIONS` on
+     `AuthUsers` and `REVOKE_TOKEN` on `RevokedTokens` strictly for their own
+     `user_id`; block cross-user attempts (`SELF_TOKEN_REVOKE_MISMATCH` /
+     `INSUFFICIENT_ROLE_FOR_AUTH_USERS`, HTTP 403); preserve `OWNER_ADMIN`
+     cross-user revocation and `AUDITOR` full write-block.
+
+B. Backend Auth Revocation Role Fix (`backend/app/auth.py`, `backend/app/routers/auth.py`):
+   - [D-4] Added `_resolve_revocation_actor_role()` in `backend/app/auth.py` so
+     governed `REVOKE_TOKEN` and `REVOKE_USER_SESSIONS` bridge writes transmit
+     the user's real authoritative role instead of synthetic `actor_role="AUTH"`.
+   - [D-4] Updated `backend/app/routers/auth.py::logout` to forward
+     `actor_role=str(current_user.get("role") or "")`.
+
+C. Manifests Synchronized:
+   - Updated `apps_script/SOURCE_INVENTORY_AND_SHA256.txt` with new `WebAppBridge.js`
+     byte size (`45,799`) and SHA-256 (`4966b600...`).
+   - Updated `apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md`
+     with matching `WebAppBridge.js` SHA-256 (`4966b600...`).
+
+D. Automated Tests Hardened:
+   - Added 4 cross-language security regression tests (`test_21` through `test_24`)
+     to `backend/tests/test_cross_language_hmac.py` covering D-1, D-2, D-3, and D-4.
+   - Fixed wall-clock second-boundary test flake in
+     `backend/tests/test_first_owner_bootstrap.py::test_08_end_to_end_bootstrap_login_replay_conflict_and_no_secret_leak`
+     by capturing a single fixed `valid_env` bootstrap expiration window across
+     initial bootstrap + replay/conflict checks.
+
+E. Audit & Release Engineering Deliverables Added (KS-RELEASE-03):
+   1. `KS_RELEASE_03_PREFLIGHT_REPORT.txt`
+   2. `KS_RELEASE_03_DATABASE_INVENTORY_RECONCILIATION.txt` (255 vs 256 vs 265 exact proof)
+   3. `KS_RELEASE_03_WORKBOOK_HEADER_AUDIT.txt` (honest BLOCKED live check + 36-tab header spec)
+   4. `KS_RELEASE_03_SECURITY_AUDIT.txt`
+   5. `KS_RELEASE_03_TEST_REPORT.txt`
+   6. `KS_RELEASE_03_GIT_TRACEABILITY_REPORT.txt`
+   7. `KS_RELEASE_03_DEPLOYMENT_READINESS_REPORT.txt`
+   8. `KS_RELEASE_03_CHANGELOG.txt`
+   9. `KS_RELEASE_03_SHA256_MANIFEST.txt`
+  10. `KS_RELEASE_03_RELEASE_CANDIDATE.zip`
+  Plus Git transfer artifacts: `KS_RELEASE_03_FROM_2FC7A23.patch`, `KS_RELEASE_03_FROM_2FC7A23.bundle`.
+
+--------------------------------------------------------------------------------
+2. PRIOR MISSION SUMMARIES (PRESERVED FOR AUDIT CONTINUITY)
+--------------------------------------------------------------------------------
+- KS-RELEASE-02 (merged to GitHub `origin/main` at `2fc7a23`, reports preserved):
+  * Removed `SystemConfig` from bridge allowlist; added protected control-table deny list.
+  * Added `ksLogExceptionLocked_()` to avoid releasing ScriptLock during quarantine logging.
+  * Enforced deterministic CORS origin resolution (`resolve_cors_origins`) stripping
+    localhost/wildcards in production.
+  * Added defensive frontend array/null guards (`StockView.tsx`, `ReportsView.tsx`).
+  * Audited all 265 repository tables across 8 governance categories.
+
+- KS-RELEASE-01 (reports preserved):
+  * Reconciled complete 42-file bound Apps Script project (`apps_script/`) with
+    the 6 SHA-256-verified First-Owner bootstrap files (`Config.js`, `IdAllocator.js`,
+    `AuditAndExceptions.js`, `WebAppBridge.js`, `BootstrapOwnerHandler.js`,
+    `WebAppBridge_BootstrapIntegration.js`).
+  * Implemented constant-time canonical HMAC-SHA256 verification and allowlisted
+    HTTP 302 GET redirect handling (`script.googleusercontent.com/macros/echo`).
+
+================================================================================
+END OF KS_RELEASE_03_CHANGELOG.txt
+================================================================================

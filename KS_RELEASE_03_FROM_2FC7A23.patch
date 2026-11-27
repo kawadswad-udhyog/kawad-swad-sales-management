@@ -1,0 +1,870 @@
+diff --git a/apps_script/SOURCE_INVENTORY_AND_SHA256.txt b/apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+index 906575f..ab81b89 100644
+--- a/apps_script/SOURCE_INVENTORY_AND_SHA256.txt
++++ b/apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+@@ -45,6 +45,6 @@ FILE: ReportsAndClosingEngine.js	BYTES: 13652	SHA256: 05f0cce1e0443c6e26dff626fe
+ FILE: SafeWriter.js	BYTES: 3274	SHA256: 6c7492e06e65b7585e5dc266746264e9e1ef49302d0de4c8472ac0547b5bc24b	STATUS: UNCHANGED
+ FILE: SalesEngine.js	BYTES: 11203	SHA256: ec97ae596f87a179c878acf4287429e5064e1dd5a0d68ef38c15ab833bf9f72e	STATUS: UNCHANGED
+ FILE: SchemaRegistry.js	BYTES: 5123	SHA256: e3138c74f7b4926e128c9997098759821e9acdad292d3deaa2175168011f497e	STATUS: UNCHANGED
+-FILE: WebAppBridge.js	BYTES: 43516	SHA256: 8b1f51b7651cb10de2f4b695037bb6c4a52d2808b33d2ca0335ceaffdddce1e7	STATUS: REPLACED (original_sha256=3c1e85e895fe5e685970a86586531bba7ee90aab5d2d108a8fefd971ab828287)
++FILE: WebAppBridge.js	BYTES: 45799	SHA256: 4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145	STATUS: REPLACED (original_sha256=3c1e85e895fe5e685970a86586531bba7ee90aab5d2d108a8fefd971ab828287)
+ FILE: WebAppBridge_BootstrapIntegration.js	BYTES: 17760	SHA256: 9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f	STATUS: ADDED
+ FILE: WorkforceEngine.js	BYTES: 21887	SHA256: 9f4f6e96e0541e4d70908983c0232114e304ac3fd7722893272eaa272449a9db	STATUS: UNCHANGED
+diff --git a/apps_script/WebAppBridge.js b/apps_script/WebAppBridge.js
+index 6c1f1bc..f406149 100644
+--- a/apps_script/WebAppBridge.js
++++ b/apps_script/WebAppBridge.js
+@@ -452,13 +452,13 @@ function ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, p
+   }
+ 
+   if (targetTab === 'AuthUsers') {
+-    if (action === 'CHANGE_PASSWORD') {
++    if (action === 'CHANGE_PASSWORD' || action === 'REVOKE_USER_SESSIONS') {
+       if (canonicalRole !== 'OWNER_ADMIN' && (!targetUserId || targetUserId !== actorUserId)) {
+         return {
+           ok: false,
+           error_code: 'INSUFFICIENT_ROLE_FOR_AUTH_USERS',
+           http_status: 403,
+-          message: 'Non-owner actor "' + actorUserId + '" may only change their own password.'
++          message: 'Non-owner actor "' + actorUserId + '" may only execute "' + action + '" for their own AuthUsers record.'
+         };
+       }
+     } else if (canonicalRole !== 'OWNER_ADMIN') {
+@@ -471,6 +471,17 @@ function ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, p
+     }
+   }
+ 
++  if (targetTab === 'RevokedTokens' && action === 'REVOKE_TOKEN') {
++    if (canonicalRole !== 'OWNER_ADMIN' && (!targetUserId || targetUserId !== actorUserId)) {
++      return {
++        ok: false,
++        error_code: 'SELF_TOKEN_REVOKE_MISMATCH',
++        http_status: 403,
++        message: 'Non-owner actor "' + actorUserId + '" may only revoke their own session token.'
++      };
++    }
++  }
++
+   if (Object.prototype.hasOwnProperty.call(KS_BRIDGE_RESTRICTED_TAB_ROLES, targetTab)) {
+     const allowedRoles = KS_BRIDGE_RESTRICTED_TAB_ROLES[targetTab];
+     if (allowedRoles.indexOf(canonicalRole) === -1) {
+@@ -529,12 +540,12 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
+     ? headers.indexOf('active')
+     : (headers.indexOf('is_active') !== -1 ? headers.indexOf('is_active') : headers.indexOf('status'));
+ 
+-  if (uidIdx === -1 || roleIdx === -1) {
++  if (uidIdx === -1 || roleIdx === -1 || activeIdx === -1) {
+     return {
+       ok: false,
+       error_code: 'ACTOR_DIRECTORY_INVALID_SCHEMA',
+       http_status: 503,
+-      message: 'Users directory must contain user_id and role headers.'
++      message: 'Users directory must contain user_id, role, and active headers.'
+     };
+   }
+ 
+@@ -542,7 +553,7 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
+   for (let i = 1; i < data.length; i++) {
+     const rowUid = String(data[i][uidIdx] || '').trim();
+     if (rowUid === actorUserId) {
+-      const rawActive = activeIdx !== -1 ? String(data[i][activeIdx]).trim().toUpperCase() : 'TRUE';
++      const rawActive = String(data[i][activeIdx] === null || data[i][activeIdx] === undefined ? '' : data[i][activeIdx]).trim().toUpperCase();
+       const isActive = (rawActive === 'TRUE' || rawActive === 'YES' || rawActive === 'ACTIVE' || rawActive === '1');
+       if (!isActive) {
+         return {
+@@ -593,13 +604,48 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
+   };
+ }
+ 
++const KS_PLAIN_DECIMAL_RE = /^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)$/;
++
++function ksFormatPlainDecimal_(rawStr) {
++  let s = String(rawStr || '').trim();
++  let sign = '';
++  if (s.charAt(0) === '+' || s.charAt(0) === '-') {
++    sign = s.charAt(0) === '-' ? '-' : '';
++    s = s.slice(1);
++  }
++  if (s.charAt(0) === '.') {
++    s = '0' + s;
++  }
++  if (s.indexOf('.') !== -1) {
++    s = s.replace(/0+$/, '').replace(/\.$/, '');
++  }
++  if (!s || /^0+$/.test(s)) {
++    return '0';
++  }
++  return sign + s;
++}
++
+ function ksNormalizeReadbackVal_(val) {
+-  if (val === undefined || val === null) return '';
+   if (typeof val === 'boolean') return val ? 'true' : 'false';
++  if (val === undefined || val === null) return '';
+   if (val instanceof Date) return val.toISOString();
++  if (typeof val === 'number') {
++    if (isFinite(val)) {
++      const numStr = String(val);
++      if (KS_PLAIN_DECIMAL_RE.test(numStr)) {
++        return ksFormatPlainDecimal_(numStr);
++      }
++      return numStr;
++    }
++    return String(val).trim();
++  }
+   const s = String(val).trim();
++  if (!s) return '';
+   const lower = s.toLowerCase();
+   if (lower === 'true' || lower === 'false') return lower;
++  if (KS_PLAIN_DECIMAL_RE.test(s)) {
++    return ksFormatPlainDecimal_(s);
++  }
+   return s;
+ }
+ 
+@@ -708,6 +754,20 @@ function doPost(e) {
+       return ksBridgeJson_(ksDispatchBootstrapFirstOwner_(req));
+     }
+ 
++    if (!payloadHash || !/^[0-9a-f]{16,128}$/.test(payloadHash)) {
++      return ksBridgeJson_({
++        status: 'REJECTED',
++        correlation_id: correlationId,
++        nonce: nonce,
++        action: action,
++        target_tab: targetTab,
++        error_code: 'MISSING_OR_INVALID_PAYLOAD_HASH',
++        message: 'A valid hex payload_hash is mandatory for all governed bridge writes.',
++        http_status: 400,
++        retryable: false
++      });
++    }
++
+     // 1C. Fail-closed target-table allowlist, action->tab binding, governance/control/scratch & role guard (W3)
+     const tabCheck = ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, payload);
+     if (!tabCheck.ok) {
+@@ -775,46 +835,58 @@ function doPost(e) {
+         });
+       }
+       const auditMeta = ksFindAuditReplayMetadata_(nonce, existing.allocated_id);
+-      if (auditMeta) {
+-        if (auditMeta.action && auditMeta.action !== action) {
+-          return ksBridgeJson_({
+-            status: 'REJECTED',
+-            correlation_id: correlationId,
+-            nonce: nonce,
+-            action: action,
+-            target_tab: targetTab,
+-            error_code: 'NONCE_ACTION_CONFLICT',
+-            message: 'Nonce "' + nonce + '" is already bound to action "' + auditMeta.action + '", cannot replay as "' + action + '".',
+-            http_status: 409,
+-            retryable: false
+-          });
+-        }
+-        if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
+-          return ksBridgeJson_({
+-            status: 'REJECTED',
+-            correlation_id: correlationId,
+-            nonce: nonce,
+-            action: action,
+-            target_tab: targetTab,
+-            error_code: 'NONCE_ACTOR_CONFLICT',
+-            message: 'Nonce "' + nonce + '" is already bound to a different actor; cross-actor replay rejected.',
+-            http_status: 409,
+-            retryable: false
+-          });
+-        }
+-        if (auditMeta.payload_hash && payloadHash && auditMeta.payload_hash !== payloadHash) {
+-          return ksBridgeJson_({
+-            status: 'REJECTED',
+-            correlation_id: correlationId,
+-            nonce: nonce,
+-            action: action,
+-            target_tab: targetTab,
+-            error_code: 'NONCE_PAYLOAD_HASH_CONFLICT',
+-            message: 'Nonce "' + nonce + '" was previously executed with a different payload_hash; mutated replay rejected.',
+-            http_status: 409,
+-            retryable: false
+-          });
+-        }
++      if (!auditMeta) {
++        return ksBridgeJson_({
++          status: 'RECOVERY_REQUIRED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          allocated_id: existing.allocated_id,
++          error_code: 'NONCE_AUDIT_METADATA_MISSING',
++          message: 'Nonce "' + nonce + '" exists in IdAllocations without a matching confirmed AuditLog record; quarantined for Owner reconciliation.',
++          http_status: 409,
++          retryable: false
++        });
++      }
++      if (auditMeta.action && auditMeta.action !== action) {
++        return ksBridgeJson_({
++          status: 'REJECTED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          error_code: 'NONCE_ACTION_CONFLICT',
++          message: 'Nonce "' + nonce + '" is already bound to action "' + auditMeta.action + '", cannot replay as "' + action + '".',
++          http_status: 409,
++          retryable: false
++        });
++      }
++      if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
++        return ksBridgeJson_({
++          status: 'REJECTED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          error_code: 'NONCE_ACTOR_CONFLICT',
++          message: 'Nonce "' + nonce + '" is already bound to a different actor; cross-actor replay rejected.',
++          http_status: 409,
++          retryable: false
++        });
++      }
++      if (auditMeta.payload_hash && (!payloadHash || auditMeta.payload_hash !== payloadHash)) {
++        return ksBridgeJson_({
++          status: 'REJECTED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          error_code: 'NONCE_PAYLOAD_HASH_CONFLICT',
++          message: 'Nonce "' + nonce + '" was previously executed with a different payload_hash; mutated or hashless replay rejected.',
++          http_status: 409,
++          retryable: false
++        });
+       }
+       return ksBridgeJson_({
+         status: 'CONFIRMED',
+diff --git a/apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md b/apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+index 5352b56..cc472dc 100644
+--- a/apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
++++ b/apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+@@ -5,4 +5,4 @@
+ - `AuditAndExceptions.js` | bytes=10341 | sha256=`04350e26bfe571d538347d6b32393f1ce2cc323177884ef6551cff55bbc76394`
+ - `BootstrapOwnerHandler.js` | bytes=45474 | sha256=`15e9026762a86855778928dbcb69686e72c4f6c86b657094e8d79708366084af`
+ - `WebAppBridge_BootstrapIntegration.js` | bytes=17760 | sha256=`9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f`
+-- `WebAppBridge.js` | bytes=43516 | sha256=`8b1f51b7651cb10de2f4b695037bb6c4a52d2808b33d2ca0335ceaffdddce1e7`
++- `WebAppBridge.js` | bytes=45799 | sha256=`4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145`
+diff --git a/apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js b/apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+index 6c1f1bc..f406149 100644
+--- a/apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
++++ b/apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+@@ -452,13 +452,13 @@ function ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, p
+   }
+ 
+   if (targetTab === 'AuthUsers') {
+-    if (action === 'CHANGE_PASSWORD') {
++    if (action === 'CHANGE_PASSWORD' || action === 'REVOKE_USER_SESSIONS') {
+       if (canonicalRole !== 'OWNER_ADMIN' && (!targetUserId || targetUserId !== actorUserId)) {
+         return {
+           ok: false,
+           error_code: 'INSUFFICIENT_ROLE_FOR_AUTH_USERS',
+           http_status: 403,
+-          message: 'Non-owner actor "' + actorUserId + '" may only change their own password.'
++          message: 'Non-owner actor "' + actorUserId + '" may only execute "' + action + '" for their own AuthUsers record.'
+         };
+       }
+     } else if (canonicalRole !== 'OWNER_ADMIN') {
+@@ -471,6 +471,17 @@ function ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, p
+     }
+   }
+ 
++  if (targetTab === 'RevokedTokens' && action === 'REVOKE_TOKEN') {
++    if (canonicalRole !== 'OWNER_ADMIN' && (!targetUserId || targetUserId !== actorUserId)) {
++      return {
++        ok: false,
++        error_code: 'SELF_TOKEN_REVOKE_MISMATCH',
++        http_status: 403,
++        message: 'Non-owner actor "' + actorUserId + '" may only revoke their own session token.'
++      };
++    }
++  }
++
+   if (Object.prototype.hasOwnProperty.call(KS_BRIDGE_RESTRICTED_TAB_ROLES, targetTab)) {
+     const allowedRoles = KS_BRIDGE_RESTRICTED_TAB_ROLES[targetTab];
+     if (allowedRoles.indexOf(canonicalRole) === -1) {
+@@ -529,12 +540,12 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
+     ? headers.indexOf('active')
+     : (headers.indexOf('is_active') !== -1 ? headers.indexOf('is_active') : headers.indexOf('status'));
+ 
+-  if (uidIdx === -1 || roleIdx === -1) {
++  if (uidIdx === -1 || roleIdx === -1 || activeIdx === -1) {
+     return {
+       ok: false,
+       error_code: 'ACTOR_DIRECTORY_INVALID_SCHEMA',
+       http_status: 503,
+-      message: 'Users directory must contain user_id and role headers.'
++      message: 'Users directory must contain user_id, role, and active headers.'
+     };
+   }
+ 
+@@ -542,7 +553,7 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
+   for (let i = 1; i < data.length; i++) {
+     const rowUid = String(data[i][uidIdx] || '').trim();
+     if (rowUid === actorUserId) {
+-      const rawActive = activeIdx !== -1 ? String(data[i][activeIdx]).trim().toUpperCase() : 'TRUE';
++      const rawActive = String(data[i][activeIdx] === null || data[i][activeIdx] === undefined ? '' : data[i][activeIdx]).trim().toUpperCase();
+       const isActive = (rawActive === 'TRUE' || rawActive === 'YES' || rawActive === 'ACTIVE' || rawActive === '1');
+       if (!isActive) {
+         return {
+@@ -593,13 +604,48 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
+   };
+ }
+ 
++const KS_PLAIN_DECIMAL_RE = /^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)$/;
++
++function ksFormatPlainDecimal_(rawStr) {
++  let s = String(rawStr || '').trim();
++  let sign = '';
++  if (s.charAt(0) === '+' || s.charAt(0) === '-') {
++    sign = s.charAt(0) === '-' ? '-' : '';
++    s = s.slice(1);
++  }
++  if (s.charAt(0) === '.') {
++    s = '0' + s;
++  }
++  if (s.indexOf('.') !== -1) {
++    s = s.replace(/0+$/, '').replace(/\.$/, '');
++  }
++  if (!s || /^0+$/.test(s)) {
++    return '0';
++  }
++  return sign + s;
++}
++
+ function ksNormalizeReadbackVal_(val) {
+-  if (val === undefined || val === null) return '';
+   if (typeof val === 'boolean') return val ? 'true' : 'false';
++  if (val === undefined || val === null) return '';
+   if (val instanceof Date) return val.toISOString();
++  if (typeof val === 'number') {
++    if (isFinite(val)) {
++      const numStr = String(val);
++      if (KS_PLAIN_DECIMAL_RE.test(numStr)) {
++        return ksFormatPlainDecimal_(numStr);
++      }
++      return numStr;
++    }
++    return String(val).trim();
++  }
+   const s = String(val).trim();
++  if (!s) return '';
+   const lower = s.toLowerCase();
+   if (lower === 'true' || lower === 'false') return lower;
++  if (KS_PLAIN_DECIMAL_RE.test(s)) {
++    return ksFormatPlainDecimal_(s);
++  }
+   return s;
+ }
+ 
+@@ -708,6 +754,20 @@ function doPost(e) {
+       return ksBridgeJson_(ksDispatchBootstrapFirstOwner_(req));
+     }
+ 
++    if (!payloadHash || !/^[0-9a-f]{16,128}$/.test(payloadHash)) {
++      return ksBridgeJson_({
++        status: 'REJECTED',
++        correlation_id: correlationId,
++        nonce: nonce,
++        action: action,
++        target_tab: targetTab,
++        error_code: 'MISSING_OR_INVALID_PAYLOAD_HASH',
++        message: 'A valid hex payload_hash is mandatory for all governed bridge writes.',
++        http_status: 400,
++        retryable: false
++      });
++    }
++
+     // 1C. Fail-closed target-table allowlist, action->tab binding, governance/control/scratch & role guard (W3)
+     const tabCheck = ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, payload);
+     if (!tabCheck.ok) {
+@@ -775,46 +835,58 @@ function doPost(e) {
+         });
+       }
+       const auditMeta = ksFindAuditReplayMetadata_(nonce, existing.allocated_id);
+-      if (auditMeta) {
+-        if (auditMeta.action && auditMeta.action !== action) {
+-          return ksBridgeJson_({
+-            status: 'REJECTED',
+-            correlation_id: correlationId,
+-            nonce: nonce,
+-            action: action,
+-            target_tab: targetTab,
+-            error_code: 'NONCE_ACTION_CONFLICT',
+-            message: 'Nonce "' + nonce + '" is already bound to action "' + auditMeta.action + '", cannot replay as "' + action + '".',
+-            http_status: 409,
+-            retryable: false
+-          });
+-        }
+-        if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
+-          return ksBridgeJson_({
+-            status: 'REJECTED',
+-            correlation_id: correlationId,
+-            nonce: nonce,
+-            action: action,
+-            target_tab: targetTab,
+-            error_code: 'NONCE_ACTOR_CONFLICT',
+-            message: 'Nonce "' + nonce + '" is already bound to a different actor; cross-actor replay rejected.',
+-            http_status: 409,
+-            retryable: false
+-          });
+-        }
+-        if (auditMeta.payload_hash && payloadHash && auditMeta.payload_hash !== payloadHash) {
+-          return ksBridgeJson_({
+-            status: 'REJECTED',
+-            correlation_id: correlationId,
+-            nonce: nonce,
+-            action: action,
+-            target_tab: targetTab,
+-            error_code: 'NONCE_PAYLOAD_HASH_CONFLICT',
+-            message: 'Nonce "' + nonce + '" was previously executed with a different payload_hash; mutated replay rejected.',
+-            http_status: 409,
+-            retryable: false
+-          });
+-        }
++      if (!auditMeta) {
++        return ksBridgeJson_({
++          status: 'RECOVERY_REQUIRED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          allocated_id: existing.allocated_id,
++          error_code: 'NONCE_AUDIT_METADATA_MISSING',
++          message: 'Nonce "' + nonce + '" exists in IdAllocations without a matching confirmed AuditLog record; quarantined for Owner reconciliation.',
++          http_status: 409,
++          retryable: false
++        });
++      }
++      if (auditMeta.action && auditMeta.action !== action) {
++        return ksBridgeJson_({
++          status: 'REJECTED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          error_code: 'NONCE_ACTION_CONFLICT',
++          message: 'Nonce "' + nonce + '" is already bound to action "' + auditMeta.action + '", cannot replay as "' + action + '".',
++          http_status: 409,
++          retryable: false
++        });
++      }
++      if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
++        return ksBridgeJson_({
++          status: 'REJECTED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          error_code: 'NONCE_ACTOR_CONFLICT',
++          message: 'Nonce "' + nonce + '" is already bound to a different actor; cross-actor replay rejected.',
++          http_status: 409,
++          retryable: false
++        });
++      }
++      if (auditMeta.payload_hash && (!payloadHash || auditMeta.payload_hash !== payloadHash)) {
++        return ksBridgeJson_({
++          status: 'REJECTED',
++          correlation_id: correlationId,
++          nonce: nonce,
++          action: action,
++          target_tab: targetTab,
++          error_code: 'NONCE_PAYLOAD_HASH_CONFLICT',
++          message: 'Nonce "' + nonce + '" was previously executed with a different payload_hash; mutated or hashless replay rejected.',
++          http_status: 409,
++          retryable: false
++        });
+       }
+       return ksBridgeJson_({
+         status: 'CONFIRMED',
+diff --git a/backend/app/auth.py b/backend/app/auth.py
+index 08c52f3..a37ba02 100644
+--- a/backend/app/auth.py
++++ b/backend/app/auth.py
+@@ -122,7 +122,29 @@ def _token_identifier(token: str, payload: Optional[Dict[str, Any]] = None) -> s
+     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+ 
+ 
+-def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_failure: bool = False) -> bool:
++def _resolve_revocation_actor_role(
++    actor_user_id: str,
++    explicit_role: Optional[str] = None,
++    token_payload: Optional[Dict[str, Any]] = None,
++) -> str:
++    """Resolve the authoritative non-synthetic role for governed token/session revocation writes."""
++    if explicit_role and str(explicit_role).strip():
++        return str(explicit_role).strip().upper()
++    row, err = _auth_row_for(actor_user_id, fresh=False)
++    if err is None and isinstance(row, dict) and str(row.get("role") or "").strip():
++        return str(row.get("role")).strip().upper()
++    if token_payload and str(token_payload.get("role") or "").strip():
++        return str(token_payload.get("role")).strip().upper()
++    return ""
++
++
++def revoke_token(
++    token: str,
++    user_id: str,
++    reason: str = "Logout",
++    raise_on_failure: bool = False,
++    actor_role: Optional[str] = None,
++) -> bool:
+     """Revoke a single active JWT token (in-memory + Apps Script governed persistence)."""
+     payload = decode_access_token(token)
+     token_id = _token_identifier(token, payload)
+@@ -135,6 +157,23 @@ def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_fail
+     if payload and payload.get("exp"):
+         exp_iso = datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()
+ 
++    resolved_role = _resolve_revocation_actor_role(
++        user_id,
++        explicit_role=actor_role,
++        token_payload=payload,
++    )
++    if not resolved_role:
++        logger.warning(
++            "Unable to resolve authoritative actor_role for REVOKE_TOKEN user=%s; token revoked in memory only.",
++            user_id,
++        )
++        if raise_on_failure:
++            raise HTTPException(
++                status_code=status.HTTP_403_FORBIDDEN,
++                detail="Authoritative actor role is required for governed token revocation.",
++            )
++        return False
++
+     from app.apps_script_bridge import apps_script_bridge
+ 
+     try:
+@@ -150,7 +189,7 @@ def revoke_token(token: str, user_id: str, reason: str = "Logout", raise_on_fail
+             },
+             nonce=f"RVK-{token_id[:24]}",
+             actor_user_id=user_id,
+-            actor_role="AUTH",
++            actor_role=resolved_role,
+             invalidate_tabs=["RevokedTokens"],
+         )
+         if res.status != "CONFIRMED" and raise_on_failure:
+@@ -181,6 +220,8 @@ def revoke_all_user_sessions(
+     reason: str = "Security revocation",
+     raise_on_failure: bool = False,
+     nonce: Optional[str] = None,
++    actor_user_id: Optional[str] = None,
++    actor_role: Optional[str] = None,
+ ) -> bool:
+     """Invalidate all active sessions across all devices via Apps Script governed write."""
+     clean_id = str(user_id or "").strip().lower()
+@@ -189,6 +230,23 @@ def revoke_all_user_sessions(
+     _USER_REVOKED_AT[clean_id] = now_epoch
+     reason_hash = hashlib.sha256(str(reason or "").encode("utf-8")).hexdigest()[:8].upper()
+     stable_nonce = str(nonce or "").strip() or f"REVOKE-SESS-{user_id}-{reason_hash}-{now_iso_str[:16]}"
++    effective_actor_id = str(actor_user_id or user_id or "").strip()
++    resolved_role = _resolve_revocation_actor_role(
++        effective_actor_id,
++        explicit_role=actor_role,
++    )
++    if not resolved_role:
++        logger.warning(
++            "Unable to resolve authoritative actor_role for REVOKE_USER_SESSIONS actor=%s target=%s; revoked in memory only.",
++            effective_actor_id,
++            user_id,
++        )
++        if raise_on_failure:
++            raise HTTPException(
++                status_code=status.HTTP_403_FORBIDDEN,
++                detail="Authoritative actor role is required for governed session revocation.",
++            )
++        return False
+ 
+     from app.apps_script_bridge import apps_script_bridge
+ 
+@@ -202,8 +260,8 @@ def revoke_all_user_sessions(
+                 "reason": reason,
+             },
+             nonce=stable_nonce,
+-            actor_user_id=user_id,
+-            actor_role="AUTH",
++            actor_user_id=effective_actor_id,
++            actor_role=resolved_role,
+             invalidate_tabs=["AuthUsers"],
+         )
+         if res.status != "CONFIRMED" and raise_on_failure:
+diff --git a/backend/app/routers/auth.py b/backend/app/routers/auth.py
+index 039cd65..d9cf6db 100644
+--- a/backend/app/routers/auth.py
++++ b/backend/app/routers/auth.py
+@@ -201,7 +201,12 @@ async def logout(
+     user_id = str(current_user.get("user_id") or "")
+     persisted = True
+     if credentials and credentials.credentials:
+-        persisted = revoke_token(credentials.credentials, user_id, reason="User logged out")
++        persisted = revoke_token(
++            credentials.credentials,
++            user_id,
++            reason="User logged out",
++            actor_role=str(current_user.get("role") or ""),
++        )
+     db.log_audit(user_id, "LOGOUT", "AuthUsers", user_id, reason="User logged out and session revoked")
+     if not persisted:
+         return {
+diff --git a/backend/tests/test_cross_language_hmac.py b/backend/tests/test_cross_language_hmac.py
+index b38569b..3b589c6 100644
+--- a/backend/tests/test_cross_language_hmac.py
++++ b/backend/tests/test_cross_language_hmac.py
+@@ -1133,6 +1133,207 @@ process.stdout.write(JSON.stringify({ responses, sheetsData, lockEvents, flushCo
+                 with self.assertRaises(RuntimeError, msg=f"Expected fail-closed for production CORS={bad_cors}"):
+                     cfg.assert_runtime_config()
+ 
++    def test_21_stage_d1_missing_payload_hash_rejected_and_orphan_nonce_without_audit_quarantines(self):
++        # 21a: Non-bootstrap governed write with empty or non-hex payload_hash MUST fail closed (HTTP 400)
++        wire_no_hash, _, _ = _python_build_wire_envelope(
++            action="CREATE_CUSTOMER",
++            target_tab="Customers",
++            nonce="KS-NOHASH-001",
++            actor_user_id="USR-1",
++            actor_role="OWNER_ADMIN",
++            payload_hash="",
++            payload={"customer_id": "CUST-NH-1", "shop_name": "NoHash"},
++        )
++        out_no_hash = self._run_real_sheet_bridge_scenario([wire_no_hash])
++        self.assertEqual(out_no_hash["responses"][0]["status"], "REJECTED")
++        self.assertEqual(out_no_hash["responses"][0]["error_code"], "MISSING_OR_INVALID_PAYLOAD_HASH")
++        self.assertEqual(out_no_hash["responses"][0]["http_status"], 400)
++
++        # 21b: Nonce present in IdAllocations WITHOUT matching AuditLog record MUST quarantine as RECOVERY_REQUIRED
++        orphan_sheets = {
++            "Users": [
++                ["user_id", "full_name", "username", "role", "active"],
++                ["USR-1", "Owner Test", "owner1", "OWNER_ADMIN", True],
++            ],
++            "IdAllocations": [
++                ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
++                ["ALLOC-0000001", "Customers", "CUST-ORPHAN-1", "KS-ORPHAN-NONCE-1", "2026-11-26T00:00:00Z"],
++            ],
++            "AuditLog": [[
++                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
++                "entity_id", "field_changed", "old_value", "new_value", "reason",
++                "approved_by_user_id", "related_record_id"
++            ]],
++            "Customers": [["customer_id", "shop_name", "nonce"]],
++        }
++        wire_replay_orphan, _, _ = _python_build_wire_envelope(
++            action="CREATE_CUSTOMER",
++            target_tab="Customers",
++            nonce="KS-ORPHAN-NONCE-1",
++            actor_user_id="USR-1",
++            actor_role="OWNER_ADMIN",
++            payload_hash="e" * 64,
++            payload={"customer_id": "CUST-ORPHAN-1", "shop_name": "Orphan"},
++        )
++        out_orphan = self._run_real_sheet_bridge_scenario([wire_replay_orphan], initial_sheets=orphan_sheets)
++        r_orphan = out_orphan["responses"][0]
++        self.assertEqual(r_orphan["status"], "RECOVERY_REQUIRED")
++        self.assertEqual(r_orphan["error_code"], "NONCE_AUDIT_METADATA_MISSING")
++        self.assertEqual(r_orphan["http_status"], 409)
++        self.assertFalse(r_orphan["retryable"])
++
++    def test_22_stage_d2_missing_users_active_column_fails_closed(self):
++        no_active_sheets = {
++            "Users": [
++                ["user_id", "full_name", "username", "role"],
++                ["USR-1", "Owner Test", "owner1", "OWNER_ADMIN"],
++            ],
++            "IdAllocations": [["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"]],
++            "AuditLog": [[
++                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
++                "entity_id", "field_changed", "old_value", "new_value", "reason",
++                "approved_by_user_id", "related_record_id"
++            ]],
++            "Customers": [["customer_id", "shop_name", "nonce"]],
++        }
++        wire_cust, _, _ = _python_build_wire_envelope(
++            action="CREATE_CUSTOMER",
++            target_tab="Customers",
++            nonce="KS-NO-ACTIVE-COL-1",
++            actor_user_id="USR-1",
++            actor_role="OWNER_ADMIN",
++            payload={"customer_id": "CUST-NA-1", "shop_name": "Blocked"},
++        )
++        out = self._run_real_sheet_bridge_scenario([wire_cust], initial_sheets=no_active_sheets)
++        self.assertEqual(out["responses"][0]["status"], "REJECTED")
++        self.assertEqual(out["responses"][0]["error_code"], "ACTOR_DIRECTORY_INVALID_SCHEMA")
++        self.assertEqual(out["responses"][0]["http_status"], 503)
++
++    def test_23_stage_d3_plain_decimal_readback_normalization_parity(self):
++        script = r"""
++const fs = require('fs');
++const path = require('path');
++const vm = require('vm');
++const input = JSON.parse(fs.readFileSync(0, 'utf8'));
++const ctx = vm.createContext({ Date, Math, JSON, Object, Array, String, Number, Boolean, RegExp, Error, isFinite });
++vm.runInContext(fs.readFileSync(path.join(input.appsDir, 'WebAppBridge.js'), 'utf8'), ctx);
++const fn = ctx.ksNormalizeReadbackVal_;
++process.stdout.write(JSON.stringify({
++  int_100: fn(100),
++  str_100_00: fn('100.00'),
++  str_0_50: fn('0.50'),
++  float_0_5: fn(0.5),
++  int_10: fn(10),
++  zero_padded: fn('0010'),
++  sci_sku: fn('1E2'),
++  bool_true: fn(true),
++  num_1: fn(1),
++  bool_false: fn(false),
++  num_0: fn(0),
++  empty: fn(''),
++  null_val: fn(null),
++}));
++"""
++        proc = subprocess.run(
++            ["node", "-e", script],
++            input=json.dumps({"appsDir": self.APPS_DIR}),
++            text=True,
++            capture_output=True,
++            cwd=REPO_ROOT,
++            timeout=15,
++            check=True,
++        )
++        res = json.loads(proc.stdout)
++        self.assertEqual(res["int_100"], "100")
++        self.assertEqual(res["str_100_00"], "100")
++        self.assertEqual(res["str_0_50"], "0.5")
++        self.assertEqual(res["float_0_5"], "0.5")
++        self.assertEqual(res["int_10"], "10")
++        self.assertNotEqual(res["int_10"], res["int_100"])
++        self.assertEqual(res["zero_padded"], "0010")
++        self.assertEqual(res["sci_sku"], "1E2")
++        self.assertEqual(res["bool_true"], "true")
++        self.assertNotEqual(res["bool_true"], res["num_1"])
++        self.assertEqual(res["bool_false"], "false")
++        self.assertNotEqual(res["bool_false"], res["num_0"])
++        self.assertEqual(res["empty"], "")
++        self.assertEqual(res["null_val"], "")
++        self.assertNotEqual(res["empty"], res["num_0"])
++
++    def test_24_stage_d4_self_vs_cross_user_token_and_session_revocation_real_roles(self):
++        sheets = {
++            "Users": [
++                ["user_id", "full_name", "username", "role", "active"],
++                ["USR-1", "Owner Test", "owner1", "OWNER_ADMIN", True],
++                ["USR-SALES-1", "Ramesh Salesman", "ramesh.s", "FIELD_SALESMAN", True],
++            ],
++            "IdAllocations": [["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"]],
++            "AuditLog": [[
++                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
++                "entity_id", "field_changed", "old_value", "new_value", "reason",
++                "approved_by_user_id", "related_record_id"
++            ]],
++            "RevokedTokens": [["jti", "user_id", "revoked_at", "expires_at", "reason", "nonce"]],
++            "AuthUsers": [["auth_id", "user_id", "username", "password_hash", "sessions_revoked_at", "nonce"]],
++        }
++        # Self REVOKE_TOKEN by FIELD_SALESMAN -> CONFIRMED
++        w_self_tok, _, _ = _python_build_wire_envelope(
++            action="REVOKE_TOKEN",
++            target_tab="RevokedTokens",
++            nonce="KS-RVK-SELF-1",
++            actor_user_id="USR-SALES-1",
++            actor_role="FIELD_SALESMAN",
++            payload={"jti": "jti-1", "user_id": "USR-SALES-1", "reason": "Logout"},
++        )
++        # Cross-user REVOKE_TOKEN by FIELD_SALESMAN -> REJECTED (SELF_TOKEN_REVOKE_MISMATCH)
++        w_cross_tok, _, _ = _python_build_wire_envelope(
++            action="REVOKE_TOKEN",
++            target_tab="RevokedTokens",
++            nonce="KS-RVK-CROSS-1",
++            actor_user_id="USR-SALES-1",
++            actor_role="FIELD_SALESMAN",
++            payload={"jti": "jti-2", "user_id": "USR-1", "reason": "Hijack"},
++        )
++        # Self REVOKE_USER_SESSIONS by FIELD_SALESMAN -> CONFIRMED
++        w_self_sess, _, _ = _python_build_wire_envelope(
++            action="REVOKE_USER_SESSIONS",
++            target_tab="AuthUsers",
++            nonce="KS-SESS-SELF-1",
++            actor_user_id="USR-SALES-1",
++            actor_role="FIELD_SALESMAN",
++            payload={"user_id": "USR-SALES-1", "sessions_revoked_at": "2026-11-26T00:00:00Z"},
++        )
++        # Cross-user REVOKE_USER_SESSIONS by FIELD_SALESMAN -> REJECTED (INSUFFICIENT_ROLE_FOR_AUTH_USERS)
++        w_cross_sess, _, _ = _python_build_wire_envelope(
++            action="REVOKE_USER_SESSIONS",
++            target_tab="AuthUsers",
++            nonce="KS-SESS-CROSS-1",
++            actor_user_id="USR-SALES-1",
++            actor_role="FIELD_SALESMAN",
++            payload={"user_id": "USR-1", "sessions_revoked_at": "2026-11-26T00:00:00Z"},
++        )
++        # Synthetic actor_role="AUTH" rejected by authoritative Users check (ACTOR_ROLE_MISMATCH)
++        w_synth_auth, _, _ = _python_build_wire_envelope(
++            action="REVOKE_TOKEN",
++            target_tab="RevokedTokens",
++            nonce="KS-RVK-SYNTH-1",
++            actor_user_id="USR-SALES-1",
++            actor_role="AUTH",
++            payload={"jti": "jti-3", "user_id": "USR-SALES-1", "reason": "Legacy"},
++        )
++        out = self._run_real_sheet_bridge_scenario(
++            [w_self_tok, w_cross_tok, w_self_sess, w_cross_sess, w_synth_auth],
++            initial_sheets=sheets,
++        )
++        self.assertEqual(out["responses"][0]["status"], "CONFIRMED")
++        self.assertEqual(out["responses"][1]["status"], "REJECTED")
++        self.assertEqual(out["responses"][1]["error_code"], "SELF_TOKEN_REVOKE_MISMATCH")
++        self.assertEqual(out["responses"][2]["status"], "CONFIRMED")
++        self.assertEqual(out["responses"][3]["status"], "REJECTED")
++        self.assertEqual(out["responses"][3]["error_code"], "INSUFFICIENT_ROLE_FOR_AUTH_USERS")
++        self.assertEqual(out["responses"][4]["status"], "REJECTED")
++        self.assertEqual(out["responses"][4]["error_code"], "ACTOR_ROLE_MISMATCH")
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/backend/tests/test_first_owner_bootstrap.py b/backend/tests/test_first_owner_bootstrap.py
+index 2d66377..85a2fd9 100644
+--- a/backend/tests/test_first_owner_bootstrap.py
++++ b/backend/tests/test_first_owner_bootstrap.py
+@@ -213,8 +213,9 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
+     def test_08_end_to_end_bootstrap_login_replay_conflict_and_no_secret_leak(self):
+         nonce = "BOOTSTRAP-OWNER-E2E-001"
+         req = self._make_bootstrap_request(nonce=nonce)
++        valid_env = self._valid_env()
+ 
+-        with patch.dict(os.environ, self._valid_env(), clear=False):
++        with patch.dict(os.environ, valid_env, clear=False):
+             res = self._run(auth_router.bootstrap_first_owner(self._valid_req(), req))
+ 
+         # Verify response contract & Owner decisions
+@@ -279,7 +280,7 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
+         self.assertFalse(me["must_change_password"])
+ 
+         # Same nonce + identical payload -> idempotent replay, zero duplicate rows
+-        with patch.dict(os.environ, self._valid_env(), clear=False):
++        with patch.dict(os.environ, valid_env, clear=False):
+             replay = self._run(auth_router.bootstrap_first_owner(self._valid_req(), req))
+         self.assertTrue(replay.is_replay)
+         self.assertEqual(replay.user_id, res.user_id)
+@@ -287,7 +288,7 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
+         self.assertEqual(len(db.memory_store["AuthUsers"]), 1)
+ 
+         # Same nonce + modified payload -> 409 IDEMPOTENCY_PAYLOAD_CONFLICT
+-        with patch.dict(os.environ, self._valid_env(), clear=False):
++        with patch.dict(os.environ, valid_env, clear=False):
+             with self.assertRaises(HTTPException) as conflict_ctx:
+                 self._run(
+                     auth_router.bootstrap_first_owner(
+@@ -300,7 +301,7 @@ class TestFirstOwnerBootstrap(unittest.TestCase):
+ 
+         # Fresh nonce after initialization -> permanently rejected 409 OWNER_ALREADY_INITIALIZED
+         req_second = self._make_bootstrap_request(nonce="BOOTSTRAP-OWNER-SECOND-NEW")
+-        with patch.dict(os.environ, self._valid_env(), clear=False):
++        with patch.dict(os.environ, valid_env, clear=False):
+             with self.assertRaises(HTTPException) as dup_ctx:
+                 self._run(auth_router.bootstrap_first_owner(self._valid_req(), req_second))
+         self.assertEqual(dup_ctx.exception.status_code, 409)
