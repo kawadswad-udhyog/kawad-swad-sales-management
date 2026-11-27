@@ -1,0 +1,163 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE D & STAGE J: TEST RECONCILIATION, NON-PASSING DEEP-DIVE & REGRESSION VERIFICATION REPORT
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:17:00Z
+Mission ID           : KS-RELEASE-05
+Baseline Reconciled  : KS-RELEASE-04 Test Report (909 PASS / 0 FAIL / 1 SKIP / 2 BLOCKED = 912 total)
+Current Source State : Frozen KS-RELEASE-04 source (0 source edits; 100% RC4 byte parity)
+Execution Environment: Sandbox Linux container (Python 3.11.15, Node.js, Bun, Playwright, Vite dev server)
+Hard Stop Compliance : 100% isolated offline/local testing; ZERO live external mutations.
+
+================================================================================================
+PART 1: EXACT RECONCILIATION OF KS-RELEASE-04 (909/912) vs FRESH KS-RELEASE-05 STAGE J RUN
+================================================================================================
+Layer / Suite                                         | RC4 (Pass/Tot) | RC5 Stage J (Pass/Tot) | Fail | Skip | Blocked | Exact Command Executed
+------------------------------------------------------+----------------+------------------------+------+------+---------+-----------------------------------------------------------------
+1. Apps Script 42-File Syntax & Integrated Collisions |   42 /   42    |      42 /   42         |   0  |   0  |    0    | node inline vm.Script + top-level function collision scan
+2. Apps Script First-Owner Bootstrap VM Suite         |    7 /    7    |       7 /    7         |   0  |   0  |    0    | node backend/tests/test_apps_script_bootstrap_vm.mjs
+3. Full Python Backend Unittest Discovery (all tests) |  740 /  741    |     740 /  741         |   0  |   1  |    0    | PYTHONPATH=backend SALES_TESTING=1 /usr/bin/python3.11 -m unittest discover -s backend/tests -p 'test_*.py' -v (52.223s)
+   (Subset: RC4 Security Matrix + Cross-Language HMAC)|  (32 /  32)    |     (32 /  32)         |  (0) |  (0) |   (0)   | Included in 741 discovery count (not double-counted)
+4. Bun Frontend Safety & Contract Suites (5 files)    |   85 /   85    |      85 /   85         |   0  |   0  |    0    | bun scripts/test_*.ts (5+39+18+17+6 = 85)
+5. Playwright Browser Suite 1: Role Acceptance Audit  |   12 /   12    |      12 /   12         |   0  |   0  |    0    | node scripts/run_frontend_acceptance_audit.cjs (vs localhost:3000)
+6. Playwright Browser Suite 2: Login Page Upgrade     |    9 /    9    |       9 /    9         |   0  |   0  |    0    | node scripts/test_login_page_upgrade.cjs (vs localhost:3000)
+7. Playwright Browser Suite 3: Usability & Workforce  |    6 /    6    |       6 /    6         |   0  |   0  |    0    | node scripts/verify_usability_workforce_upgrade.cjs (vs localhost:3000)
+8. Frontend Production Build & TypeScript Lint        |    2 /    2    |       2 /    2         |   0  |   0  |    0    | compile_applet (`npm run build`) + lint_applet (`npm run lint`)
+9. Static Security & Dependency Hygiene Audits        |    4 /    4    |       4 /    4         |   0  |   0  |    0    | npm audit (0 vulns) + MongoDB(0) + secrets(0) + aistudio(0)
+10. Git Patch & Bundle Clean-Clone Verification       |    2 /    2    |       2 /    2         |   0  |   0  |    0    | git bundle verify + live origin/main diff check (0 source diffs)
+11. External Live Checks (Workbook Export & Git Push) |    0 /    2    |       0 /    2         |   0  |   0  |    2    | Prohibited by Section 14 Hard Stop + absent live credentials
+------------------------------------------------------+----------------+------------------------+------+------+---------+-----------------------------------------------------------------
+GRAND TOTAL                                           |  909 /  912    |     909 /  912         |   0  |   1  |    2    | 100% REPRODUCIBLE PARITY BETWEEN RC4 AND RC5
+
+PLAYWRIGHT PNG HYGIENE NOTE:
+  Prior to running Playwright in Stage J, `public/screenshots/` was backed up to `/tmp/ks_r05_ss_bak`
+  and restored immediately after all 3 Playwright suites passed 27/27, and temporary JSON logs
+  (`audit_results.json`, `login_audit_results.json`) were deleted. Result: 100% live browser
+  re-verification with ZERO source or screenshot byte drift from `KS_RELEASE_04_RELEASE_CANDIDATE.zip`.
+
+================================================================================================
+PART 2: EXHAUSTIVE 8-FIELD DEEP-DIVE ON ALL 3 NON-PASSING CHECKS (1 SKIPPED + 2 BLOCKED)
+================================================================================================
+
+------------------------------------------------------------------------------------------------
+NON-PASSING CHECK #1 (SKIPPED): Real Uvicorn ASGI Subprocess Startup & Non-Blocking `/health`
+------------------------------------------------------------------------------------------------
+  1. Exact Test / Check Name :
+     `test_startup_port_bind_and_resilience.TestStartupPortBindAndResilience.test_uvicorn_binds_and_serves_health_within_3s_when_sheets_hangs_over_5s`
+  2. File Path & Line Number :
+     `backend/tests/test_startup_port_bind_and_resilience.py`, lines 735–790 (decorator `@unittest.skipUnless(_has_real_uvicorn_and_fastapi(), ...)`)
+  3. Classification          : SKIPPED (1 of 741 Python unittest cases)
+  4. Exact Cause / Skip Text :
+     `Requires real ASGI runtime packages (uvicorn, fastapi, pydantic, starlette, jwt); install backend/requirements.txt to execute full Uvicorn ASGI subprocess check`
+     Specifically, the sandbox container's `/usr/bin/python3.11` environment does not have `uvicorn`
+     installed (and installing external PyPI packages into system Python is unnecessary when Render
+     installs exact pinned dependencies from `backend/requirements.txt`).
+  5. What IS Covered Offline :
+     The companion test in the exact same class (`test_http_subprocess_binds_and_serves_health_within_3s_when_sheets_hangs_over_5s_stdlib`,
+     line 507) AND `test_storage_init_status_transitions_and_health_reporting` (line 448) AND
+     `test_post_bind_scheduler_schedules_nonblocking_callback` (line 430) ALL PASSED in Stage J,
+     verifying the non-blocking lifespan/post-bind architecture and `<3s` health response even when
+     Google Sheets hangs `>5s`.
+  6. Security / Production Criticality :
+     LOW-TO-MODERATE OPERATIONAL RISK (NOT A SECURITY VULNERABILITY). It tests Render cold-start
+     port-binding resilience under ASGI `uvicorn` when Google Sheets is slow. Failure would manifest
+     as a Render deployment health-check timeout (fail-safe; service would not go live), NOT a
+     security bypass or data corruption.
+  7. Residual Risk If Unclosed :
+     Possible Render boot-time dependency mismatch or slow ASGI startup if `backend/requirements.txt`
+     were broken.
+  8. Exact Closure Path & Owner / Gate Step :
+     Automatically closed during Stage I Deployment Runbook Steps 7 & 11 when Render installs
+     `backend/requirements.txt`, boots `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`, and
+     passes live `GET /health` HTTP 200 within `<3s`.
+
+------------------------------------------------------------------------------------------------
+NON-PASSING CHECK #2 (BLOCKED): Live Google Sheets Physical Row-1 Header & 255-vs-256 Tab Audit
+------------------------------------------------------------------------------------------------
+  1. Exact Test / Check Name :
+     Live Production Google Spreadsheet Physical Tab List & Row-1 Header Audit (36 Guarded Tabs:
+     12 `CONFLICTING_CORE_SCHEMA_TABS` + 24 `PENDING_OWNER_MAPPING_TABS`, plus 255-vs-256 1-tab delta).
+  2. File Path & Line Number :
+     `backend/app/schema_registry.py` (guards `CONFLICTING_CORE_SCHEMA_TABS`, `PENDING_OWNER_MAPPING_TABS`,
+     `WORKBOOK_TARGET_TAB_COUNT = 255`); `KS_RELEASE_05_OWNER_WORKBOOK_EXPORT_GUIDE.txt` (read-only script).
+  3. Classification          : BLOCKED (1 of 2 external live checks)
+  4. Exact Cause             :
+     (a) Sandbox has ZERO live Google Sheets credentials (`SALES_GOOGLE_SPREADSHEET_ID=NOT_SET`,
+         `/etc/secrets/sales-service-account.json` absent, `SALES_GOOGLE_SERVICE_ACCOUNT_JSON=NOT_SET`).
+     (b) Mission KS-RELEASE-05 Section 14 Hard Stop strictly prohibits ANY reads or writes against
+         the production Google Spreadsheet by the engineering agent.
+  5. What IS Covered Offline :
+     All 36 unverified tabs are actively HARD-BLOCKED fail-closed in `backend/app/schema_registry.py`
+     so the backend refuses writes rather than corrupting misaligned columns, and every expected
+     header list, type, and required field is documented in `KS_RELEASE_04_WORKBOOK_HEADER_AUDIT.txt`
+     and embedded into the Stage F Owner audit script.
+  6. Security / Production Criticality :
+     **YES — OPERATIONALLY & DATA-INTEGRITY CRITICAL BEFORE PRODUCTION GO-LIVE.**
+     HONEST ASSESSMENT: Even though fail-closed guards protect against silent column misalignment,
+     we MUST NOT claim full production readiness until the Owner executes the strictly read-only
+     workbook export (Stage F) and we reconcile:
+       - The exact 1-tab delta between 256 repo canonical tabs and the 255 cleaned physical workbook.
+       - Physical Row-1 headers of all 12 `CONFLICTING_CORE_SCHEMA_TABS` (including core tables such
+         as `Customers`, `Products`, `Sales`, `Suppliers`, `Expenses`, `RawMaterials`, `ProductionBatches`,
+         `PackagingBatches`, `Workers`, `ShopVisits`, `CustomRoles`, `SalaryIncentives`).
+       - Physical existence / mapping of all 24 `PENDING_OWNER_MAPPING_TABS` (including the 9 extended
+         v2 proposed entries) and empty status of `Users` and `AuthUsers` prior to First-Owner bootstrap.
+  7. Residual Risk If Unclosed :
+     Core business endpoints targeting the 12 conflicting core tabs will intentionally fail closed
+     (blocked writes) in production until physical Row-1 headers are reconciled, OR if a guard were
+     prematurely disabled without verification, header mismatch could misalign business columns.
+  8. Exact Closure Path & Owner / Gate Step :
+     Owner executes strictly read-only `ksExportReadOnlyWorkbookAuditV5()` from
+     `KS_RELEASE_05_OWNER_WORKBOOK_EXPORT_GUIDE.txt` (zero writes, zero business data) BEFORE Gate G3
+     production cutover, supplies the header-only JSON output, and GPT/Owner sign off on reconciliation.
+
+------------------------------------------------------------------------------------------------
+NON-PASSING CHECK #3 (BLOCKED): Live GitHub Remote Push of `release/ks-release-04` Branch
+------------------------------------------------------------------------------------------------
+  1. Exact Test / Check Name :
+     Live GitHub Remote Push & Remote Branch Verification (`release/ks-release-04` -> GitHub origin).
+  2. File Path & Line Number :
+     `KS_RELEASE_04_FROM_C8E5A15.bundle` (`9046a0f9...`), `KS_RELEASE_04_FROM_C8E5A15.patch` (`18244cb0...`),
+     and live GitHub repository `https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git`.
+  3. Classification          : BLOCKED for agent push (VERIFIED READ-ONLY via live `git ls-remote` + clone!)
+  4. Exact Cause             :
+     Sandbox has no GitHub write credentials/PAT, and Section 14 Hard Stop prohibits pushing to
+     GitHub without GPT G2 + Owner G3 authorization.
+  5. CRITICAL NEW LIVE FACT DISCOVERED IN KS-RELEASE-05 STAGE H :
+     Live read-only inspection via `git ls-remote --heads` and fresh read-only clone on 2026-11-27
+     proved:
+       - `refs/heads/release/ks-release-04` does NOT exist on GitHub.
+       - HOWEVER, `refs/heads/main` has ALREADY advanced from `c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6`
+         to `461f023f0db7d4e5c82863a693046bdd48d28e36` (Author: `kawadswad-udhyog`, Date: `2026-11-27 12:34:01 +0530`),
+         which ALREADY contains ALL 5 KS-RELEASE-04 source/test/manifest files byte-identically
+         (`git diff rc4_bundle..461f023f -- apps_script apps_script_patch backend` = EMPTY; 0 source diffs!).
+  6. Security / Production Criticality :
+     **GOVERNANCE / TRACEABILITY CRITICAL (NOW PARTIALLY MITIGATED BY `461f023f` ON `origin/main`).**
+     Because `origin/main` already holds the exact byte-identical KS-RELEASE-04 source code, there is
+     ZERO unpushed security code missing from `origin/main`. However, the commit message on `461f023f`
+     is `chore: update screenshot assets` (which bundles RC4 code + RC4 reports + 6 PNGs), and
+     `release/ks-release-04` (`e4e86802`) is not a separate remote tag/branch. Full provenance options
+     (preserving `461f023f` vs publishing `release/ks-release-04` / tagging release) are documented in
+     `KS_RELEASE_05_GIT_TRANSFER_GUIDE.txt`.
+  7. Residual Risk If Unclosed :
+     Deployment provenance confusion if Render deploys an unintended commit or if `render.yaml` /
+     `public/_redirects` `-dev` URLs are not updated on a clean Owner-approved release commit prior to G3.
+  8. Exact Closure Path & Owner / Gate Step :
+     Owner verifies `origin/main` = `461f023f0db7d4e5c82863a693046bdd48d28e36` (and optionally creates
+     release tag / applies Stage G production Render URL updates on a clean branch after G2 + G3).
+
+================================================================================================
+PART 3: OVERALL HONEST TECHNICAL VERDICT FOR GPT G2 REVIEW
+================================================================================================
+  - Automated Offline Security & Regression Posture : 909/909 executable checks PASS (0 FAIL).
+  - Unresolved Production Go-Live Blockers          :
+      1. [CRITICAL] Owner read-only live Google Sheets Row-1 header & 255-vs-256 tab export (Stage F).
+      2. [CRITICAL] Owner production Render backend URL & config confirmation replacing `-dev` in
+         `render.yaml` & `public/_redirects` (Stage G).
+      3. [OPERATIONAL] Live `uvicorn` ASGI `/health` check on Render during controlled deployment (Stage I).
+      4. [GOVERNANCE] Independent GPT technical acceptance (G2) + Owner deployment authorization (G3–G6).
+  - Gemini does NOT claim production release approval or pass any gate (G1–G6).
+
+================================================================================================
+END OF KS_RELEASE_05_TEST_RECONCILIATION.txt
+================================================================================================

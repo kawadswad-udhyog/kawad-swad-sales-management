@@ -1,0 +1,175 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE G: OWNER INPUT REQUIREMENTS & SECURE PRODUCTION CONFIGURATION HANDOFF
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:19:00Z
+Mission ID           : KS-RELEASE-05
+Governance Policy    : ZERO guessed production URLs, IDs, or secrets.
+                       NEVER assume the `-dev` Render hostname is the production backend.
+
+================================================================================================
+CRITICAL SECURITY WARNING — DO NOT PASTE SECRETS INTO CHAT
+================================================================================================
+  **NEVER paste passwords, private keys, service-account JSON files, JWT secrets, Apps Script
+    HMAC shared secrets, or First-Owner bootstrap tokens into chat, Git commits, or emails.**
+
+  WHERE TO ENTER SECRETS DIRECTLY (SAFE DASHBOARD-ONLY ENTRY):
+    1. Render Backend Environment Variables:
+       Render Dashboard -> Select Production Backend Web Service -> `Environment` -> `Environment Variables`
+       (Enter `SALES_JWT_SECRET`, `SALES_APPS_SCRIPT_SHARED_SECRET`, `SALES_GOOGLE_SPREADSHEET_ID`,
+       `SALES_APPS_SCRIPT_WEBAPP_URL`, and temporary `SALES_OWNER_BOOTSTRAP_SECRET` directly here.)
+    2. Render Secret Files (for Google Service Account JSON):
+       Render Dashboard -> Select Production Backend Web Service -> `Environment` -> `Secret Files`
+       -> Filename: `/etc/secrets/sales-service-account.json` -> Paste JSON directly into Render.
+    3. Google Apps Script Script Properties:
+       Master Google Spreadsheet -> `Extensions` -> `Apps Script` -> `Project Settings` (gear icon)
+       -> `Script Properties` -> `Add script property`
+       (Enter `SALES_APPS_SCRIPT_SHARED_SECRET`, `KS_OWNER_BOOTSTRAP_TOKEN_HASH`, and
+       `KS_OWNER_BOOTSTRAP_EXPIRES_AT` directly here.)
+
+  WHAT THE OWNER SHARES IN CHAT FOR CONFIGURATION CLOSURE (NON-SECRET VALUES ONLY):
+    - Public HTTPS URLs (production frontend URL, production backend URL, Render service names)
+    - Non-secret boolean/mode confirmations (`SALES_ENV=production`, persistent disk mount confirmed)
+    - Read-only Row-1 header JSON export from Stage F (contains ZERO business rows and ZERO secrets)
+    - Confirmation "SET IN RENDER" / "SET IN APPS SCRIPT" for each secret item below.
+
+================================================================================================
+1. ALL 12 REQUIRED PRODUCTION CONFIGURATION ITEMS (OWNER INPUT MATRIX)
+================================================================================================
+
+[ITEM 01] Production Frontend Render URL & Service Name
+  Current Repo Value : `https://kawad-swad-sales-frontend.onrender.com` (`render.yaml:44`, `config.py:205`)
+  Secret?            : NO (share public HTTPS URL in chat)
+  Status             : OWNER CONFIRMATION REQUIRED
+  Action Needed      : Confirm whether `https://kawad-swad-sales-frontend.onrender.com` (or a custom
+                       HTTPS domain) is the authoritative production frontend static site URL.
+
+[ITEM 02] Production Backend Render URL & Service Name (CRITICAL — DO NOT USE `-dev`!)
+  Current Repo Value : DEV ONLY — `https://kawad-swad-sales-dev.onrender.com` / service `kawad-swad-sales-dev`
+                       (`render.yaml:9,12,15,24`; `public/_redirects:2-4`)
+  Secret?            : NO (share public HTTPS URL & service name in chat)
+  Status             : CRITICAL BLOCKER — OWNER INPUT REQUIRED
+  Action Needed      : Provide the authoritative PRODUCTION Render backend service name and HTTPS URL.
+                       We strictly refuse to assume `kawad-swad-sales-dev.onrender.com` is production.
+                       `render.yaml` and `public/_redirects` must be updated to the real production
+                       backend URL on an Owner-approved commit prior to Gate G3 deployment.
+
+[ITEM 03] Frontend API Base URL (`VITE_API_URL`) & Proxy Rewrite Mode
+  Current Repo Value : Blank in production (`render.yaml:20`, `src/services/api.ts:68`) so browser uses
+                       same-origin Render rewrites (`/api/*`, `/auth/*`, `/health`).
+  Secret?            : NO
+  Status             : OWNER CONFIRMATION REQUIRED
+  Action Needed      : Confirm keeping same-origin Render proxy rewrites (recommended — zero CORS
+                       friction) once Item 02 production backend URL is placed into `render.yaml`
+                       and `public/_redirects`.
+
+[ITEM 04] Backend Health Check Endpoint & Render Health Check Path
+  Current Repo Value : `GET /health` (`backend/main.py`, `render.yaml:11`, `public/_redirects:3`)
+  Secret?            : NO
+  Status             : VERIFIED IN CODE — OWNER CONFIRMATION ON RENDER SERVICE
+  Action Needed      : Confirm Render Production Backend Health Check Path is set to `/health`
+                       (returns minimal JSON within `<3s` with zero secret disclosure).
+
+[ITEM 05] Production CORS Origins (`SALES_CORS_ORIGINS`)
+  Current Repo Value : `https://kawad-swad-sales-frontend.onrender.com` (`render.yaml:43-44`, `config.py:186-238`)
+  Secret?            : NO (share exact HTTPS origin list in chat)
+  Status             : OWNER CONFIRMATION REQUIRED
+  Action Needed      : Provide exact comma-separated HTTPS origin(s) for production frontend (e.g.,
+                       custom domain if any). Note: When `SALES_ENV=production`, `config.py` fails
+                       closed if `*` or `localhost` is present.
+
+[ITEM 06] Production Runtime Mode, Worker Count & Persistent Disk Mount
+  Current Repo Value : `SALES_ENV=production`, `SALES_TESTING` unset/`false`, `WEB_CONCURRENCY=1`,
+                       `SALES_INSTANCE_COUNT=1`, `SALES_TX_COORDINATOR_DB_PATH=/var/data/kawad_swad/tx_coordinator.sqlite3`
+                       (`render.yaml:45-58`, `backend/app/transaction_safety.py:876`)
+  Secret?            : NO
+  Status             : OWNER INFRASTRUCTURE CONFIRMATION REQUIRED
+  Action Needed      : Confirm a Render Persistent Disk (`>=1 GB`) is mounted at `/var/data/kawad_swad`
+                       on the Production Backend Web Service, and `WEB_CONCURRENCY=1` /
+                       `SALES_INSTANCE_COUNT=1` are enforced so SQLite WAL transaction coordination
+                       is durable and single-writer safe.
+
+[ITEM 07] Production Google Spreadsheet ID (`SALES_GOOGLE_SPREADSHEET_ID`)
+  Current Repo Value : NOT SET (`sync: false` in `render.yaml:37-38`)
+  Secret?            : SENSITIVE IDENTIFIER — Enter directly in Render Dashboard Environment Variables
+                       (do NOT commit to Git).
+  Status             : OWNER ACTION REQUIRED IN RENDER DASHBOARD
+  Action Needed      : Enter the exact production Master Google Spreadsheet ID in Render Backend
+                       Environment Variables (`SALES_GOOGLE_SPREADSHEET_ID`). Confirm in chat only
+                       as "SET IN RENDER" (or redacted first/last 4 chars).
+
+[ITEM 08] Google Service Account Credentials File (`/etc/secrets/sales-service-account.json`)
+  Current Repo Value : Path configured in `render.yaml:39-40` & `config.py:9-12`; file absent locally.
+  Secret?            : YES — PRIVATE KEY! **NEVER PASTE IN CHAT.**
+  Status             : OWNER ACTION REQUIRED IN RENDER SECRET FILES
+  Action Needed      : Upload the Google Service Account JSON directly into Render Dashboard ->
+                       `Secret Files` -> `/etc/secrets/sales-service-account.json`. Confirm the
+                       service account email is shared on the Master Google Spreadsheet with
+                       strictly LEAST-PRIVILEGE access (Viewer / Read-Only, because all governed
+                       writes flow through the signed Apps Script Web App Bridge!).
+
+[ITEM 09] Backend JWT Signing Secret (`SALES_JWT_SECRET`)
+  Current Repo Value : NOT SET (`sync: false` in `render.yaml`)
+  Secret?            : YES — CRYPTOGRAPHIC SECRET! **NEVER PASTE IN CHAT.**
+  Status             : OWNER ACTION REQUIRED IN RENDER DASHBOARD
+  Action Needed      : Generate a fresh cryptographically random secret (`>=48` characters, e.g.
+                       `openssl rand -hex 32`) and enter it directly in Render Dashboard under
+                       `SALES_JWT_SECRET`. Must be UNIQUE (never reused as HMAC or bootstrap secret).
+
+[ITEM 10] Production Apps Script Web App URL (`SALES_APPS_SCRIPT_WEBAPP_URL`)
+  Current Repo Value : NOT SET (`sync: false` in `render.yaml:63-64`)
+  Secret?            : SENSITIVE ENDPOINT — Enter directly in Render Dashboard after G3 GAS deploy.
+  Status             : OWNER ACTION REQUIRED AT STAGE I STEP 6
+  Action Needed      : After Gate G2 + G3 approval and bound Apps Script deployment ("Execute as: Me",
+                       "Who has access: Anyone" — protected by mandatory HMAC-SHA256), paste the
+                       resulting `https://script.google.com/macros/s/<DEPLOY_ID>/exec` URL directly
+                       into Render Dashboard `SALES_APPS_SCRIPT_WEBAPP_URL`.
+
+[ITEM 11] Bridge HMAC Shared Secret (`SALES_APPS_SCRIPT_SHARED_SECRET`)
+  Current Repo Value : NOT SET (`sync: false` in `render.yaml`; read by `WebAppBridge_BootstrapIntegration.js:53`)
+  Secret?            : YES — CRYPTOGRAPHIC SECRET! **NEVER PASTE IN CHAT.**
+  Status             : OWNER ACTION REQUIRED IN BOTH RENDER & APPS SCRIPT PROJECT SETTINGS
+  Action Needed      : Generate a fresh cryptographically random secret (`>=48` characters, DIFFERENT
+                       from `SALES_JWT_SECRET` and `SALES_OWNER_BOOTSTRAP_SECRET`) and enter the
+                       EXACT same value directly into:
+                         (a) Render Backend Environment Variable: `SALES_APPS_SCRIPT_SHARED_SECRET`
+                         (b) Apps Script -> Project Settings -> Script Properties: `SALES_APPS_SCRIPT_SHARED_SECRET`
+
+[ITEM 12] Temporary First-Owner Bootstrap Window Secrets & CA Policy Overrides
+  Current Repo Value : `SALES_OWNER_BOOTSTRAP_ENABLED=false` (fail-closed default);
+                       `SALES_CA_POLICY_CONFIG_JSON` optional (`config.py`)
+  Secret?            : YES FOR BOOTSTRAP SECRET! **NEVER PASTE IN CHAT.**
+  Status             : OWNER ACTION REQUIRED ONLY DURING CONTROLLED STAGE I STEP 12 WINDOW
+  Action Needed      :
+    (a) Leave `SALES_OWNER_BOOTSTRAP_ENABLED=false` during initial deployment and health verification.
+    (b) ONLY at Stage I Step 12 (after confirming `Users` and `AuthUsers` are physically empty):
+        - Generate a fresh temporary `>=48`-char bootstrap secret (DIFFERENT from JWT & HMAC secrets).
+        - Compute its lowercase 64-char SHA-256 hex digest locally on your machine:
+          `printf '%s' '<BOOTSTRAP_SECRET>' | shasum -a 256` (do NOT echo into chat/logs).
+        - Pick a short UTC expiry window (e.g., 30 minutes from now, `YYYY-MM-DDTHH:MM:SSZ`).
+        - Enter in Render Dashboard:
+            `SALES_OWNER_BOOTSTRAP_ENABLED=true`
+            `SALES_OWNER_BOOTSTRAP_SECRET=<raw temporary secret>`
+            `SALES_OWNER_BOOTSTRAP_EXPIRES_AT=<ISO-8601 UTC expiry>`
+        - Enter in Apps Script Project Settings -> Script Properties:
+            `KS_OWNER_BOOTSTRAP_TOKEN_HASH=<64-char lowercase SHA-256 hex>`
+            `KS_OWNER_BOOTSTRAP_EXPIRES_AT=<exact same ISO-8601 UTC expiry>`
+    (c) Immediately after First-Owner bootstrap returns `CONFIRMED` and Owner login succeeds:
+        - Set `SALES_OWNER_BOOTSTRAP_ENABLED=false` on Render and DELETE `SALES_OWNER_BOOTSTRAP_SECRET`
+          and `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` from Render Environment Variables.
+        - Apps Script automatically latches `KS_OWNER_BOOTSTRAP_COMPLETED=true` permanently.
+    (d) Confirm whether any custom `SALES_CA_POLICY_CONFIG_JSON` overrides are needed (non-secret).
+
+================================================================================================
+2. PRE-CUTOVER WORKBOOK CLOSURE INPUT REQUIRED FROM OWNER (NON-SECRET)
+================================================================================================
+  1. Execute `ksExportReadOnlyWorkbookAuditV5()` from `KS_RELEASE_05_OWNER_WORKBOOK_EXPORT_GUIDE.txt`
+     and provide the header-only JSON output (zero business rows, zero secrets).
+  2. Approve reconciliation decisions for:
+     - The 1-tab variance (256 canonical repo tabs vs 255 physical workbook tabs).
+     - The 12 `CONFLICTING_CORE_SCHEMA_TABS` and 24 `PENDING_OWNER_MAPPING_TABS`.
+     - ID prefix cutover policy (`PKG`/`PKB`, `RCPT`/`PAY`, `SAL`).
+
+================================================================================================
+END OF KS_RELEASE_05_OWNER_INPUT_REQUIREMENTS.txt
+================================================================================================

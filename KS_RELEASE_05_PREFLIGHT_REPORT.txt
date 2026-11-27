@@ -1,0 +1,111 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE A PREFLIGHT, KS-RELEASE-04 PRESERVATION & WORKSPACE INTEGRITY REPORT
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:16:13Z
+Mission ID           : KS-RELEASE-05 (Final Independent Audit Evidence & Owner Deployment Handoff)
+Previous Missions    : KS-RELEASE-01, KS-RELEASE-02, KS-RELEASE-03, KS-RELEASE-04
+Source Modification  : ZERO (100% preserved frozen KS-RELEASE-04 source; no broad rewrite)
+Gate Status          : SUBMITTED FOR INDEPENDENT GPT AUDIT (G2) / REQUIRES OWNER APPROVAL (G3-G6)
+Hard Stop Compliance : STRICTLY OBSERVED (Zero deployments, zero live Render/Sheets/Apps Script mutations)
+
+------------------------------------------------------------------------------------------------
+1. STAGE A — 10-POINT VERIFICATION OF PRESERVED KS-RELEASE-04 RELEASE CANDIDATE
+------------------------------------------------------------------------------------------------
+  [01] Package SHA-256       : 5bb6de1cc6aa77800ed78ece9857cad9ea1897b9516849b2125a5c68007c4bc6 (4,210,623 bytes — UNTOUCHED)
+  [02] Manifest SHA-256      : 4d804228371c29ea90c7a31caaece78ffc6676215f3d6a35e8ed63cd66fd8dd7 (43,783 bytes — UNTOUCHED)
+  [03] ZIP Structural Count  : 416 members (415 indexed + 1 self manifest); zipfile.testzip()=None
+  [04] Member Checksum Audit : 415/415 indexed ZIP members match KS_RELEASE_04_SHA256_MANIFEST.txt (mismatches=0, extra=0); self-manifest parity=True
+  [05] Source-to-Package Parity (RC4 ZIP vs Current Workspace Disk):
+         - Byte-identical files            : 416/416 (100.0% EXACT PARITY)
+         - Modified files on disk          : 0
+         - Missing RC4 files on disk       : 0
+         (NOTE: RC4's own preflight report had a line-parsing defect when reading RC3's manifest;
+          this KS-RELEASE-05 audit fixes the parser and confirms 416/416 RC4 ZIP members match
+          current workspace disk byte-for-byte with 0 mismatches and 0 drifted PNGs.)
+  [06] Required RC4 Files    : ALL 13/13 KS_RELEASE_04_* artifacts PRESENT & INTACT:
+         - KS_RELEASE_04_RELEASE_CANDIDATE.zip              |  4,210,623 B | 5bb6de1cc6aa77800ed78ece9857cad9ea1897b9516849b2125a5c68007c4bc6
+         - KS_RELEASE_04_SHA256_MANIFEST.txt                |     43,783 B | 4d804228371c29ea90c7a31caaece78ffc6676215f3d6a35e8ed63cd66fd8dd7
+         - KS_RELEASE_04_PREFLIGHT_REPORT.txt               |     10,161 B | 5cd4e290d9d09654e07f8eda68f8a380badf7d84df2dfe5769cc82cf71a72a82
+         - KS_RELEASE_04_DATABASE_RECONCILIATION.txt        |     84,856 B | b0429c4ed49ae106f51d575536df9aaa43bb1dc807a0be510e93981d2819f39d
+         - KS_RELEASE_04_WORKBOOK_HEADER_AUDIT.txt          |     43,698 B | 59543c1ab59f60e754d68ff40b51198b71ab3056c906f775c84bd3545918f583
+         - KS_RELEASE_04_SECURITY_TEST_MATRIX.txt           |     18,456 B | 0b7010d809d4cee0e5f35e430dc8280a3672062229c435c02b4422ea30888dae
+         - KS_RELEASE_04_OWNER_INPUT_REQUIREMENTS.txt       |      7,273 B | b59776c6b49b51716d8fe9db21d171bcda297627581e442f96b4dbf486afa1d5
+         - KS_RELEASE_04_GIT_TRACEABILITY_REPORT.txt        |      7,232 B | 00621fd939945f8f7ed5ef635cac9be6a2047fbb7f359c19c7629e96a3f926a9
+         - KS_RELEASE_04_TEST_REPORT.txt                    |      8,258 B | 6f7e432c4d45bbfa4d8045c34ebfe6f9cebc84f03c67e36982c83c2aa50532de
+         - KS_RELEASE_04_DEPLOYMENT_READINESS_REPORT.txt    |      7,955 B | d712f1f58d2ba1ec46c6406b3d1de16c1032b566c56b891eb19fd7d1363cc7e0
+         - KS_RELEASE_04_CHANGELOG.txt                      |      5,605 B | c87c92f4d10a246d4e3086c3a9fff61f3c30680df7b57376ba4389bf1ae1ecf7
+         - KS_RELEASE_04_FROM_C8E5A15.patch                 |     56,033 B | 18244cb04cae915a55602ec264d50184aa92c90ce8439cf3126d5ff44d0aabc8
+         - KS_RELEASE_04_FROM_C8E5A15.bundle                |     11,950 B | 9046a0f9d217bfee6aefc2cdec96e15d3630c1e9f7fcf56f8fdaf6341fc1a091
+  [07] Excluded Files Check  : 0 violations inside RC4 ZIP (0 node_modules/dist/.git/__pycache__/.env/aistudio/*.zip/*.bundle)
+  [08] Secret Scanning (RC4) : 1 hits across all 416 RC4 ZIP members (0 leaked keys/credentials)
+  [09] Package Hygiene (RC4) : rc=0 | ARCHIVE_NAME=KS_RELEASE_04_RELEASE_CANDIDATE.zip | SIZE_BYTES=4210623 | ENTRY_COUNT=416 | FILE_COUNT=416 | TESTZIP_BAD_MEMBER=None | ROOT_LAYOUT=REPOSITORY_ROOT | TIMESTAMP_UTC=2026-11-27T07:01:52.325570+00:00 | SHA256=5bb6de1cc6aa77800ed78ece9857cad9ea1897b9516849b2125a5c68007c4bc6 | STATUS=PASS
+  [10] Live Git Provenance   : Live GitHub origin/main verified via `git ls-remote` & read-only clone:
+                               origin/main = 461f023f0db7d4e5c82863a693046bdd48d28e36 (parent c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6).
+                               RC4 bundle commit = e4e868020de7f43cfb22122a14c88ef380be32ae (`release/ks-release-04`, NOT yet pushed as remote branch).
+                               0 source/test/manifest diffs between `e4e86802` and live `origin/main` `461f023f` (details in KS_RELEASE_05_GIT_TRANSFER_GUIDE.txt).
+
+------------------------------------------------------------------------------------------------
+2. COMPLETE PRESERVED PRIOR ARTIFACTS INVENTORY (ZERO MODIFICATIONS / ZERO DELETIONS)
+------------------------------------------------------------------------------------------------
+  A. KS-RELEASE-04 (13 files): ALL VERIFIED INTACT ABOVE
+  B. KS-RELEASE-03 (12 files):
+     c814021a174a6a0990ec0e901d7efa9f296fe65ce1a318cadf5cee89e97670d1       5,805 B  KS_RELEASE_03_CHANGELOG.txt
+     0f5f99167f44789b2ead6a3231613b11f753e0f21658201499e79785f7f9ffbd      74,220 B  KS_RELEASE_03_DATABASE_INVENTORY_RECONCILIATION.txt
+     ece3daa0506b92ab3af30b1debdbf6d84187be820b07bfaa5a9f752d172033ff       7,380 B  KS_RELEASE_03_DEPLOYMENT_READINESS_REPORT.txt
+     573783b62222507590d4af15ef86b0d9b52796800034070668ff7c34aedaa8cc       5,416 B  KS_RELEASE_03_FROM_2FC7A23.bundle
+     b8a0977630def153e50333816c89b22697cfb34f4432409368f261bc693878d4      39,235 B  KS_RELEASE_03_FROM_2FC7A23.patch
+     95ff76705dfa90e856cc82666716ef79fa22191b8dbc709afdba5dc2ac6d3190       6,685 B  KS_RELEASE_03_GIT_TRACEABILITY_REPORT.txt
+     eba7281498ba4c564743862a1d6f19310563bc765239b1dbec116a0f3a094c44       7,769 B  KS_RELEASE_03_PREFLIGHT_REPORT.txt
+     97a5e43b1021e6e3fbdbc874c41392f4cc615fdb4b0d6299cdb403db5f1c4b16   4,182,291 B  KS_RELEASE_03_RELEASE_CANDIDATE.zip
+     586418b0174c2110f52772fec148d022e1bbe7f8a6752c21687eb543dab7afdb      10,362 B  KS_RELEASE_03_SECURITY_AUDIT.txt
+     b60fa2432d12955f29c2f446c46904b0c989a63b13b88751bd62868d5b7e3548      51,659 B  KS_RELEASE_03_SHA256_MANIFEST.txt
+     a28c64e0260b555e6b780faec25e7812fcd182d702133b8a2ec9128a810e7e8c       7,149 B  KS_RELEASE_03_TEST_REPORT.txt
+     76379f22ab88a215a5ff409a161ecb3cb5828f07e0c33af0c0d87e021628d8fb      29,660 B  KS_RELEASE_03_WORKBOOK_HEADER_AUDIT.txt
+  C. KS-RELEASE-02 (11 files):
+     f28d4be0b8e38ec35ef9624ebbb74bd9cf5d40e38fa1340c7b9b1743bfd3a7ef       7,194 B  KS_RELEASE_02_CHANGELOG.txt
+     f6d323af731c34993bc62fb116bc19f1352c55039aa1b34f3765939de3fe926b     114,877 B  KS_RELEASE_02_DATABASE_ALLOWLIST_AUDIT.txt
+     8b5c76dee893de8d66093b88a2c526d2da750af40e6500620763f77d186d73d9       4,060 B  KS_RELEASE_02_DEPENDENCY_REPORT.txt
+     dc656c00877cc26c79c1131e28df9dcb0875f71a95d2c651e42fb037ec50d924       6,697 B  KS_RELEASE_02_DEPLOYMENT_READINESS_REPORT.txt
+     44c423de8af85a98ea27981f9b32d3b38c135a8681df0a50ca59704fb45d2623   1,724,657 B  KS_RELEASE_02_FROM_DA87C0D.bundle
+     3ea4f1db09fa9c2da6f2fdfec31f9e5ef54ab72b73f9c380ae49802b77bf6bc4   5,991,247 B  KS_RELEASE_02_FROM_DA87C0D.patch
+     d03efc17f6c4af4289656d8e683d5ac5daa6e8611c72684d0f02ba9b1b215462       5,474 B  KS_RELEASE_02_PREFLIGHT_REPORT.txt
+     8ca273e9af12cb35bd8b1eb70a17232226b1f2f3a944d2e52ab8ba5efcf79d82      10,596 B  KS_RELEASE_02_SECURITY_REPORT.txt
+     9f598aeee844503cacb578eba4991b204bde4ad4a0f0f8f6767500412553504f      52,051 B  KS_RELEASE_02_SHA256_MANIFEST.txt
+     aa8f85a04b93d5603119f8201539fdf03e59463491d8e0eb8908d65e731ca13f      10,193 B  KS_RELEASE_02_SOURCE_RECONCILIATION_REPORT.txt
+     edd396ca663d417ef71984e662c8c7ae62a4872c34eb1ca3a92b810926f78f31       7,352 B  KS_RELEASE_02_TEST_REPORT.txt
+  D. KS-RELEASE-01 (8 files):
+     53f8030ecf72d01d8b32efeb06d60c59518e48ee35e9d350c5703581eb7601fa       5,968 B  KS_RELEASE_01_CHANGELOG.txt
+     552362ac01a02b2adc993383ceaf6c190aee76fe7866f771181f32fba12356c3       8,201 B  KS_RELEASE_01_DEPENDENCY_REPORT.txt
+     a79f79157b98d85b4783eee857bdca7fbbfff91f65551cb3acb2e1ab5f7f9690      13,527 B  KS_RELEASE_01_DEPLOYMENT_READINESS_REPORT.txt
+     ad7ba6744d0b02d5fb8caa02fe41974048a0a5f7ca03e59213c9f36e0389ac9b      16,683 B  KS_RELEASE_01_PREFLIGHT_REPORT.txt
+     ddbf98c04aacc06a96de7a9f998fa888a314593d781672296b056cbdf8e60351       7,143 B  KS_RELEASE_01_SECURITY_REPORT.txt
+     8de6700cec3a3a29f7a31e4e8184a9f4444cf106cd3421414fe9ea7ecb62dbb3      49,277 B  KS_RELEASE_01_SHA256_MANIFEST.txt
+     eeb2d0870a565d4fa0918f2a28455a7235ce3f53ea04221c7f1bc69b8894c12e      13,822 B  KS_RELEASE_01_SOURCE_RECONCILIATION_REPORT.txt
+     226f3cc273f3d6436b5572ff357f7af19690098d0a269abcf82c62faf969e699       8,884 B  KS_RELEASE_01_TEST_REPORT.txt
+
+------------------------------------------------------------------------------------------------
+3. APPS SCRIPT BOUND-PROJECT vs PATCH-PACKAGE PARITY (UNCHANGED RC4 FROZEN STATE)
+------------------------------------------------------------------------------------------------
+  AuditAndExceptions.js                    | 04350e26bfe571d538347d6b32393f1ce2cc323177884ef6551cff55bbc76394 | 10,341 B | PARITY=EXACT
+  BootstrapOwnerHandler.js                 | 15e9026762a86855778928dbcb69686e72c4f6c86b657094e8d79708366084af | 45,474 B | PARITY=EXACT
+  Config.js                                | 7d7fcbb3c66ac79ba3fb9529580ab9a5e5fb6f07a10579f51f98b7b4bd2a7bb9 |  4,911 B | PARITY=EXACT
+  IdAllocator.js                           | c2066daea436b7f6704d2e2562eac927abff4131d2dafe2f834bdc8a0786b845 |  5,044 B | PARITY=EXACT
+  WebAppBridge.js                          | 776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6 | 48,176 B | PARITY=EXACT
+  WebAppBridge_BootstrapIntegration.js     | 9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f | 17,760 B | PARITY=EXACT
+  SOURCE_INVENTORY_AND_SHA256.txt          | 24b4806e17aca4878c5c999ce066bcbed78406e229d5a87518206c9748a0ddd9 |  6,919 B | VERIFIED
+  MERGED_SHA256_MANIFEST.md                | 9cfa4a0fdc4fa282d47becd41de692b00e5c38efff1e81047f3a2b37990db720 |    769 B | VERIFIED
+
+------------------------------------------------------------------------------------------------
+4. WORKSPACE HYGIENE & STATIC SECURITY PREFLIGHT
+------------------------------------------------------------------------------------------------
+  public/assets/aistudio/ present                : FALSE (0 files)
+  MongoDB drivers / imports (backend,src,gas)    : 0 hits (Google Sheets is sole authoritative DB)
+  Hardcoded secrets / private keys / AIza / ghp_ : 0 hits
+  Local .env / service-account JSON files        : 0 present (only .env.example exists)
+  npm audit vulnerabilities                      : 0 total (info=0, low=0, moderate=0, high=0, critical=0)
+  Apps Script 42-file JS syntax check            : 42/42 valid JS; 0 collisions in 6 integrated files
+
+================================================================================================
+END OF KS_RELEASE_05_PREFLIGHT_REPORT.txt
+================================================================================================

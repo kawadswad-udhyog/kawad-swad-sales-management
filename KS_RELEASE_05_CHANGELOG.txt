@@ -1,0 +1,94 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+RELEASE CHANGELOG (KS-RELEASE-04 -> KS-RELEASE-05) & FULL RELEASE LINEAGE
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:22:00Z
+Mission ID           : KS-RELEASE-05 (Final Independent Audit Evidence & Owner Deployment Handoff)
+Previous Mission     : KS-RELEASE-04 (Final Security Verification, Database Closure & Handoff)
+Release Candidate    : KS_RELEASE_05_RELEASE_CANDIDATE.zip
+
+================================================================================================
+1. SOURCE CODE DELTA (KS-RELEASE-04 -> KS-RELEASE-05)
+================================================================================================
+  Application Source Files Modified : ZERO (0 files modified; 0 broad rewrites)
+  Apps Script Bound Files Modified  : ZERO (100% byte-identical to KS-RELEASE-04)
+  Python Backend Files Modified     : ZERO (100% byte-identical to KS-RELEASE-04)
+  React Frontend Files Modified     : ZERO (100% byte-identical to KS-RELEASE-04)
+  Test Files Modified               : ZERO (100% byte-identical to KS-RELEASE-04)
+  RC4 ZIP-to-Disk Parity            : 416 / 416 members byte-identical (100.0% EXACT PARITY)
+
+  Rationale:
+    Stage B bridge security audit, Stage C 14-control acceptance matrix, and Stage J complete
+    regression execution (909/909 executable checks PASS, 0 FAIL, 1 sandbox-skipped `uvicorn`
+    subprocess check, 2 external live checks blocked by Section 14 Hard Stop) uncovered ZERO
+    reproducible defects in the frozen KS-RELEASE-04 codebase. Therefore, the exact audited
+    KS-RELEASE-04 source was preserved 100% unchanged.
+
+================================================================================================
+2. NEW AUDIT EVIDENCE & OWNER HANDOFF DELIVERABLES ADDED IN KS-RELEASE-05 (13 ARTIFACTS)
+================================================================================================
+  01. KS_RELEASE_05_PREFLIGHT_REPORT.txt
+      - Full 10-point Stage A verification of untouched `KS_RELEASE_04_RELEASE_CANDIDATE.zip`
+        (416/416 members byte-verified against manifest AND disk; fixes RC4's RC3 manifest-parser
+        formatting bug; confirms all RC1–RC4 prior artifacts intact).
+  02. KS_RELEASE_05_BRIDGE_SECURITY_AUDIT.txt
+      - Complete Stage B line-by-line diff (`c8e5a15 -> e4e86802`) and 9-point security analysis
+        of all 3 KS-RELEASE-04 safeguards in `apps_script/WebAppBridge.js` plus full end-to-end
+        call-chain audit across all 9 threat classes.
+  03. KS_RELEASE_05_SECURITY_ACCEPTANCE_MATRIX.txt
+      - Complete Stage C 14-control matrix (Controls A–N) mapping exact source files, functions,
+        line numbers, test files, test names, expected behaviors, actual results, and status.
+  04. KS_RELEASE_05_TEST_RECONCILIATION.txt
+      - Complete Stage D & Stage J reconciliation of the 909/912 KS-RELEASE-04 baseline, fresh
+        Stage J regression results (909 PASS / 0 FAIL / 1 SKIP / 2 BLOCKED), exhaustive 8-field
+        deep-dive on all 3 non-passing checks, and honest security-criticality verdict.
+  05. KS_RELEASE_05_DATABASE_FINAL_RECONCILIATION.txt
+      - Complete Stage E 265-entry + 1 deprecated alias (`ExceptionLogs`) table containing ALL 13
+        required governance/permission/role/validation/audit/presence columns plus verbatim answers
+        to all 10 Stage E database questions (218 / 255 / 256 / 265).
+  06. KS_RELEASE_05_OWNER_WORKBOOK_EXPORT_GUIDE.txt
+      - Enhanced Stage F strictly read-only Google Apps Script export (`ksExportReadOnlyWorkbookAuditV5`
+        and downloadable modal `ksShowReadOnlyAuditDownloadDialog`) scanning workbook metadata,
+        all sheet names, Row-1 headers in exact order, all 36 guarded tabs (12 conflicting + 24
+        pending), duplicate/blank/missing/unexpected headers, and `Users`/`AuthUsers` row counts
+        with ZERO writes and ZERO business data reads.
+  07. KS_RELEASE_05_OWNER_INPUT_REQUIREMENTS.txt
+      - Complete Stage G 12-item production configuration handoff explicitly instructing the Owner
+        NEVER to paste secrets into chat, showing direct Render Dashboard / Secret Files / Apps
+        Script Project Settings entry paths, and flagging `-dev` backend URL isolation.
+  08. KS_RELEASE_05_GIT_TRANSFER_GUIDE.txt
+      - Complete Stage H live GitHub verification (`git ls-remote --heads` + read-only clone)
+        documenting the critical live finding that `origin/main` has already advanced to
+        `461f023f0db7d4e5c82863a693046bdd48d28e36` (100% source-identical to `e4e86802`), while
+        `release/ks-release-04` is not a remote branch, with safe non-force-push Owner procedures.
+  09. KS_RELEASE_05_DEPLOYMENT_RUNBOOK.txt
+      - Complete Stage I 15-step controlled production deployment runbook (each step with all 6
+        required governance fields) strictly separating application deployment from live business
+        data operations.
+  10. KS_RELEASE_05_ROLLBACK_PLAN.txt
+      - Dedicated Stage I rollback & forensic quarantine plan covering Render, Apps Script, Git
+        (zero force-push), SQLite WAL preservation, Google Sheets non-destructive quarantine,
+        secret rotation, and post-rollback verification.
+  11. KS_RELEASE_05_CHANGELOG.txt (this file)
+  12. KS_RELEASE_05_SHA256_MANIFEST.txt
+  13. KS_RELEASE_05_RELEASE_CANDIDATE.zip
+
+================================================================================================
+3. PRESERVED PRIOR RELEASE LINEAGE (100% UNTOUCHED ON DISK)
+================================================================================================
+  - KS-RELEASE-01 (8 preserved reports/manifests): Initial source reconciliation & audit baseline.
+  - KS-RELEASE-02 (11 preserved files incl. `FROM_DA87C0D` patch/bundle): Major bridge security
+    hardening (W1–W6), authoritative actor verification, deterministic CORS, read-back checks.
+  - KS-RELEASE-03 (12 preserved files incl. `KS_RELEASE_03_RELEASE_CANDIDATE.zip` & `FROM_2FC7A23`):
+    Server-side actor role resolution for token revocation, fail-closed `Users.active` header check,
+    decimal read-back normalization, 265-table inventory baseline (merged into `origin/main` `c8e5a15`).
+  - KS-RELEASE-04 (13 preserved files incl. `KS_RELEASE_04_RELEASE_CANDIDATE.zip` & `FROM_C8E5A15`):
+    3 `WebAppBridge.js` edge-case hardenings (incomplete AuditLog quarantine, duplicate/malformed
+    `Users` actor guard, scientific-notation JS float read-back parity) + `test_ks_release_04_security_matrix.py`
+    (subsequently present in live `origin/main` `461f023f`).
+  - KS-RELEASE-05 (13 deliverables): Zero source changes; final independent audit evidence &
+    Owner deployment handoff package for GPT G2 review and Owner G3–G6 control.
+
+================================================================================================
+END OF KS_RELEASE_05_CHANGELOG.txt
+================================================================================================

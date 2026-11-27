@@ -1,0 +1,170 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE C: COMPLETE SECURITY ACCEPTANCE MATRIX (CONTROLS A–N)
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:16:00Z
+Mission ID           : KS-RELEASE-05
+Audited Source State : Frozen KS-RELEASE-04 source (0 source modifications; 100% RC4 parity)
+Execution Scope      : Re-verified live in Stage J against unchanged source (zero live prod writes)
+Status Legend        : PASS | FAIL | BLOCKED | NOT TESTED
+Governance Notice    : Evidence prepared by Gemini for independent GPT G2 review; NOT self-certified.
+
+------------------------------------------------------------------------------------------------
+SECURITY ACCEPTANCE MATRIX (ALL 14 CONTROLS: A THROUGH N)
+------------------------------------------------------------------------------------------------
+Format:
+Control | Source file | Function | Relevant lines | Test file | Test name | Expected behavior | Actual result | Status
+------------------------------------------------------------------------------------------------
+
+[A] MANDATORY HMAC-SHA256 AUTHENTICATION & CONSTANT-TIME SIGNATURE VERIFICATION
+  Source file       : apps_script/WebAppBridge.js; apps_script/WebAppBridge_BootstrapIntegration.js; backend/app/apps_script_bridge.py
+  Function          : doPost; ksVerifySignedBridgeEnvelope_; ksBridgeSafeEqual_; ksComputeHmacSha256Hex_; AppsScriptBridge.sign_envelope
+  Relevant lines    : WebAppBridge.js:753-766; WebAppBridge_BootstrapIntegration.js:69-106, 118-237; apps_script_bridge.py:387-415
+  Test file         : backend/tests/test_cross_language_hmac.py; backend/tests/test_apps_script_bootstrap_vm.mjs
+  Test name         : test_01_positive_python_hmac_matches_apps_script_byte_for_byte_ascii_and_unicode; test_06_negative_missing_invalid_wrong_secret_and_malformed_signatures_rejected_before_dispatch; test_09_negative_missing_verifier_and_weak_secret_fail_closed; VM Suite PASS 2
+  Expected behavior : Every bridge request MUST carry contract_version="2.0", signature_alg="HMAC-SHA-256", 64-hex HMAC-SHA256 over exact canonical_envelope UTF-8 bytes verified in constant time against >=32-char shared secret; missing/weak secret -> 503; forged/unsigned/wrong secret -> 401 before dispatch.
+  Actual result     : Python and Apps Script HMAC digests match byte-for-byte for ASCII & Unicode; unsigned, wrong-secret, malformed, weak-secret, and missing-verifier requests all fail closed prior to dispatch.
+  Status            : PASS
+
+[B] TIMESTAMP FRESHNESS (±300s SKEW) & OUTER-VS-SIGNED ENVELOPE INTEGRITY
+  Source file       : apps_script/WebAppBridge_BootstrapIntegration.js
+  Function          : ksVerifySignedBridgeEnvelope_
+  Relevant lines    : WebAppBridge_BootstrapIntegration.js:56-58, 179-204, 238-355
+  Test file         : backend/tests/test_cross_language_hmac.py; backend/tests/test_apps_script_bootstrap_vm.mjs
+  Test name         : test_03_positive_z_and_ist_offset_timestamps_accepted; test_07_negative_expired_future_and_malformed_timestamps_rejected; test_08_negative_outer_field_tampering_and_malformed_json_structures_rejected; VM Suite PASS 2
+  Expected behavior : Accepts valid ISO-8601 Z/+05:30 timestamps within ±300s; rejects expired (>300s), future (>300s), malformed timestamps, unknown contract_version/signature_alg, and any outer wire field differing from signed canonical_envelope (OUTER_ENVELOPE_TAMPER_DETECTED, 401).
+  Actual result     : Z and +05:30 within ±300s accepted; stale, future, malformed timestamps and outer field tampering all rejected fail-closed before dispatch.
+  Status            : PASS
+
+[C] PAYLOAD HASH ENFORCEMENT, CANONICAL BINDING & MUTATED-REPLAY REJECTION
+  Source file       : backend/app/transaction_safety.py; apps_script/WebAppBridge.js; apps_script/WebAppBridge_BootstrapIntegration.js
+  Function          : compute_deterministic_payload_hash; doPost; ksFindAuditReplayMetadata_; ksVerifySignedBridgeEnvelope_
+  Relevant lines    : transaction_safety.py:233-285; WebAppBridge.js:708-737, 810-822, 875-968, 978-988; WebAppBridge_BootstrapIntegration.js:118-355
+  Test file         : backend/tests/test_ks_release_04_security_matrix.py; backend/tests/test_cross_language_hmac.py
+  Test name         : test_d1_canonical_hash_binding_and_idempotent_replay; test_d1_incomplete_audit_metadata_fails_closed_to_quarantine; test_17_stage5_w2_nonce_action_actor_and_payload_hash_conflict_rejection; test_21_stage_d1_missing_payload_hash_rejected_and_orphan_nonce_without_audit_quarantines
+  Expected behavior : Python computes deterministic SHA-256 payload_hash (key-order & numeric-equivalent invariant) embedded inside HMAC-signed canonical_envelope; Apps Script requires valid hex payload_hash, stores hash=<hex> in AuditLog, allows exact replay (CONFIRMED, 0 extra rows), rejects mutated hash/action/actor/tab (409 REJECTED), and quarantines orphan or incomplete AuditLog rows (409 RECOVERY_REQUIRED). Note: Apps Script trusts the HMAC-authenticated payload_hash rather than independently re-hashing req.payload.
+  Actual result     : All 12 D-1 checks PASS including NONCE_AUDIT_METADATA_INCOMPLETE (409 RECOVERY_REQUIRED), NONCE_PAYLOAD_HASH_CONFLICT (409 REJECTED), and 0 duplicate rows on exact replay.
+  Status            : PASS
+
+[D] 7-STAGE FAILURE-POINT QUARANTINE & PARTIAL-WRITE PRESERVATION (NEVER FALSE CONFIRMED)
+  Source file       : apps_script/WebAppBridge.js; apps_script/AuditAndExceptions.js; apps_script/IdAllocator.js
+  Function          : doPost; ksLogAuditStrictLocked_; ksLogExceptionLocked_; ksRecordIdAllocation_; ksAllocateIdLocked_
+  Relevant lines    : WebAppBridge.js:748, 841-853, 971-1063; AuditAndExceptions.js:180-310; IdAllocator.js:16-111
+  Test file         : backend/tests/test_ks_release_04_security_matrix.py; backend/tests/test_cross_language_hmac.py
+  Test name         : test_d1_all_seven_failure_points; test_11_stage1_w1_mandatory_audit_missing_and_post_write_audit_failure_quarantine
+  Expected behavior : Faults before business write return REJECTED with 0 writes; any fault after businessWriteAttempted=true (missing sheet, write error, readback error, IdAllocations error, AuditLog error, flush error) preserves partial rows (never auto-deletes), logs ExceptionRegister where possible without masking failure, releases ScriptLock, and returns RECOVERY_REQUIRED (HTTP 409, retryable=false); retries against missing AuditLog remain quarantined.
+  Actual result     : All 7 injected fault points verified PASS; lockHeld=false on all 7 stages; retry after Stage 6 AuditLog fault returns RECOVERY_REQUIRED (NONCE_AUDIT_METADATA_MISSING) with 0 duplicate rows.
+  Status            : PASS
+
+[E] AUTHORITATIVE `Users.active` & IDENTITY FAIL-CLOSED VALIDATION (APPS SCRIPT + PYTHON)
+  Source file       : apps_script/WebAppBridge.js; backend/app/auth.py
+  Function          : ksVerifyBridgeActor_; is_account_active; _auth_row_for; get_current_user
+  Relevant lines    : WebAppBridge.js:504-637; auth.py:45-64, 361-400, 444-525
+  Test file         : backend/tests/test_ks_release_04_security_matrix.py; backend/tests/test_cross_language_hmac.py
+  Test name         : test_e_all_ten_users_active_cases_apps_script; test_e_python_is_account_active_fail_closed; test_15_stage5_w4_authoritative_actor_verification_rejects_forged_inactive_escalated_and_uninitialized; test_22_stage_d2_missing_users_active_column_fails_closed
+  Expected behavior : Missing Users sheet, missing active/role/user_id header, truncated/malformed row -> 503 fail-closed; unknown actor, duplicate case-insensitive user_id, inactive/blank/invalid active value, missing role, AUDITOR role, or claimed-vs-authoritative role mismatch -> 403 fail-closed.
+  Actual result     : All 11 Apps Script subTests + 22 Python is_account_active edge vectors PASS with exact expected error codes and HTTP statuses.
+  Status            : PASS
+
+[F] FULL-ROW READ-BACK VERIFICATION & PYTHON <-> APPS SCRIPT DECIMAL PARITY
+  Source file       : apps_script/WebAppBridge.js; backend/app/apps_script_bridge.py
+  Function          : ksWriteCanonicalRowByHeaders_; ksNormalizeReadbackVal_; ksFormatPlainDecimal_; ksExpandSciNumber_; _normalize_scalar; _format_decimal_canonical; _verify_readback
+  Relevant lines    : WebAppBridge.js:639-703, 1110-1197; apps_script_bridge.py:196-245, 1343-1450
+  Test file         : backend/tests/test_ks_release_04_security_matrix.py; backend/tests/test_cross_language_hmac.py; backend/tests/test_tx_final_08_readback_completeness.py
+  Test name         : test_f_all_twelve_decimal_and_edge_cases_parity; test_14_stage1_w5_readback_verification_mismatch_quarantines; test_18_stage5_w5_non_primary_field_readback_corruption_quarantines_and_logs; test_23_stage_d3_plain_decimal_readback_normalization_parity
+  Expected behavior : Flushes and reads back entire written row verifying PK, nonce, and every written column; Python and Apps Script normalize plain decimals, negative zero, and tiny JS sci-floats (5e-7 -> "0.0000005") identically while preserving integer trailing zeros (10!=100), leading-zero strings ("0010"), sci-strings ("1E2"), blanks (""!="0"), nulls, and booleans ("true"!="1").
+  Actual result     : All 27 cross-language parity vectors match 100%; corrupted read-back cell triggers READBACK_VERIFICATION_FAILED -> RECOVERY_REQUIRED (409).
+  Status            : PASS
+
+[G] TOKEN & SESSION REVOCATION + SELF-VS-CROSS-USER AUTHORIZATION
+  Source file       : backend/app/auth.py; backend/app/routers/auth.py; apps_script/WebAppBridge.js
+  Function          : revoke_token; revoke_all_user_sessions; check_token_revocation; _resolve_revocation_actor_role; logout; ksValidateBridgeTargetTab_
+  Relevant lines    : auth.py:125-360; routers/auth.py:197-287; WebAppBridge.js:454-484
+  Test file         : backend/tests/test_ks_release_04_security_matrix.py; backend/tests/test_cross_language_hmac.py; backend/tests/test_user_system_phase2.py
+  Test name         : test_g_apps_script_self_vs_cross_user_and_admin_revocation; test_g_backend_expired_revoked_replayed_rotation_and_concurrent_revocation; test_24_stage_d4_self_vs_cross_user_token_and_session_revocation_real_roles; test_deactivation_immediate_session_invalidation; test_role_change_session_invalidation; test_password_reset_session_invalidation
+  Expected behavior : Users may revoke only their own token/sessions; cross-user revocation by non-Owner fails closed with 403 (SELF_TOKEN_REVOKE_MISMATCH / INSUFFICIENT_ROLE_FOR_AUTH_USERS); OWNER_ADMIN may revoke any user; expired, revoked, replayed, and pre-rotation JWTs all fail with 401; concurrent revocations (8x4 threads) exhibit zero race leaks; backend resolves authoritative actor role server-side (ignoring forged caller claims).
+  Actual result     : All 9 revocation/rotation/concurrency scenarios PASS across both Apps Script VM and FastAPI backend.
+  Status            : PASS
+
+[H] PROTECTED GOVERNANCE, CONTROL, SCRATCH & TARGET-TAB ALLOWLIST ENFORCEMENT
+  Source file       : apps_script/WebAppBridge.js; backend/app/schema_registry.py
+  Function          : ksValidateBridgeTargetTab_; KS_BRIDGE_PROTECTED_GOVERNANCE_TABS; KS_BRIDGE_PROTECTED_CONTROL_TABS; KS_BRIDGE_ACTION_TARGET_TAB_MAP; KS_BRIDGE_ALLOWED_TARGET_TABS
+  Relevant lines    : WebAppBridge.js:17-340, 355-498; schema_registry.py:1-220
+  Test file         : backend/tests/test_cross_language_hmac.py
+  Test name         : test_12_stage1_w2_cross_table_nonce_collision_rejected; test_13_stage1_w3_w4_target_tab_allowlist_governance_scratch_authusers_and_actor_checks; test_16_stage5_w3_control_table_systemconfig_action_tab_binding_and_role_restrictions
+  Expected behavior : Direct bridge writes to AuditLog/IdAllocations/ExceptionRegister -> 403 GOVERNANCE_TAB_WRITE_FORBIDDEN; SystemConfig/BackupRegister/START_HERE/DBV5_FIELD_DICTIONARY_3074 -> 403 CONTROL_TABLE_WRITE_FORBIDDEN; scratch prefixes (KS_P1_*/KS_P2_*/KS_P3_*/DBV5_*/DB_*) -> 403 SCRATCH_TAB_FORBIDDEN; unregistered actions or mismatched action->tab -> 403; unverified 36 schema tabs blocked fail-closed by backend schema_registry.
+  Actual result     : All forbidden tabs, scratch tabs, unregistered actions, and mismatched action->tab pairs rejected with HTTP 403 before lock acquisition.
+  Status            : PASS
+
+[I] FIRST-OWNER SECURE ONE-TIME BOOTSTRAP & CRASH QUARANTINE
+  Source file       : apps_script/WebAppBridge.js; apps_script/WebAppBridge_BootstrapIntegration.js; apps_script/BootstrapOwnerHandler.js; backend/app/routers/auth.py
+  Function          : doPost; ksDispatchBootstrapFirstOwner_; ksBootstrapFirstOwner_; ksBootstrapSafeEqual_; ksValidatePbkdf2Hash_; ksQuarantineBootstrapState_; bootstrap_first_owner
+  Relevant lines    : WebAppBridge.js:806-808; WebAppBridge_BootstrapIntegration.js:363-477; BootstrapOwnerHandler.js:153-230, 434-800; routers/auth.py:288-460
+  Test file         : backend/tests/test_apps_script_bootstrap_vm.mjs; backend/tests/test_first_owner_bootstrap.py; backend/tests/test_phase4_2a_security_guards.py
+  Test name         : VM Suites PASS 1..7; test_01..test_09 in test_first_owner_bootstrap.py; test_no_public_owner_bootstrap_route
+  Expected behavior : Disabled by default (SALES_OWNER_BOOTSTRAP_ENABLED=false); rejects expired window, secret reuse with HMAC/JWT, query-string tokens, brute-force (>rate limit), non-empty Users/AuthUsers; verifies token via SHA-256 constant-time equal; stores salted PBKDF2-HMAC-SHA256 hash; holds single uninterrupted ScriptLock; sets permanent KS_OWNER_BOOTSTRAP_COMPLETED latch; promotes mid-transaction flush/latch/timeout faults to RECOVERY_REQUIRED (409, retryable=false) preserving partial rows.
+  Actual result     : 7/7 Apps Script VM suites PASS + 13/13 Python bootstrap tests PASS; zero secret leaks in logs/responses.
+  Status            : PASS
+
+[J] ALLOWLISTED APPS SCRIPT HTTP 302 REDIRECT & HEADER-STRIPPING SAFETY
+  Source file       : backend/app/apps_script_bridge.py
+  Function          : _is_allowed_apps_script_echo_url; AppsScriptBridge.execute_governed_write
+  Relevant lines    : apps_script_bridge.py:83-135, 2271-2520
+  Test file         : backend/tests/test_first_owner_bootstrap.py
+  Test name         : test_10_b2_allowlisted_apps_script_302_echo_redirect_and_header_stripping; test_11_b2_post_redirect_echo_failure_is_unknown_never_failed; test_12_b2_disallowed_redirect_stays_rejected_failed; test_13_b2_302_echo_redirect_commits_confirmed_end_to_end
+  Expected behavior : Follows ONLY HTTPS 302 redirects to `script.googleusercontent.com/macros/echo*` using GET with POST body, bootstrap token, and HMAC headers stripped; rejects non-allowlisted redirect hosts fail-closed; classifies post-redirect echo failure as UNKNOWN (never silently FAILED to prevent duplicate retries).
+  Actual result     : All 4 B2 redirect security tests PASS.
+  Status            : PASS
+
+[K] DETERMINISTIC CORS ORIGIN RESOLUTION & PRODUCTION FAIL-CLOSED CONFIG
+  Source file       : backend/app/config.py; render.yaml; public/_redirects
+  Function          : get_cors_origins; validate_production_config
+  Relevant lines    : config.py:115-245; render.yaml:6-52; public/_redirects:1-5
+  Test file         : backend/tests/test_cross_language_hmac.py
+  Test name         : test_20_stage7_environment_cors_resolution_dev_staging_production
+  Expected behavior : When SALES_ENV=production, rejects wildcard `*`, rejects localhost origins, and allows only explicitly configured HTTPS production origins; development/staging resolve deterministically without leaking dev origins into production. (Note: `render.yaml` / `public/_redirects` still reference `-dev` backend hostname pending Owner confirmation in Stage G.)
+  Actual result     : Code-level CORS resolution & production fail-closed guard PASS; production hostname confirmation remains an Owner pre-deployment input (Stage G).
+  Status            : PASS
+
+[L] PUBLIC /health MINIMAL DISCLOSURE & PROTECTED DIAGNOSTICS REDACTION
+  Source file       : backend/main.py; backend/app/routers/health.py (or diagnostics route in main.py)
+  Function          : health; diagnostic health endpoint
+  Relevant lines    : backend/main.py (health & diagnostics routes); backend/tests/test_startup_port_bind_and_resilience.py:507-780
+  Test file         : backend/tests/test_health_diagnostics_security_and_quota.py; backend/tests/test_startup_port_bind_and_resilience.py
+  Test name         : test_public_health_is_minimal_and_hides_infrastructure_and_secrets; test_protected_health_diagnostics_require_owner_or_pa_and_redact_secrets; test_http_subprocess_binds_and_serves_health_within_3s_when_sheets_hangs_over_5s_stdlib; test_uvicorn_binds_and_serves_health_within_3s_when_sheets_hangs_over_5s
+  Expected behavior : Public `/health` returns minimal status (<3s even if Sheets hangs >5s) with zero secrets/paths/infra leaks; protected diagnostics require OWNER_ADMIN or PA and redact all secrets.
+  Actual result     : Public health minimal disclosure, protected RBAC + secret redaction, and stdlib subprocess <3s non-blocking health bind all PASS. Note: the real `uvicorn` ASGI subprocess check is SKIPPED in sandbox Python 3.11 (uvicorn absent locally; closed during Render deployment health verification — see Stage D).
+  Status            : PASS (with 1 sandbox-skipped uvicorn ASGI subprocess check documented in Stage D)
+
+[M] RBAC PRIVILEGE BOUNDARY, OWNER-ONLY ESCALATION BLOCK & FRONTEND SESSION SAFETY
+  Source file       : backend/app/routers/users.py; apps_script/WebAppBridge.js; src/App.tsx; src/services/api.ts
+  Function          : create_user; update_user; deactivate_user; reactivate_user; ksValidateBridgeTargetTab_; KS_BRIDGE_RESTRICTED_TAB_ROLES
+  Relevant lines    : routers/users.py:44-105, 136-155, 205-225, 261-315; WebAppBridge.js:212-220, 420-497
+  Test file         : backend/tests/test_user_system_phase2.py; backend/tests/test_integrity.py; backend/tests/test_master_repair_and_readiness.py; backend/tests/test_phase4_2a_security_guards.py; scripts/run_frontend_acceptance_audit.cjs; scripts/test_login_page_upgrade.cjs
+  Test name         : test_pa_cannot_create_or_modify_owner; test_pa_cannot_create_owner; test_custom_roles_cannot_escalate_to_owner_permissions; test_owner_retains_full_directory_view; Playwright Role Acceptance (12/12); Playwright Login Security (9/9)
+  Expected behavior : PA and non-Owner roles cannot create, modify, deactivate, or escalate to OWNER_ADMIN; custom roles cannot grant OWNER permissions; Apps Script enforces KS_BRIDGE_RESTRICTED_TAB_ROLES (CustomRoles/Settings/SalaryStructures = OWNER_ADMIN only); frontend purges credentials on logout, blocks sessionStorage unauthorized escalation, and never leaks passwords to localStorage.
+  Actual result     : All backend RBAC escalation tests + 21/21 Playwright role & login security checks PASS with 0 console errors.
+  Status            : PASS
+
+[N] LIVE GOOGLE WORKBOOK PHYSICAL ROW-1 SCHEMA VERIFICATION & LIVE GIT REMOTE SYNC
+  Source file       : backend/app/schema_registry.py; apps_script/LiveCutoverGate.js
+  Function          : CONFLICTING_CORE_SCHEMA_TABS (12 tabs); PENDING_OWNER_MAPPING_TABS (24 tabs); WORKBOOK_TARGET_TAB_COUNT (255)
+  Relevant lines    : schema_registry.py:1-220; LiveCutoverGate.js:1-120
+  Test file         : N/A — Requires live production Google Spreadsheet read-only export (Stage F) and Owner GitHub branch verification (Stage H)
+  Test name         : Live Workbook Physical Header Export (`ksExportReadOnlyWorkbookAuditV5`); Live GitHub Remote Branch Verification
+  Expected behavior : Live workbook physical tabs and Row-1 headers for all 36 guarded tabs must be exported read-only by Owner and reconciled before enabling live writes to those tabs; production GitHub commit/branch provenance must be verified prior to Render deploy.
+  Actual result     : LIVE WORKBOOK HEADER CHECK IS BLOCKED (no live credentials in sandbox + Section 14 Hard Stop; backend fail-closed guards remain ACTIVE blocking unverified writes). LIVE GITHUB CHECK EXECUTED READ-ONLY: `origin/main` is at `461f023f0db7d4e5c82863a693046bdd48d28e36` (already contains all 5 RC4 source/test/manifest files byte-identically; `release/ks-release-04` is NOT a remote branch).
+  Status            : BLOCKED (Live Google Sheets workbook export awaiting Owner Stage F execution)
+
+------------------------------------------------------------------------------------------------
+MATRIX SUMMARY (14 CONTROLS: A–N)
+------------------------------------------------------------------------------------------------
+  PASS    : 13 controls (A, B, C, D, E, F, G, H, I, J, K, L*, M)
+            *Control L has 1 sandbox-skipped `uvicorn` ASGI subprocess check (stdlib HTTP check PASS).
+  FAIL    :  0 controls
+  BLOCKED :  1 control  (N — Live physical Google Spreadsheet Row-1 header & 255-vs-256 tab audit)
+  NOT TESTED : 0 controls
+
+================================================================================================
+END OF KS_RELEASE_05_SECURITY_ACCEPTANCE_MATRIX.txt
+================================================================================================

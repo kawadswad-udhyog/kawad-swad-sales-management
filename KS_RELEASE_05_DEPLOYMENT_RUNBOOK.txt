@@ -1,0 +1,236 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE I: CONTROLLED PRODUCTION DEPLOYMENT RUNBOOK (15 STEPS — STRICT GATE SEPARATION)
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:21:00Z
+Mission ID           : KS-RELEASE-05
+Governance Policy    :
+  - STRICT SEPARATION between Phase I (Pre-Deployment Audit & Config), Phase II (Application
+    Deployment — Zero Live Business Data Writes), and Phase III (Live Identity Initialization &
+    Controlled Business Go-Live).
+  - ZERO step in this runbook may be executed by Gemini during KS-RELEASE-05 (Section 14 Hard Stop).
+  - Every Gate (G1–G6) requires explicit recorded authorization from its designated authority.
+
+GATE AUTHORITY LEGEND:
+  G1 : Gemini Engineering Evidence Package Submitted (NOT an approval)
+  G2 : GPT Independent Technical & Security Audit Acceptance
+  G3 : Owner Production Infrastructure & Deployment Authorization
+  G4 : Owner First-Owner Bootstrap Window Authorization
+  G5 : Owner Post-Bootstrap Verification & Bootstrap Decommissioning Sign-Off
+  G6 : Owner Controlled Live Business Operations & Historical Cutover Authorization
+
+================================================================================================
+PHASE I — PRE-DEPLOYMENT AUDIT, WORKBOOK RECONCILIATION & CONFIGURATION CLOSURE (STEPS 01–04)
+================================================================================================
+
+STEP 01 — Independent GPT Audit Review of KS-RELEASE-05 Package (Gate G2)
+  Responsible party    : GPT (Independent Technical & Security Auditor)
+  Required approval    : Gate G2 Written Acceptance
+  Expected result      : GPT verifies `KS_RELEASE_05_RELEASE_CANDIDATE.zip` SHA-256 manifest,
+                         Bridge Security Audit (Stage B), Security Matrix (Stage C), Test
+                         Reconciliation (Stage D/J), Database Reconciliation (Stage E), and Git
+                         provenance (Stage H) with zero unresolved critical technical defects.
+  Evidence             : Signed/recorded GPT G2 acceptance summary citing RC5 ZIP SHA-256.
+  Failure response     : HALT deployment immediately; log exact defect list for targeted fix cycle.
+  Rollback requirement : None (zero production changes made).
+
+STEP 02 — Owner Strictly Read-Only Live Workbook Header Export (Stage F)
+  Responsible party    : Owner
+  Required approval    : Gate G2 Complete + Owner Initiation
+  Expected result      : Owner runs `ksExportReadOnlyWorkbookAuditV5()` from
+                         `KS_RELEASE_05_OWNER_WORKBOOK_EXPORT_GUIDE.txt` against production Master
+                         Google Spreadsheet, exports header-only JSON (`ks_workbook_header_audit_v5.json`)
+                         confirming physical tab list, Row-1 headers for all 36 guarded tabs, and
+                         `Users`/`AuthUsers` row counts = 0, then deletes temporary script file.
+  Evidence             : Exported header-only JSON file + confirmation that temp script was deleted.
+  Failure response     : HALT; do NOT weaken or bypass `schema_registry.py` fail-closed guards.
+  Rollback requirement : Delete temporary `TempReadOnlyHeaderAudit.gs` file (zero sheet writes made).
+
+STEP 03 — Schema Reconciliation & Production URL/Config Closure (Stage G)
+  Responsible party    : Owner + Engineering (Gemini) + GPT Verification
+  Required approval    : Gate G2 + Owner G3 Config Approval
+  Expected result      : (a) Reconcile 255-vs-256 1-tab variance and 36 guarded tabs based on Step 02
+                         export; (b) Owner supplies real production backend Render URL & frontend
+                         HTTPS origin(s) (NEVER using `-dev` hostname); (c) Update `render.yaml` and
+                         `public/_redirects` on a clean PR branch (`release/ks-prod-config`) and
+                         merge to `main` via PR (no force-push).
+  Evidence             : Merged GitHub PR SHA, verified `render.yaml` & `public/_redirects` diff,
+                         and passing regression suite.
+  Failure response     : Do NOT deploy with `-dev` backend URL or unreconciled core tabs; fix PR first.
+  Rollback requirement : Revert PR via `git revert <merge_sha>` (zero production infra touched yet).
+
+STEP 04 — Pre-Deployment Workbook Snapshot Backup (Google Sheets Protection)
+  Responsible party    : Owner
+  Required approval    : Owner G3 Authorization
+  Expected result      : Owner creates an immutable timestamped Google Drive copy of the production
+                         Master Google Spreadsheet (`Kawad_Swad_Master_PRE_GO_LIVE_BACKUP_<YYYYMMDD>`)
+                         and records its Drive link/ID in offline Owner custody (and `BackupRegister`).
+  Evidence             : Verified backup spreadsheet copy exists in restricted Owner Drive folder.
+  Failure response     : HALT deployment; never deploy Apps Script or backend without a verified backup.
+  Rollback requirement : Backup copy serves as clean baseline reference if any later anomaly occurs.
+
+================================================================================================
+PHASE II — APPLICATION DEPLOYMENT ONLY (ZERO LIVE BUSINESS DATA MUTATIONS) (STEPS 05–11)
+================================================================================================
+
+STEP 05 — Provision Secrets Directly in Render Dashboard & Apps Script Project Settings
+  Responsible party    : Owner (Direct dashboard entry — NEVER paste secrets into chat)
+  Required approval    : Gate G3 Authorization
+  Expected result      : Owner enters directly into Render Production Backend:
+                         - `SALES_ENV=production` (`SALES_TESTING` unset/`false`)
+                         - `WEB_CONCURRENCY=1`, `SALES_INSTANCE_COUNT=1`
+                         - Persistent disk mounted at `/var/data/kawad_swad`
+                         - `SALES_GOOGLE_SPREADSHEET_ID`, Secret File `/etc/secrets/sales-service-account.json` (Viewer/Read-Only)
+                         - Unique `>=48`-char `SALES_JWT_SECRET`
+                         - Unique `>=48`-char `SALES_APPS_SCRIPT_SHARED_SECRET`
+                         - `SALES_OWNER_BOOTSTRAP_ENABLED=false` (MUST stay false until Step 12!)
+                         And enters matching `SALES_APPS_SCRIPT_SHARED_SECRET` in Apps Script
+                         Project Settings -> Script Properties.
+  Evidence             : Owner checklist confirmation ("ALL SECRETS SET IN RENDER & APPS SCRIPT");
+                         zero secret values pasted into logs/chat.
+  Failure response     : HALT if any secret is reused across boundaries or <32 chars; rotate immediately.
+  Rollback requirement : Delete/rotate any misconfigured environment variable before deploying code.
+
+STEP 06 — Sync & Deploy Bound Google Apps Script Project (New Immutable Version)
+  Responsible party    : Owner (in bound Google Apps Script Editor / clasp)
+  Required approval    : Gate G3 Authorization
+  Expected result      : Owner verifies the 6 integrated Apps Script files in the bound project match
+                         exact SHA-256 hashes in `apps_script/SOURCE_INVENTORY_AND_SHA256.txt`
+                         (specifically `WebAppBridge.js` = `776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6`),
+                         creates a new immutable Apps Script Web App Deployment (`Execute as: Me`,
+                         `Who has access: Anyone`), and copies the `/exec` URL into Render
+                         `SALES_APPS_SCRIPT_WEBAPP_URL`.
+  Evidence             : Apps Script Deployment Version number + SHA-256 parity confirmation +
+                         `SALES_APPS_SCRIPT_WEBAPP_URL` set in Render Dashboard.
+  Failure response     : Do NOT publish partial file updates; verify all 6 files match manifest first.
+  Rollback requirement : In Apps Script -> Manage Deployments -> revert active deployment to prior
+                         saved Version number (see `KS_RELEASE_05_ROLLBACK_PLAN.txt` Section 2).
+
+STEP 07 — Deploy Production Backend Service on Render (Python 3.11 + Uvicorn)
+  Responsible party    : Owner (Render Dashboard)
+  Required approval    : Gate G3 Authorization
+  Expected result      : Render builds from the approved GitHub `main` commit, installs
+                         `backend/requirements.txt` (including `uvicorn`), mounts `/var/data/kawad_swad`,
+                         binds `0.0.0.0:$PORT`, and transitions service status to `Live`.
+  Evidence             : Render build & deploy log showing exact deployed commit SHA and `Live` status.
+  Failure response     : Inspect Render build/startup logs (check missing env vars or disk mount);
+                         do NOT enable frontend traffic until backend passes Step 08.
+  Rollback requirement : Render Dashboard -> Deploys -> Roll back to last known healthy deploy (or
+                         suspend service if greenfield first deploy).
+
+STEP 08 — Backend Live `/health` & Fail-Closed Security Smoke Verification (Read-Only)
+  Responsible party    : Owner (with optional GPT/Engineering log review of sanitized output)
+  Required approval    : Gate G3 Active
+  Expected result      : (a) `GET https://<prod-backend>/health` returns HTTP 200 in `<3s` with
+                         minimal status JSON and ZERO secrets/paths leaked (closes Stage D skipped
+                         `uvicorn` ASGI check!).
+                         (b) Unauthenticated `GET /api/users` returns HTTP 401.
+                         (c) `POST /auth/bootstrap-first-owner` returns HTTP 403/404/disabled while
+                         `SALES_OWNER_BOOTSTRAP_ENABLED=false`.
+                         (d) Unsigned `POST` to Apps Script `/exec` returns `401/REJECTED` (`MISSING_OR_MALFORMED_HMAC_ENVELOPE`).
+  Evidence             : Sanitized HTTP status codes and response timings (`<3s`), zero secrets shown.
+  Failure response     : IMMEDIATELY suspend backend / revoke deployment if any unauthenticated or
+                         unsigned request succeeds or leaks secrets.
+  Rollback requirement : Execute Backend + Apps Script Rollback (`KS_RELEASE_05_ROLLBACK_PLAN.txt`).
+
+STEP 09 — Deploy Production Frontend Static Site on Render
+  Responsible party    : Owner (Render Dashboard)
+  Required approval    : Gate G3 Authorization + Step 08 PASS
+  Expected result      : Render builds Vite production bundle (`npm run build`) from the approved
+                         commit with verified production `render.yaml` & `public/_redirects` rewrites
+                         pointing to the production backend (NOT `-dev`), and publishes static site.
+  Evidence             : Render static site deploy log showing exact commit SHA and `Live` status.
+  Failure response     : HALT; check Vite build errors or rewrite rules before opening to users.
+  Rollback requirement : Render Dashboard -> Static Site Deploys -> Roll back to prior deploy (or
+                         unpublish if greenfield).
+
+STEP 10 — End-to-End Frontend Proxy, HTTPS & CORS Verification (Read-Only, Pre-Login)
+  Responsible party    : Owner
+  Required approval    : Gate G3 Active + Step 09 PASS
+  Expected result      : Opening `https://<prod-frontend>` loads the Login page over HTTPS with zero
+                         console errors, `GET https://<prod-frontend>/health` proxies cleanly to
+                         production backend HTTP 200, and browser DevTools confirms zero `-dev` URLs
+                         and zero CORS errors.
+  Evidence             : Owner confirmation + sanitized browser Network tab `/health` HTTP 200 proof.
+  Failure response     : HALT; fix `SALES_CORS_ORIGINS` or Render rewrite destination before Step 11.
+  Rollback requirement : Roll back frontend static site deploy on Render.
+
+STEP 11 — Application Deployment Sign-Off Checkpoint (ZERO Business Data Touched Yet)
+  Responsible party    : Owner (optional GPT verification of Steps 06–10 evidence)
+  Required approval    : Gate G4 Authorization to open First-Owner Bootstrap Window
+  Expected result      : Production application stack (Frontend + Backend + Apps Script Bridge) is
+                         verified live, healthy, HMAC-enforced, and idle with 0 business writes and
+                         0 rows in `Users` and `AuthUsers`.
+  Evidence             : Written Owner G4 go-ahead confirming readiness for one-time First-Owner init.
+  Failure response     : Hold in idle state (`SALES_OWNER_BOOTSTRAP_ENABLED=false`) until resolved.
+  Rollback requirement : Suspend Render services; zero business data affected.
+
+================================================================================================
+PHASE III — CONTROLLED FIRST-OWNER INITIALIZATION & LIVE OPERATIONS CUTOVER (STEPS 12–15)
+================================================================================================
+
+STEP 12 — Controlled One-Time First-Owner Bootstrap Execution (Gate G4 Window)
+  Responsible party    : Owner (Direct dashboard + local secure terminal)
+  Required approval    : Gate G4 Authorization + Confirmed Empty `Users`/`AuthUsers`
+  Expected result      : (a) Owner temporarily sets `SALES_OWNER_BOOTSTRAP_ENABLED=true`, unique
+                         `SALES_OWNER_BOOTSTRAP_SECRET`, and short UTC `SALES_OWNER_BOOTSTRAP_EXPIRES_AT`
+                         (+30 min) on Render, plus matching `KS_OWNER_BOOTSTRAP_TOKEN_HASH` (SHA-256)
+                         and `KS_OWNER_BOOTSTRAP_EXPIRES_AT` in Apps Script Properties.
+                         (b) Owner submits ONE signed `POST /auth/bootstrap-first-owner` request with
+                         header `X-Bootstrap-Token` (NEVER query string), unique `Idempotency-Key`,
+                         and strong Owner password.
+                         (c) Response returns `status: CONFIRMED` with canonical `USR-0000001`,
+                         `AUTH-0000001`, and `AUD-*` audit row.
+  Evidence             : Sanitized `CONFIRMED` response (`user_id`, `auth_id`, `audit_id`; ZERO
+                         passwords/tokens recorded) + Google Sheets `Users`, `AuthUsers`, `AuditLog`
+                         each contain exactly 1 canonical bootstrap record.
+  Failure response     : If response is `RECOVERY_REQUIRED` (HTTP 409) or `UNKNOWN`: DO NOT retry
+                         with a new idempotency key and DO NOT auto-delete sheet rows! Inspect
+                         `KS_OWNER_BOOTSTRAP_IN_PROGRESS` / `KS_OWNER_BOOTSTRAP_RECOVERY_REQUIRED`
+                         and `ExceptionRegister` per `KS_RELEASE_05_ROLLBACK_PLAN.txt` Section 5.
+  Rollback requirement : Quarantine partial state (never auto-delete audit/alloc rows); revoke
+                         temporary bootstrap secrets immediately.
+
+STEP 13 — Immediate Bootstrap Decommissioning & Owner Login / Revocation Verification (Gate G5)
+  Responsible party    : Owner
+  Required approval    : Gate G5 Sign-Off
+  Expected result      : (a) IMMEDIATELY set `SALES_OWNER_BOOTSTRAP_ENABLED=false` and DELETE
+                         `SALES_OWNER_BOOTSTRAP_SECRET` & `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` on Render.
+                         (b) Verify Apps Script Script Property `KS_OWNER_BOOTSTRAP_COMPLETED=true`.
+                         (c) Verify a second call to `POST /auth/bootstrap-first-owner` fails closed.
+                         (d) Owner logs in via production Frontend UI, confirms `/auth/me` returns
+                         `OWNER_ADMIN`, tests logout (`REVOKE_TOKEN`), and confirms revoked JWT
+                         returns HTTP 401.
+  Evidence             : Owner G5 confirmation: bootstrap disabled, latch=true, login & logout PASS.
+  Failure response     : If bootstrap remains reachable or logout fails to invalidate JWT, suspend
+                         backend immediately and rotate `SALES_JWT_SECRET`.
+  Rollback requirement : Rotate `SALES_JWT_SECRET` + roll back backend if auth anomalies appear.
+
+STEP 14 — Controlled Pilot Operational Verification (Single Low-Risk Governed Write)
+  Responsible party    : Owner
+  Required approval    : Gate G5 Complete + Owner Pilot Sign-Off
+  Expected result      : Owner creates 1 non-destructive test/master record (or updates own profile
+                         via `UPDATE_SELF_PROFILE`), confirming end-to-end HMAC -> Apps Script ->
+                         read-back verification -> `IdAllocations` (`ALLOC-0000001+`) -> `AuditLog`
+                         (`AUD-*` with `hash=<64hex>`), and `ExceptionRegister` = 0 errors.
+  Evidence             : Verified `Users`/`AuditLog`/`IdAllocations` row parity and HTTP 200 response.
+  Failure response     : If `RECOVERY_REQUIRED` or read-back mismatch occurs, HALT staff onboarding
+                         and inspect `ExceptionRegister` + SQLite WAL state.
+  Rollback requirement : Quarantine any failed write in `ExceptionRegister` (never delete audit rows).
+
+STEP 15 — Controlled Staff Onboarding & Separate Live Business / Historical Data Cutover (Gate G6)
+  Responsible party    : Owner
+  Required approval    : Gate G6 Explicit Separate Authorization
+  Expected result      : ONLY after Steps 01–14 are 100% green:
+                         (a) Owner creates staff user accounts via Owner UI with least-privilege roles.
+                         (b) Any historical data migration or opening-stock verification executes as
+                             a SEPARATE, explicitly authorized Gate G6 operation (never bundled with
+                             application deployment), preserving immutable `AuditLog` and prior backups.
+  Evidence             : Owner G6 sign-off record + verified staff role boundaries (`AUDITOR` read-only,
+                         `PA` cannot modify `OWNER_ADMIN`).
+  Failure response     : Revoke affected staff sessions via `REVOKE_USER_SESSIONS` and pause cutover.
+  Rollback requirement : Follow `KS_RELEASE_05_ROLLBACK_PLAN.txt` (preserve workbook & WAL forensic state).
+
+================================================================================================
+END OF KS_RELEASE_05_DEPLOYMENT_RUNBOOK.txt
+================================================================================================

@@ -1,0 +1,138 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE I: PRODUCTION ROLLBACK, QUARANTINE & RECOVERY VERIFICATION PLAN
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:22:00Z
+Mission ID           : KS-RELEASE-05
+Core Safety Principle: **FAIL CLOSED, PRESERVE FORENSIC EVIDENCE, NEVER AUTO-DELETE BUSINESS OR
+                       AUDIT ROWS.** Recovery always favors quarantine + Owner reconciliation
+                       over destructive automated rollbacks on Google Sheets.
+
+================================================================================================
+1. RENDER BACKEND & FRONTEND APPLICATION ROLLBACK
+================================================================================================
+Trigger Conditions:
+  - `/health` fails or exceeds 3s timeout on deploy.
+  - Unexpected HTTP 5xx spike, CORS/proxy failure, or authentication/revocation defect.
+  - Discovery of accidental `-dev` URL routing in `render.yaml` or `public/_redirects`.
+
+Procedure (Owner in Render Dashboard):
+  1. BACKEND ROLLBACK:
+     - Open Render Dashboard -> Production Backend Web Service -> `Events` / `Deploys`.
+     - Click `Rollback to this deploy` on the last verified healthy deploy (or click `Suspend`
+       immediately if this is a greenfield first deployment with no prior live version).
+     - Confirm `SALES_OWNER_BOOTSTRAP_ENABLED=false` remains enforced.
+  2. FRONTEND ROLLBACK:
+     - Open Render Dashboard -> Production Frontend Static Site -> `Deploys`.
+     - Click `Rollback to this deploy` on the prior healthy static build (or `Suspend`).
+  3. VERIFY:
+     - Confirm `GET https://<prod-backend>/health` returns HTTP 200 (or 503 if intentionally suspended).
+     - Confirm zero unauthenticated writes can reach Apps Script while suspended.
+
+================================================================================================
+2. GOOGLE APPS SCRIPT BOUND DEPLOYMENT ROLLBACK
+================================================================================================
+Trigger Conditions:
+  - Bridge returns unexpected `503`/`500` errors on valid signed envelopes.
+  - Read-back verification or lock errors after publishing a new Apps Script version.
+
+Procedure (Owner in Master Google Spreadsheet -> Extensions -> Apps Script):
+  1. Click `Deploy` -> `Manage deployments`.
+  2. Select the active Web App deployment -> click the Edit (pencil) icon.
+  3. Change `Version` dropdown back to the prior verified immutable version number -> click `Deploy`.
+     (Preserves the same `/exec` URL if rolling back to a known-good version; if disabling the
+      bridge completely during an incident, click `Archive deployment` to cut off all HTTP traffic
+      immediately.)
+  4. Never overwrite old Apps Script version snapshots — always roll back by switching Version ID.
+
+================================================================================================
+3. GIT REPOSITORY ROLLBACK (ZERO FORCE-PUSH POLICY)
+================================================================================================
+Trigger Conditions:
+  - A bad configuration or code commit was merged into `main`.
+
+Procedure (Owner local terminal — NEVER use `git push --force` on `main`):
+  1. git fetch origin main && git checkout main && git pull --ff-only origin main
+  2. git revert -m 1 <bad_merge_commit_sha>   # (or `git revert <bad_commit_sha>` for non-merge)
+  3. git push origin main
+  4. Confirm clean linear audit history is preserved on GitHub.
+
+================================================================================================
+4. SQLITE WAL TRANSACTION COORDINATOR STATE PRESERVATION (`/var/data/kawad_swad`)
+================================================================================================
+CRITICAL RULE: **NEVER delete `tx_coordinator.sqlite3`, `-wal`, or `-shm` during a rollback!**
+Why:
+  - `backend/app/transaction_safety.py` stores in-flight `PENDING`, `UNKNOWN`, `RECOVERY_REQUIRED`,
+    and `CONFIRMED` idempotency/nonce records on the persistent disk `/var/data/kawad_swad`.
+  - Deleting this SQLite file while transactions are in `UNKNOWN` or `RECOVERY_REQUIRED` destroys
+    the backend's duplicate-prevention memory and could allow a retried write to double-post.
+
+Procedure:
+  1. During backend rollback or restart, keep the Render Persistent Disk `/var/data/kawad_swad`
+     mounted and untouched.
+  2. If investigating an incident, read/copy the SQLite database ONLY in read-only backup mode
+     (`sqlite3 "file:/var/data/kawad_swad/tx_coordinator.sqlite3?mode=ro" ".backup /tmp/wal_snapshot.db"`).
+  3. Reconcile any `UNKNOWN` / `RECOVERY_REQUIRED` rows against Google Sheets `AuditLog`,
+     `IdAllocations`, and `ExceptionRegister` BEFORE marking them resolved.
+
+================================================================================================
+5. GOOGLE SHEETS PARTIAL-WRITE QUARANTINE & RECONCILIATION (NEVER AUTO-DELETE)
+================================================================================================
+Trigger Conditions:
+  - Any governed write or First-Owner bootstrap returns `status: "RECOVERY_REQUIRED"` (HTTP 409)
+    or `UNKNOWN` (post-redirect network timeout).
+  - Script Properties show `KS_OWNER_BOOTSTRAP_IN_PROGRESS` or `KS_OWNER_BOOTSTRAP_RECOVERY_REQUIRED`.
+
+Mandatory Non-Destructive Rules:
+  - NEVER delete rows from `AuditLog`, `IdAllocations`, or `ExceptionRegister` (POL-001 immutable).
+  - NEVER blindly re-run a failed financial/bootstrap write with a brand-new `Idempotency-Key`
+    until the partial state is inspected.
+
+Reconciliation Procedure (Owner):
+  1. Inspect `ExceptionRegister` for the matching `correlation_id`, `nonce`, and `recovery_exception_id`.
+  2. Inspect `IdAllocations` for the `nonce` and `allocated_id`.
+  3. Inspect `AuditLog` for `related_record_id = <nonce>` or `new_value` containing `nonce=<nonce>`.
+  4. Inspect the target business tab for the `allocated_id`:
+     - Case A (Row absent everywhere): Transaction failed prior to persistence; safe to retry once
+       root cause is fixed.
+     - Case B (Business row present, `IdAllocations` or `AuditLog` missing): Record an Owner
+       reconciliation note in `ExceptionRegister` and `AuditLog`; restore from Step 04 pre-go-live
+       backup ONLY if during greenfield pre-cutover (before real staff/business transactions), or
+       post an audited compensating reversal entry if live operations have started.
+     - Case C (Bootstrap `RECOVERY_REQUIRED`): Keep `SALES_OWNER_BOOTSTRAP_ENABLED=false`, inspect
+       `Users`, `AuthUsers`, `AuditLog`, `IdAllocations`, and `ExceptionRegister`, resolve partial
+       state under Owner control, and clear `KS_OWNER_BOOTSTRAP_IN_PROGRESS` /
+       `KS_OWNER_BOOTSTRAP_RECOVERY_REQUIRED` ONLY after full verification.
+
+================================================================================================
+6. SECRET ROTATION & EMERGENCY SESSION REVOCATION
+================================================================================================
+Trigger Conditions:
+  - Suspected credential exposure, leaked JWT, leaked HMAC shared secret, or unauthorized access.
+
+Procedure (Owner — Direct Dashboard Entry Only):
+  1. JWT Exposure -> Rotate `SALES_JWT_SECRET` in Render Dashboard and redeploy backend (immediately
+     invalidates ALL existing JWT access tokens across every user!).
+  2. Bridge HMAC Exposure -> Generate new `>=48`-char `SALES_APPS_SCRIPT_SHARED_SECRET` and update
+     SIMULTANEOUSLY in Render Dashboard AND Apps Script Project Settings -> Script Properties.
+     (Any in-flight requests using the old secret immediately fail closed with HTTP 401.)
+  3. Service Account JSON Exposure -> Revoke compromised key in Google Cloud IAM -> generate new
+     key -> replace `/etc/secrets/sales-service-account.json` in Render Secret Files -> redeploy.
+  4. Bootstrap Secret Exposure -> Set `SALES_OWNER_BOOTSTRAP_ENABLED=false` + delete bootstrap env
+     vars in Render + delete `KS_OWNER_BOOTSTRAP_TOKEN_HASH` in Apps Script Properties immediately.
+  5. Single-User Compromise -> Owner deactivates user (`Users.active=FALSE`) and executes
+     `REVOKE_USER_SESSIONS` (writes `sessions_revoked_at` to `AuthUsers`).
+
+================================================================================================
+7. POST-ROLLBACK RECOVERY VERIFICATION CHECKLIST
+================================================================================================
+  [ ] Backend `/health` returns HTTP 200 in `<3s` (or intentionally suspended during incident).
+  [ ] Unsigned request to Apps Script `/exec` returns HTTP 401 `REJECTED`.
+  [ ] `SALES_OWNER_BOOTSTRAP_ENABLED=false` verified on Render.
+  [ ] `AuditLog`, `IdAllocations`, and `ExceptionRegister` intact with zero deleted rows.
+  [ ] `/var/data/kawad_swad/tx_coordinator.sqlite3` intact and readable.
+  [ ] Incident root cause and corrective actions recorded before re-attempting deployment.
+
+================================================================================================
+END OF KS_RELEASE_05_ROLLBACK_PLAN.txt
+================================================================================================

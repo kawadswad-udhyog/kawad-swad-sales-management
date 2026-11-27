@@ -1,0 +1,134 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE H: LIVE GITHUB VERIFICATION, COMMIT PROVENANCE & SAFE OWNER TRANSFER GUIDE
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:20:00Z
+Mission ID           : KS-RELEASE-05
+Repository           : https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git
+Agent Push Status    : ZERO PUSHES PERFORMED (No GitHub push credentials + Section 14 Hard Stop)
+Verification Method  : Live read-only `git ls-remote --heads` + fresh read-only shallow clone into
+                       `/tmp/ks_r05_remote_inspect` + `git bundle verify` + exact tree diff.
+
+================================================================================================
+1. LIVE GITHUB REMOTE HEADS (VERIFIED VERBATIM VIA `git ls-remote --heads`)
+================================================================================================
+Command executed on 2026-11-27T07:10Z:
+  `git ls-remote --heads https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git`
+
+Exact live remote heads returned:
+  9e42b3050d753b238924a55c201000ad84958283  refs/heads/fix/full-audit-2026-10-17
+  461f023f0db7d4e5c82863a693046bdd48d28e36  refs/heads/main
+  3a30463ebf8389da7ffb6f6953a828545fb7c494  refs/heads/phase-4-2a-security-guards
+  5f83d3d8e8c9c3650b7ca3cbb246fed2234d4c4d  refs/heads/phase-4-2b-master-data-contract-audit
+  10351971de8ee3e98d7bc96f150398f742f9ebab  refs/heads/phase-4-2b-master-data-schema
+  a8fcd905602de36e8236cb736bd3a17201b11233  refs/heads/phase-4-2b-master-data-schema-v2
+  e1c5b0d1dbf5f782bb59edfd2cf7b0f20f31dbe6  refs/heads/phase-4-production-milling-hardening
+  ebe1bbc82b71545f2eeb7e3f144d94c9e0b04209  refs/heads/phase-5-safe-migration-design
+
+CRITICAL HONEST FINDING #1 (REMOTE BRANCH STATUS):
+  - `refs/heads/release/ks-release-04` DOES NOT EXIST on GitHub. (We do NOT claim it exists remotely.)
+  - `refs/heads/release/ks-release-05` DOES NOT EXIST on GitHub.
+
+CRITICAL HONEST FINDING #2 (LIVE `origin/main` ALREADY ADVANCED TO `461f023f`):
+  - Since KS-RELEASE-04 ran, live GitHub `origin/main` has ALREADY advanced by 1 commit from
+    `c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6` to `461f023f0db7d4e5c82863a693046bdd48d28e36`:
+      Commit  : 461f023f0db7d4e5c82863a693046bdd48d28e36
+      Parent  : c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6
+      Author  : kawadswad-udhyog <bestankit3@gmail.com>
+      Date    : Fri Nov 27 12:34:01 2026 +0530
+      Message : chore: update screenshot assets
+  - Exact tree diff verified between `KS_RELEASE_04_FROM_C8E5A15.bundle` (`e4e86802...`) and
+    live GitHub `origin/main` (`461f023f...`):
+      `git diff rc4_bundle..461f023f -- apps_script apps_script_patch backend src scripts render.yaml public/_redirects`
+      => **EMPTY (0 SOURCE / TEST / MANIFEST DIFFERENCES!)**
+  - In other words: Live GitHub `origin/main` (`461f023f`) ALREADY contains 100% of the 5
+    KS-RELEASE-04 security/test/manifest files byte-for-byte, PLUS the 12 `KS_RELEASE_04_*`
+    deliverables and 6 updated `public/screenshots/*.png` files!
+
+================================================================================================
+2. COMPLETE VERIFIED COMMIT LINEAGE & FULL SHAs
+================================================================================================
+  [1] f7ccebffdacb96081f498b304dc009326bbcee44  ("docs: update project screenshots")
+  [2] da87c0db91219e4674c2360043d4f3095083f32e  ("chore: update application screenshots")
+       +--> RC2 bundle branch: 452d6dc400ab56b8ed56551e68d3a7c15af06fdb
+  [3] 2fc7a23e822680c6fae8fd0d709b26206388258f  ("feat: implement deterministic CORS origin resolution")
+       +--> RC3 bundle branch: 13d7cb05818cdc56ef1f3759380288cd516119d5
+  [4] c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6  ("feat(auth): resolve actor role for token revocation")
+       |
+       +--> [Preserved RC4 Clean Bundle Commit — NOT pushed to remote]:
+       |    e4e868020de7f43cfb22122a14c88ef380be32ae (`refs/heads/release/ks-release-04`)
+       |    Parent  : c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6
+       |    Message : "security(bridge,tests): harden KS-RELEASE-04 incomplete audit quarantine,
+       |               duplicate/malformed actor checks, sci-float readback parity, and full
+       |               security matrix suite"
+       |    Changed : EXACTLY 5 audited files (985 insertions, 96 deletions; ZERO unrelated files)
+       |
+       +--> [CURRENT LIVE GitHub `origin/main` HEAD]:
+            461f023f0db7d4e5c82863a693046bdd48d28e36 (`refs/heads/main`)
+            Parent  : c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6
+            Changed : 23 files = the EXACT same 5 audited RC4 files (byte-identical!) +
+                      12 KS_RELEASE_04_* reports/patch/bundle + 6 public/screenshots/*.png
+
+================================================================================================
+3. EXACT 5 AUDITED CODE/TEST/MANIFEST FILES & CHECKSUMS (100% PARITY ACROSS BUNDLE, RC4 ZIP, DISK & `461f023f`)
+================================================================================================
+  SHA-256                                                          | Bytes  | File Path
+  -----------------------------------------------------------------+--------+--------------------------------------------------------------------------
+  776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6 | 48,176 | apps_script/WebAppBridge.js
+  24b4806e17aca4878c5c999ce066bcbed78406e229d5a87518206c9748a0ddd9 |  4,897 | apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+  776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6 | 48,176 | apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+  9cfa4a0fdc4fa282d47becd41de692b00e5c38efff1e81047f3a2b37990db720 |  1,229 | apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+  51e63b0ef77dfb4496198ece88c2f8cb277afecf4278cb97f3758ebd5d824b16 | 36,237 | backend/tests/test_ks_release_04_security_matrix.py
+
+  KS-RELEASE-05 Source Code Changes : ZERO (0 source files modified; 416/416 RC4 ZIP members match disk 100%).
+
+================================================================================================
+4. PRESERVED TRANSFER ARTIFACT CHECKSUMS & BUNDLE VERIFICATION
+================================================================================================
+  Artifact                           | Bytes     | SHA-256
+  -----------------------------------+-----------+------------------------------------------------------------------
+  KS_RELEASE_04_FROM_C8E5A15.patch   |    56,033 | 18244cb04cae915a55602ec264d50184aa92c90ce8439cf3126d5ff44d0aabc8
+  KS_RELEASE_04_FROM_C8E5A15.bundle  |    11,950 | 9046a0f9d217bfee6aefc2cdec96e15d3630c1e9f7fcf56f8fdaf6341fc1a091
+  KS_RELEASE_04_RELEASE_CANDIDATE.zip| 4,210,623 | 5bb6de1cc6aa77800ed78ece9857cad9ea1897b9516849b2125a5c68007c4bc6
+
+  `git bundle verify KS_RELEASE_04_FROM_C8E5A15.bundle` (against live clone containing `c8e5a15`):
+    - Result: `KS_RELEASE_04_FROM_C8E5A15.bundle is okay`
+    - Contains: `e4e868020de7f43cfb22122a14c88ef380be32ae refs/heads/release/ks-release-04`
+    - Requires: `c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6`
+
+================================================================================================
+5. SAFE NON-FORCE-PUSH OWNER GIT PROCEDURES (ONLY AFTER GPT G2 + OWNER G3 APPROVAL)
+================================================================================================
+  IMPORTANT: Because live `origin/main` (`461f023f`) ALREADY contains all 5 KS-RELEASE-04 code
+  changes on top of `c8e5a15`, DO NOT run `git push --force` and DO NOT re-apply
+  `KS_RELEASE_04_FROM_C8E5A15.patch` onto `461f023f` (it would fail with "already applied").
+
+  RECOMMENDED PROCEDURE A — Verify Existing `origin/main` (`461f023f`) & Tag Release Baseline:
+    1. git fetch origin main
+    2. git checkout main && git pull --ff-only origin main
+    3. git rev-parse HEAD
+       # Confirm output: 461f023f0db7d4e5c82863a693046bdd48d28e36
+    4. sha256sum apps_script/WebAppBridge.js backend/tests/test_ks_release_04_security_matrix.py
+       # Confirm:
+       #   776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6  apps_script/WebAppBridge.js
+       #   51e63b0ef77dfb4496198ece88c2f8cb277afecf4278cb97f3758ebd5d824b16  backend/tests/test_ks_release_04_security_matrix.py
+    5. Optional (create immutable release branch/tag for audit traceability — zero force push):
+       git tag -a ks-release-05-rc 461f023f0db7d4e5c82863a693046bdd48d28e36 -m "Kawad Swad ERP KS-RELEASE-05 Audited Release Candidate"
+       git push origin ks-release-05-rc
+
+  RECOMMENDED PROCEDURE B — Clean Production Config PR (After Stage F + Stage G Owner Inputs):
+    1. git checkout -b release/ks-prod-config main
+    2. Update ONLY the Owner-confirmed production backend URL in `render.yaml` & `public/_redirects`
+       (and any GPT/Owner-approved header reconciliations after Stage F).
+    3. Commit cleanly, push `git push -u origin release/ks-prod-config`, and merge via GitHub PR
+       into `main` (NO force-push).
+
+  OPTIONAL ARCHIVE PROCEDURE C — Publish Clean 5-File Bundle Branch `release/ks-release-04` (For Historical Audit Only):
+    1. git fetch KS_RELEASE_04_FROM_C8E5A15.bundle release/ks-release-04:release/ks-release-04
+    2. git push -u origin release/ks-release-04
+       (Note: Do NOT merge this into `461f023f` since `461f023f` already contains the exact same
+        5 code files; use only if you want `e4e86802` preserved as an archival branch on GitHub.)
+
+================================================================================================
+END OF KS_RELEASE_05_GIT_TRANSFER_GUIDE.txt
+================================================================================================

@@ -1,0 +1,965 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE F: OWNER STRICTLY READ-ONLY GOOGLE WORKBOOK EXPORT & HEADER AUDIT GUIDE
+================================================================================================
+Generated At (UTC)   : 2026-11-27T07:20:21Z
+Mission ID           : KS-RELEASE-05
+Purpose              : Allow the Owner to export 100% read-only structural metadata (sheet names,
+                       Row-1 headers in exact order, row counts, and guarded-tab header diffs)
+                       from the production Kawad Swad Master Google Spreadsheet so the 36 guarded
+                       tabs and the 255-vs-256 1-tab variance can be closed prior to Gate G3.
+
+STRICT READ-ONLY SAFETY GUARANTEES (VERIFIED IN SCRIPT BELOW):
+  - ZERO sheet writes (`setValue`, `setValues`, `appendRow`, `insertSheet`, `deleteSheet` ABSENT).
+  - ZERO tab renames, ZERO column reorders, ZERO formatting changes, ZERO data validation edits.
+  - ZERO Script Properties mutations and ZERO business data reads (reads ONLY Row 1 headers and
+    `getLastRow()` / `getLastColumn()` integer counts — NEVER reads Row 2+ customer/sales/PII/password data!).
+  - ZERO historical data imports and ZERO external HTTP calls (`UrlFetchApp` ABSENT).
+
+================================================================================================
+1. WHAT THIS EXPORT CLOSES BEFORE PRODUCTION CUTOVER (GATE G3)
+================================================================================================
+  1. Exact 255-vs-256 Tab Delta:
+     Returns the complete ordered list of physical sheet names so we can identify with 100%
+     certainty which single canonical repository tab (out of 256) is absent or renamed in the
+     255-tab physical workbook.
+  2. All 12 `CONFLICTING_CORE_SCHEMA_TABS`:
+     CustomRoles, Customers, Expenses, PackagingBatches, ProductionBatches, Products, RawMaterials, SalaryIncentives, Sales, ShopVisits, Suppliers, Workers
+     Computes exact missing headers, unexpected extra headers, duplicate headers, blank headers,
+     and exact Row-1 header order vs both `REQUIRED_TABS` and Blueprint v2.0 `KS_SCHEMA_JSON`.
+  3. All 24 `PENDING_OWNER_MAPPING_TABS`:
+     AssetsMaintenance, ComplianceRecords, DBV5_FIELD_DICTIONARY_3074, DistributionDispatches, EmployeeAdvances, Employees, ExceptionRegister, MarketplaceSettlements, MaterialConsumptions, PackagingMaterials, PackagingOutputs, PaymentAllocations, ProductSKUs, ProductionLosses, ProductionOutputs, ProductionWorkEntries, QualityChecks_FGQC, QualityChecks_IPQC, RPT_SalesAndReceivables, RPT_StockStatus, RPT_TrialBalance, SalaryPayments, SalesOrderItems, SalesOrders
+     Checks whether each tab exists physically in the workbook and exports its exact Row-1 headers.
+  4. First-Owner Bootstrap Readiness Pre-Check (Row Counts ONLY — Zero PII):
+     Confirms `Users` and `AuthUsers` have `data_row_count === 0` (Row 1 headers only) before
+     First-Owner bootstrap is ever enabled.
+  5. Deprecated / Legacy Scratch Tab Scan:
+     Flags if deprecated `ExceptionLogs` or any forbidden legacy scratch tab (`KS_P1_*`, `KS_P2_*`,
+     `KS_P3_*`, `DBV5_*` except `DBV5_FIELD_DICTIONARY_3074`, `DB_*`) still exists physically.
+
+================================================================================================
+2. STEP-BY-STEP OWNER EXECUTION GUIDE (NO CODE DEPLOYMENT REQUIRED)
+================================================================================================
+  STEP 1: Open the production Kawad Swad Master Google Spreadsheet in Google Sheets while signed
+          in as the Owner account.
+  STEP 2: Click `Extensions` -> `Apps Script` in the top menu bar.
+  STEP 3: In the Apps Script editor left sidebar, click `+` -> `Script` and create a temporary
+          file named `TempReadOnlyHeaderAudit` (do NOT edit any existing `.gs` files!).
+  STEP 4: Paste the ENTIRE `ksExportReadOnlyWorkbookAuditV5()` script from Section 3 below into
+          `TempReadOnlyHeaderAudit.gs` and press Ctrl+S / Cmd+S to save.
+  STEP 5: Select `ksExportReadOnlyWorkbookAuditV5` from the function dropdown at the top and
+          click `Run`.
+          - If Google prompts for read-only permissions, review and approve ONLY spreadsheet read
+            (and UI modal display if running from a bound spreadsheet UI).
+  STEP 6: Collect the JSON report using EITHER Option A (recommended) or Option B:
+          - Option A (Downloadable Modal — if triggered from Spreadsheet UI):
+            Call `ksShowReadOnlyAuditDownloadDialog()` (included below), which displays a copy/
+            download modal directly in Google Sheets so you can save `ks_workbook_header_audit_v5.json`
+            to your computer with zero Drive writes.
+          - Option B (Execution Log — zero UI permissions needed):
+            Run `ksExportReadOnlyWorkbookAuditV5()` directly in Apps Script Editor -> wait ~3-10s ->
+            copy the chunked JSON lines between `=== KS_AUDIT_JSON_START ===` and
+            `=== KS_AUDIT_JSON_END ===` from Execution Log into a local `.json` or `.txt` file.
+  STEP 7: Verify the exported JSON contains ZERO business rows (only sheet names, integer counts,
+          and Row-1 header strings), then share that header-only JSON for GPT/Owner reconciliation.
+  STEP 8: Immediately delete the temporary `TempReadOnlyHeaderAudit.gs` file from Apps Script
+          Editor so the bound project stays 100% identical to the audited release candidate.
+
+================================================================================================
+3. STRICTLY READ-ONLY GOOGLE APPS SCRIPT EXPORT PROCEDURE (COPY-PASTE VERBATIM)
+================================================================================================
+
+```javascript
+/**
+ * KAWAD SWAD ERP — KS-RELEASE-05 STRICTLY READ-ONLY WORKBOOK HEADER AUDIT
+ *
+ * GUARANTEES:
+ *  - READ-ONLY: Only calls getName, getTimeZone, getSpreadsheetLocale, getSheets,
+ *    getLastRow, getLastColumn, and getRange(1, 1, 1, lastCol).getValues() (Row 1 ONLY).
+ *  - NEVER reads Row 2+ (zero customer, sales, employee, financial, or password data).
+ *  - NEVER writes, renames, deletes, formats, or modifies any sheet, cell, or Script Property.
+ */
+var KS_R05_GUARDED_TABS_EXPECTED = {
+  "CustomRoles": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "role_id",
+      "role_name",
+      "description",
+      "permissions_json",
+      "created_by",
+      "created_at",
+      "updated_at"
+    ],
+    "expected_blueprint_v2": [
+      "role_id",
+      "role_name",
+      "description",
+      "permissions_json",
+      "created_by",
+      "created_at",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "Customers": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "customer_id",
+      "customer_type",
+      "shop_name",
+      "shopkeeper_name",
+      "mobile",
+      "alternate_mobile",
+      "address",
+      "locality_area",
+      "city",
+      "gstin",
+      "map_location",
+      "active",
+      "created_at"
+    ],
+    "expected_blueprint_v2": [
+      "customer_id",
+      "customer_type",
+      "shop_name",
+      "shopkeeper_name",
+      "mobile",
+      "alternate_mobile",
+      "address",
+      "locality_area",
+      "city",
+      "gstin",
+      "map_location",
+      "active",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "Expenses": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "expense_id",
+      "expense_datetime",
+      "salesman_user_id",
+      "submitted_by_user_id",
+      "category",
+      "amount",
+      "payment_mode",
+      "description",
+      "receipt_image_url",
+      "receipt_link_or_file_ref",
+      "approval_status",
+      "approved_by_user_id",
+      "approval_datetime",
+      "approved_datetime",
+      "cash_reducing_expense",
+      "related_closing_id",
+      "rejection_reason",
+      "created_at",
+      "notes"
+    ],
+    "expected_blueprint_v2": [
+      "expense_id",
+      "expense_datetime",
+      "salesman_user_id",
+      "submitted_by_user_id",
+      "category",
+      "amount",
+      "payment_mode",
+      "description",
+      "receipt_image_url",
+      "receipt_link_or_file_ref",
+      "approval_status",
+      "approved_by_user_id",
+      "approval_datetime",
+      "approved_datetime",
+      "cash_reducing_expense",
+      "related_closing_id",
+      "rejection_reason",
+      "created_at",
+      "notes",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "PackagingBatches": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "packaging_id",
+      "packaging_date",
+      "product_id",
+      "product_name_snapshot",
+      "bulk_kg_used",
+      "packets_200g",
+      "packets_500g",
+      "packets_1000g",
+      "total_packets",
+      "expected_kg",
+      "difference_kg",
+      "difference_status",
+      "status",
+      "notes",
+      "created_at",
+      "created_by",
+      "batch_allocations_json",
+      "bulk_cost",
+      "bulk_cost_per_kg",
+      "packaging_material_cost",
+      "packaging_labor_cost",
+      "total_finished_cost",
+      "packing_loss_kg",
+      "loss_reason",
+      "discrepancy_approved",
+      "discrepancy_explanation",
+      "discrepancy_approved_by",
+      "discrepancy_approved_at",
+      "reference",
+      "cost_status"
+    ],
+    "expected_blueprint_v2": [
+      "packaging_id",
+      "packaging_date",
+      "product_id",
+      "product_name_snapshot",
+      "bulk_kg_used",
+      "packets_200g",
+      "packets_500g",
+      "packets_1000g",
+      "total_packets",
+      "expected_kg",
+      "difference_kg",
+      "difference_status",
+      "status",
+      "notes",
+      "created_at",
+      "created_by",
+      "batch_allocations_json",
+      "bulk_cost",
+      "bulk_cost_per_kg",
+      "packaging_material_cost",
+      "packaging_labor_cost",
+      "total_finished_cost",
+      "packing_loss_kg",
+      "loss_reason",
+      "discrepancy_approved",
+      "discrepancy_explanation",
+      "discrepancy_approved_by",
+      "discrepancy_approved_at",
+      "reference",
+      "cost_status",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "ProductionBatches": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "production_id",
+      "production_date",
+      "product_id",
+      "product_name_snapshot",
+      "quantity_kg",
+      "wastage_kg",
+      "net_quantity_kg",
+      "flour_base_used_kg",
+      "benchmark_yield_kg",
+      "actual_yield_ratio",
+      "yield_variance_kg",
+      "recipe_id",
+      "status",
+      "notes",
+      "created_at",
+      "created_by",
+      "approved_by",
+      "approved_at",
+      "approval_notes",
+      "materials_issued",
+      "material_issue_txn_id",
+      "recipe_version"
+    ],
+    "expected_blueprint_v2": [
+      "production_id",
+      "production_date",
+      "product_id",
+      "product_name_snapshot",
+      "quantity_kg",
+      "wastage_kg",
+      "net_quantity_kg",
+      "flour_base_used_kg",
+      "benchmark_yield_kg",
+      "actual_yield_ratio",
+      "yield_variance_kg",
+      "recipe_id",
+      "status",
+      "notes",
+      "created_at",
+      "created_by",
+      "approved_by",
+      "approved_at",
+      "approval_notes",
+      "materials_issued",
+      "material_issue_txn_id",
+      "recipe_version",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "Products": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "product_id",
+      "sku",
+      "product_name",
+      "category",
+      "variant",
+      "pack_weight_g",
+      "selling_unit",
+      "retail_pack_only",
+      "active",
+      "notes"
+    ],
+    "expected_blueprint_v2": [
+      "product_id",
+      "sku",
+      "product_name",
+      "category",
+      "variant",
+      "pack_weight_g",
+      "selling_unit",
+      "retail_pack_only",
+      "active",
+      "notes",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "RawMaterials": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "raw_material_id",
+      "material_name",
+      "current_stock",
+      "unit",
+      "rate_per_unit",
+      "rate_status",
+      "category",
+      "created_at",
+      "created_by"
+    ],
+    "expected_blueprint_v2": [
+      "raw_material_id",
+      "material_name",
+      "current_stock",
+      "unit",
+      "rate_per_unit",
+      "rate_status",
+      "category",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "SalaryIncentives": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "incentive_id",
+      "period_month",
+      "salesman_user_id",
+      "salesman_name",
+      "qualifying_kg_sold",
+      "base_rate_per_kg",
+      "incentive_amount",
+      "approved_by_user_id",
+      "status",
+      "paid_at",
+      "notes",
+      "created_at"
+    ],
+    "expected_blueprint_v2": [
+      "incentive_id",
+      "period_month",
+      "salesman_user_id",
+      "salesman_name",
+      "qualifying_kg_sold",
+      "base_rate_per_kg",
+      "incentive_amount",
+      "approved_by_user_id",
+      "status",
+      "paid_at",
+      "notes",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "Sales": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "sale_id",
+      "bill_number",
+      "idempotency_key",
+      "txn_status",
+      "sale_datetime",
+      "sales_type",
+      "customer_id",
+      "customer_name_snapshot",
+      "customer_mobile",
+      "customer_gstin",
+      "entered_by_user_id",
+      "salesman_user_id",
+      "delivery_status",
+      "payment_status",
+      "payment_method",
+      "payment_reference",
+      "subtotal",
+      "discount_amount",
+      "tax_amount",
+      "bill_total",
+      "bill_status",
+      "created_at",
+      "notes"
+    ],
+    "expected_blueprint_v2": []
+  },
+  "ShopVisits": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "visit_id",
+      "visit_datetime",
+      "salesman_user_id",
+      "customer_id",
+      "customer_name_snapshot",
+      "purpose",
+      "outcome",
+      "notes",
+      "created_at"
+    ],
+    "expected_blueprint_v2": []
+  },
+  "Suppliers": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "supplier_id",
+      "supplier_name",
+      "contact_person",
+      "mobile",
+      "email",
+      "address",
+      "city",
+      "gstin",
+      "active",
+      "created_at",
+      "created_by",
+      "notes"
+    ],
+    "expected_blueprint_v2": [
+      "supplier_id",
+      "supplier_name",
+      "contact_person",
+      "mobile",
+      "email",
+      "address",
+      "city",
+      "gstin",
+      "active",
+      "created_at",
+      "created_by",
+      "notes",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "Workers": {
+    "guard_group": "CONFLICTING_CORE_SCHEMA_TABS",
+    "expected_required_tabs": [
+      "worker_id",
+      "worker_name",
+      "mobile",
+      "daily_wage",
+      "active",
+      "notes",
+      "created_at"
+    ],
+    "expected_blueprint_v2": []
+  },
+  "AssetsMaintenance": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "ComplianceRecords": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "DBV5_FIELD_DICTIONARY_3074": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "DistributionDispatches": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "EmployeeAdvances": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "employee_advance_id",
+      "employee_id",
+      "period_start",
+      "period_end",
+      "record_date",
+      "quantity_or_days",
+      "amount",
+      "approval_status",
+      "approved_by",
+      "payment_status",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "Employees": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "employee_id",
+      "employee_code",
+      "full_name",
+      "mobile",
+      "email",
+      "designation",
+      "department",
+      "employment_type",
+      "joining_date",
+      "exit_date",
+      "employment_status",
+      "reporting_manager_id",
+      "address",
+      "emergency_contact",
+      "bank_details_reference",
+      "active",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "ExceptionRegister": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "MarketplaceSettlements": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "settlement_id",
+      "channel_id",
+      "settlement_reference",
+      "period_start",
+      "period_end",
+      "gross_sales",
+      "fees",
+      "refunds",
+      "deductions",
+      "net_settlement",
+      "bank_reference",
+      "settlement_date",
+      "reconciled_by",
+      "status",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "MaterialConsumptions": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "PackagingMaterials": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "packaging_material_id",
+      "material_name",
+      "material_type",
+      "unit",
+      "specification",
+      "supplier_id",
+      "rate_per_unit",
+      "minimum_stock",
+      "active",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "PackagingOutputs": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "packaging_output_id",
+      "packaging_batch_id",
+      "product_id",
+      "sku",
+      "product_lot_id",
+      "pack_weight_g",
+      "packet_count",
+      "net_weight_kg",
+      "recorded_by",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "PaymentAllocations": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "allocation_id",
+      "payment_id",
+      "supplier_bill_id",
+      "allocated_amount",
+      "allocation_date",
+      "allocated_by",
+      "notes",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "ProductSKUs": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "ProductionLosses": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "ProductionOutputs": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "production_output_id",
+      "production_batch_id",
+      "product_id",
+      "output_lot_id",
+      "output_type",
+      "quantity",
+      "unit",
+      "quality_status",
+      "recorded_by",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "ProductionWorkEntries": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "QualityChecks_FGQC": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "QualityChecks_IPQC": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "RPT_SalesAndReceivables": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "RPT_StockStatus": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "RPT_TrialBalance": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": []
+  },
+  "SalaryPayments": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "salary_payment_id",
+      "party_type",
+      "party_id",
+      "reference_type",
+      "reference_id",
+      "transaction_date",
+      "payment_method",
+      "amount",
+      "reference_number",
+      "status",
+      "recorded_by",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "SalesOrderItems": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "sales_order_item_id",
+      "sales_order_id",
+      "product_id",
+      "sku",
+      "product_name_snapshot",
+      "pack_weight_g",
+      "quantity",
+      "unit_price",
+      "discount_amount",
+      "tax_rate",
+      "line_total",
+      "inventory_lot_id",
+      "created_at",
+      "created_by",
+      "updated_at",
+      "updated_by"
+    ]
+  },
+  "SalesOrders": {
+    "guard_group": "PENDING_OWNER_MAPPING_TABS",
+    "expected_required_tabs": [],
+    "expected_blueprint_v2": [
+      "sales_order_id",
+      "order_number",
+      "order_datetime",
+      "channel_id",
+      "customer_id",
+      "customer_name_snapshot",
+      "customer_phone_snapshot",
+      "billing_address_json",
+      "shipping_address_json",
+      "subtotal",
+      "discount_amount",
+      "tax_amount",
+      "shipping_amount",
+      "grand_total",
+      "payment_status",
+      "fulfilment_status",
+      "external_order_id",
+      "created_by",
+      "created_at",
+      "updated_at",
+      "updated_by"
+    ]
+  }
+};
+
+function ksBuildReadOnlyWorkbookAuditReportV5_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    throw new Error('No active spreadsheet bound to this Apps Script project.');
+  }
+
+  var sheets = ss.getSheets();
+  var scratchRe = /^(?:KS_P1_|KS_P2_|KS_P3_|DBV5_|DB_)/i;
+  var physicalByName = {};
+  var allTabs = [];
+  var deprecatedOrScratchFound = [];
+
+  for (var i = 0; i < sheets.length; i++) {
+    var sh = sheets[i];
+    var name = sh.getName();
+    var lastRow = sh.getLastRow();
+    var lastCol = sh.getLastColumn();
+    var rawRow1 = lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+
+    var headersPreservedOrder = [];
+    var seen = {};
+    var duplicateHeaders = [];
+    var blankHeaderColumns = [];
+
+    for (var c = 0; c < rawRow1.length; c++) {
+      var h = String(rawRow1[c] === null || rawRow1[c] === undefined ? '' : rawRow1[c]).trim();
+      headersPreservedOrder.push(h);
+      if (!h) {
+        blankHeaderColumns.push(c + 1);
+      } else {
+        var key = h.toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(seen, key)) {
+          duplicateHeaders.push({ header: h, col_index_1based: c + 1, first_col_1based: seen[key] });
+        } else {
+          seen[key] = c + 1;
+        }
+      }
+    }
+
+    var entry = {
+      sheet_index_1based: i + 1,
+      sheet_name: name,
+      is_hidden: sh.isSheetHidden(),
+      total_rows_including_header: lastRow,
+      data_row_count: lastRow > 0 ? (lastRow - 1) : 0,
+      col_count: lastCol,
+      row1_headers_ordered: headersPreservedOrder,
+      duplicate_headers: duplicateHeaders,
+      blank_header_columns: blankHeaderColumns
+    };
+
+    allTabs.push(entry);
+    physicalByName[name] = entry;
+
+    if (name === 'ExceptionLogs' || (scratchRe.test(name) && name !== 'DBV5_FIELD_DICTIONARY_3074')) {
+      deprecatedOrScratchFound.push({
+        sheet_name: name,
+        data_row_count: entry.data_row_count,
+        reason: name === 'ExceptionLogs' ? 'DEPRECATED_LEGACY_ALIAS' : 'FORBIDDEN_SCRATCH_PREFIX'
+      });
+    }
+  }
+
+  // Audit all 36 guarded tabs (12 CONFLICTING_CORE_SCHEMA_TABS + 24 PENDING_OWNER_MAPPING_TABS)
+  var guardedAudit = [];
+  var guardedNames = Object.keys(KS_R05_GUARDED_TABS_EXPECTED).sort();
+  for (var g = 0; g < guardedNames.length; g++) {
+    var tabName = guardedNames[g];
+    var spec = KS_R05_GUARDED_TABS_EXPECTED[tabName];
+    var phys = physicalByName[tabName] || null;
+    var actual = phys ? phys.row1_headers_ordered : [];
+    var actualSet = {};
+    for (var a = 0; a < actual.length; a++) {
+      if (actual[a]) actualSet[actual[a]] = true;
+    }
+
+    function diffAgainst(expectedList) {
+      if (!expectedList || expectedList.length === 0) {
+        return { expected_count: 0, missing_from_live: [], unexpected_in_live: actual.slice(), exact_order_match: false };
+      }
+      var expSet = {};
+      var missing = [];
+      for (var x = 0; x < expectedList.length; x++) {
+        expSet[expectedList[x]] = true;
+        if (!actualSet[expectedList[x]]) missing.push(expectedList[x]);
+      }
+      var unexpected = [];
+      for (var y = 0; y < actual.length; y++) {
+        if (actual[y] && !expSet[actual[y]]) unexpected.push(actual[y]);
+      }
+      var orderMatch = (actual.length === expectedList.length);
+      if (orderMatch) {
+        for (var z = 0; z < expectedList.length; z++) {
+          if (actual[z] !== expectedList[z]) { orderMatch = false; break; }
+        }
+      }
+      return {
+        expected_count: expectedList.length,
+        missing_from_live: missing,
+        unexpected_in_live: unexpected,
+        exact_order_match: orderMatch
+      };
+    }
+
+    guardedAudit.push({
+      tab_name: tabName,
+      guard_group: spec.guard_group,
+      physically_present: Boolean(phys),
+      data_row_count: phys ? phys.data_row_count : null,
+      actual_headers_ordered: actual,
+      duplicate_headers: phys ? phys.duplicate_headers : [],
+      blank_header_columns: phys ? phys.blank_header_columns : [],
+      diff_vs_required_tabs: diffAgainst(spec.expected_required_tabs),
+      diff_vs_blueprint_v2: diffAgainst(spec.expected_blueprint_v2)
+    });
+  }
+
+  // Bootstrap pre-check (counts ONLY, zero user data)
+  var usersTab = physicalByName['Users'] || null;
+  var authUsersTab = physicalByName['AuthUsers'] || null;
+
+  return {
+    schema_export_version: 'ks-release-05-readonly-audit-v1',
+    read_only_guarantee: 'ROW_1_HEADERS_AND_COUNTS_ONLY_ZERO_WRITES_ZERO_BUSINESS_DATA',
+    exported_at_utc: new Date().toISOString(),
+    workbook_metadata: {
+      workbook_name: ss.getName(),
+      spreadsheet_id_redacted: String(ss.getId()).slice(0, 4) + '****' + String(ss.getId()).slice(-4),
+      timezone: ss.getSpreadsheetTimeZone(),
+      locale: ss.getSpreadsheetLocale(),
+      physical_sheet_count: sheets.length
+    },
+    bootstrap_precheck_counts_only: {
+      Users_present: Boolean(usersTab),
+      Users_data_row_count: usersTab ? usersTab.data_row_count : null,
+      Users_row1_headers: usersTab ? usersTab.row1_headers_ordered : [],
+      AuthUsers_present: Boolean(authUsersTab),
+      AuthUsers_data_row_count: authUsersTab ? authUsersTab.data_row_count : null,
+      AuthUsers_row1_headers: authUsersTab ? authUsersTab.row1_headers_ordered : []
+    },
+    deprecated_or_scratch_tabs_found: deprecatedOrScratchFound,
+    guarded_36_tabs_audit: guardedAudit,
+    all_physical_tabs: allTabs
+  };
+}
+
+/**
+ * Entry Point A (Execution Log — zero UI permissions needed).
+ * Splits JSON cleanly across 15,000-char chunks so Apps Script Logger never truncates output.
+ */
+function ksExportReadOnlyWorkbookAuditV5() {
+  var report = ksBuildReadOnlyWorkbookAuditReportV5_();
+  var jsonText = JSON.stringify(report, null, 2);
+  var chunkSize = 15000;
+  var totalChunks = Math.ceil(jsonText.length / chunkSize);
+  Logger.log('=== KS_AUDIT_JSON_START (total_chars=' + jsonText.length + ', chunks=' + totalChunks + ') ===');
+  for (var i = 0; i < totalChunks; i++) {
+    Logger.log('--- CHUNK ' + (i + 1) + '/' + totalChunks + ' ---\n' + jsonText.slice(i * chunkSize, (i + 1) * chunkSize));
+  }
+  Logger.log('=== KS_AUDIT_JSON_END ===');
+  return 'OK: Exported ' + report.workbook_metadata.physical_sheet_count + ' sheets (read-only).';
+}
+
+/**
+ * Entry Point B (Downloadable Modal inside Google Sheets UI — zero Drive writes).
+ * Run from Apps Script Editor while the spreadsheet tab is open to download a clean .json file.
+ */
+function ksShowReadOnlyAuditDownloadDialog() {
+  var report = ksBuildReadOnlyWorkbookAuditReportV5_();
+  var jsonText = JSON.stringify(report, null, 2);
+  var b64 = Utilities.base64Encode(Utilities.newBlob(jsonText, 'application/json').getBytes());
+  var html = HtmlService.createHtmlOutput(
+    '<div style="font-family:sans-serif;padding:12px;">' +
+    '<h3>Kawad Swad ERP — Read-Only Workbook Header Audit (KS-RELEASE-05)</h3>' +
+    '<p>Sheets scanned: <b>' + report.workbook_metadata.physical_sheet_count + '</b> | Zero writes performed | Zero business rows read.</p>' +
+    '<a download="ks_workbook_header_audit_v5.json" href="data:application/json;base64,' + b64 + '" ' +
+    'style="display:inline-block;padding:10px 16px;background:#0f766e;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold;">' +
+    'Download ks_workbook_header_audit_v5.json</a>' +
+    '</div>'
+  ).setWidth(520).setHeight(180);
+  SpreadsheetApp.getUi().showModalDialog(html, 'KS-RELEASE-05 Read-Only Header Export');
+}
+```
+
+================================================================================================
+END OF KS_RELEASE_05_OWNER_WORKBOOK_EXPORT_GUIDE.txt
+================================================================================================

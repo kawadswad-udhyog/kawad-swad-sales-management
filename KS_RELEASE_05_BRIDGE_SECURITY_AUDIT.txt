@@ -1,0 +1,285 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-05
+STAGE B: FULL BRIDGE SECURITY AUDIT (`apps_script/WebAppBridge.js` & SURROUNDING CALL CHAIN)
+================================================================================================
+Generated At (UTC)      : 2026-11-27T07:16:00Z
+Mission ID              : KS-RELEASE-05
+Audited Target File     : apps_script/WebAppBridge.js (48,176 bytes, 1,297 lines)
+Mirrored Patch File     : apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+File SHA-256 (Current)  : 776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6
+File SHA-256 (Prior RC3): 4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145
+Git Comparison Range    : c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6 -> e4e868020de7f43cfb22122a14c88ef380be32ae
+                          (also byte-identical in live GitHub origin/main 461f023f0db7d4e5c82863a693046bdd48d28e36)
+Audit Verdict           : ZERO new defects or regressions found in the 3 KS-RELEASE-04 safeguards
+                          or surrounding bridge call chain; 0 source edits required in KS-RELEASE-05.
+                          Independent GPT acceptance (G2) remains required.
+
+================================================================================================
+PART 1: EXACT DIFF & 9-POINT SECURITY ANALYSIS OF ALL THREE KS-RELEASE-04 SAFEGUARDS
+================================================================================================
+
+------------------------------------------------------------------------------------------------
+SAFEGUARD 1 [H1 — Stage D]: Incomplete AuditLog Replay Metadata Fail-Closed Quarantine
+------------------------------------------------------------------------------------------------
+1. Exact Location & Diff (`apps_script/WebAppBridge.js`, `doPost(e)` lines 905–957):
+   BEFORE (`c8e5a15`, prior lines 852–878):
+     ```javascript
+     if (auditMeta.action && auditMeta.action !== action) { ... }
+     if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) { ... }
+     if (auditMeta.payload_hash && (!payloadHash || auditMeta.payload_hash !== payloadHash)) { ... }
+     ```
+   AFTER (`e4e86802` / current lines 905–957):
+     ```javascript
+     if (!auditMeta.action || !auditMeta.actor_user_id || !auditMeta.payload_hash) {
+       return ksBridgeJson_({
+         status: 'RECOVERY_REQUIRED',
+         correlation_id: correlationId,
+         nonce: nonce,
+         action: action,
+         target_tab: targetTab,
+         allocated_id: existing.allocated_id,
+         error_code: 'NONCE_AUDIT_METADATA_INCOMPLETE',
+         message: 'AuditLog metadata for nonce "' + nonce + '" is missing mandatory action, actor_user_id, or payload_hash; quarantined fail-closed.',
+         http_status: 409,
+         retryable: false
+       });
+     }
+     if (auditMeta.action !== action) { ... }
+     if (auditMeta.actor_user_id !== actorUserId) { ... }
+     if (!payloadHash || auditMeta.payload_hash !== payloadHash) { ... }
+     ```
+2. Why the Change Was Required:
+   Previously, guarding each mismatch check with `if (auditMeta.field && ...)` silently skipped
+   verification whenever the corresponding `AuditLog` cell was blank, truncated, or missing
+   `hash=<hex>`. A corrupted or partially written `AuditLog` row could therefore allow a replay
+   with a mutated payload, different action, or different actor to return `CONFIRMED` (`idempotent_replay: true`).
+3. Threat Class Mitigated:
+   Nonce replay bypass / mutated-payload replay / cross-actor replay / false `CONFIRMED` on
+   incomplete or corrupted audit records.
+4. Security Boundary & Preconditions Enforced:
+   Runs inside `doPost(e)` AFTER mandatory HMAC verification (`line 762`), payload_hash hex
+   validation (`line 810`), target-tab/role validation (`line 825`), `ScriptLock.waitLock(20000)`
+   (`line 856`), authoritative actor verification (`line 859`), and `ksFindByNonce_(nonce)` hit (`line 875`).
+   Requires ALL THREE audit fields (`action`, `actor_user_id`, and regex-extracted `payload_hash`
+   `[0-9a-fA-F]{16,128}` from `ksFindAuditReplayMetadata_` lines 708–737) to be non-empty before
+   exact equality checks execute.
+5. Exact Failure Behavior (Fail-Closed Guarantee):
+   - Missing `AuditLog` entry entirely -> `status: 'RECOVERY_REQUIRED'`, `error_code: 'NONCE_AUDIT_METADATA_MISSING'`, `http_status: 409`, `retryable: false` (lines 891–904).
+   - Missing ANY of `action`, `actor_user_id`, or `payload_hash` -> `status: 'RECOVERY_REQUIRED'`, `error_code: 'NONCE_AUDIT_METADATA_INCOMPLETE'`, `http_status: 409`, `retryable: false` (lines 905–918).
+   - Mismatched `action` -> `status: 'REJECTED'`, `error_code: 'NONCE_ACTION_CONFLICT'`, `http_status: 409` (lines 919–931).
+   - Mismatched `actor_user_id` -> `status: 'REJECTED'`, `error_code: 'NONCE_ACTOR_CONFLICT'`, `http_status: 409` (lines 932–944).
+   - Mismatched `payload_hash` -> `status: 'REJECTED'`, `error_code: 'NONCE_PAYLOAD_HASH_CONFLICT'`, `http_status: 409` (lines 945–957).
+6. Lock & Side-Effect Safety:
+   Zero sheet writes occur on the replay-rejection or quarantine path; `businessWriteAttempted`
+   remains `false`; `finally` block (lines 1061–1063) unconditionally releases `ScriptLock`.
+7. Compatibility with Legitimate Idempotent Replays:
+   Every governed bridge write performed by `doPost` writes `action`, `actor_user_id`, and
+   `new_value = 'CONFIRMED | nonce=' + nonce + ' | corr=' + correlationId + ' | hash=' + payloadHash`
+   at lines 978–988 via `ksLogAuditStrictLocked_`, so every legitimate retry satisfies all 3 checks
+   and returns `CONFIRMED` with `idempotent_replay: true` and 0 duplicate rows.
+8. Honest Architectural Boundary Note:
+   `ksFindAuditReplayMetadata_` (line 728) accepts `hash=([0-9a-fA-F]{16,128})` matching `doPost`
+   line 810 (`^[0-9a-f]{16,128}$`); Python `compute_deterministic_payload_hash` always produces
+   64-char SHA-256 hex. Apps Script binds `payload_hash` via HMAC over `canonical_envelope` rather
+   than independently re-hashing `req.payload`.
+9. Direct Automated Test Coverage:
+   - `backend/tests/test_ks_release_04_security_matrix.py::TestStageDPayloadHashAndFailurePoints::test_d1_incomplete_audit_metadata_fails_closed_to_quarantine` (PASS)
+   - `backend/tests/test_ks_release_04_security_matrix.py::TestStageDPayloadHashAndFailurePoints::test_d1_canonical_hash_binding_and_idempotent_replay` (PASS)
+   - `backend/tests/test_cross_language_hmac.py::test_17_stage5_w2_nonce_action_actor_and_payload_hash_conflict_rejection` (PASS)
+   - `backend/tests/test_cross_language_hmac.py::test_21_stage_d1_missing_payload_hash_rejected_and_orphan_nonce_without_audit_quarantines` (PASS)
+
+------------------------------------------------------------------------------------------------
+SAFEGUARD 2 [H2 — Stage E]: Duplicate User Identity & Malformed Row Fail-Closed in `ksVerifyBridgeActor_`
+------------------------------------------------------------------------------------------------
+1. Exact Location & Diff (`apps_script/WebAppBridge.js`, `ksVerifyBridgeActor_` lines 552–637):
+   BEFORE (`c8e5a15`, prior lines 551–606):
+     - Returned immediately on the FIRST row where `String(data[i][uidIdx] || '').trim() === actorUserId`
+       (case-sensitive exact match only; never scanned remaining rows for duplicates).
+     - Did NOT verify `Array.isArray(row) && row.length > maxRequiredIdx` before indexing.
+   AFTER (`e4e86802` / current lines 552–637):
+     - Normalizes `cleanActorId = String(actorUserId || '').trim()` and `cleanActorIdLower = cleanActorId.toLowerCase()` (lines 552–553).
+     - Computes `maxRequiredIdx = Math.max(uidIdx, roleIdx, activeIdx)` (line 555).
+     - Scans EVERY row `i = 1 .. data.length - 1` (lines 558–572):
+       * Rejects truncated/malformed rows fail-closed: `ACTOR_DIRECTORY_MALFORMED_ROW` (HTTP 503, lines 560–567).
+       * Collects all case-insensitive trimmed `user_id` matches into `matchedRows`.
+     - `matchedRows.length === 0` -> `ACTOR_NOT_FOUND` (HTTP 403, lines 574–581).
+     - `matchedRows.length > 1` -> `ACTOR_DUPLICATE_IDENTITY` (HTTP 403, lines 583–590).
+     - Explicitly handles native JS booleans and strings for `active` (`TRUE`/`YES`/`ACTIVE`/`1` ONLY; blank, `FALSE`, `MAYBE`, `null`, `0` -> `ACTOR_INACTIVE`, HTTP 403, lines 593–605).
+     - Verifies non-empty canonical role (`ACTOR_ROLE_MISSING`, 403), blocks `AUDITOR` (`AUDITOR_WRITE_FORBIDDEN`, 403), and enforces exact `authoritativeRole === claimedRole` (`ACTOR_ROLE_MISMATCH`, 403, lines 607–631).
+2. Why the Change Was Required:
+   First-match-wins lookup allowed a duplicate/shadow `Users` row (e.g., `USR-1` active + `usr-1`
+   deactivated, or two rows with conflicting roles) to silently authenticate depending on row order,
+   and a truncated sheet row could yield `undefined` silently instead of failing closed.
+3. Threat Class Mitigated:
+   Ambiguous identity / duplicate-row shadow-account privilege escalation / case-variation bypass /
+   inactive-user bypass / schema truncation bypass.
+4. Security Boundary & Preconditions Enforced:
+   Runs inside `doPost(e)` at line 859 IMMEDIATELY AFTER `ScriptLock` acquisition (line 856) and
+   BEFORE any nonce replay acceptance, business write, ID allocation, or audit write. Re-checks
+   authoritative Google Sheets `Users` state live (zero caching).
+5. Exact Failure Behavior (Fail-Closed Guarantee):
+   - Missing spreadsheet -> `ACTOR_DIRECTORY_UNAVAILABLE` (503, lines 506–513).
+   - Missing/empty `Users` sheet -> `ACTOR_DIRECTORY_UNINITIALIZED` (403, lines 515–522).
+   - Missing `user_id`/`role`/`active` header -> `ACTOR_DIRECTORY_INVALID_SCHEMA` (503, lines 543–550).
+   - Malformed/short row -> `ACTOR_DIRECTORY_MALFORMED_ROW` (503, lines 560–567).
+   - Unknown user -> `ACTOR_NOT_FOUND` (403, lines 574–581).
+   - Duplicate `user_id` (case-insensitive) -> `ACTOR_DUPLICATE_IDENTITY` (403, lines 583–590).
+   - Inactive/blank/invalid `active` value -> `ACTOR_INACTIVE` (403, lines 598–605).
+   - Missing/AUDITOR/mismatched role -> 403 (lines 608–631).
+6. Lock & Side-Effect Safety:
+   Strictly read-only against `Users`; zero sheet mutations; `ScriptLock` released in `finally`.
+7. Compatibility with Python Backend:
+   Matches Python `backend/app/auth.py::is_account_active` (lines 45–64) and `_auth_row_for`
+   `AMBIGUOUS_IDENTITY` duplicate-row guard (lines 361–399).
+8. Edge Case Verification:
+   Verified for native boolean `true`/`false`, string `"TRUE"`/`"FALSE"`, `"YES"`, `"ACTIVE"`, `"1"`,
+   `""`, `"MAYBE"`, `null`, `undefined`, truncated row array, duplicate mixed-case `USR-1`/`usr-1`,
+   `AUDITOR`, and claimed-role escalation.
+9. Direct Automated Test Coverage:
+   - `backend/tests/test_ks_release_04_security_matrix.py::TestStageEUsersActiveValidation::test_e_all_ten_users_active_cases_apps_script` (PASS — all 11 subTests)
+   - `backend/tests/test_ks_release_04_security_matrix.py::TestStageEUsersActiveValidation::test_e_python_is_account_active_fail_closed` (PASS)
+   - `backend/tests/test_cross_language_hmac.py::test_15_stage5_w4_authoritative_actor_verification_rejects_forged_inactive_escalated_and_uninitialized` (PASS)
+   - `backend/tests/test_cross_language_hmac.py::test_22_stage_d2_missing_users_active_column_fails_closed` (PASS)
+
+------------------------------------------------------------------------------------------------
+SAFEGUARD 3 [H3 — Stage F]: Scientific-Notation JS Number Read-Back Normalization Parity
+------------------------------------------------------------------------------------------------
+1. Exact Location & Diff (`apps_script/WebAppBridge.js`, `ksExpandSciNumber_` & `ksNormalizeReadbackVal_` lines 660–703):
+   BEFORE (`c8e5a15`, prior lines 628–652):
+     - `ksNormalizeReadbackVal_` tested `KS_PLAIN_DECIMAL_RE.test(numStr)` on JS `typeof val === 'number'`,
+       so tiny finite JS floats like `0.0000005` (`String(val) === "5e-7"`) skipped `ksFormatPlainDecimal_`
+       and returned `"5e-7"`, disagreeing with Python `_normalize_scalar` (`"0.0000005"`).
+   AFTER (`e4e86802` / current lines 660–703):
+     - Added pure helper `ksExpandSciNumber_(numStr)` (lines 660–676) that expands exact decimal digits
+       of `^([+-]?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$` without float arithmetic and routes the result
+       through `ksFormatPlainDecimal_`.
+     - Invoked STRICTLY inside the `if (typeof val === 'number') { if (isFinite(val)) { ... } }`
+       branch (lines 688–690) — NEVER on string inputs.
+2. Why the Change Was Required:
+   Google Sheets stores numeric cells as IEEE-754 numbers and returns JS `typeof val === 'number'`
+   on `getValues()`. For values `< 1e-6` (e.g., trace spice quantities or small decimal rates like
+   `0.0000005`), JS `String(val)` outputs `"5e-7"` while Python `Decimal` outputs `"0.0000005"`,
+   triggering false `READBACK_VERIFICATION_FAILED` quarantine faults.
+3. Threat Class Mitigated:
+   Read-back verification false-positive denial-of-service on valid decimal writes AND prevention
+   of silent string-to-number coercion attacks on SKU/lot identifiers (like `"1E2"` or `"0010"`).
+4. Security Boundary & Preconditions Enforced:
+   Called inside `ksWriteCanonicalRowByHeaders_` (lines 1183–1184) AFTER `SpreadsheetApp.flush()`
+   (line 1158) and fresh `sh.getRange(targetRow, 1, 1, lastCol).getValues()[0]` read-back (line 1159),
+   verifying EVERY written column in `flatData`.
+5. Exact Failure Behavior (Fail-Closed Guarantee):
+   - Any mismatch between normalized `expectedRow[idx]` and normalized `readBack[idx]` throws
+     `READBACK_VERIFICATION_FAILED` (lines 1185–1190), caught by `doPost` with
+     `businessWriteAttempted = true` -> logs `ExceptionRegister` -> returns `status: 'RECOVERY_REQUIRED'`,
+     `http_status: 409`, `retryable: false` (lines 1005–1049).
+   - Non-finite JS values (`NaN`, `Infinity`, `-Infinity`) bypass expansion (line 683 `isFinite(val)`).
+   - String codes like `"0010"`, `"1E2"`, `"12.34.56"`, `"12abc"`, `""`, `null` are NEVER coerced
+     to numbers (Note: `KS_PLAIN_DECIMAL_RE` at line 639 rejects leading-zero multi-digit integers
+     such as `"0010"` because integer part requires `0|[1-9]\d*`).
+6. Lock & Side-Effect Safety:
+   Pure deterministic string transformation; zero external calls, zero mutations, bounded linear
+   work relative to digit length.
+7. Compatibility with Python Backend:
+   Exact 27-vector parity verified against `backend/app/apps_script_bridge.py::_normalize_scalar`
+   (lines 213–245) and `_format_decimal_canonical` (lines 196–210).
+8. Integer & Negative-Zero Preservation:
+   `10` -> `"10"`, `100` -> `"100"`, `100.00` -> `"100"`, `-0.00` -> `"0"`, `""` -> `""`, `null` -> `""`,
+   `true` -> `"true"`, `false` -> `"false"` (`10 != 100`, `"" != "0"`, `false != "0"`).
+9. Direct Automated Test Coverage:
+   - `backend/tests/test_ks_release_04_security_matrix.py::TestStageFDecimalReadbackParity::test_f_all_twelve_decimal_and_edge_cases_parity` (PASS — all 27 vectors)
+   - `backend/tests/test_cross_language_hmac.py::test_23_stage_d3_plain_decimal_readback_normalization_parity` (PASS)
+   - `backend/tests/test_cross_language_hmac.py::test_14_stage1_w5_readback_verification_mismatch_quarantines` (PASS)
+   - `backend/tests/test_cross_language_hmac.py::test_18_stage5_w5_non_primary_field_readback_corruption_quarantines_and_logs` (PASS)
+
+================================================================================================
+PART 2: FULL SURROUNDING CALL-CHAIN SECURITY AUDIT (ALL 9 REQUIRED THREAT CLASSES)
+================================================================================================
+
+Complete Call Chain Traced End-to-End:
+  FastAPI `AppsScriptBridge.execute_governed_write` (`backend/app/apps_script_bridge.py:2271`)
+   -> `sign_envelope` (`apps_script_bridge.py:387`)
+   -> Apps Script `doPost(e)` (`apps_script/WebAppBridge.js:739`)
+   -> `ksVerifySignedBridgeEnvelope_(e)` (`apps_script/WebAppBridge_BootstrapIntegration.js:118`)
+   -> [Branch A] `BOOTSTRAP_FIRST_OWNER` -> `ksDispatchBootstrapFirstOwner_(req)` (`WebAppBridge_BootstrapIntegration.js:363`) -> `ksBootstrapFirstOwner_` (`BootstrapOwnerHandler.js:584`)
+   -> [Branch B] Governed writes -> `payloadHash` check (`WebAppBridge.js:810`)
+   -> `ksValidateBridgeTargetTab_` (`WebAppBridge.js:355`)
+   -> `ksLogAuditStrictLocked_` presence guard (`WebAppBridge.js:841`)
+   -> `LockService.getScriptLock().waitLock(20000)` (`WebAppBridge.js:856`)
+   -> `ksVerifyBridgeActor_` (`WebAppBridge.js:504`)
+   -> `ksFindByNonce_` (`WebAppBridge.js:1199`) + `ksFindAuditReplayMetadata_` (`WebAppBridge.js:708`)
+   -> `ksRouteGovernedWrite_` (`WebAppBridge.js:1071`) -> domain engine OR `ksWriteCanonicalRowByHeaders_` (`WebAppBridge.js:1110`)
+   -> `ksRecordIdAllocation_` (`WebAppBridge.js:1224`)
+   -> `ksLogAuditStrictLocked_` (`AuditAndExceptions.js:180`) + `ksAllocateIdLocked_` (`IdAllocator.js:16`)
+   -> `SpreadsheetApp.flush()` (`WebAppBridge.js:990`)
+   -> `catch` (`WebAppBridge.js:1003`): `ksLogExceptionLocked_` (`AuditAndExceptions.js:252`) + `RECOVERY_REQUIRED` (HTTP 409)
+   -> `finally` (`WebAppBridge.js:1061`): `if (lock.hasLock()) lock.releaseLock()`
+
+9-CLASS THREAT VERIFICATION TABLE:
+------------------------------------------------------------------------------------------------
+Threat Class                           | Enforcing Functions & Exact Lines                                  | Audit Result
+---------------------------------------+--------------------------------------------------------------------+-------------------------
+1. Auth / HMAC Verification Bypass     | `WebAppBridge.js:753-766`; `WebAppBridge_BootstrapIntegration.js`  | PASS — Fail-closed.
+                                       | `ksVerifySignedBridgeEnvelope_` (118-355), `ksBridgeSafeEqual_`    | Missing verifier -> 503;
+                                       | (69-80), `ksComputeHmacSha256Hex_` (90-106).                       | secret <32 -> 503;
+                                       |                                                                    | unsigned/wrong sig -> 401;
+                                       |                                                                    | ±300s skew & outer-vs-signed
+                                       |                                                                    | parity enforced pre-dispatch.
+2. Replay & Nonce Collision Attacks    | `WebAppBridge.js:875-968` (`ksFindByNonce_` 1199-1218,             | PASS — Fail-closed.
+                                       | `ksFindAuditReplayMetadata_` 708-737).                             | Binds (nonce, target_tab,
+                                       |                                                                    | action, actor_user_id,
+                                       |                                                                    | payload_hash). Missing or
+                                       |                                                                    | incomplete audit -> 409
+                                       |                                                                    | RECOVERY_REQUIRED; mismatch
+                                       |                                                                    | -> 409 REJECTED.
+3. Privilege Escalation & Role Forgery | `WebAppBridge.js:342-349` (`ksCanonicalizeBridgeRole_`),           | PASS — Defense-in-depth.
+                                       | `ksValidateBridgeTargetTab_` (355-498), `ksVerifyBridgeActor_`     | Live Users check rejects
+                                       | (504-637), `KS_BRIDGE_RESTRICTED_TAB_ROLES` (212-220);             | forged role, AUDITOR writes,
+                                       | Python `auth.py::_validate_authoritative_role` (401-441).          | inactive/duplicate users,
+                                       |                                                                    | and cross-user self-actions.
+4. Protected / Governance / Scratch    | `WebAppBridge.js:17-36`, `355-418` (`KS_BRIDGE_PROTECTED_*`,       | PASS — Fail-closed.
+   Table Tampering                     | `KS_BRIDGE_FORBIDDEN_SCRATCH_RE`, `KS_BRIDGE_ALLOWED_TARGET_TABS`, | AuditLog/IdAllocations/
+                                       | `KS_BRIDGE_ACTION_TARGET_TAB_MAP`).                                | ExceptionRegister/SystemConfig/
+                                       |                                                                    | BackupRegister/START_HERE/
+                                       |                                                                    | scratch/unregistered -> 403.
+5. Partial Write & Silent Swallow      | `WebAppBridge.js:748, 841-853, 971-1049`;                          | PASS — Fail-closed.
+   (False CONFIRMED on Post-Write Err) | `AuditAndExceptions.js:180-250` (`ksLogAuditStrictLocked_`,        | `businessWriteAttempted=true`
+                                       | `ksLogExceptionLocked_` 252-310).                                  | converts any post-write fault
+                                       |                                                                    | to RECOVERY_REQUIRED (409,
+                                       |                                                                    | retryable=false) & preserves
+                                       |                                                                    | partial rows for reconciliation.
+6. ScriptLock Leak / Re-entrancy Race  | `WebAppBridge.js:740, 856, 987, 1061-1063`;                        | PASS — Uninterrupted lock.
+                                       | `IdAllocator.js:16-111` (`ksAllocateIdLocked_`);                   | Single lock acquisition;
+                                       | `BootstrapOwnerHandler.js:174-184, 584-800`.                       | `callerHoldsLock:true` never
+                                       |                                                                    | prematurely releases lock;
+                                       |                                                                    | `finally` always releases.
+7. Read-Back Spoofing / Type Coercion  | `WebAppBridge.js:639-703, 1158-1192`;                              | PASS — Exact parity.
+                                       | `apps_script_bridge.py:196-245, 1343-1450`.                        | Flushes + reads full row back
+                                       |                                                                    | and verifies PK, nonce, and
+                                       |                                                                    | every written column; zero
+                                       |                                                                    | string-to-number coercion.
+8. First-Owner Bootstrap Hijack /      | `WebAppBridge.js:806-808`; `WebAppBridge_BootstrapIntegration.js`  | PASS — Isolated pre-lock.
+   Duplicate Owner / Secret Reuse      | (363-477); `BootstrapOwnerHandler.js` (153-230, 562-800).          | Permanent COMPLETED latch,
+                                       |                                                                    | IN_PROGRESS crash quarantine,
+                                       |                                                                    | SHA-256 constant-time token,
+                                       |                                                                    | Users & AuthUsers empty check.
+9. Redirect & Secret Exfiltration      | `apps_script_bridge.py:83-135` (`_is_allowed_apps_script_echo_url`)| PASS — Allowlisted GET echo.
+                                       | & `execute_governed_write` redirect handler.                       | Follows ONLY HTTPS
+                                       |                                                                    | `script.googleusercontent.com/macros/echo`
+                                       |                                                                    | stripping auth/POST body;
+                                       |                                                                    | post-redirect failure -> UNKNOWN.
+
+NON-BLOCKING ARCHITECTURAL OBSERVATIONS (HONESTLY DISCLOSED FOR GPT G2 REVIEW):
+  1. Payload Hash Re-Computation Boundary: `doPost` verifies `payload_hash` integrity via HMAC-SHA256
+     over `canonical_envelope` + `AuditLog` binding, rather than independently computing SHA-256 over
+     `req.payload` in Apps Script. Because `canonical_envelope` is signed with `SALES_APPS_SCRIPT_SHARED_SECRET`
+     by FastAPI right after `compute_deterministic_payload_hash`, tampering in transit is cryptographically
+     impossible without possessing the server shared secret.
+  2. Domain Engine Sub-Routes (`WebAppBridge.js:1072-1101`): 10 specialized domain actions delegate to
+     Apps Script engines (`ksCreateInventoryLotAndReceipt`, `ksCreateProductionOrder`, etc.) rather than
+     `ksWriteCanonicalRowByHeaders_`, while still wrapped inside `doPost`'s HMAC, actor check, nonce
+     idempotency, `ScriptLock`, `ksRecordIdAllocation_`, `ksLogAuditStrictLocked_`, `flush()`, and
+     `RECOVERY_REQUIRED` quarantine.
+
+================================================================================================
+END OF KS_RELEASE_05_BRIDGE_SECURITY_AUDIT.txt
+================================================================================================
