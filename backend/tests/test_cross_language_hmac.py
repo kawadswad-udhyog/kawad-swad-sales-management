@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 
 BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -177,6 +178,10 @@ for (const fname of input.loadFiles) {
 }
 
 if (input.stubLegacyRoute) {
+  ctx.ksVerifyBridgeActor_ = (uid, role) => {
+    legacyCalls.push(['ksVerifyBridgeActor_', uid, role]);
+    return { ok: true, user_id: uid, canonical_role: role };
+  };
   ctx.ksFindByNonce_ = (nonce) => { legacyCalls.push(['ksFindByNonce_', nonce]); return null; };
   ctx.ksRouteGovernedWrite_ = (action, tab, payload) => {
     legacyCalls.push(['ksRouteGovernedWrite_', action, tab]);
@@ -500,7 +505,15 @@ class TestCrossLanguageHmacAuthentication(unittest.TestCase):
         self.assertEqual(out_weak["result"]["error_code"], "BRIDGE_NOT_CONFIGURED")
         self.assertEqual(out_weak["result"]["http_status"], 503)
 
-    def _run_real_sheet_bridge_scenario(self, requests_list, *, initial_sheets=None, corrupt_readback_tab=None, fail_audit_tab=False):
+    def _run_real_sheet_bridge_scenario(
+        self,
+        requests_list,
+        *,
+        initial_sheets=None,
+        corrupt_readback_tab=None,
+        corrupt_readback_col=0,
+        fail_audit_tab=False,
+    ):
         """Runs real Apps Script modules (Config, SafeWriter, IdAllocator, AuditAndExceptions, WebAppBridge_BootstrapIntegration, WebAppBridge) against an in-memory Google Sheets workbook."""
         script = r"""
 const fs = require('fs');
@@ -533,8 +546,8 @@ function makeSheet(name) {
             const line = [];
             for (let c = 0; c < numCols; c++) {
               let v = c0 + c < src.length ? src[c0 + c] : '';
-              if (input.corruptReadbackTab === name && r0 + r >= 1 && c0 + c === 0) {
-                v = 'CORRUPTED-ID';
+              if (input.corruptReadbackTab === name && r0 + r >= 1 && c0 + c === input.corruptReadbackCol) {
+                v = 'CORRUPTED-VALUE';
               }
               line.push(v);
             }
@@ -635,7 +648,15 @@ for (const wireBody of input.requests) {
 }
 process.stdout.write(JSON.stringify({ responses, sheetsData, lockEvents, flushCount, locked }));
 """
-        sheets = initial_sheets or {
+        sheets = initial_sheets if initial_sheets is not None else {
+            "Users": [
+                ["user_id", "full_name", "username", "role", "active"],
+                ["USR-20261126-00001", "Rajesh Kawad", "kawad.owner", "OWNER_ADMIN", True],
+                ["USR-1", "Owner Test", "owner1", "OWNER_ADMIN", True],
+                ["USR-SALES-1", "Ramesh Salesman", "ramesh.s", "FIELD_SALESMAN", True],
+                ["USR-AUD-1", "CA Auditor", "ca.auditor", "AUDITOR", True],
+                ["USR-INACTIVE-1", "Former Staff", "old.staff", "FIELD_SALESMAN", False],
+            ],
             "IdAllocations": [
                 ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
                 # Legacy 13-digit epoch timestamp row to verify W6 does NOT jump sequence
@@ -646,12 +667,19 @@ process.stdout.write(JSON.stringify({ responses, sheetsData, lockEvents, flushCo
                 "entity_id", "field_changed", "old_value", "new_value", "reason",
                 "approved_by_user_id", "related_record_id"
             ]],
+            "ExceptionRegister": [[
+                "exception_id", "created_at", "severity", "source_function", "tab_name",
+                "reference_id", "error_message", "payload_json", "assigned_owner",
+                "due_date", "status", "resolution_notes", "resolved_by", "resolved_at"
+            ]],
             "Customers": [[
                 "customer_id", "customer_type", "shop_name", "shopkeeper_name", "mobile",
                 "alternate_mobile", "address", "locality_area", "city", "map_location",
                 "active", "created_at", "notes", "gstin", "nonce"
             ]],
             "AuthUsers": [["auth_id", "user_id", "username", "password_hash", "must_change_password", "nonce"]],
+            "Settings": [["setting_key", "setting_value", "nonce"]],
+            "Products": [["product_id", "sku", "product_name", "active", "nonce"]],
         }
         proc = subprocess.run(
             ["node", "-e", script],
@@ -661,6 +689,7 @@ process.stdout.write(JSON.stringify({ responses, sheetsData, lockEvents, flushCo
                 "initialSheets": sheets,
                 "requests": requests_list,
                 "corruptReadbackTab": corrupt_readback_tab,
+                "corruptReadbackCol": corrupt_readback_col,
                 "failAuditTab": fail_audit_tab,
             }),
             text=True,
@@ -816,6 +845,293 @@ process.stdout.write(JSON.stringify({ responses, sheetsData, lockEvents, flushCo
         self.assertEqual(res["status"], "RECOVERY_REQUIRED")
         self.assertEqual(res["error_code"], "BRIDGE_POST_WRITE_FAILURE")
         self.assertIn("READBACK_VERIFICATION_FAILED", res["message"])
+        # W1/W5: Must record an attributable forensic exception entry in ExceptionRegister
+        self.assertEqual(len(out["sheetsData"]["ExceptionRegister"]), 2)
+        exc_row = out["sheetsData"]["ExceptionRegister"][1]
+        self.assertTrue(exc_row[0].startswith("EXC-"))
+        self.assertEqual(exc_row[2], "CRITICAL")
+        self.assertIn("READBACK_VERIFICATION_FAILED", exc_row[6])
+        self.assertIn("USR-1", exc_row[7])
+        self.assertTrue(res.get("recovery_exception_id", "").startswith("EXC-"))
+
+    def test_15_stage5_w4_authoritative_actor_verification_rejects_forged_inactive_escalated_and_uninitialized(self):
+        cases = [
+            ("forged_user", "USR-FORGED-999", "OWNER_ADMIN", "ACTOR_NOT_FOUND", 403),
+            ("inactive_user", "USR-INACTIVE-1", "FIELD_SALESMAN", "ACTOR_INACTIVE", 403),
+            ("role_escalation", "USR-SALES-1", "OWNER_ADMIN", "ACTOR_ROLE_MISMATCH", 403),
+            ("auditor_claimed", "USR-AUD-1", "AUDITOR", "AUDITOR_WRITE_FORBIDDEN", 403),
+            ("auditor_spoofing_owner", "USR-AUD-1", "OWNER_ADMIN", "AUDITOR_WRITE_FORBIDDEN", 403),
+        ]
+        reqs = [
+            _python_build_wire_envelope(
+                action="CREATE_CUSTOMER",
+                target_tab="Customers",
+                nonce=f"KS-W4-{idx}",
+                actor_user_id=uid,
+                actor_role=role,
+                payload={"customer_id": f"CUST-W4-{idx}", "shop_name": "Test Shop"},
+            )[0]
+            for idx, (_, uid, role, _, _) in enumerate(cases)
+        ]
+        out = self._run_real_sheet_bridge_scenario(reqs)
+        for idx, (label, _, _, expected_code, expected_http) in enumerate(cases):
+            r = out["responses"][idx]
+            self.assertEqual(r["status"], "REJECTED", f"W4 case {label}: {r}")
+            self.assertEqual(r["error_code"], expected_code, f"W4 case {label}: {r}")
+            self.assertEqual(r["http_status"], expected_http, f"W4 case {label}: {r}")
+        # Zero customer rows written
+        self.assertEqual(len(out["sheetsData"]["Customers"]), 1)
+
+        # Uninitialized empty Users directory must fail closed for non-bootstrap writes
+        empty_users_sheets = {
+            "Users": [["user_id", "full_name", "username", "role", "active"]],
+            "IdAllocations": [["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"]],
+            "AuditLog": [[
+                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
+                "entity_id", "field_changed", "old_value", "new_value", "reason",
+                "approved_by_user_id", "related_record_id"
+            ]],
+            "Customers": [["customer_id", "shop_name", "nonce"]],
+        }
+        wire_uninit, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-W4-UNINIT-1",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload={"customer_id": "CUST-UNINIT-1", "shop_name": "Blocked"},
+        )
+        out_uninit = self._run_real_sheet_bridge_scenario([wire_uninit], initial_sheets=empty_users_sheets)
+        self.assertEqual(out_uninit["responses"][0]["status"], "REJECTED")
+        self.assertEqual(out_uninit["responses"][0]["error_code"], "ACTOR_DIRECTORY_UNINITIALIZED")
+        self.assertEqual(out_uninit["responses"][0]["http_status"], 403)
+
+    def test_16_stage5_w3_control_table_systemconfig_action_tab_binding_and_role_restrictions(self):
+        cases = [
+            # SystemConfig removed from generic writer allowlist -> CONTROL_TABLE_WRITE_FORBIDDEN
+            ("SystemConfig", "UPDATE_CA_POLICY", "USR-1", "OWNER_ADMIN", {}, "CONTROL_TABLE_WRITE_FORBIDDEN", 403),
+            ("BackupRegister", "UPDATE_CA_POLICY", "USR-1", "OWNER_ADMIN", {}, "CONTROL_TABLE_WRITE_FORBIDDEN", 403),
+            ("START_HERE", "UPDATE_CA_POLICY", "USR-1", "OWNER_ADMIN", {}, "CONTROL_TABLE_WRITE_FORBIDDEN", 403),
+            # Unregistered action rejected fail-closed
+            ("Customers", "ROGUE_UNREGISTERED_ACTION", "USR-1", "OWNER_ADMIN", {}, "UNREGISTERED_BRIDGE_ACTION", 403),
+            # Action bound to Products cannot target Customers (prevents routing mismatch)
+            ("Customers", "CREATE_PRODUCT", "USR-1", "OWNER_ADMIN", {}, "ACTION_TARGET_TAB_MISMATCH", 403),
+            # Non-owner cannot mutate Settings
+            ("Settings", "UPDATE_CA_POLICY", "USR-SALES-1", "FIELD_SALESMAN", {"setting_key": "k", "setting_value": "v"}, "INSUFFICIENT_ROLE_FOR_TARGET_TAB", 403),
+            # Non-owner cannot change another user's password
+            ("AuthUsers", "CHANGE_PASSWORD", "USR-SALES-1", "FIELD_SALESMAN", {"user_id": "USR-1"}, "INSUFFICIENT_ROLE_FOR_AUTH_USERS", 403),
+            # Non-owner cannot update another user's profile
+            ("Users", "UPDATE_SELF_PROFILE", "USR-SALES-1", "FIELD_SALESMAN", {"user_id": "USR-1"}, "SELF_PROFILE_TARGET_MISMATCH", 403),
+        ]
+        reqs = [
+            _python_build_wire_envelope(
+                action=act,
+                target_tab=tab,
+                nonce=f"KS-W3-{idx}",
+                actor_user_id=uid,
+                actor_role=role,
+                payload=pl,
+            )[0]
+            for idx, (tab, act, uid, role, pl, _, _) in enumerate(cases)
+        ]
+        out = self._run_real_sheet_bridge_scenario(reqs)
+        for idx, (tab, act, _, _, _, expected_code, expected_http) in enumerate(cases):
+            r = out["responses"][idx]
+            self.assertEqual(r["status"], "REJECTED", f"W3 case {tab}/{act}: {r}")
+            self.assertEqual(r["error_code"], expected_code, f"W3 case {tab}/{act}: {r}")
+            self.assertEqual(r["http_status"], expected_http, f"W3 case {tab}/{act}: {r}")
+
+    def test_17_stage5_w2_nonce_action_actor_and_payload_hash_conflict_rejection(self):
+        hash_a = "a" * 64
+        hash_b = "b" * 64
+        wire_orig, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-W2-BIND-001",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload_hash=hash_a,
+            payload={"customer_id": "CUST-W2-001", "shop_name": "Original Shop"},
+        )
+        # Same nonce + same tab, DIFFERENT action (UPDATE_CUSTOMER vs CREATE_CUSTOMER)
+        wire_diff_action, _, _ = _python_build_wire_envelope(
+            action="UPDATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-W2-BIND-001",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload_hash=hash_a,
+            payload={"customer_id": "CUST-W2-001", "shop_name": "Original Shop"},
+        )
+        # Same nonce + same tab + same action, DIFFERENT actor
+        wire_diff_actor, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-W2-BIND-001",
+            actor_user_id="USR-SALES-1",
+            actor_role="FIELD_SALESMAN",
+            payload_hash=hash_a,
+            payload={"customer_id": "CUST-W2-001", "shop_name": "Original Shop"},
+        )
+        # Same nonce + same tab + same action + same actor, DIFFERENT payload_hash
+        wire_diff_hash, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-W2-BIND-001",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload_hash=hash_b,
+            payload={"customer_id": "CUST-W2-001", "shop_name": "Mutated Shop"},
+        )
+        out = self._run_real_sheet_bridge_scenario([
+            wire_orig,
+            wire_diff_action,
+            wire_diff_actor,
+            wire_diff_hash,
+            wire_orig,  # exact replay still succeeds idempotently
+        ])
+        self.assertEqual(out["responses"][0]["status"], "CONFIRMED")
+        self.assertEqual(out["responses"][1]["status"], "REJECTED")
+        self.assertEqual(out["responses"][1]["error_code"], "NONCE_ACTION_CONFLICT")
+        self.assertEqual(out["responses"][1]["http_status"], 409)
+        self.assertEqual(out["responses"][2]["status"], "REJECTED")
+        self.assertEqual(out["responses"][2]["error_code"], "NONCE_ACTOR_CONFLICT")
+        self.assertEqual(out["responses"][2]["http_status"], 409)
+        self.assertEqual(out["responses"][3]["status"], "REJECTED")
+        self.assertEqual(out["responses"][3]["error_code"], "NONCE_PAYLOAD_HASH_CONFLICT")
+        self.assertEqual(out["responses"][3]["http_status"], 409)
+        self.assertEqual(out["responses"][4]["status"], "CONFIRMED")
+        self.assertTrue(out["responses"][4]["idempotent_replay"])
+
+    def test_18_stage5_w5_non_primary_field_readback_corruption_quarantines_and_logs(self):
+        # Corrupt column 2 (`shop_name`, NOT primary key col 0) during read-back
+        wire_cust, _, _ = _python_build_wire_envelope(
+            action="CREATE_CUSTOMER",
+            target_tab="Customers",
+            nonce="KS-W5-FIELD-CORRUPT-01",
+            actor_user_id="USR-1",
+            actor_role="OWNER_ADMIN",
+            payload={"customer_id": "CUST-20261126-00101", "shop_name": "Shree Ganesh Traders"},
+        )
+        out = self._run_real_sheet_bridge_scenario(
+            [wire_cust],
+            corrupt_readback_tab="Customers",
+            corrupt_readback_col=2,
+        )
+        res = out["responses"][0]
+        self.assertEqual(res["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(res["error_code"], "BRIDGE_POST_WRITE_FAILURE")
+        self.assertIn('Field "shop_name" mismatch', res["message"])
+        self.assertEqual(len(out["sheetsData"]["ExceptionRegister"]), 2)
+
+    def test_19_stage6_end_to_end_python_bridge_to_apps_script_vm_to_sheets(self):
+        """
+        Isolated cross-system verification (Stage 6):
+        FastAPI AppsScriptBridge.execute_governed_write -> real HMAC envelope ->
+        Node VM executing actual Apps Script files -> in-memory Google Sheets ->
+        Python read-back verification, IdAllocations, and AuditLog. Zero live workbook writes.
+        """
+        from unittest.mock import patch
+        import app.apps_script_bridge as bridge_mod
+
+        bridge = AppsScriptBridge()
+        captured_vm_out = {}
+        e2e_nonce = f"KS-E2E-STAGE6-{uuid.uuid4().hex[:8].upper()}"
+
+        def _fake_opener_open(req, timeout=10.0):
+            # Pipe the exact raw bytes emitted by Python AppsScriptBridge straight into Node VM Apps Script!
+            raw_body = req.data.decode("utf-8") if isinstance(req.data, (bytes, bytearray)) else str(req.data)
+            vm_out = self._run_real_sheet_bridge_scenario([raw_body])
+            captured_vm_out.clear()
+            captured_vm_out.update(vm_out)
+            resp_json = json.dumps(vm_out["responses"][0]).encode("utf-8")
+
+            class _Resp:
+                status = 200
+                def read(self_inner):
+                    return resp_json
+                def __enter__(self_inner):
+                    return self_inner
+                def __exit__(self_inner, *args):
+                    return False
+                def getheaders(self_inner):
+                    return [("Content-Type", "application/json")]
+
+            return _Resp()
+
+        class _FakeOpener:
+            def open(self_inner, req, timeout=10.0):
+                return _fake_opener_open(req, timeout=timeout)
+
+        def _fake_get_records(tab_name, *args, **kwargs):
+            _, _ = args, kwargs
+            grid = (captured_vm_out.get("sheetsData") or {}).get(tab_name) or []
+            if len(grid) < 2:
+                return []
+            headers = grid[0]
+            rows = []
+            for r in grid[1:]:
+                rows.append({headers[i]: (r[i] if i < len(r) else "") for i in range(len(headers))})
+            return rows
+
+        with patch.object(bridge_mod, "SALES_APPS_SCRIPT_ENABLED", True), \
+             patch.object(bridge_mod, "SALES_APPS_SCRIPT_WEBAPP_URL", "https://script.google.com/macros/s/AKfycbTestIsolatedOnly/exec"), \
+             patch.object(bridge_mod, "SALES_APPS_SCRIPT_SHARED_SECRET", SHARED_SECRET), \
+             patch.object(bridge_mod, "SALES_APPS_SCRIPT_TIMEOUT_SECONDS", 10.0), \
+             patch("app.apps_script_bridge.urllib.request.build_opener", return_value=_FakeOpener()), \
+             patch.object(bridge_mod.db, "get_records", side_effect=_fake_get_records), \
+             patch.object(bridge_mod.db, "invalidate_tab_cache", return_value=None):
+            res = bridge.execute_governed_write(
+                action="UPDATE_CA_POLICY",
+                target_tab="Settings",
+                id_field="setting_key",
+                payload={"setting_key": "GST_FILING_MODE", "setting_value": "MONTHLY"},
+                nonce=e2e_nonce,
+                actor_user_id="USR-1",
+                actor_role="OWNER_ADMIN",
+                correlation_id="CORR-E2E-STAGE6-001",
+            )
+
+        self.assertEqual(res.status, "CONFIRMED", f"Unexpected E2E result: {res}")
+        self.assertEqual(res.nonce, e2e_nonce)
+        self.assertEqual(len(captured_vm_out["sheetsData"]["Settings"]), 2)
+        self.assertEqual(captured_vm_out["sheetsData"]["Settings"][1][0], "GST_FILING_MODE")
+        self.assertEqual(captured_vm_out["sheetsData"]["Settings"][1][1], "MONTHLY")
+        self.assertEqual(len(captured_vm_out["sheetsData"]["AuditLog"]), 2)
+        self.assertEqual(captured_vm_out["sheetsData"]["AuditLog"][1][3], "UPDATE_CA_POLICY")
+
+    def test_20_stage7_environment_cors_resolution_dev_staging_production(self):
+        """Verify Stage 7 CORS config resolution across development, staging, and production."""
+        from unittest.mock import patch
+        import app.config as cfg
+
+        # Development & staging permit localhost
+        dev_origins = cfg.resolve_cors_origins("https://kawad-swad-sales-frontend.onrender.com", env="development")
+        self.assertIn("http://localhost:3000", dev_origins)
+        self.assertIn("https://kawad-swad-sales-frontend.onrender.com", dev_origins)
+
+        staging_origins = cfg.resolve_cors_origins("https://kawad-swad-sales-frontend.onrender.com", env="staging")
+        self.assertIn("http://localhost:3000", staging_origins)
+
+        # Production strictly strips localhost and wildcards
+        prod_origins = cfg.resolve_cors_origins(
+            "https://kawad-swad-sales-frontend.onrender.com,http://localhost:3000,*",
+            env="production",
+        )
+        self.assertEqual(prod_origins, ["https://kawad-swad-sales-frontend.onrender.com"])
+
+        # assert_runtime_config() fails closed if production SALES_CORS_ORIGINS includes localhost or http://
+        for bad_cors in (
+            "https://kawad-swad-sales-frontend.onrender.com,http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://kawad-swad-sales-frontend.onrender.com",
+            "*",
+        ):
+            with patch.object(cfg, "SALES_ENV", "production"), \
+                 patch.dict(os.environ, {"SALES_ENV": "production", "SALES_TESTING": "0", "SALES_JWT_SECRET": "a" * 40}, clear=False), \
+                 patch.object(cfg, "SALES_CORS_ORIGINS", bad_cors):
+                with self.assertRaises(RuntimeError, msg=f"Expected fail-closed for production CORS={bad_cors}"):
+                    cfg.assert_runtime_config()
 
 
 if __name__ == "__main__":

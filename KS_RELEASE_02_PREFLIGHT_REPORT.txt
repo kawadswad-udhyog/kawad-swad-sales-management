@@ -1,0 +1,98 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-02
+STAGE 0 & STAGE 1: PREFLIGHT, PRESERVATION & GIT TRACEABILITY REPORT
+================================================================================
+Mission ID        : KS-RELEASE-02 (Release Candidate Remediation & G1 Completion)
+Previous Mission  : KS-RELEASE-01
+Agent Authority   : Implementation & Engineering Agent ONLY (Not Auditor / Not Approver)
+Independent Audit : GPT (REQUIRES GPT INDEPENDENT REVIEW)
+Production Auth   : Owner (REQUIRES OWNER APPROVAL)
+Live Systems      : UNTOUCHED (Read-Only Gate G1 Hold; zero live Sheets, Apps Script,
+                    or Render mutations performed)
+
+--------------------------------------------------------------------------------
+1. STAGE 0 — KS-RELEASE-01 ARTIFACT PRESERVATION VERIFICATION
+--------------------------------------------------------------------------------
+Status: PASSED
+
+All 9 KS-RELEASE-01 artifacts on disk were verified intact before remediation began,
+and an unmodified preservation backup of the original RC1 archive was created:
+
+  1. KS_RELEASE_01_RELEASE_CANDIDATE.zip
+     - Bytes   : 4,021,837
+     - Members : 412 (0 mismatches vs KS_RELEASE_01_SHA256_MANIFEST.txt)
+     - SHA-256 : 0d028dabc7ebdd8ce04bc2bca4b84c0a5935fe03c4f94369c0ad4e9880cb0ce5
+     - Status  : UNMODIFIED / PRESERVED
+
+  2. KS_RELEASE_01_RELEASE_CANDIDATE_ORIGINAL.zip (Stage 0 immutable backup)
+     - Bytes   : 4,021,837
+     - SHA-256 : 0d028dabc7ebdd8ce04bc2bca4b84c0a5935fe03c4f94369c0ad4e9880cb0ce5
+     - Status  : BIT-FOR-BIT IDENTICAL TO ORIGINAL RC1 ARCHIVE
+
+  3. All 8 KS_RELEASE_01_*.txt reports preserved unmodified in workspace root:
+     - KS_RELEASE_01_PREFLIGHT_REPORT.txt
+     - KS_RELEASE_01_SOURCE_RECONCILIATION_REPORT.txt
+     - KS_RELEASE_01_SECURITY_REPORT.txt
+     - KS_RELEASE_01_TEST_REPORT.txt
+     - KS_RELEASE_01_DEPENDENCY_REPORT.txt
+     - KS_RELEASE_01_CHANGELOG.txt
+     - KS_RELEASE_01_DEPLOYMENT_READINESS_REPORT.txt
+     - KS_RELEASE_01_SHA256_MANIFEST.txt
+
+--------------------------------------------------------------------------------
+2. STAGE 1 — GIT REPOSITORY TRACEABILITY & RELEASE BRANCH STATUS
+--------------------------------------------------------------------------------
+GitHub Repository : https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git
+Sandbox Workspace : /app/applet (no .git metadata in sandbox root; no GitHub push token)
+
+Verified Remote History (via read-only clone of origin):
+  - Prior Baseline Commit : f7ccebffdacb96081f498b304dc009326bbcee44
+                            ("docs: update project screenshots")
+  - Current origin/main   : da87c0db91219e4674c2360043d4f3095083f32e
+                            ("chore: update application screenshots" — already contains
+                             KS-RELEASE-01 reports + RC1 Apps Script/test changes)
+  - Remote Branches       : origin/main, fix/full-audit-2026-10-17,
+                            phase-4-2a-security-guards,
+                            phase-4-2b-master-data-contract-audit,
+                            phase-4-2b-master-data-schema,
+                            phase-4-2b-master-data-schema-v2,
+                            phase-4-production-milling-hardening,
+                            phase-5-safe-migration-design
+
+Local Release Branch Materialization:
+  - Branch Name           : release/ks-source-reconciliation-01
+  - Parent Commit         : da87c0db91219e4674c2360043d4f3095083f32e (origin/main HEAD)
+  - Local HEAD Commit SHA : 452d6dc400ab56b8ed56551e68d3a7c15af06fdb
+  - Diff vs origin/main   : 33 files changed, 1,834 insertions(+), 16,151 deletions(-)
+  - Diff vs f7ccebf       : 44 files changed, 4,319 insertions(+), 16,171 deletions(-)
+
+Verified Transfer Artifacts Generated for Owner/CI Push:
+  1. KS_RELEASE_02_FROM_DA87C0D.patch
+     - SHA-256             : 3ea4f1db09fa9c2da6f2fdfec31f9e5ef54ab72b73f9c380ae49802b77bf6bc4
+     - git apply --check   : PASSED against clean da87c0db91219e4674c2360043d4f3095083f32e
+  2. KS_RELEASE_02_FROM_DA87C0D.bundle
+     - SHA-256             : 44c423de8af85a98ea27981f9b32d3b38c135a8681df0a50ca59704fb45d2623
+     - git bundle verify   : PASSED (ref refs/heads/release/ks-source-reconciliation-01,
+                             requires da87c0db91219e4674c2360043d4f3095083f32e)
+
+Remote GitHub Push Status : BLOCKED
+  - Reason: Sandbox environment does not hold GitHub write/push credentials.
+  - Owner/CI One-Command Import & Push:
+      git fetch KS_RELEASE_02_FROM_DA87C0D.bundle \
+        refs/heads/release/ks-source-reconciliation-01:refs/heads/release/ks-source-reconciliation-01
+      git push -u origin release/ks-source-reconciliation-01
+
+--------------------------------------------------------------------------------
+3. VERIFIED BUILD & TEST ENVIRONMENT
+--------------------------------------------------------------------------------
+  - Node.js  : v22.23.5
+  - npm      : 10.9.9
+  - Bun      : 1.4.4
+  - Python   : 3.11.2
+  - Dev HTTP : http://localhost:3000 (HTTP 200 verified during Playwright audits)
+  - Note     : Real uvicorn ASGI package is absent in sandbox Python environment
+               (1 uvicorn subprocess boot test skipped honestly; see Test Report).
+
+================================================================================
+END OF KS_RELEASE_02_PREFLIGHT_REPORT.txt
+================================================================================

@@ -1,0 +1,111 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-02
+COMPLETE CHANGELOG (DELTA FROM KS-RELEASE-01 / da87c0d & FROM f7ccebf)
+================================================================================
+Mission ID        : KS-RELEASE-02
+Local Release Ref : release/ks-source-reconciliation-01 (452d6dc400ab56b8ed56551e68d3a7c15af06fdb)
+Parent (main/RC1) : da87c0db91219e4674c2360043d4f3095083f32e
+Prior Baseline    : f7ccebffdacb96081f498b304dc009326bbcee44
+
+--------------------------------------------------------------------------------
+1. SUMMARY OF KS-RELEASE-02 CHANGES OVER KS-RELEASE-01 (da87c0d -> 452d6dc4)
+--------------------------------------------------------------------------------
+Total Code/Asset Delta: 33 files changed, 1,834 insertions(+), 16,151 deletions(-)
+
+[DELETED — Stage 2 Static Information-Disclosure Leak Remediation (6 files)]
+  - D public/assets/aistudio/Kawad_Swad_Bound_Apps_Script_Source_COMPLETE_VERBATIM_EXPORT_c019c467.txt
+  - D public/assets/aistudio/Kawad_Swad_Master_Apps_Script_Security_Repair_Blueprint_v1.0_0963dfa1.txt
+  - D public/assets/aistudio/Kawad_Swad_Mission_51B1R_E2F_Owner_Decision_and_Technical_Baseline_c7844e47.txt
+  - D public/assets/aistudio/Kawad_Swad_Mission_51B1R_E2G_Gemini_Phase_0_1_Prompt_7ab7108b.txt
+  - D public/assets/aistudio/Mission_51B1R_E2D_Complete_Apps_Script_Audit_94dae3ba.txt
+  - D public/assets/aistudio/UPLOAD_TO_GEMINI_FIRST_c5bff036.txt
+  Rationale: Prevented Vite from copying 1.65 MB of internal Apps Script source and
+  security blueprints into dist/assets/aistudio/ on Render Static Site; resolved
+  test_accidental_aistudio_prompt_artifact_removed failure.
+
+[MODIFIED — Stage 5 Apps Script Bridge Security Hardening W1-W6 (6 files)]
+  - M apps_script/AuditAndExceptions.js (+58 lines)
+      Added lock-safe `ksLogExceptionLocked_()` so post-write quarantine failures write
+      forensic evidence to ExceptionRegister without releasing caller's ScriptLock.
+  - M apps_script/WebAppBridge.js (+645 / -lines net upgrade to 1,158 lines)
+      * W1: Enforced mandatory `ksLogAuditStrictLocked_`, removed legacy fallback,
+        added attributable forensic `ExceptionRegister` logging on post-write quarantine.
+      * W2: Embedded `hash=<payload_hash>` in AuditLog and enforced 4-way replay check
+        (target_tab, action, actor_user_id, payload_hash -> HTTP 409 on conflict).
+      * W3: Added 133-action `KS_BRIDGE_ACTION_TARGET_TAB_MAP`, removed `SystemConfig`
+        from `KS_BRIDGE_ALLOWED_TARGET_TABS` (115 tabs), added `KS_BRIDGE_PROTECTED_CONTROL_TABS`
+        (`SystemConfig`, `BackupRegister`, `DBV5_FIELD_DICTIONARY_3074`, `START_HERE` -> 403),
+        blocked `AUDITOR` on all writes, and added `KS_BRIDGE_RESTRICTED_TAB_ROLES`.
+      * W4: Added authoritative `ksVerifyBridgeActor_()` inside ScriptLock against `Users` tab.
+      * W5: Upgraded `ksWriteCanonicalRowByHeaders_()` to full field-by-field authoritative
+        read-back verification after flush with CRITICAL ExceptionRegister quarantine.
+      * W6: Hardened monotonic 7-digit `ALLOC-0000001` allocation with flush + read-back.
+  - M apps_script_patch/first_owner_bootstrap/merged_bound_files/AuditAndExceptions.js
+      Synchronized byte-for-byte with apps_script/AuditAndExceptions.js.
+  - M apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+      Synchronized byte-for-byte with apps_script/WebAppBridge.js.
+  - M apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+      Synchronized exact byte sizes and SHA-256 digests for all 44 bound files.
+  - M apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+      Synchronized exact byte sizes and SHA-256 digests for all 6 merged files.
+
+[MODIFIED — Stage 7 Production CORS & Config Hardening (4 files)]
+  - M render.yaml
+      Removed `,http://localhost:3000` from production `SALES_CORS_ORIGINS`.
+  - M backend/app/config.py
+      Added `_is_local_or_loopback_origin()`, `resolve_cors_origins()`, and production
+      fail-closed checks in `assert_runtime_config()` rejecting `*`, localhost/loopback,
+      and non-`https://` origins.
+  - M backend/app/main.py
+      Wired FastAPI CORSMiddleware to `resolve_cors_origins(SALES_CORS_ORIGINS)`.
+  - M .env.example
+      Separated production vs dev/staging CORS configuration examples.
+
+[MODIFIED — Stage 3 Frontend Runtime Crash Fixes & Acceptance Harness (3 files)]
+  - M src/views/StockView.tsx
+      Fixed real TypeError crash (`loadingPasses.filter is not a function`) via
+      `Array.isArray` normalization in `loadLoadingPasses` and `loadRegister`.
+  - M src/views/ReportsView.tsx
+      Fixed real TypeError crash (`Cannot read properties of undefined (reading 'length')`)
+      via `Array.isArray(officialReport.rows)` guard before table/count render.
+  - M scripts/run_frontend_acceptance_audit.cjs
+      Fixed Playwright LIFO route shadowing bug, fixed line 400 `if (mgrDashBtn)` typo,
+      aligned canonical v2 workspace/nav labels (`Production Floor`, `Accounts & Finance`,
+      `Field Sales Mobile`, `Money Records`), added `/api/v2/reports/**` & stock mocks,
+      and enforced non-zero exit code on any workflow/security/responsive/console failure.
+
+[MODIFIED — Stage 5/6/7 Cross-Language & E2E Tests (1 file)]
+  - M backend/tests/test_cross_language_hmac.py
+      Expanded from 14 to 20 tests covering W1-W6 deep security enforcement (tests 15-18),
+      Stage 6 End-to-End Python bridge -> HMAC -> Node VM Apps Script -> Google Sheets ->
+      Python read-back verification (test_19), and Stage 7 multi-env CORS (test_20).
+
+[UPDATED — Stage 8 Fresh Verified Playwright Screenshots (13 PNGs)]
+  - M public/screenshots/01_desktop_navigation.png .. 08_owner_tablet_768x1024.png
+      Regenerated cleanly during passing Playwright verification runs.
+
+[ADDED — Stage 0, Stage 1 & Stage 9 KS-RELEASE-02 Governance Deliverables]
+  - KS_RELEASE_01_RELEASE_CANDIDATE_ORIGINAL.zip (unmodified RC1 backup, outside RC2 ZIP)
+  - KS_RELEASE_02_PREFLIGHT_REPORT.txt
+  - KS_RELEASE_02_SOURCE_RECONCILIATION_REPORT.txt
+  - KS_RELEASE_02_SECURITY_REPORT.txt
+  - KS_RELEASE_02_DATABASE_ALLOWLIST_AUDIT.txt
+  - KS_RELEASE_02_TEST_REPORT.txt
+  - KS_RELEASE_02_DEPENDENCY_REPORT.txt
+  - KS_RELEASE_02_CHANGELOG.txt
+  - KS_RELEASE_02_DEPLOYMENT_READINESS_REPORT.txt
+  - KS_RELEASE_02_SHA256_MANIFEST.txt
+  - KS_RELEASE_02_FROM_DA87C0D.patch
+  - KS_RELEASE_02_FROM_DA87C0D.bundle (outside RC2 ZIP for Git import/push)
+  - KS_RELEASE_02_RELEASE_CANDIDATE.zip
+
+--------------------------------------------------------------------------------
+2. CUMULATIVE DELTA FROM PRIOR BASELINE f7ccebf -> 452d6dc4
+--------------------------------------------------------------------------------
+  - 44 files changed, 4,319 insertions(+), 16,171 deletions(-)
+  - Includes all KS-RELEASE-01 reports + IdAllocator/WebAppBridge initial hardening
+    (committed in da87c0d) PLUS all KS-RELEASE-02 remediations above.
+
+================================================================================
+END OF KS_RELEASE_02_CHANGELOG.txt
+================================================================================

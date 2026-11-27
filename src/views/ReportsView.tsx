@@ -237,12 +237,17 @@ export const ReportsView: React.FC = () => {
           </div>
         )}
 
-        {officialReport && (
+        {officialReport && (() => {
+          const officialRows = Array.isArray(officialReport.rows) ? officialReport.rows : [];
+          const officialCols = officialRows.length > 0 && officialRows[0] && typeof officialRows[0] === 'object'
+            ? Object.keys(officialRows[0]).slice(0, 8)
+            : [];
+          return (
           <div style={{ marginTop: '14px' }}>
             <div className="grid">
               <div className="metric">
                 <span>Source Tab</span>
-                <strong style={{ fontSize: '1rem' }}><code>{officialReport.source_tab}</code></strong>
+                <strong style={{ fontSize: '1rem' }}><code>{officialReport.source_tab || 'UNKNOWN'}</code></strong>
               </div>
               <div className="metric">
                 <span>Period / Generated At</span>
@@ -266,7 +271,7 @@ export const ReportsView: React.FC = () => {
                 </strong>
               </div>
               <div className="metric">
-                <span>Rows ({officialReport.row_count ?? officialReport.rows.length})</span>
+                <span>Rows ({officialReport.row_count ?? officialRows.length})</span>
                 <strong style={{ fontSize: '0.95rem' }}>
                   {officialReport.total_debit != null || officialReport.total_credit != null
                     ? `Dr ${officialReport.total_debit || '0.00'} / Cr ${officialReport.total_credit || '0.00'}`
@@ -283,24 +288,22 @@ export const ReportsView: React.FC = () => {
               </div>
             )}
 
-            {officialReport.rows.length > 0 && (
+            {officialRows.length > 0 && officialCols.length > 0 && (
               <div className="table-wrap" style={{ marginTop: '14px' }}>
                 <table>
                   <thead>
                     <tr>
-                      {Object.keys(officialReport.rows[0]).slice(0, 8).map((col) => (
+                      {officialCols.map((col) => (
                         <th key={col}>{col}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {officialReport.rows.map((r, idx) => (
+                    {officialRows.map((r, idx) => (
                       <tr key={idx}>
-                        {Object.keys(officialReport.rows[0])
-                          .slice(0, 8)
-                          .map((col) => (
-                            <td key={col}>{String(r[col] ?? '')}</td>
-                          ))}
+                        {officialCols.map((col) => (
+                          <td key={col}>{String((r && r[col]) ?? '')}</td>
+                        ))}
                       </tr>
                     ))}
                   </tbody>
@@ -308,7 +311,8 @@ export const ReportsView: React.FC = () => {
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
       </div>
 
       <div className="card">

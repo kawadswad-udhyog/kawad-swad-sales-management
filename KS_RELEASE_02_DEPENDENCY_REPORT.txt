@@ -1,0 +1,83 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-02
+DEPENDENCY, RUNTIME & DATABASE DRIVER AUDIT REPORT
+================================================================================
+Mission ID : KS-RELEASE-02
+Status     : PASSED (Zero MongoDB Dependencies; Zero Unnecessary Packages Added)
+
+--------------------------------------------------------------------------------
+1. RUNTIME ENVIRONMENT VERSIONS (VERIFIED IN BUILD/TEST SANDBOX)
+--------------------------------------------------------------------------------
+  - Node.js : v22.23.5
+  - npm     : 10.9.9
+  - Bun     : 1.4.4 (frontend contract & transaction safety test runner)
+  - Python  : 3.11.2
+  - Google Apps Script Runtime : V8 (`apps_script/appsscript.json`)
+
+--------------------------------------------------------------------------------
+2. FRONTEND DEPENDENCIES (package.json — UNCHANGED IN KS-RELEASE-02)
+--------------------------------------------------------------------------------
+  Runtime Dependencies:
+    - react            : ^18.3.1
+    - react-dom        : ^18.3.1
+    - lucide-react     : ^1.16.0
+    - jspdf            : ^4.2.1
+    - write-excel-file : ^4.1.1
+
+  Dev Dependencies:
+    - vite                 : ^6.0.7
+    - @vitejs/plugin-react : ^4.3.4
+    - typescript           : ^5.7.2
+    - tailwindcss          : ^4.3.3
+    - @tailwindcss/vite    : ^4.3.3
+    - @types/react         : ^18.3.18
+    - @types/react-dom     : ^18.3.5
+
+  Security Overrides:
+    - dompurify : ^3.4.17
+
+  Lockfile:
+    - package-lock.json present and preserved (used by Render `npm ci && npm run build`).
+
+--------------------------------------------------------------------------------
+3. BACKEND DEPENDENCIES (backend/requirements.txt — UNCHANGED IN KS-RELEASE-02)
+--------------------------------------------------------------------------------
+    - fastapi>=0.109.0
+    - uvicorn[standard]>=0.27.0
+    - pydantic>=2.5.0
+    - pyjwt>=2.8.0
+    - cryptography>=42.0.0
+    - gspread>=6.0.0
+    - google-auth>=2.27.0
+    - python-multipart>=0.0.9
+
+  Sandbox Runtime Caveat (Honest Disclosure):
+    - The sandbox container runs Python 3.11.2 without `uvicorn` preinstalled, so
+      1 subprocess ASGI boot test (`test_render_boot_readiness.py`) was honestly
+      SKIPPED during offline testing. Render installs `backend/requirements.txt`
+      verbatim (`pip install -r requirements.txt`) during deployment build.
+
+--------------------------------------------------------------------------------
+4. APPS SCRIPT RUNTIME & MANIFEST (apps_script/appsscript.json)
+--------------------------------------------------------------------------------
+  - Bound Google Apps Script project (44 files: 42 .js + ErpSidebar.html + appsscript.json).
+  - Zero third-party external libraries or unauthorized OAuth scopes added in KS-RELEASE-02.
+  - Uses native Apps Script services: `SpreadsheetApp`, `LockService`, `PropertiesService`,
+    `Utilities`, `ContentService`.
+
+--------------------------------------------------------------------------------
+5. DATABASE DRIVER & ZERO-MONGODB VERIFICATION (STAGE 6)
+--------------------------------------------------------------------------------
+  - Full codebase search (`mongo`, `pymongo`, `motor`, `mongoose`, `mongodb`) confirmed:
+      * ZERO MongoDB packages in package.json, package-lock.json, requirements.txt,
+        or backend/requirements.txt.
+      * ZERO MongoDB imports, clients, URIs, or collections in frontend, backend, or
+        Apps Script.
+  - Sole Authoritative Business Database: Google Sheets (via `gspread` read layer +
+    signed Apps Script Web App single-write-owner bridge).
+  - Operational Transaction Coordinator: Python stdlib `sqlite3` WAL on persistent disk
+    (`/var/data/kawad_swad/kawad_swad_tx_coord.db`, single-instance `WEB_CONCURRENCY=1`).
+
+================================================================================
+END OF KS_RELEASE_02_DEPENDENCY_REPORT.txt
+================================================================================

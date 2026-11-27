@@ -1,0 +1,149 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-02
+SOURCE RECONCILIATION REPORT (STAGES 1, 2, 3, 4, 5, 6, 7)
+================================================================================
+Mission ID        : KS-RELEASE-02
+Local Release Ref : release/ks-source-reconciliation-01 (452d6dc400ab56b8ed56551e68d3a7c15af06fdb)
+Parent (main)     : da87c0db91219e4674c2360043d4f3095083f32e
+Prior Baseline    : f7ccebffdacb96081f498b304dc009326bbcee44
+Gate Status       : REQUIRES GPT INDEPENDENT REVIEW
+
+--------------------------------------------------------------------------------
+1. STAGE 2 — public/assets/aistudio/ CLASSIFICATION & REMEDIATION
+--------------------------------------------------------------------------------
+Status: PASSED (Outcome A — Confirmed Production Security & Hygiene Defect)
+
+Root Cause Investigation:
+  - Both origin/main (da87c0d) and f7ccebf tracked 6 AI Studio upload files under
+    public/assets/aistudio/ totaling ~1.65 MB (16,011 lines), including the complete
+    43-file verbatim Apps Script source export and internal security audit blueprints:
+      1. Kawad_Swad_Bound_Apps_Script_Source_COMPLETE_VERBATIM_EXPORT_c019c467.txt (14,746 lines)
+      2. Kawad_Swad_Master_Apps_Script_Security_Repair_Blueprint_v1.0_0963dfa1.txt (448 lines)
+      3. Kawad_Swad_Mission_51B1R_E2F_Owner_Decision_and_Technical_Baseline_c7844e47.txt (431 lines)
+      4. Kawad_Swad_Mission_51B1R_E2G_Gemini_Phase_0_1_Prompt_7ab7108b.txt (168 lines)
+      5. Mission_51B1R_E2D_Complete_Apps_Script_Audit_94dae3ba.txt (202 lines)
+      6. UPLOAD_TO_GEMINI_FIRST_c5bff036.txt (16 lines)
+  - Zero code references existed anywhere in src/, backend/app/, apps_script/,
+    index.html, or vite.config.ts.
+  - Because files under public/ are copied verbatim by Vite into dist/, `npm run build`
+    copied all 6 internal files into dist/assets/aistudio/, where Render Static Site
+    would publicly serve internal source code and security audit memos over HTTPS.
+  - This also caused backend/tests/test_mission51b1_round2_integrity.py ::
+    test_accidental_aistudio_prompt_artifact_removed to fail in KS-RELEASE-01.
+
+Remediation Performed:
+  - Deleted public/assets/aistudio/ and empty public/assets/ directory.
+  - Rebuilt production frontend bundle via `tsc && vite build`.
+  - Verified `dist/assets/aistudio` no longer exists (DIST_AISTUDIO_ABSENT_OK).
+  - Verified `test_accidental_aistudio_prompt_artifact_removed` now PASSES.
+  - Verified `scripts/verify_package_hygiene.py` reports 0 forbidden `aistudio` violations.
+
+--------------------------------------------------------------------------------
+2. STAGE 3 — FRONTEND ACCEPTANCE HARNESS & REAL UI RUNTIME CRASH REMEDIATION
+--------------------------------------------------------------------------------
+Status: PASSED (2 Real Production React Crashes Fixed + Audit Harness Repaired)
+
+Exact BEFORE Failure Evidence (captured against live http://localhost:3000):
+  1. Real Production Crash #1 — src/views/StockView.tsx:186
+     - Error: `TypeError: loadingPasses.filter is not a function`
+     - Cause: `loadLoadingPasses()` called `setLoadingPasses(res || [])` without an
+       `Array.isArray(res)` guard (unlike `loadBulkBatches` on line 418), crashing
+       StockView whenever an API endpoint returned a non-array envelope object.
+     - Fix: Added `Array.isArray(res)` / `Array.isArray(res?.items)` normalization in
+       `loadLoadingPasses` (lines 182-198) and `Array.isArray(res?.register)` guard in
+       `loadRegister` (line 482).
+
+  2. Real Production Crash #2 — src/views/ReportsView.tsx:269 & 286
+     - Error: `TypeError: Cannot read properties of undefined (reading 'length')`
+     - Cause: `officialReport.rows.length` and `Object.keys(officialReport.rows[0])`
+       assumed `officialReport.rows` was always an array, crashing React ErrorBoundary
+       when `/api/v2/reports/*` returned a partial/error payload without `rows`.
+     - Fix: Guarded `officialRows = Array.isArray(officialReport.rows) ? officialReport.rows : []`
+       and `officialCols` prior to `.length` and `.map()` rendering (lines 240-306).
+
+  3. Audit Harness Bugs — scripts/run_frontend_acceptance_audit.cjs
+     - Bug A (Playwright LIFO Route Shadowing): Catch-all `context.route('**/api/**', ...)`
+       was registered LAST, causing Playwright (which evaluates routes in LIFO order)
+       to shadow `/api/auth/me`, `/api/workspace`, `/api/dashboard`, and `/api/health`,
+       corrupting `currentUser` and breaking OWNER/PA/MANAGER/FACTORY/ACCOUNTANT/EMPLOYEE
+       and security checks. Fixed by registering the catch-all FIRST and adding realistic
+       mocks for `/api/stock/loading-passes**`, `/api/stock/finished-goods-register**`,
+       and `/api/v2/reports/**`.
+     - Bug B (Syntax/Logic Typo): Line 400 had `if (dashNavBtn => mgrDashBtn)` (arrow
+       function always truthy). Fixed to `if (mgrDashBtn)`.
+     - Bug C (Pre-v2 Workspace/Nav Labels): Updated Factory/Accountant/Salesman header
+       checks and Accounting nav selector to align with canonical v2 `src/utils/workspaces.ts`
+       (`Production Floor`, `Accounts & Finance`, `Field Sales Mobile`, `Money Records`),
+       which is contract-enforced by `scripts/test_phase1_6_frontend_contracts.ts` Test 17.
+     - Bug D (Exit Code Enforcement): Added strict `process.exitCode = 1` whenever ANY
+       workflow, security check, responsive check, or console error fails. Zero security
+       assertions were weakened or removed.
+
+Exact AFTER Verification:
+  - 7/7 Workflows PASS (OWNER, PA, MANAGER, SALESMAN, FACTORY, ACCOUNTANT, EMPLOYEE)
+  - 4/4 Security Audits PASS (sessionStorageRestoration, invalidRoleHandling,
+    ownerPreview, logoutStatePurge)
+  - 1/1 Responsive PASS (TABLET 768x1024)
+  - Console Errors: 0 (`[]`)
+  - Exit Code: 0
+
+--------------------------------------------------------------------------------
+3. STAGE 5 — APPS SCRIPT BOUND PROJECT RECONCILIATION (44 FILES)
+--------------------------------------------------------------------------------
+Status: PASSED (0 New Collisions; 100% SHA-256 Parity Between apps_script/ & merged_bound_files/)
+
+  - Total bound files in apps_script/ : 44 source files (42 .js + ErpSidebar.html + appsscript.json)
+    plus SOURCE_INVENTORY_AND_SHA256.txt.
+  - JS syntax check (`node --check` / VM parse): 42/42 PASSED.
+  - Modified bound files in KS-RELEASE-02 (synchronized byte-for-byte with
+    apps_script_patch/first_owner_bootstrap/merged_bound_files/):
+      * AuditAndExceptions.js : 10,341 bytes
+        SHA-256: 04350e26bfe571d538347d6b32393f1ce2cc323177884ef6551cff55bbc76394
+      * WebAppBridge.js       : 43,516 bytes
+        SHA-256: 8b1f51b7651cb10de2f4b695037bb6c4a52d2808b33d2ca0335ceaffdddce1e7
+  - Unchanged First-Owner files verified byte-for-byte against MERGED_SHA256_MANIFEST.md:
+      * BootstrapOwnerHandler.js
+      * Config.js
+      * IdAllocator.js
+      * WebAppBridge_BootstrapIntegration.js
+  - Global Declaration Collision Audit:
+      * Zero collisions in any of the 6 First-Owner / Bridge files.
+      * 8 pre-existing legacy collisions documented transparently in untouched original
+        bound files (`onOpen` declared across AuthAndMenu.js, Code.js, and 4 legacy
+        Phase 3 menu files; `KS_P3_EMPTY_V13*` duplicated between legacy v1_3.js and v1_4.js).
+        Preserved untouched per scope rule ("preserve all unrelated original bound files");
+        flagged for Owner/GPT awareness before Apps Script cutover.
+
+--------------------------------------------------------------------------------
+4. STAGE 7 — RENDER & MULTI-ENVIRONMENT CONFIGURATION RECONCILIATION
+--------------------------------------------------------------------------------
+Status: PASSED (Production CORS Hardened; Production Backend Hostname Flagged for Owner)
+
+Environment Matrix Comparison:
+
+  Setting                 | Local Development          | Staging                    | Production (render.yaml)
+  ------------------------|----------------------------|----------------------------|-------------------------------------------
+  SALES_ENV               | development                | staging                    | production
+  SALES_CORS_ORIGINS      | localhost:3000 + frontend  | localhost:3000 + staging   | https://kawad-swad-sales-frontend.onrender.com
+  Localhost CORS Allowed? | YES (dev convenience)      | YES (staging QA)           | NO — FAIL-CLOSED RuntimeError at boot
+  HTTP (non-HTTPS) CORS?  | YES (loopback only)        | YES (loopback only)        | NO — FAIL-CLOSED RuntimeError at boot
+  Wildcard (*) CORS?      | Stripped/disallowed        | Stripped/disallowed        | NO — FAIL-CLOSED RuntimeError at boot
+  WEB_CONCURRENCY         | 1                          | 1                          | 1 (single-instance SQLite WAL coordinator)
+  SALES_INSTANCE_COUNT    | 1                          | 1                          | 1
+  Persistent Disk         | Local ./.ks_tx_coord.db    | /var/data/kawad_swad       | /var/data/kawad_swad (1 GB Render Disk)
+  SALES_APPS_SCRIPT_ENABLED| false (or mock/dev URL)   | true (staging Web App)     | true (production Web App — sync: false)
+
+CRITICAL TRANSPARENT DISCLOSURE — BACKEND SERVICE HOSTNAME:
+  - Across render.yaml, public/_redirects, backend/app/main.py, and src/services/api.ts,
+    the ONLY verified backend Render service name/URL in the repository is:
+      `kawad-swad-sales-dev` / `https://kawad-swad-sales-dev.onrender.com`
+  - Per strict engineering governance (never invent unverified production URLs),
+    KS-RELEASE-02 did NOT fabricate a renamed hostname (such as `-prod` or `-api`).
+  - BEFORE Gate G3 production cutover, the Owner MUST confirm whether production traffic
+    will use `https://kawad-swad-sales-dev.onrender.com` or provide the exact provisioned
+    production backend Render URL so `render.yaml` and `public/_redirects` can be updated
+    with Owner authorization.
+
+================================================================================
+END OF KS_RELEASE_02_SOURCE_RECONCILIATION_REPORT.txt
+================================================================================

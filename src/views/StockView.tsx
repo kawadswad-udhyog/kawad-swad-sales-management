@@ -183,7 +183,12 @@ export const StockView: React.FC = () => {
     try {
       setLoadingPassesLoading(true);
       const res = await getVanLoadingPasses();
-      setLoadingPasses(res || []);
+      const normalized = Array.isArray(res)
+        ? res
+        : Array.isArray((res as unknown as { data?: VanLoadingPass[] })?.data)
+        ? ((res as unknown as { data: VanLoadingPass[] }).data)
+        : [];
+      setLoadingPasses(normalized);
     } catch (err: any) {
       console.error('Failed to load van loading passes:', err);
     } finally {
@@ -474,8 +479,8 @@ export const StockView: React.FC = () => {
       const res = await apiRequest<{ register: FinishedGoodsRegisterItem[]; summary: FinishedGoodsRegisterSummary }>(
         '/api/stock/finished-goods-register'
       );
-      if (res?.register) setRegisterItems(res.register);
-      if (res?.summary) setRegisterSummary(res.summary);
+      if (Array.isArray(res?.register)) setRegisterItems(res.register);
+      if (res?.summary && typeof res.summary === 'object') setRegisterSummary(res.summary);
     } catch (err) {
       console.warn('Could not load register in StockView', err);
     } finally {

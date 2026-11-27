@@ -1,0 +1,96 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-02
+DEPLOYMENT READINESS REPORT & GATE G1 / G2 / G3 CHECKLIST
+================================================================================
+Mission ID        : KS-RELEASE-02
+Current Gate      : GATE G1 — SUBMISSION READY FOR INDEPENDENT GPT AUDIT
+Self-Certification: PROHIBITED (Agent is Implementation Only)
+Production Status : NOT RUN / HARD HOLD (Zero Live Changes Made)
+
+--------------------------------------------------------------------------------
+1. GATE G1 (ENGINEERING REMEDIATION & PACKAGE VERIFICATION) — STATUS MATRIX
+--------------------------------------------------------------------------------
+Stage | Description                                        | Honest Status
+------|----------------------------------------------------|------------------------------
+  0   | KS-RELEASE-01 artifact preservation & backup       | PASSED
+  1   | Local release branch + verified patch & bundle     | PASSED (Local) / BLOCKED (Remote GitHub Push — no token)
+  2   | public/assets/aistudio/ static leak remediation    | PASSED
+  3   | Frontend acceptance audit + Stock/Reports crash fix| PASSED (0 console errors)
+  4   | 265-table canonical & write-permission audit       | PASSED (Code) / BLOCKED (Live Workbook Row-1 Headers)
+  5   | Apps Script WebAppBridge W1-W6 deep hardening      | PASSED (VM/Unit) / REQUIRES GPT INDEPENDENT REVIEW
+  6   | Cross-system E2E verification & zero-MongoDB audit | PASSED
+  7   | Production CORS fail-closed & Render config audit  | PASSED (CORS) / REQUIRES OWNER HOSTNAME CONFIRMATION
+  8   | Full regression test suite (Backend/VM/Bun/PW)     | PASSED (1 sandbox uvicorn test honestly SKIPPED)
+  9   | KS-RELEASE-02 reports, SHA-256 manifest & RC2 ZIP  | PASSED / REQUIRES GPT INDEPENDENT REVIEW
+
+--------------------------------------------------------------------------------
+2. MANDATORY PRE-G2 & PRE-G3 BLOCKERS / OWNER INPUTS REQUIRED
+--------------------------------------------------------------------------------
+Before Gate G2 (GPT Independent Approval) and Gate G3 (Owner Production Deployment
+Authorization), the following items MUST be explicitly resolved:
+
+  [BLOCKER-1] Remote GitHub Push of `release/ks-source-reconciliation-01`
+    - Status: BLOCKED in sandbox (no GitHub push credentials).
+    - Action: Owner/CI fetches `KS_RELEASE_02_FROM_DA87C0D.bundle` (or applies
+      `KS_RELEASE_02_FROM_DA87C0D.patch` onto `da87c0d`) and pushes branch
+      `release/ks-source-reconciliation-01` to GitHub.
+
+  [BLOCKER-2] Live Google Workbook Physical Row-1 Header Verification
+    - Status: BLOCKED during G1 (live Google Sheet untouched per hard stop).
+    - Action: Owner inspects live workbook Row-1 headers for the 12 conflicting core
+      tabs (`CustomRoles`, `Customers`, `Expenses`, `PackagingBatches`,
+      `ProductionBatches`, `Products`, `RawMaterials`, `SalaryIncentives`, `Sales`,
+      `ShopVisits`, `Suppliers`, `Workers`) and 24 `PENDING_OWNER_MAPPING_TABS`, and
+      either aligns headers or configures `SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON`.
+
+  [BLOCKER-3] Owner Confirmation of Production Backend Render Hostname
+    - Status: REQUIRES OWNER APPROVAL.
+    - Fact  : `render.yaml`, `public/_redirects`, `backend/app/main.py`, and
+      `src/services/api.ts` currently reference `https://kawad-swad-sales-dev.onrender.com`
+      (the ONLY verified backend service name in the repository).
+    - Action: Owner must confirm whether production backend uses `kawad-swad-sales-dev`
+      or supply the exact provisioned production Render backend hostname before G3 deploy.
+
+  [BLOCKER-4] Pre-Existing Legacy Apps Script Duplicate Declarations (Informational)
+    - Fact  : 8 pre-existing duplicate declarations exist in untouched legacy original
+      bound files (`onOpen` in 6 legacy files; `KS_P3_EMPTY_V13*` in v1_3 vs v1_4).
+      Zero collisions exist in the 6 First-Owner/Bridge files.
+    - Action: GPT & Owner review whether to keep untouched or clean legacy menu scripts
+      in a separate post-cutover housekeeping mission.
+
+  [BLOCKER-5] Independent GPT Security & Code Review (Gate G2)
+    - Status: REQUIRES GPT INDEPENDENT REVIEW.
+    - Scope : Inspect `KS_RELEASE_02_RELEASE_CANDIDATE.zip`, verify SHA-256 manifest,
+      audit W1-W6 in `WebAppBridge.js` & `AuditAndExceptions.js`, audit `StockView.tsx`
+      & `ReportsView.tsx`, verify CORS fail-closed enforcement, and issue Gate G2 verdict.
+
+--------------------------------------------------------------------------------
+3. PRODUCTION DEPLOYMENT CHECKLIST (STRICTLY NOT RUN — AWAITING G2 + OWNER G3)
+--------------------------------------------------------------------------------
+  [ ] Gate G2 signed off by GPT independent auditor
+  [ ] Gate G3 production deployment explicitly authorized by Owner
+  [ ] `release/ks-source-reconciliation-01` pushed & merged per Owner Git workflow
+  [ ] Production Render secrets configured in Render Dashboard (NEVER in Git):
+        - SALES_GOOGLE_SPREADSHEET_ID
+        - /etc/secrets/sales-service-account.json
+        - SALES_JWT_SECRET (auto-generated >=32 chars)
+        - SALES_APPS_SCRIPT_WEBAPP_URL (new deployed Web App /exec URL)
+        - SALES_APPS_SCRIPT_SHARED_SECRET (>=32 chars, matching Script Properties)
+        - SALES_CORS_ORIGINS=https://kawad-swad-sales-frontend.onrender.com
+        - SALES_ENV=production, WEB_CONCURRENCY=1, SALES_INSTANCE_COUNT=1
+        - Render Persistent Disk mounted at /var/data/kawad_swad (1 GB)
+  [ ] Bound Apps Script updated from verified `apps_script/` (44 files) & deployed as
+      Web App (Execute as: Me; Access: Anyone with link — protected by mandatory HMAC)
+  [ ] Script Properties set: `SALES_APPS_SCRIPT_SHARED_SECRET` + one-time bootstrap token
+  [ ] Run live Render `/health` + real Uvicorn ASGI boot check (resolving the 1 sandbox skip)
+  [ ] Controlled First-Owner (`OWNER_ADMIN`) bootstrap executed ONLY under Owner approval
+  [ ] Post-bootstrap verification of `Users`, `AuthUsers`, `AuditLog` + one-time token cleared
+
+================================================================================
+HARD STOP NOTICE (SECTION 13):
+No production deployment, Render mutation, Apps Script deployment, live Google Sheet
+mutation, Script Properties change, First Owner creation, or historical data import
+was performed during KS-RELEASE-02. Awaiting GPT Gate G2 review and Owner Gate G3 decision.
+================================================================================
+END OF KS_RELEASE_02_DEPLOYMENT_READINESS_REPORT.txt
+================================================================================

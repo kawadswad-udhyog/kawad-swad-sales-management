@@ -174,15 +174,67 @@ def jwt_secret() -> str:
     return secret
 
 
+def _is_local_or_loopback_origin(origin: str) -> bool:
+    """Return True if an origin targets localhost, 127.0.0.1, 0.0.0.0, or IPv6 loopback."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(origin)
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or host.endswith(".local")
+
+
+def resolve_cors_origins(
+    raw_origins: Optional[str] = None,
+    *,
+    env: Optional[str] = None,
+) -> list[str]:
+    """
+    Resolve effective CORS allowlist deterministically for development, staging, and production.
+    - production: returns ONLY explicitly configured non-wildcard, non-localhost HTTPS origins
+      plus the verified deployed frontend origin (never adds or keeps localhost).
+    - development / staging: merges configured origins with local development origins.
+    """
+    raw = SALES_CORS_ORIGINS if raw_origins is None else raw_origins
+    configured = [o.strip().rstrip("/") for o in str(raw or "").split(",") if o.strip()]
+    if is_production_env(env=env):
+        # Strictly exclude wildcards and localhost/loopback origins in production.
+        prod_origins = [
+            o for o in configured
+            if o != "*" and not _is_local_or_loopback_origin(o)
+        ]
+        if "https://kawad-swad-sales-frontend.onrender.com" not in prod_origins:
+            prod_origins.insert(0, "https://kawad-swad-sales-frontend.onrender.com")
+        return list(dict.fromkeys(prod_origins))
+
+    dev_defaults = [
+        "https://kawad-swad-sales-frontend.onrender.com",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    return list(dict.fromkeys([*dev_defaults, *configured]))
+
+
 def assert_runtime_config() -> None:
     assert_production_test_isolation()
     _ = jwt_secret()
-    origins = [o.strip() for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
+    origins = [o.strip().rstrip("/") for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
     if is_production_env():
         if not origins or "*" in origins:
             raise RuntimeError(
                 "SALES_CORS_ORIGINS must list the real frontend origins when SALES_ENV=production. "
                 "Wildcard CORS is not allowed."
+            )
+        local_origins = [o for o in origins if _is_local_or_loopback_origin(o)]
+        if local_origins:
+            raise RuntimeError(
+                f"SALES_CORS_ORIGINS must not contain localhost/loopback origins when SALES_ENV=production: {local_origins}"
+            )
+        non_https_origins = [o for o in origins if not o.lower().startswith("https://")]
+        if non_https_origins:
+            raise RuntimeError(
+                f"SALES_CORS_ORIGINS must use https:// origins when SALES_ENV=production: {non_https_origins}"
             )
         if not SALES_GOOGLE_SPREADSHEET_ID:
             raise RuntimeError(

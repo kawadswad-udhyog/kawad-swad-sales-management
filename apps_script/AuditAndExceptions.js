@@ -235,3 +235,61 @@ function ksLogAuditStrictLocked_(action, entityType, entityId, opts) {
     record: auditRecord
   };
 }
+
+/**
+ * Caller-locked ExceptionRegister writer for governed security-critical transactions (Stage 5 W1/W5).
+ * Caller MUST already hold `LockService.getScriptLock()`.
+ * NEVER acquires or releases `ScriptLock`.
+ *
+ * @param {string} severity
+ * @param {string} sourceFunction
+ * @param {string} tabName
+ * @param {string} referenceId
+ * @param {string} errorMessage
+ * @param {Object=} payloadObj
+ * @return {{exception_id: string, row: number, record: Object}|null}
+ */
+function ksLogExceptionLocked_(severity, sourceFunction, tabName, referenceId, errorMessage, payloadObj) {
+  if (!LockService.getScriptLock().hasLock()) {
+    throw new Error('LOCK_OWNERSHIP_VIOLATION: ksLogExceptionLocked_ requires caller-held ScriptLock.');
+  }
+  if (typeof ksAllocateIdLocked_ !== 'function') {
+    throw new Error('BOUND_DEPENDENCY_MISSING: ksAllocateIdLocked_ is required for caller-locked exception logging.');
+  }
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss || !ss.getSheetByName(KS_CONFIG.TABS.EXCEPTION_REGISTER)) {
+    return null;
+  }
+
+  const alloc = ksAllocateIdLocked_(KS_CONFIG.TABS.EXCEPTION_REGISTER, 'EXC_' + Utilities.getUuid());
+  const excRecord = {
+    exception_id: alloc.allocated_id,
+    created_at: ksNowIso_(),
+    severity: severity || 'CRITICAL',
+    source_function: sourceFunction || 'WebAppBridge.doPost',
+    tab_name: tabName || '',
+    reference_id: referenceId || '',
+    error_message: String(errorMessage || ''),
+    payload_json: JSON.stringify(payloadObj || {}),
+    assigned_owner: 'OWNER_ADMIN',
+    due_date: '',
+    status: 'OPEN',
+    resolution_notes: '',
+    resolved_by: '',
+    resolved_at: ''
+  };
+
+  const writeRes = ksAppendAndVerifyRow_(
+    ss,
+    KS_CONFIG.TABS.EXCEPTION_REGISTER,
+    excRecord,
+    'exception_id',
+    ['exception_id', 'created_at', 'severity', 'source_function', 'error_message', 'status']
+  );
+
+  return {
+    exception_id: alloc.allocated_id,
+    row: writeRes.row,
+    record: excRecord
+  };
+}

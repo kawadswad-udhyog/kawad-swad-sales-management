@@ -105,6 +105,60 @@ const TEST_USERS = {
 };
 
 async function setupMocksForUser(context, activeUser) {
+  // Playwright matches routes in LIFO (reverse registration) order:
+  // register the default catch-all FIRST so specific endpoint handlers below take precedence.
+  await context.route('**/api/**', (route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, data: [] }),
+    });
+  });
+
+  await context.route('**/api/stock/loading-passes**', (route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([]),
+    });
+  });
+
+  await context.route('**/api/stock/finished-goods-register**', (route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        register: [
+          {
+            product_id: 'PRD-MOONG-200',
+            sku: 'MOONG-200G',
+            product_name: 'Moong Special Papad (200g)',
+            category: 'Papad',
+            pack_weight_g: 200,
+            selling_unit: 'PACKET',
+            factory_packets: 120,
+            warehouse_packets: 400,
+            salesmen_packets: 80,
+            total_internal_on_hand_packets: 600,
+            channels_dispatched_packets: 50,
+            stock_status: 'HEALTHY',
+            active: true,
+          },
+        ],
+        summary: {
+          active_skus: 2,
+          active_with_stock: 2,
+          active_zero_stock: 0,
+          factory_packets: 120,
+          warehouse_packets: 750,
+          salesmen_packets: 80,
+          total_internal_on_hand_packets: 950,
+          channels_dispatched_packets: 50,
+        },
+      }),
+    });
+  });
+
   await context.route('**/api/auth/me', (route) => {
     return route.fulfill({
       status: 200,
@@ -204,6 +258,29 @@ async function setupMocksForUser(context, activeUser) {
     });
   });
 
+  await context.route('**/api/v2/reports/**', (route) => {
+    const url = route.request().url();
+    const sourceTab = url.includes('stock-status')
+      ? 'RPT_StockStatus'
+      : url.includes('sales-receivables')
+      ? 'RPT_SalesAndReceivables'
+      : 'RPT_TrialBalance';
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        source_tab: sourceTab,
+        period: 'CURRENT',
+        status: 'AVAILABLE',
+        balance_status: 'BALANCED',
+        row_count: 1,
+        total_debit: '125000.00',
+        total_credit: '125000.00',
+        rows: [{ account_code: '1001', account_name: 'Cash in Hand', debit: '125000.00', credit: '0.00' }],
+      }),
+    });
+  });
+
   await context.route('**/api/health', (route) => {
     return route.fulfill({
       status: 200,
@@ -215,15 +292,6 @@ async function setupMocksForUser(context, activeUser) {
         spreadsheet_id_configured: true,
         backend: { status: 'CONNECTED', service: 'kawad-swad-sales-backend' },
       }),
-    });
-  });
-
-  // Default fallback for any other api request
-  await context.route('**/api/**', (route) => {
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ success: true, data: [] }),
     });
   });
 }
@@ -397,7 +465,7 @@ async function runAudit() {
 
     // Return to dashboard
     const mgrDashBtn = await mgrPage.$('aside button:has-text("Home")');
-    if (dashNavBtn => mgrDashBtn) {
+    if (mgrDashBtn) {
       await mgrDashBtn.click();
       await mgrPage.waitForTimeout(600);
     }
@@ -444,7 +512,7 @@ async function runAudit() {
     const hasVanStockAction = salesBodyText.includes('My Van Stock') || salesBodyText.includes('My Stock');
     const hasClosingAction = salesBodyText.includes('Daily Cash Closing') || salesBodyText.includes('Daily Closing');
 
-    console.log('Salesman Header Contains "My Sales":', salesHeaderText.includes('My Sales'));
+    console.log('Salesman Header Contains "Field Sales Mobile" / "My Sales":', salesHeaderText.includes('Field Sales Mobile') || salesHeaderText.includes('My Sales'));
     console.log('Salesman Mobile Touch Actions:', {
       hasFieldSalesTitle,
       hasNewSaleAction,
@@ -500,13 +568,13 @@ async function runAudit() {
 
     const factoryHeaderText = await factoryPage.textContent('header');
     const factoryBodyText = await factoryPage.textContent('body');
-    const hasFactoryHeader = factoryHeaderText.includes('Factory Work');
+    const hasFactoryHeader = factoryHeaderText.includes('Production Floor') || factoryHeaderText.includes('Factory Work');
     const hasFactoryTitle = factoryBodyText.includes('Factory Work & Daily Production');
     const hasMillingStep = factoryBodyText.includes('Raw Dal Milling');
     const hasBatchStep = factoryBodyText.includes('Production Batch');
     const hasPackagingStep = factoryBodyText.includes('Packaging Entry');
 
-    console.log('Factory Header Contains "Factory Work":', hasFactoryHeader);
+    console.log('Factory Header Contains "Production Floor" / "Factory Work":', hasFactoryHeader);
     console.log('Factory Floor Steps:', { hasFactoryTitle, hasMillingStep, hasBatchStep, hasPackagingStep });
 
     const factoryShotPath = path.join(SCREENSHOT_DIR, '05_factory_workspace_1440x900.png');
@@ -540,22 +608,24 @@ async function runAudit() {
 
     const acctHeaderText = await acctPage.textContent('header');
     const acctBodyText = await acctPage.textContent('body');
-    const hasAcctHeader = acctHeaderText.includes('Accounts & Payments');
-    const hasAccountsTitle = acctBodyText.includes('Accounts & Payments Workspace');
+    const hasAcctHeader = acctHeaderText.includes('Accounts & Finance') || acctHeaderText.includes('Accounts & Payments');
+    const hasAccountsTitle = acctBodyText.includes('Accounts & Payments Workspace') || acctBodyText.includes('Accounts & Finance');
     const hasJournalAction = acctBodyText.includes('Post Journal Voucher');
     const hasTrialBalance = acctBodyText.includes('Trial Balance');
 
-    console.log('Accountant Header Contains "Accounts & Payments":', hasAcctHeader);
+    console.log('Accountant Header Contains "Accounts & Finance" / "Accounts & Payments":', hasAcctHeader);
     console.log('Accountant Dashboard Features:', { hasAccountsTitle, hasJournalAction, hasTrialBalance });
 
-    // Test navigating to Accounting ledger view via "Payments" nav button
-    const acctNavBtn = await acctPage.$('aside button:has-text("Payments")');
+    // Test navigating to Accounting ledger view via "Money Records" (v2) or "Payments" nav button
+    const acctNavBtn =
+      (await acctPage.$('aside button:has-text("Money Records")')) ||
+      (await acctPage.$('aside button:has-text("Payments")'));
     let canNavAccounting = false;
     if (acctNavBtn) {
       await acctNavBtn.click();
       await acctPage.waitForTimeout(800);
       const ledgerBody = await acctPage.textContent('body');
-      canNavAccounting = ledgerBody.includes('General Ledger & Financial Accounts') || ledgerBody.includes('Trial Balance');
+      canNavAccounting = ledgerBody.includes('General Ledger & Financial Accounts') || ledgerBody.includes('Trial Balance') || ledgerBody.includes('Accounting');
     }
 
     // Return to dashboard
@@ -820,6 +890,18 @@ async function runAudit() {
   console.log('='.repeat(80));
 
   fs.writeFileSync('./audit_results.json', JSON.stringify(auditResults, null, 2));
+
+  const failedWorkflows = Object.entries(auditResults.workflows).filter(([, v]) => v.status !== 'PASS');
+  const failedSecurity = Object.entries(auditResults.security).filter(([, v]) => v.result !== 'PASS');
+  const failedResponsive = Object.entries(auditResults.responsive).filter(([, v]) => v.status !== 'PASS');
+  if (
+    failedWorkflows.length > 0 ||
+    failedSecurity.length > 0 ||
+    failedResponsive.length > 0 ||
+    auditResults.consoleErrors.length > 0
+  ) {
+    process.exitCode = 1;
+  }
 }
 
 runAudit();

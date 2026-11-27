@@ -10,6 +10,7 @@ from app.config import (
     assert_runtime_config,
     is_isolated_testing_mode,
     is_production_env,
+    resolve_cors_origins,
 )
 
 # Enforce production/test isolation before API framework, storage, routers, auth, or coordinator initialization.
@@ -116,19 +117,8 @@ if hasattr(app, "exception_handler"):
             },
         )
 
-# Configure CORS
-configured_origins = [o.strip().rstrip("/") for o in SALES_CORS_ORIGINS.split(",") if o.strip()]
-default_origins = {
-    "https://kawad-swad-sales-frontend.onrender.com",
-}
-if not is_production_env():
-    default_origins.update({
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    })
-origins = list(default_origins.union(configured_origins))
+# Configure CORS (strictly excludes localhost/wildcards when SALES_ENV=production)
+origins = resolve_cors_origins(SALES_CORS_ORIGINS)
 
 cors_kwargs = {
     "allow_origins": origins,

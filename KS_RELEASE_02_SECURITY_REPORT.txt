@@ -1,0 +1,166 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-02
+SECURITY AUDIT & REMEDIATION REPORT (W1-W6, STATIC LEAK, MONGODB, CORS)
+================================================================================
+Mission ID        : KS-RELEASE-02
+Audit Authority   : Engineering Implementation Evidence (REQUIRES GPT INDEPENDENT REVIEW)
+Production Auth   : REQUIRES OWNER APPROVAL
+
+--------------------------------------------------------------------------------
+1. STAGE 5 — APPS SCRIPT BRIDGE DEEP SECURITY REMEDIATION (W1 - W6)
+--------------------------------------------------------------------------------
+All 6 bridge security controls (W1 through W6) were implemented in the actual bound
+Apps Script files (`apps_script/WebAppBridge.js` and `apps_script/AuditAndExceptions.js`),
+synchronized to `apps_script_patch/first_owner_bootstrap/merged_bound_files/`, and
+verified end-to-end via Node VM execution of the actual files in
+`backend/tests/test_cross_language_hmac.py` (tests 01-20) and
+`backend/tests/test_apps_script_bootstrap_vm.mjs` (suites 1-7).
+
+  [W1] Mandatory Strict Locked Audit + Attributable Post-Write Quarantine
+  - Status   : PASSED (Unit & VM Verified; REQUIRES GPT INDEPENDENT REVIEW)
+  - Evidence :
+      * apps_script/AuditAndExceptions.js:180 (`ksLogAuditStrictLocked_`) — never
+        acquires or releases ScriptLock; allocates AUD-* ID via `ksAllocateIdLocked_`.
+      * apps_script/AuditAndExceptions.js:252 (`ksLogExceptionLocked_`, NEW in R02) —
+        writes forensic exception record to `ExceptionRegister` WITHOUT acquiring or
+        releasing caller's `ScriptLock`, ensuring uninterrupted lock ownership even
+        during quarantine error paths.
+      * apps_script/WebAppBridge.js:640 (`doPost`) — verifies `ksLogAuditStrictLocked_`
+        exists BEFORE lock acquisition/write (HTTP 503 `MANDATORY_AUDIT_LOGGER_MISSING`);
+        removed any silent fallback to legacy `ksLogAudit_`. Any failure after business
+        mutation calls `ksLogExceptionLocked_` and returns HTTP 409 `RECOVERY_REQUIRED`
+        (`retryable: false`, `error_code: BRIDGE_POST_WRITE_FAILURE`, with
+        `recovery_exception_id`).
+  - Tests    : test_10, test_11, test_14, test_18 (PASSED).
+
+  [W2] Replay & Nonce Collision Protection (Tab + Action + Actor + Payload Hash)
+  - Status   : PASSED (Unit & VM Verified; REQUIRES GPT INDEPENDENT REVIEW)
+  - Evidence :
+      * apps_script/WebAppBridge.js:609 (`ksFindAuditReplayMetadata_`) and `doPost`:
+        every governed write records `related_record_id = nonce` and embeds
+        `hash=<payload_hash>` in `AuditLog.new_value`.
+      * On nonce replay, compares persisted `IdAllocations` + `AuditLog` metadata against
+        incoming request across ALL four dimensions:
+          1. Target tab mismatch  -> HTTP 409 `NONCE_TARGET_TAB_CONFLICT`
+          2. Action mismatch      -> HTTP 409 `NONCE_ACTION_CONFLICT`
+          3. Actor mismatch       -> HTTP 409 `NONCE_ACTOR_CONFLICT`
+          4. Payload hash mismatch-> HTTP 409 `NONCE_PAYLOAD_HASH_CONFLICT`
+      * Only exact 4-way matches return idempotent `CONFIRMED` (`idempotent_replay: true`).
+  - Tests    : test_10, test_12, test_17 (PASSED).
+
+  [W3] Strict 133-Action-to-Tab Allowlist + Control-Table Hard Block + Role Gates
+  - Status   : PASSED (Unit & VM Verified; REQUIRES GPT INDEPENDENT REVIEW)
+  - Evidence :
+      * apps_script/WebAppBridge.js:17 (`KS_BRIDGE_PROTECTED_GOVERNANCE_TABS`:
+        `AuditLog`, `IdAllocations`, `ExceptionRegister`) -> HTTP 403
+        `GOVERNANCE_TAB_WRITE_FORBIDDEN`.
+      * apps_script/WebAppBridge.js:23 (`KS_BRIDGE_PROTECTED_CONTROL_TABS`, NEW in R02:
+        `SystemConfig`, `BackupRegister`, `DBV5_FIELD_DICTIONARY_3074`, `START_HERE`) ->
+        HTTP 403 `CONTROL_TABLE_WRITE_FORBIDDEN`. `SystemConfig` was explicitly REMOVED
+        from `KS_BRIDGE_ALLOWED_TARGET_TABS` (now 115 tables).
+      * apps_script/WebAppBridge.js:30 (`KS_BRIDGE_FORBIDDEN_SCRATCH_RE`) -> HTTP 403
+        `SCRATCH_TAB_FORBIDDEN` for `KS_P1_*`, `KS_P2_*`, `KS_P3_*`, `DBV5_*`, `DB_*`.
+      * apps_script/WebAppBridge.js:75 (`KS_BRIDGE_ACTION_TARGET_TAB_MAP`, 133 bound
+        actions) & `ksValidateBridgeTargetTab_` (line 355) -> blocks unregistered actions
+        (`403 UNREGISTERED_BRIDGE_ACTION`), action/tab mismatches
+        (`403 ACTION_TARGET_TAB_MISMATCH`), unauthorized `AuthUsers` actions
+        (`403 AUTH_USERS_ACTION_FORBIDDEN`), `AUDITOR` on ALL writes
+        (`403 AUDITOR_WRITE_FORBIDDEN`), and privileged role gates on `Users`, `AuthUsers`,
+        `CustomRoles`, `Settings`, `SalaryStructures`, `AccountingPeriods`,
+        `FinancialPeriods`, `PayrollRuns`, `PayrollItems` (`KS_BRIDGE_RESTRICTED_TAB_ROLES`,
+        line 212).
+  - Tests    : test_13, test_16 (PASSED).
+
+  [W4] Authoritative Server-Side Actor Directory Verification (Inside ScriptLock)
+  - Status   : PASSED (Unit & VM Verified; REQUIRES GPT INDEPENDENT REVIEW)
+  - Evidence :
+      * apps_script/WebAppBridge.js:342 (`ksCanonicalizeBridgeRole_`) & line 493
+        (`ksVerifyBridgeActor_`) — validates `actor_user_id` and canonicalized `actor_role`
+        directly against the authoritative `Users` tab inside `ScriptLock` BEFORE any
+        mutation or ID allocation:
+          - Uninitialized `Users` directory -> HTTP 403 `ACTOR_DIRECTORY_UNINITIALIZED`
+          - Missing/forged `actor_user_id`  -> HTTP 403 `ACTOR_NOT_FOUND`
+          - Inactive/suspended account      -> HTTP 403 `ACTOR_INACTIVE`
+          - Escalated/mismatched role       -> HTTP 403 `ACTOR_ROLE_MISMATCH`
+          - Read-only `AUDITOR` role        -> HTTP 403 `AUDITOR_WRITE_FORBIDDEN`
+  - Tests    : test_13, test_15 (PASSED).
+
+  [W5] Full Field-by-Field Authoritative Read-Back Verification After Flush
+  - Status   : PASSED (Unit & VM Verified; REQUIRES GPT INDEPENDENT REVIEW)
+  - Evidence :
+      * apps_script/WebAppBridge.js:596 (`ksNormalizeReadbackVal_`) & line 971
+        (`ksWriteCanonicalRowByHeaders_`) — after writing canonical row and executing
+        `SpreadsheetApp.flush()`, reads back the exact written row from Google Sheets and
+        verifies EVERY written column (not just primary key). Any discrepancy logs a
+        CRITICAL `ExceptionRegister` entry via `ksLogExceptionLocked_` and throws
+        `READBACK_VERIFICATION_FAILED`, quarantined as HTTP 409 `RECOVERY_REQUIRED`.
+  - Tests    : test_14, test_18 (PASSED).
+
+  [W6] Monotonic 7-Digit ALLOC-0000001 Numbering With Flush + Read-Back
+  - Status   : PASSED (Unit & VM Verified; REQUIRES GPT INDEPENDENT REVIEW)
+  - Evidence :
+      * apps_script/WebAppBridge.js:1085 (`ksRecordIdAllocation_`) — scans existing
+        `IdAllocations` ignoring legacy 13-digit epoch timestamp IDs, computes strictly
+        monotonic 7-digit `ALLOC-0000001` sequence, flushes, and verifies read-back of
+        `allocation_id`, `nonce`, `tab_name`, and `allocated_id` under `ScriptLock`.
+  - Tests    : test_10 (PASSED).
+
+--------------------------------------------------------------------------------
+2. CROSS-LANGUAGE HMAC-SHA256 & FIRST-OWNER BOOTSTRAP SECURITY
+--------------------------------------------------------------------------------
+Status: PASSED (20/20 Cross-Language HMAC Tests + 7/7 Bootstrap VM Suites)
+
+  - Exact Python canonical JSON (`separators=(",", ":")`, `sort_keys=True`,
+    `ensure_ascii=True`) matches Apps Script `ksVerifySignedBridgeEnvelope_`
+    (`apps_script/WebAppBridge_BootstrapIntegration.js:118`) byte-for-byte for ASCII and
+    Unicode payloads.
+  - Constant-time signature comparison (`ksBridgeSafeEqual_` line 69 / `ksSafeEqual_`
+    line 1143).
+  - Enforces `contract_version == "2.0"`, `signature_alg == "HMAC-SHA-256"`, `+/-300s`
+    clock skew window, minimum secret strength, and outer-vs-canonical tamper rejection
+    BEFORE action dispatch or lock acquisition.
+  - FastAPI Apps Script HTTP 302 redirect handling (`backend/app/apps_script_bridge.py:83-160`)
+    strictly allowlists ONLY `https://script.googleusercontent.com/macros/echo` (max 1 hop),
+    converts to `GET` with `data=None`, and strips POST body + HMAC + Authorization headers.
+
+--------------------------------------------------------------------------------
+3. STAGE 2 — PUBLIC STATIC INFORMATION DISCLOSURE REMEDIATION
+--------------------------------------------------------------------------------
+Status: PASSED
+
+  - Removed `public/assets/aistudio/` (6 internal source/audit files, 1.65 MB).
+  - Verified `dist/assets/aistudio/` is completely absent from Vite production build.
+
+--------------------------------------------------------------------------------
+4. STAGE 6 — ZERO-MONGODB PROOF & DATA STORAGE BOUNDARY
+--------------------------------------------------------------------------------
+Status: PASSED
+
+  - Full repository search for `mongo|pymongo|motor` confirmed ZERO MongoDB dependencies,
+    imports, drivers, connection strings, or runtime usage anywhere in frontend, backend,
+    or Apps Script. (Only matches were literal string `'Motorcycle Petrol / Fuel'` in
+    `ExpensesView.tsx` and 3 non-executable legacy design comments.)
+  - Authoritative Business Database : Google Sheets ONLY (single-write-owner via signed
+    Apps Script Web App bridge).
+  - Local SQLite WAL (`TRANSACTION_DB_PATH` on Render persistent disk) is strictly scoped
+    to single-instance (`WEB_CONCURRENCY=1`, `SALES_INSTANCE_COUNT=1`) idempotency/lease
+    transaction coordination — NOT business entity storage.
+
+--------------------------------------------------------------------------------
+5. STAGE 7 — PRODUCTION CORS FAIL-CLOSED ENFORCEMENT
+--------------------------------------------------------------------------------
+Status: PASSED
+
+  - Removed `,http://localhost:3000` from `render.yaml` production `SALES_CORS_ORIGINS`
+    (now strictly `https://kawad-swad-sales-frontend.onrender.com`).
+  - Added `_is_local_or_loopback_origin()` and `resolve_cors_origins()` in
+    `backend/app/config.py`, wired into `backend/app/main.py`.
+  - Hardened `assert_runtime_config()` in `backend/app/config.py` so production boot
+    raises `RuntimeError` (fail-closed) if `SALES_CORS_ORIGINS` contains `*`,
+    `localhost`/`127.0.0.1`/`::1`/`.local`, or any non-`https://` origin.
+  - Verified in `backend/tests/test_cross_language_hmac.py :: test_20` and
+    `backend/tests/test_cors_preflight.py`.
+
+================================================================================
+END OF KS_RELEASE_02_SECURITY_REPORT.txt
+================================================================================

@@ -1,6 +1,17 @@
 /**
  * KAWAD SWAD ERP - SIGNED WEB APP BRIDGE (WebAppBridge.gs)
- * Matches backend/app/apps_script_bridge.py & backend/app/action_registry.py (Phase 1.8+)
+ * Matches backend/app/apps_script_bridge.py & backend/app/action_registry.py (Phase 1.8+ / KS-RELEASE-02)
+ *
+ * Security Guarantees (W1–W6):
+ *  - Mandatory HMAC-SHA256 + contract_version="2.0" + +/-300s skew check via ksVerifySignedBridgeEnvelope_.
+ *  - W1: Uninterrupted ScriptLock ownership, strict lock-preserving ksLogAuditStrictLocked_ (no silent swallow),
+ *        and attributable ExceptionRegister quarantine (RECOVERY_REQUIRED, HTTP 409) on post-mutation failure.
+ *  - W2: Full nonce idempotency bound to (nonce, target_tab, action, actor_user_id, payload_hash).
+ *  - W3: Strict 1:1 action -> canonical target_tab binding, immutable governance/control/scratch tab blocking,
+ *        and privilege-sensitive role enforcement (AUDITOR blocked from all writes; SystemConfig blocked).
+ *  - W4: Authoritative actor verification against Google Sheets Users tab (existence, active flag, role match).
+ *  - W5: Full-row authoritative read-back verification after flush with audited failure quarantine.
+ *  - W6: Monotonic 7-digit ALLOC-0000001 numbering ignoring legacy 13-digit epoch timestamps.
  */
 
 const KS_BRIDGE_PROTECTED_GOVERNANCE_TABS = Object.freeze({
@@ -9,12 +20,203 @@ const KS_BRIDGE_PROTECTED_GOVERNANCE_TABS = Object.freeze({
   ExceptionRegister: true
 });
 
+const KS_BRIDGE_PROTECTED_CONTROL_TABS = Object.freeze({
+  SystemConfig: true,
+  BackupRegister: true,
+  DBV5_FIELD_DICTIONARY_3074: true,
+  START_HERE: true
+});
+
 const KS_BRIDGE_FORBIDDEN_SCRATCH_RE = /^(?:KS_P1_|KS_P2_|KS_P3_|DBV5_|DB_)/i;
 
 const KS_BRIDGE_AUTH_USERS_ALLOWED_ACTIONS = Object.freeze({
   REVOKE_USER_SESSIONS: true,
   CHANGE_PASSWORD: true,
   RESET_PASSWORD: true
+});
+
+const KS_BRIDGE_ROLE_ALIASES = Object.freeze({
+  OWNER_ADMIN: 'OWNER_ADMIN',
+  OWNER: 'OWNER_ADMIN',
+  ADMIN: 'OWNER_ADMIN',
+  PA: 'PA',
+  PERSONAL_ASSISTANT: 'PA',
+  MANAGER: 'PA',
+  OPERATIONS_MANAGER: 'PA',
+  ACCOUNTS: 'ACCOUNTS',
+  ACCOUNTANT: 'ACCOUNTS',
+  FINANCE: 'ACCOUNTS',
+  PROCUREMENT: 'PROCUREMENT',
+  PURCHASE: 'PROCUREMENT',
+  STORE: 'STORE',
+  STOREKEEPER: 'STORE',
+  WAREHOUSE: 'STORE',
+  DISPATCH: 'STORE',
+  PRODUCTION: 'PRODUCTION',
+  FACTORY_WORKER: 'PRODUCTION',
+  PRODUCTION_WORKER: 'PRODUCTION',
+  WORKER: 'PRODUCTION',
+  OPERATOR: 'PRODUCTION',
+  LABOUR_SUPERVISOR: 'PRODUCTION',
+  SUPERVISOR: 'PRODUCTION',
+  QUALITY: 'QUALITY',
+  QC: 'QUALITY',
+  PACKAGING: 'PACKAGING',
+  PACKING: 'PACKAGING',
+  SALES: 'SALES',
+  FIELD_SALESMAN: 'FIELD_SALESMAN',
+  SALESMAN: 'FIELD_SALESMAN',
+  HR: 'HR',
+  AUDITOR: 'AUDITOR'
+});
+
+// Strict canonical action -> target_tab binding matching backend/app/action_registry.py (128 actions)
+// plus Blueprint v2 Apps Script domain engine actions.
+const KS_BRIDGE_ACTION_TARGET_TAB_MAP = Object.freeze({
+  ACCEPT_VAN_LOADING_PASS: 'VanLoadingPasses',
+  ADJUST_FINISHED_GOODS_STOCK: 'ProductionStockLedger',
+  ADJUST_RAW_MATERIAL_STOCK: 'RawMaterialLedger',
+  APPLY_SUPPLIER_ADVANCE: 'SupplierPayments',
+  APPROVE_AND_EXECUTE_REQUEST: 'ApprovalRequests',
+  APPROVE_PACKAGING_DISCREPANCY: 'PackagingBatches',
+  APPROVE_PAYROLL: 'PayrollRuns',
+  APPROVE_PRODUCTION_BATCH: 'ProductionBatches',
+  APPROVE_RECIPE_VERSION: 'Recipes',
+  APPROVE_SALARY_INCENTIVE: 'SalaryIncentives',
+  ASSIGN_TASK: 'WorkAssignments',
+  BOOTSTRAP_FIRST_OWNER: 'Users',
+  BULK_LABOUR_ATTENDANCE: 'LabourAttendance',
+  CALCULATE_PAYROLL: 'PayrollRuns',
+  CANCEL_APPROVAL_REQUEST: 'ApprovalRequests',
+  CANCEL_PURCHASE_ORDER: 'PurchaseOrders',
+  CANCEL_SALE: 'Sales',
+  CANCEL_VAN_LOADING_PASS: 'VanLoadingPasses',
+  CHANGE_PASSWORD: 'AuthUsers',
+  CHECK_IN_ATTENDANCE: 'EmployeeAttendance',
+  CHECK_OUT_ATTENDANCE: 'EmployeeAttendance',
+  CLOSE_ACCOUNTING_PERIOD: ['AccountingPeriods', 'FinancialPeriods'],
+  CLOSE_COMPLAINT: 'ComplaintsRecalls',
+  CONFIRM_SALES_ORDER: 'Sales',
+  CONSUME_CREDIT_APPROVAL: 'ApprovalRequests',
+  CORRECT_WORKER_ATTENDANCE: 'WorkerAttendance',
+  CREATE_APPROVAL_REQUEST: 'ApprovalRequests',
+  CREATE_COMPLAINT_OR_RECALL: 'ComplaintsRecalls',
+  CREATE_CUSTOMER: 'Customers',
+  CREATE_CUSTOMER_RETURN: 'CustomerReturns',
+  CREATE_CUSTOM_ROLE: 'CustomRoles',
+  CREATE_GOODS_RECEIPT: 'GoodsReceipts',
+  CREATE_LABOUR: 'LabourMaster',
+  CREATE_LEGACY_SALES_ORDER: 'Sales',
+  CREATE_MILESTONE: 'FreelancerMilestones',
+  CREATE_PRODUCT: 'Products',
+  CREATE_PRODUCTION_BATCH: 'ProductionBatches',
+  CREATE_PRODUCTION_ORDER: 'ProductionOrders',
+  CREATE_PRODUCT_LOT: 'ProductLots',
+  CREATE_PROJECT: 'FreelancerProjects',
+  CREATE_PURCHASE_ORDER: 'PurchaseOrders',
+  CREATE_QUALITY_CHECK: 'QualityChecks',
+  CREATE_RAW_MATERIAL_MASTER: 'RawMaterials',
+  CREATE_RECIPE: 'Recipes',
+  CREATE_SALARY_INCENTIVE: 'SalaryIncentives',
+  CREATE_SALE: 'Sales',
+  CREATE_SALES_INVOICE: ['Sales', 'SalesInvoices'],
+  CREATE_SALES_ORDER: 'SalesOrders',
+  CREATE_SUPPLIER: 'Suppliers',
+  CREATE_SUPPLIER_RETURN: 'SupplierReturns',
+  CREATE_USER: 'Users',
+  CREATE_VAN_LOADING_PASS: 'VanLoadingPasses',
+  CREATE_WORKER: 'Workers',
+  CREATE_WORK_ENTRY: 'LabourWorkEntries',
+  DEACTIVATE_USER: 'Users',
+  DELETE_CUSTOM_ROLE: 'CustomRoles',
+  DISBURSE_APPROVED_ADVANCE: 'EmployeeAdvances',
+  ISSUE_RAW_MATERIALS: 'RawMaterialLedger',
+  LOG_SHOP_VISIT: 'ShopVisits',
+  MARK_SALE_COMPLETE: 'Sales',
+  PAY_GIG_WORK_ENTRY: 'LabourWorkEntries',
+  PAY_SALARY_INCENTIVE: 'SalaryIncentives',
+  POST_JOURNAL_VOUCHER: ['JournalHeaders', 'JournalEntries'],
+  PRODUCTION_STOCK_DISPATCH: 'ProductionDispatches',
+  QUALITY_CHECK_DECISION: ['QualityChecks', 'IncomingQualityChecks', 'InProcessQualityChecks', 'FinishedGoodsQualityChecks'],
+  REACTIVATE_USER: 'Users',
+  RECEIVE_GOODS: 'GoodsReceipts',
+  RECEIVE_RAW_MATERIAL: ['RawMaterialLedger', 'InventoryLots'],
+  RECONCILE_DISPATCH: 'ProductionDispatches',
+  RECONCILE_FACTORY_STOCK: 'ProductionStockLedger',
+  RECONCILE_PACKAGING_BATCH: 'PackagingBatches',
+  RECONCILE_ROLE_ALIAS: 'Users',
+  RECONCILE_SALESMAN_STOCK: 'SalesmanStockLedger',
+  RECONCILE_WAREHOUSE_STOCK: 'SalesmanStockLedger',
+  RECORD_ASSET_MAINTENANCE: 'AssetsMaintenance',
+  RECORD_BULK_WORKER_ATTENDANCE: 'WorkerAttendance',
+  RECORD_COMPLIANCE_ITEM: 'ComplianceRecords',
+  RECORD_CUSTOMER_PAYMENT: ['CustomerPayments', 'Payments'],
+  RECORD_DISTRIBUTION_DISPATCH: 'ProductionDispatches',
+  RECORD_MARKETPLACE_SETTLEMENT: 'MarketplaceSettlements',
+  RECORD_MATERIAL_CONSUMPTION: 'MaterialConsumption',
+  RECORD_MILLING_BATCH: 'MillingBatches',
+  RECORD_PACKAGING_BATCH: ['PackagingBatches', 'PackagingOutputs'],
+  RECORD_PACKAGING_PENDING_REVIEW: 'PackagingBatches',
+  RECORD_PRODUCTION_OUTPUT: 'ProductionOutputs',
+  RECORD_SALE_PAYMENT: 'Payments',
+  RECORD_STOCK_MOVEMENT: 'SalesmanStockLedger',
+  RECORD_SUPPLIER_BILL: 'SupplierBills',
+  RECORD_SUPPLIER_PAYMENT: 'SupplierPayments',
+  RECORD_WORKER_ATTENDANCE: 'WorkerAttendance',
+  RECORD_WORKFORCE_PAYMENT: 'WorkforcePayments',
+  RECOVER_MILLING_BATCH: 'RawMaterialLedger',
+  RECOVER_PACKAGING: 'PackagingBatches',
+  RECOVER_RAW_MATERIALS_STATUS: 'ProductionBatches',
+  REJECT_APPROVAL_REQUEST: 'ApprovalRequests',
+  REJECT_PRODUCTION_BATCH: 'ProductionBatches',
+  RELEASE_CREDIT_APPROVAL: 'ApprovalRequests',
+  REMOVE_DUPLICATE_ATTENDANCE: 'WorkerAttendance',
+  REPORT_VAN_LOADING_DISCREPANCY: 'VanLoadingPasses',
+  REQUEST_STOCK_ADJUSTMENT: 'StockDiscrepancies',
+  RESERVE_CREDIT_APPROVAL: 'ApprovalRequests',
+  RESET_PASSWORD: 'AuthUsers',
+  RESOLVE_LEGACY_BATCH_COST: 'ProductionBatches',
+  RESUME_SALE: 'Sales',
+  REVERSE_JOURNAL_VOUCHER: 'JournalHeaders',
+  REVIEW_DAILY_CLOSING: 'DailyClosing',
+  REVIEW_EXPENSE: 'Expenses',
+  REVIEW_MILESTONE: 'FreelancerMilestones',
+  REVIEW_STOCK_DISCREPANCY: 'StockDiscrepancies',
+  REVIEW_TASK: 'WorkAssignments',
+  REVOKE_TOKEN: 'RevokedTokens',
+  REVOKE_USER_SESSIONS: 'AuthUsers',
+  SUBMIT_DAILY_CLOSING: 'DailyClosing',
+  SUBMIT_EXPENSE: 'Expenses',
+  SUBMIT_GIG_WORK_ENTRY: 'LabourWorkEntries',
+  SUBMIT_MILESTONE: 'FreelancerMilestones',
+  SUBMIT_STOCK_DISCREPANCY: 'StockDiscrepancies',
+  SUBMIT_TASK: 'WorkAssignments',
+  UPDATE_CA_POLICY: 'Settings',
+  UPDATE_CUSTOMER: 'Customers',
+  UPDATE_CUSTOM_ROLE: 'CustomRoles',
+  UPDATE_LABOUR: 'LabourMaster',
+  UPDATE_LOT_STATUS: 'ProductLots',
+  UPDATE_PAYROLL_ITEM: 'PayrollItems',
+  UPDATE_PRODUCT: 'Products',
+  UPDATE_RAW_MATERIAL_RATE: 'RawMaterials',
+  UPDATE_SELF_PROFILE: 'Users',
+  UPDATE_SUPPLIER: 'Suppliers',
+  UPDATE_TASK: 'WorkAssignments',
+  UPDATE_USER: 'Users',
+  UPSERT_SALARY_STRUCTURE: 'SalaryStructures',
+  VERIFY_GIG_WORK_ENTRY: 'LabourWorkEntries',
+  VERIFY_RAW_MATERIAL_OPENING_STOCK: 'RawMaterialLedger'
+});
+
+// Privilege-sensitive table role gates enforced inside Apps Script (defense-in-depth W3)
+const KS_BRIDGE_RESTRICTED_TAB_ROLES = Object.freeze({
+  CustomRoles: ['OWNER_ADMIN'],
+  Settings: ['OWNER_ADMIN'],
+  SalaryStructures: ['OWNER_ADMIN'],
+  AccountingPeriods: ['OWNER_ADMIN', 'ACCOUNTS'],
+  FinancialPeriods: ['OWNER_ADMIN', 'ACCOUNTS'],
+  PayrollRuns: ['OWNER_ADMIN', 'ACCOUNTS', 'PA', 'HR'],
+  PayrollItems: ['OWNER_ADMIN', 'ACCOUNTS', 'PA', 'HR']
 });
 
 const KS_BRIDGE_ALLOWED_TARGET_TABS = Object.freeze({
@@ -74,7 +276,7 @@ const KS_BRIDGE_ALLOWED_TARGET_TABS = Object.freeze({
   WorkerAttendance: true,
   Workers: true,
   WorkforcePayments: true,
-  // Canonical Blueprint v2 Apps Script engine target tabs (Config.js ID_PREFIXES, non-governance)
+  // Canonical Blueprint v2 Apps Script engine target tabs (non-governance, non-control)
   CustomerPaymentAllocations: true,
   CustomerPayments: true,
   DamagedStock: true,
@@ -132,22 +334,39 @@ const KS_BRIDGE_ALLOWED_TARGET_TABS = Object.freeze({
   StockTransferItems: true,
   StockTransfers: true,
   SupplierQuotations: true,
-  SystemConfig: true,
   Warehouses: true,
   BankTransactions: true,
   CreditNotes: true
 });
 
+function ksCanonicalizeBridgeRole_(rawRole) {
+  const norm = String(rawRole || '').trim().toUpperCase();
+  if (!norm) return '';
+  if (Object.prototype.hasOwnProperty.call(KS_BRIDGE_ROLE_ALIASES, norm)) {
+    return KS_BRIDGE_ROLE_ALIASES[norm];
+  }
+  return norm;
+}
+
 /**
- * Fail-closed target-table allowlist and governance/scratch/AuthUsers guard (Stage 1 W3).
+ * Fail-closed target-table allowlist, action->tab binding, governance/control/scratch guard,
+ * and privilege-sensitive role authorization (Stage 5 W3).
  */
-function ksValidateBridgeTargetTab_(action, targetTab) {
+function ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, payload) {
   if (Object.prototype.hasOwnProperty.call(KS_BRIDGE_PROTECTED_GOVERNANCE_TABS, targetTab)) {
     return {
       ok: false,
       error_code: 'GOVERNANCE_TAB_WRITE_FORBIDDEN',
       http_status: 403,
       message: 'Direct bridge mutation of immutable governance tab "' + targetTab + '" is forbidden.'
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(KS_BRIDGE_PROTECTED_CONTROL_TABS, targetTab)) {
+    return {
+      ok: false,
+      error_code: 'CONTROL_TABLE_WRITE_FORBIDDEN',
+      http_status: 403,
+      message: 'Direct generic bridge mutation of protected control table "' + targetTab + '" is forbidden.'
     };
   }
   if (KS_BRIDGE_FORBIDDEN_SCRATCH_RE.test(targetTab)) {
@@ -177,7 +396,245 @@ function ksValidateBridgeTargetTab_(action, targetTab) {
       message: 'Target tab "' + targetTab + '" is not in the approved canonical bridge allowlist.'
     };
   }
-  return { ok: true };
+
+  // Enforce strict registered action -> target_tab binding (prevents caller-controlled routing mismatch)
+  if (!Object.prototype.hasOwnProperty.call(KS_BRIDGE_ACTION_TARGET_TAB_MAP, action)) {
+    return {
+      ok: false,
+      error_code: 'UNREGISTERED_BRIDGE_ACTION',
+      http_status: 403,
+      message: 'Action "' + action + '" is not registered in the governed bridge action allowlist.'
+    };
+  }
+  const boundTabs = KS_BRIDGE_ACTION_TARGET_TAB_MAP[action];
+  const allowedList = Array.isArray(boundTabs) ? boundTabs : [boundTabs];
+  if (allowedList.indexOf(targetTab) === -1) {
+    return {
+      ok: false,
+      error_code: 'ACTION_TARGET_TAB_MISMATCH',
+      http_status: 403,
+      message: 'Action "' + action + '" is bound to [' + allowedList.join(', ') + '] and cannot target "' + targetTab + '".'
+    };
+  }
+
+  // Enforce canonical role restrictions (AUDITOR read-only + privilege-sensitive tables)
+  const canonicalRole = ksCanonicalizeBridgeRole_(actorRole);
+  if (canonicalRole === 'AUDITOR') {
+    return {
+      ok: false,
+      error_code: 'AUDITOR_WRITE_FORBIDDEN',
+      http_status: 403,
+      message: 'AUDITOR role is strictly read-only and forbidden from executing governed bridge writes.'
+    };
+  }
+
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const targetUserId = String(p.user_id || (p.record && p.record.user_id) || (p.updates && p.updates.user_id) || '').trim();
+
+  if (targetTab === 'Users') {
+    if (action === 'UPDATE_SELF_PROFILE') {
+      if (!targetUserId || targetUserId !== actorUserId) {
+        return {
+          ok: false,
+          error_code: 'SELF_PROFILE_TARGET_MISMATCH',
+          http_status: 403,
+          message: 'UPDATE_SELF_PROFILE may only update the authenticated actor\'s own Users record.'
+        };
+      }
+    } else if (canonicalRole !== 'OWNER_ADMIN') {
+      return {
+        ok: false,
+        error_code: 'INSUFFICIENT_ROLE_FOR_TARGET_TAB',
+        http_status: 403,
+        message: 'Role "' + canonicalRole + '" is not authorized to mutate Users via "' + action + '".'
+      };
+    }
+  }
+
+  if (targetTab === 'AuthUsers') {
+    if (action === 'CHANGE_PASSWORD') {
+      if (canonicalRole !== 'OWNER_ADMIN' && (!targetUserId || targetUserId !== actorUserId)) {
+        return {
+          ok: false,
+          error_code: 'INSUFFICIENT_ROLE_FOR_AUTH_USERS',
+          http_status: 403,
+          message: 'Non-owner actor "' + actorUserId + '" may only change their own password.'
+        };
+      }
+    } else if (canonicalRole !== 'OWNER_ADMIN') {
+      return {
+        ok: false,
+        error_code: 'INSUFFICIENT_ROLE_FOR_AUTH_USERS',
+        http_status: 403,
+        message: 'Role "' + canonicalRole + '" is not authorized for "' + action + '" on AuthUsers.'
+      };
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(KS_BRIDGE_RESTRICTED_TAB_ROLES, targetTab)) {
+    const allowedRoles = KS_BRIDGE_RESTRICTED_TAB_ROLES[targetTab];
+    if (allowedRoles.indexOf(canonicalRole) === -1) {
+      return {
+        ok: false,
+        error_code: 'INSUFFICIENT_ROLE_FOR_TARGET_TAB',
+        http_status: 403,
+        message: 'Role "' + canonicalRole + '" is not authorized to write to "' + targetTab + '".'
+      };
+    }
+  }
+
+  return { ok: true, canonical_role: canonicalRole };
+}
+
+/**
+ * Authoritatively verifies actor_user_id and actor_role against Google Sheets `Users` tab (Stage 5 W4).
+ * Rejects uninitialized user directories, unknown/forged actor IDs, inactive users, and role escalation.
+ */
+function ksVerifyBridgeActor_(actorUserId, actorRole) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_DIRECTORY_UNAVAILABLE',
+      http_status: 503,
+      message: 'Active spreadsheet is unavailable for authoritative actor verification.'
+    };
+  }
+  const userSheet = ss.getSheetByName((typeof KS_CONFIG !== 'undefined' && KS_CONFIG.TABS && KS_CONFIG.TABS.USERS) || 'Users');
+  if (!userSheet || userSheet.getLastRow() < 2) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_DIRECTORY_UNINITIALIZED',
+      http_status: 403,
+      message: 'Users directory is missing or empty; complete First-Owner bootstrap before governed writes.'
+    };
+  }
+
+  const lastCol = userSheet.getLastColumn();
+  if (lastCol < 1) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_DIRECTORY_INVALID_SCHEMA',
+      http_status: 503,
+      message: 'Users directory has no header row.'
+    };
+  }
+  const data = userSheet.getRange(1, 1, userSheet.getLastRow(), lastCol).getValues();
+  const headers = data[0].map(h => String(h || '').trim());
+  const uidIdx = headers.indexOf('user_id');
+  const roleIdx = headers.indexOf('role') !== -1
+    ? headers.indexOf('role')
+    : (headers.indexOf('user_role') !== -1 ? headers.indexOf('user_role') : headers.indexOf('role_code'));
+  const activeIdx = headers.indexOf('active') !== -1
+    ? headers.indexOf('active')
+    : (headers.indexOf('is_active') !== -1 ? headers.indexOf('is_active') : headers.indexOf('status'));
+
+  if (uidIdx === -1 || roleIdx === -1) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_DIRECTORY_INVALID_SCHEMA',
+      http_status: 503,
+      message: 'Users directory must contain user_id and role headers.'
+    };
+  }
+
+  const claimedRole = ksCanonicalizeBridgeRole_(actorRole);
+  for (let i = 1; i < data.length; i++) {
+    const rowUid = String(data[i][uidIdx] || '').trim();
+    if (rowUid === actorUserId) {
+      const rawActive = activeIdx !== -1 ? String(data[i][activeIdx]).trim().toUpperCase() : 'TRUE';
+      const isActive = (rawActive === 'TRUE' || rawActive === 'YES' || rawActive === 'ACTIVE' || rawActive === '1');
+      if (!isActive) {
+        return {
+          ok: false,
+          error_code: 'ACTOR_INACTIVE',
+          http_status: 403,
+          message: 'Actor "' + actorUserId + '" is inactive/deactivated in Users directory.'
+        };
+      }
+      const authoritativeRole = ksCanonicalizeBridgeRole_(data[i][roleIdx]);
+      if (!authoritativeRole) {
+        return {
+          ok: false,
+          error_code: 'ACTOR_ROLE_MISSING',
+          http_status: 403,
+          message: 'Authoritative role is missing for actor "' + actorUserId + '" in Users directory.'
+        };
+      }
+      if (authoritativeRole === 'AUDITOR') {
+        return {
+          ok: false,
+          error_code: 'AUDITOR_WRITE_FORBIDDEN',
+          http_status: 403,
+          message: 'Actor "' + actorUserId + '" holds read-only AUDITOR role in Users directory.'
+        };
+      }
+      if (authoritativeRole !== claimedRole) {
+        return {
+          ok: false,
+          error_code: 'ACTOR_ROLE_MISMATCH',
+          http_status: 403,
+          message: 'Claimed actor_role "' + claimedRole + '" does not match authoritative Users role "' + authoritativeRole + '" for "' + actorUserId + '".'
+        };
+      }
+      return {
+        ok: true,
+        user_id: actorUserId,
+        canonical_role: authoritativeRole
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    error_code: 'ACTOR_NOT_FOUND',
+    http_status: 403,
+    message: 'Actor "' + actorUserId + '" does not exist in authoritative Users directory.'
+  };
+}
+
+function ksNormalizeReadbackVal_(val) {
+  if (val === undefined || val === null) return '';
+  if (typeof val === 'boolean') return val ? 'true' : 'false';
+  if (val instanceof Date) return val.toISOString();
+  const s = String(val).trim();
+  const lower = s.toLowerCase();
+  if (lower === 'true' || lower === 'false') return lower;
+  return s;
+}
+
+/**
+ * Looks up AuditLog replay binding metadata (action, actor_user_id, payload_hash) for a nonce (Stage 5 W2).
+ */
+function ksFindAuditReplayMetadata_(nonce, allocatedId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) return null;
+  const auditTab = (typeof KS_CONFIG !== 'undefined' && KS_CONFIG.TABS && KS_CONFIG.TABS.AUDIT_LOG) || 'AuditLog';
+  const sh = ss.getSheetByName(auditTab);
+  if (!sh || sh.getLastRow() < 2) return null;
+  const data = sh.getDataRange().getValues();
+  const headers = data[0].map(h => String(h || '').trim());
+  const actionIdx = headers.indexOf('action');
+  const actorIdx = headers.indexOf('actor_user_id');
+  const newValIdx = headers.indexOf('new_value');
+  const relIdx = headers.indexOf('related_record_id');
+  const entIdIdx = headers.indexOf('entity_id');
+  const nonceNeedle = 'nonce=' + nonce;
+
+  for (let i = data.length - 1; i >= 1; i--) {
+    const newVal = newValIdx !== -1 ? String(data[i][newValIdx] || '') : '';
+    const relVal = relIdx !== -1 ? String(data[i][relIdx] || '').trim() : '';
+    const entVal = entIdIdx !== -1 ? String(data[i][entIdIdx] || '').trim() : '';
+    if (relVal === nonce || newVal.indexOf(nonceNeedle) !== -1 || (allocatedId && entVal === allocatedId && newVal.indexOf('CONFIRMED') !== -1)) {
+      const hashMatch = newVal.match(/hash=([0-9a-fA-F]{16,128})/);
+      return {
+        action: actionIdx !== -1 ? String(data[i][actionIdx] || '').trim().toUpperCase() : '',
+        actor_user_id: actorIdx !== -1 ? String(data[i][actorIdx] || '').trim() : '',
+        payload_hash: hashMatch ? hashMatch[1].toLowerCase() : ''
+      };
+    }
+  }
+  return null;
 }
 
 function doPost(e) {
@@ -186,12 +643,14 @@ function doPost(e) {
   let targetTab = '';
   let nonce = '';
   let correlationId = '';
+  let actorUserId = '';
+  let actorRole = '';
+  let payloadHash = '';
   let businessWriteAttempted = false;
   let outcome = null;
 
   try {
     // 1. Mandatory HMAC-SHA256 + contract_version="2.0" + +/-300s skew verification
-    //    Verifier implemented in WebAppBridge_BootstrapIntegration.js (`ksVerifySignedBridgeEnvelope_`).
     if (typeof ksVerifySignedBridgeEnvelope_ !== 'function') {
       return ksBridgeJson_({
         status: 'REJECTED',
@@ -211,8 +670,9 @@ function doPost(e) {
     targetTab = String(req.target_tab || '').trim();
     nonce = String(req.nonce || '').trim();
     correlationId = String(req.correlation_id || '').trim();
-    const actorUserId = String(req.actor_user_id || '').trim();
-    const actorRole = String(req.actor_role || '').trim().toUpperCase();
+    actorUserId = String(req.actor_user_id || '').trim();
+    actorRole = String(req.actor_role || '').trim().toUpperCase();
+    payloadHash = String(req.payload_hash || '').trim().toLowerCase();
     const payload = req.payload || {};
 
     if (!action || !targetTab || !nonce || !correlationId) {
@@ -248,8 +708,8 @@ function doPost(e) {
       return ksBridgeJson_(ksDispatchBootstrapFirstOwner_(req));
     }
 
-    // 1C. Fail-closed target-table allowlist & governance/scratch/AuthUsers guard
-    const tabCheck = ksValidateBridgeTargetTab_(action, targetTab);
+    // 1C. Fail-closed target-table allowlist, action->tab binding, governance/control/scratch & role guard (W3)
+    const tabCheck = ksValidateBridgeTargetTab_(action, targetTab, actorRole, actorUserId, payload);
     if (!tabCheck.ok) {
       return ksBridgeJson_({
         status: 'REJECTED',
@@ -264,8 +724,8 @@ function doPost(e) {
       });
     }
 
-    // 1D. Fail-closed check: mandatory audit logger must be loaded before any write
-    if (typeof ksLogAuditStrictLocked_ !== 'function' && typeof ksLogAudit_ !== 'function') {
+    // 1D. Fail-closed check: strict lock-preserving audit logger MUST be loaded (no silent fallback)
+    if (typeof ksLogAuditStrictLocked_ !== 'function') {
       return ksBridgeJson_({
         status: 'REJECTED',
         correlation_id: correlationId,
@@ -273,14 +733,32 @@ function doPost(e) {
         action: action,
         target_tab: targetTab,
         error_code: 'MANDATORY_AUDIT_LOGGER_MISSING',
-        message: 'Mandatory audit logger is not loaded in Apps Script project.',
+        message: 'Mandatory strict lock-preserving ksLogAuditStrictLocked_ is not loaded in Apps Script project.',
         http_status: 503,
         retryable: false
       });
     }
 
-    // 2. Serialize via ScriptLock & Enforce Nonce + Target-Tab Idempotency
+    // 2. Serialize via ScriptLock
     lock.waitLock(20000);
+
+    // 2A. Authoritative Actor Verification against Users directory (W4)
+    const actorCheck = ksVerifyBridgeActor_(actorUserId, actorRole);
+    if (!actorCheck.ok) {
+      return ksBridgeJson_({
+        status: 'REJECTED',
+        correlation_id: correlationId,
+        nonce: nonce,
+        action: action,
+        target_tab: targetTab,
+        error_code: actorCheck.error_code,
+        message: actorCheck.message,
+        http_status: actorCheck.http_status,
+        retryable: false
+      });
+    }
+
+    // 2B. Enforce Nonce + Target-Tab + Action + Actor + Payload-Hash Idempotency (W2)
     const existing = ksFindByNonce_(nonce);
     if (existing) {
       if (existing.tab_name && existing.tab_name !== targetTab) {
@@ -296,6 +774,48 @@ function doPost(e) {
           retryable: false
         });
       }
+      const auditMeta = ksFindAuditReplayMetadata_(nonce, existing.allocated_id);
+      if (auditMeta) {
+        if (auditMeta.action && auditMeta.action !== action) {
+          return ksBridgeJson_({
+            status: 'REJECTED',
+            correlation_id: correlationId,
+            nonce: nonce,
+            action: action,
+            target_tab: targetTab,
+            error_code: 'NONCE_ACTION_CONFLICT',
+            message: 'Nonce "' + nonce + '" is already bound to action "' + auditMeta.action + '", cannot replay as "' + action + '".',
+            http_status: 409,
+            retryable: false
+          });
+        }
+        if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
+          return ksBridgeJson_({
+            status: 'REJECTED',
+            correlation_id: correlationId,
+            nonce: nonce,
+            action: action,
+            target_tab: targetTab,
+            error_code: 'NONCE_ACTOR_CONFLICT',
+            message: 'Nonce "' + nonce + '" is already bound to a different actor; cross-actor replay rejected.',
+            http_status: 409,
+            retryable: false
+          });
+        }
+        if (auditMeta.payload_hash && payloadHash && auditMeta.payload_hash !== payloadHash) {
+          return ksBridgeJson_({
+            status: 'REJECTED',
+            correlation_id: correlationId,
+            nonce: nonce,
+            action: action,
+            target_tab: targetTab,
+            error_code: 'NONCE_PAYLOAD_HASH_CONFLICT',
+            message: 'Nonce "' + nonce + '" was previously executed with a different payload_hash; mutated replay rejected.',
+            http_status: 409,
+            retryable: false
+          });
+        }
+      }
       return ksBridgeJson_({
         status: 'CONFIRMED',
         idempotent_replay: true,
@@ -308,27 +828,25 @@ function doPost(e) {
       });
     }
 
-    // 3. Execute Governed Domain Action (or Header-Mapped Canonical Table Write with Read-Back)
+    // 3. Execute Governed Domain Action (or Header-Mapped Canonical Table Write with Full Read-Back)
     businessWriteAttempted = true;
-    outcome = ksRouteGovernedWrite_(action, targetTab, payload, actorUserId, actorRole, nonce, correlationId);
+    outcome = ksRouteGovernedWrite_(action, targetTab, payload, actorUserId, actorCheck.canonical_role, nonce, correlationId);
 
-    // 4. Record Monotonic Nonce in IdAllocations & Write Strict Lock-Preserving AuditLog
-    ksRecordIdAllocation_(nonce, targetTab, (outcome && outcome.allocated_id) || nonce);
+    // 4. Record Monotonic Nonce in IdAllocations & Write Strict Lock-Preserving AuditLog (W1/W2/W6)
+    const finalAllocatedId = (outcome && outcome.allocated_id) || nonce;
+    ksRecordIdAllocation_(nonce, targetTab, finalAllocatedId);
 
-    const auditOpts = {
+    const auditNewValue = 'CONFIRMED | nonce=' + nonce + ' | corr=' + correlationId + (payloadHash ? ' | hash=' + payloadHash : '');
+    ksLogAuditStrictLocked_(action, targetTab, finalAllocatedId, {
       actor_user_id: actorUserId,
       field_changed: 'governed_write',
       old_value: '',
-      new_value: 'CONFIRMED | nonce=' + nonce + ' | corr=' + correlationId,
+      new_value: auditNewValue,
       reason: 'FastAPI Bridge: ' + action,
+      related_record_id: nonce,
       audit_nonce: 'AUD_BRIDGE_' + nonce,
       callerHoldsLock: true
-    };
-    if (typeof ksLogAuditStrictLocked_ === 'function') {
-      ksLogAuditStrictLocked_(action, targetTab, (outcome && outcome.allocated_id) || nonce, auditOpts);
-    } else {
-      ksLogAudit_(action, targetTab, (outcome && outcome.allocated_id) || nonce, auditOpts);
-    }
+    });
 
     SpreadsheetApp.flush();
 
@@ -346,15 +864,46 @@ function doPost(e) {
   } catch (err) {
     const errMsg = err && err.message ? err.message : String(err);
     if (businessWriteAttempted) {
+      // W1: Best-effort attributable forensic exception entry (lock-safe, never masks RECOVERY_REQUIRED)
+      let recoveryExceptionId = '';
+      try {
+        if (typeof ksLogExceptionLocked_ === 'function' && lock.hasLock()) {
+          const excRes = ksLogExceptionLocked_(
+            'CRITICAL',
+            'WebAppBridge.doPost',
+            targetTab,
+            (outcome && outcome.allocated_id) || nonce,
+            errMsg,
+            {
+              recovery_action: 'MANUAL_RECONCILIATION_REQUIRED',
+              action: action,
+              target_tab: targetTab,
+              nonce: nonce,
+              correlation_id: correlationId,
+              actor_user_id: actorUserId,
+              actor_role: actorRole,
+              allocated_id: (outcome && outcome.allocated_id) || ''
+            }
+          );
+          if (excRes && excRes.exception_id) {
+            recoveryExceptionId = excRes.exception_id;
+          }
+        }
+      } catch (_excLogErr) {
+        // Never mask RECOVERY_REQUIRED if secondary forensic logging fails
+      }
+
       return ksBridgeJson_({
         status: 'RECOVERY_REQUIRED',
         correlation_id: correlationId,
         nonce: nonce,
         action: action,
         target_tab: targetTab,
+        actor_user_id: actorUserId,
         allocated_id: (outcome && outcome.allocated_id) || '',
+        recovery_exception_id: recoveryExceptionId,
         error_code: 'BRIDGE_POST_WRITE_FAILURE',
-        message: 'Governed write encountered a post-mutation failure (audit/allocation/flush); quarantined for reconciliation: ' + errMsg,
+        message: 'Governed write encountered a post-mutation failure (readback/audit/allocation/flush); quarantined for Owner reconciliation: ' + errMsg,
         http_status: 409,
         retryable: false
       });
@@ -376,12 +925,11 @@ function doPost(e) {
 }
 
 /**
- * Routes registered actions from backend/app/action_registry.py to your existing
- * Apps Script engines, falling back to safe Row-1 header-mapped sheet writes for
- * standard CRUD actions so all 15 ERP modules work immediately.
+ * Routes registered actions from backend/app/action_registry.py to specialized
+ * Apps Script domain engines, falling back to safe Row-1 header-mapped sheet writes
+ * with full-row authoritative read-back verification.
  */
 function ksRouteGovernedWrite_(action, targetTab, payload, actorUserId, actorRole, nonce, correlationId) {
-  // Specialized Domain Engine Dispatch (if those functions exist in your project)
   if (action === 'RECEIVE_RAW_MATERIAL' && typeof ksCreateInventoryLotAndReceipt === 'function') {
     return ksCreateInventoryLotAndReceipt(payload, nonce);
   }
@@ -413,13 +961,12 @@ function ksRouteGovernedWrite_(action, targetTab, payload, actorUserId, actorRol
     return ksPostBalancedJournalEntry(payload, nonce);
   }
 
-  // Safe Header-Mapped Canonical Table Writer for all other action_registry.py actions
   return ksWriteCanonicalRowByHeaders_(targetTab, payload, actorUserId, nonce);
 }
 
 /**
  * Appends or updates a row in `targetTab` strictly by matching Row-1 header names,
- * flushes, and performs authoritative read-back verification before returning (Stage 1 W5).
+ * flushes, and performs FULL authoritative field-by-field read-back verification (Stage 5 W5).
  */
 function ksWriteCanonicalRowByHeaders_(targetTab, payload, actorUserId, nonce) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -442,7 +989,7 @@ function ksWriteCanonicalRowByHeaders_(targetTab, payload, actorUserId, nonce) {
   // Determine primary ID field (first *_id column or record_id)
   const idColIdx = headers.findIndex(h => h === 'record_id' || h.endsWith('_id'));
   const idField = idColIdx !== -1 ? headers[idColIdx] : null;
-  let allocatedId = idField && flatData[idField] ? String(flatData[idField]).trim() : '';
+  const allocatedId = idField && flatData[idField] ? String(flatData[idField]).trim() : '';
   const nonceColIdx = headers.indexOf('nonce');
 
   // Check if updating an existing row by ID
@@ -457,19 +1004,21 @@ function ksWriteCanonicalRowByHeaders_(targetTab, payload, actorUserId, nonce) {
     }
   }
 
+  let expectedRow;
   if (targetRow !== -1) {
     const existingRow = sh.getRange(targetRow, 1, 1, lastCol).getValues()[0];
-    const updatedRow = headers.map((h, idx) => (h in flatData && flatData[h] !== undefined) ? flatData[h] : existingRow[idx]);
-    sh.getRange(targetRow, 1, 1, lastCol).setValues([updatedRow]);
+    expectedRow = headers.map((h, idx) => (h in flatData && flatData[h] !== undefined) ? flatData[h] : existingRow[idx]);
+    sh.getRange(targetRow, 1, 1, lastCol).setValues([expectedRow]);
   } else {
     targetRow = sh.getLastRow() + 1;
-    const newRow = headers.map(h => (h in flatData && flatData[h] !== undefined) ? flatData[h] : '');
-    sh.getRange(targetRow, 1, 1, lastCol).setValues([newRow]);
+    expectedRow = headers.map(h => (h in flatData && flatData[h] !== undefined) ? flatData[h] : '');
+    sh.getRange(targetRow, 1, 1, lastCol).setValues([expectedRow]);
   }
 
-  // Mandatory flush & authoritative read-back verification (POL-003 / Section 11.2)
+  // Mandatory flush & FULL field-by-field authoritative read-back verification (POL-003 / Stage 5 W5)
   SpreadsheetApp.flush();
   const readBack = sh.getRange(targetRow, 1, 1, lastCol).getValues()[0];
+
   if (idColIdx !== -1 && allocatedId) {
     const actualId = String(readBack[idColIdx] || '').trim();
     if (actualId !== allocatedId) {
@@ -486,6 +1035,20 @@ function ksWriteCanonicalRowByHeaders_(targetTab, payload, actorUserId, nonce) {
         'READBACK_VERIFICATION_FAILED: Nonce mismatch in "' + targetTab + '" row ' + targetRow +
         ' (expected "' + nonce + '", read "' + actualNonce + '").'
       );
+    }
+  }
+
+  for (let idx = 0; idx < headers.length; idx++) {
+    const colName = headers[idx];
+    if (Object.prototype.hasOwnProperty.call(flatData, colName) && flatData[colName] !== undefined) {
+      const expNorm = ksNormalizeReadbackVal_(expectedRow[idx]);
+      const actNorm = ksNormalizeReadbackVal_(readBack[idx]);
+      if (expNorm !== actNorm) {
+        throw new Error(
+          'READBACK_VERIFICATION_FAILED: Field "' + colName + '" mismatch in "' + targetTab + '" row ' + targetRow +
+          ' (expected "' + expNorm + '", read "' + actNorm + '").'
+        );
+      }
     }
   }
 
@@ -517,7 +1080,7 @@ function ksFindByNonce_(nonce) {
 
 /**
  * Records a bridge nonce allocation using monotonic 7-digit ALLOC-0000001 numbering
- * (never Date.now() epoch timestamps) with flush + read-back verification (Stage 1 W6).
+ * (never Date.now() epoch timestamps) with flush + read-back verification (Stage 5 W6).
  */
 function ksRecordIdAllocation_(nonce, tabName, allocatedId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();

@@ -1,0 +1,104 @@
+================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-02
+COMPREHENSIVE REGRESSION & VERIFICATION TEST REPORT (STAGE 8)
+================================================================================
+Mission ID      : KS-RELEASE-02
+Execution Mode  : Sequential, reproducible, offline / zero live production mutation
+Overall Status  : ALL EXECUTABLE SUITES PASSED (1 environment-dependent uvicorn test
+                  honestly SKIPPED; live Sheet/production tests NOT RUN per G1 hold)
+
+--------------------------------------------------------------------------------
+1. EXECUTIVE TEST SUMMARY TABLE
+--------------------------------------------------------------------------------
+Layer / Test Suite                                  | Ran | Pass | Fail | Skip | Status
+----------------------------------------------------|-----|------|------|------|--------
+Backend Full Unittest Discovery (sequential)        | 729 |  728 |    0 |    1 | PASSED (1 skipped)*
+  - incl. test_cross_language_hmac.py (W1-W6+E2E)   |  20 |   20 |    0 |    0 | PASSED
+  - incl. test_first_owner_bootstrap.py             | all |  all |    0 |    0 | PASSED
+  - incl. test_mission51b1_round2_integrity.py      | all |  all |    0 |    0 | PASSED (aistudio fix verified)
+  - incl. test_cors_preflight.py                    | all |  all |    0 |    0 | PASSED
+  - incl. test_phase1_database_schema_guards.py     | all |  all |    0 |    0 | PASSED
+Apps Script Bootstrap VM Suite (Node.js VM)         |   7 |    7 |    0 |    0 | PASSED
+Apps Script Bound JS Syntax Check (42 .js files)    |  42 |   42 |    0 |    0 | PASSED
+Frontend TypeScript Check (`npx tsc --noEmit`)      |   1 |    1 |    0 |    0 | PASSED
+Frontend Production Build (`npm run build`)         |   1 |    1 |    0 |    0 | PASSED (dist/assets/aistudio absent)
+Frontend Lint (`npm run lint`)                      |   1 |    1 |    0 |    0 | PASSED
+Frontend Bun Contract & Safety Suites (5 scripts)   |  85 |   85 |    0 |    0 | PASSED
+  - test_mission51b1_frontend_transaction_safety.ts |   5 |    5 |    0 |    0 | PASSED
+  - test_mission51b1rf2_transaction_identity_closure|  39 |   39 |    0 |    0 | PASSED
+  - test_mission51b1rf_persistence_and_fingerprint  |  18 |   18 |    0 |    0 | PASSED
+  - test_phase1_6_frontend_contracts.ts             |  17 |   17 |    0 |    0 | PASSED
+  - test_tx_final_04_frontend_unknown_safety.ts     |   6 |    6 |    0 |    0 | PASSED
+Playwright Browser Acceptance Audit (Chromium)      |  12 |   12 |    0 |    0 | PASSED (0 console errors)
+  - 7 Role Workflows (OWNER/PA/MGR/SALES/FACT/ACCT/EMP) | 7 |  7 |    0 |    0 | PASSED
+  - 4 Security Audits (Session/Role/Preview/Logout) |   4 |    4 |    0 |    0 | PASSED
+  - 1 Responsive Viewport (Tablet 768x1024)         |   1 |    1 |    0 |    0 | PASSED
+Playwright Login Page Upgrade Audit (Chromium)      |   9 |    9 |    0 |    0 | PASSED (7 scenarios + 2 responsive)
+Playwright Usability & Workforce Upgrade (Chromium) |   6 |    6 |    0 |    0 | PASSED (6/6 checks)
+Git Patch & Bundle Verification (from da87c0d)      |   2 |    2 |    0 |    0 | PASSED
+Package Hygiene & SHA-256 Archive Verification      |   2 |    2 |    0 |    0 | PASSED (see Manifest)
+Live Google Workbook Row-1 Header Verification      |   - |    - |    - |    - | BLOCKED (G1 Read-Only Hold)
+Live Production Render / Apps Script Smoke Test     |   - |    - |    - |    - | NOT RUN (REQUIRES OWNER APPROVAL)
+
+* Honest Skip Disclosure:
+  1 backend test was skipped:
+  `test_render_boot_readiness.py` — "Real uvicorn subprocess must bind 0.0.0.0:$PORT
+  and answer /health <3s even if Sheets hangs >5s."
+  Reason: `uvicorn` runtime wheel is not installed in this sandbox Python 3.11.2 container
+  (`backend/requirements.txt` installs `uvicorn[standard]>=0.27.0` during Render build).
+  This is NOT masked as PASSED.
+
+--------------------------------------------------------------------------------
+2. EXACT COMMANDS EXECUTED & OBSERVED RESULTS
+--------------------------------------------------------------------------------
+1. Cross-Language HMAC, W1-W6 Bridge, Stage 6 E2E & Stage 7 CORS:
+   Command : PYTHONPATH=backend SALES_TESTING=1 python3 -m unittest backend/tests/test_cross_language_hmac.py -v
+   Result  : Ran 20 tests in 4.751s — OK (20/20 PASSED)
+   Highlights:
+     - test_01..09 : Python <-> Apps Script HMAC-SHA256 ASCII/Unicode parity, skew, tamper
+     - test_10..14 : Real-sheet VM lock ownership, monotonic ALLOC-0000001, W1/W2/W3/W4/W5
+     - test_15     : W4 forged/inactive/escalated/uninitialized actor rejection
+     - test_16     : W3 SystemConfig 403 CONTROL_TABLE_WRITE_FORBIDDEN, action-tab binding,
+                     AUDITOR write block, privileged tab role restrictions
+     - test_17     : W2 nonce action/actor/payload-hash conflict rejection (HTTP 409)
+     - test_18     : W5 non-primary field (`shop_name`) read-back corruption quarantine +
+                     attributable `ExceptionRegister` forensic log
+     - test_19     : Stage 6 End-to-End Python `AppsScriptBridge.execute_governed_write` ->
+                     real HMAC envelope -> Node VM Apps Script -> in-memory Google Sheets ->
+                     Python read-back verification (`CONFIRMED`, Settings + AuditLog written)
+     - test_20     : Stage 7 multi-env CORS resolution + production fail-closed RuntimeError
+
+2. Apps Script First-Owner Bootstrap VM Suite:
+   Command : node backend/tests/test_apps_script_bootstrap_vm.mjs
+   Result  : ALL 7 MERGED APPS SCRIPT VM SECURITY SUITES PASSED.
+
+3. Full Backend Unittest Suite (Sequential):
+   Command : PYTHONPATH=backend SALES_TESTING=1 python3 -m unittest discover -s backend/tests -p 'test_*.py' -v
+   Result  : Ran 729 tests in 81.730s — OK (skipped=1)
+   Note    : Specifically verified `test_accidental_aistudio_prompt_artifact_removed` NOW
+             PASSES (previously failed in KS-RELEASE-01 before Stage 2 remediation).
+
+4. Frontend TypeScript, Build & Lint:
+   Command : npx tsc --noEmit && npm run build && npm run lint
+   Result  : 0 TypeScript errors, Vite production build succeeded, `dist/assets/aistudio`
+             confirmed absent (`DIST_AISTUDIO_ABSENT_OK`).
+
+5. Frontend Bun Unit & Contract Suites:
+   Commands:
+     - bun scripts/test_mission51b1_frontend_transaction_safety.ts          -> 5/5 PASSED
+     - bun scripts/test_mission51b1rf2_transaction_identity_closure.ts      -> 39/39 PASSED
+     - bun scripts/test_mission51b1rf_persistence_and_fingerprint.ts        -> 18/18 PASSED
+     - bun scripts/test_phase1_6_frontend_contracts.ts                      -> 17/17 PASSED
+     - bun scripts/test_tx_final_04_frontend_unknown_safety.ts              -> 6/6 PASSED
+
+6. Playwright Headless Chromium Audits (against live http://localhost:3000):
+   Commands:
+     - node scripts/run_frontend_acceptance_audit.cjs -> 7/7 workflows, 4/4 security,
+       1/1 tablet, 0 console errors, exit code 0
+     - node scripts/test_login_page_upgrade.cjs       -> 7/7 scenarios, 2/2 responsive,
+       exit code 0
+     - node scripts/verify_usability_workforce_upgrade.cjs -> 6/6 checks, exit code 0
+
+================================================================================
+END OF KS_RELEASE_02_TEST_REPORT.txt
+================================================================================
