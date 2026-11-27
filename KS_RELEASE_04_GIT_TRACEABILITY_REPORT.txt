@@ -1,0 +1,101 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+STAGE J GIT TRACEABILITY, PROVENANCE & SAFE OWNER TRANSFER REPORT
+================================================================================================
+Generated At (UTC)   : 2026-11-27T06:33:00Z
+Mission ID           : KS-RELEASE-04
+Repository           : https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git
+Remote Push Status   : BLOCKED (No GitHub push credentials in sandbox; Section 15 Hard Stop
+                       prohibits pushing to GitHub without GPT G2 + Owner G3 authorization)
+
+------------------------------------------------------------------------------------------------
+1. VERIFIED COMPLETE GIT COMMIT ANCESTRY CHAIN (LIVE GITHUB INSPECTION)
+------------------------------------------------------------------------------------------------
+Fresh clone of `https://github.com/kawadswad-udhyog/kawad-swad-sales-management.git` confirmed
+that GitHub `origin/main` has ALREADY advanced to `c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6`,
+incorporating 100% of KS-RELEASE-03's 8 source/test/manifest files (0 source diffs between
+`origin/main` and `release/ks-release-03` = `13d7cb05818cdc56ef1f3759380288cd516119d5`).
+
+  [1] f7ccebffdacb96081f498b304dc009326bbcee44  ("docs: update project screenshots")
+       |
+       v
+  [2] da87c0db91219e4674c2360043d4f3095083f32e  ("chore: update application screenshots")
+       |
+       +---> [RC2 Archive Branch] 452d6dc400ab56b8ed56551e68d3a7c15af06fdb (KS_RELEASE_02_FROM_DA87C0D.bundle)
+       |
+       v
+  [3] 2fc7a23e822680c6fae8fd0d709b26206388258f  ("feat: implement deterministic CORS origin resolution")
+       |
+       +---> [RC3 Archive Branch] 13d7cb05818cdc56ef1f3759380288cd516119d5 (KS_RELEASE_03_FROM_2FC7A23.bundle)
+       |     (Verified clean against 2fc7a23: git bundle verify PASS, git apply --check PASS)
+       |
+       v
+  [4] c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6  (CURRENT LIVE GitHub `origin/main` HEAD)
+       ("feat(auth): resolve actor role for token revocation")
+       NOTE: Verified `git diff c8e5a15 release/ks-release-03 -- apps_script backend src` = EMPTY
+       (0 source-code differences; c8e5a15 already includes all 8 RC3 source/test/manifest edits
+        plus the 11 RC3 reports/patch/bundle).
+       |
+       v
+  [5] e4e868020de7f43cfb22122a14c88ef380be32ae  (KS-RELEASE-04 Branch: `release/ks-release-04`)
+       ("security(bridge,tests): harden KS-RELEASE-04 incomplete audit quarantine, duplicate/malformed actor checks, sci-float readback parity, and full security matrix suite")
+       Parent : c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6 (`origin/main`)
+       Delta  : 5 files changed, 985 insertions(+), 96 deletions(-)
+
+------------------------------------------------------------------------------------------------
+2. EXACT 5 FILES IN KS-RELEASE-04 COMMIT (`e4e868020de7f43cfb22122a14c88ef380be32ae`)
+------------------------------------------------------------------------------------------------
+  SHA-256                                                          | Bytes  | File Path
+  -----------------------------------------------------------------+--------+--------------------------------------------------------------------------
+  776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6 | 48,176 | apps_script/WebAppBridge.js
+  24b4806e17aca4878c5c999ce066bcbed78406e229d5a87518206c9748a0ddd9 |  4,897 | apps_script/SOURCE_INVENTORY_AND_SHA256.txt
+  776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6 | 48,176 | apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js
+  9cfa4a0fdc4fa282d47becd41de692b00e5c38efff1e81047f3a2b37990db720 |  1,229 | apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md
+  51e63b0ef77dfb4496198ece88c2f8cb277afecf4278cb97f3758ebd5d824b16 | 36,237 | backend/tests/test_ks_release_04_security_matrix.py
+
+  Note: Binary PNG screenshots regenerated during Playwright verification were intentionally
+  EXCLUDED from commit `e4e86802` so the Git transfer patch/bundle contains strictly the 5
+  audited security/test/manifest files.
+
+------------------------------------------------------------------------------------------------
+3. VERIFIED KS-RELEASE-04 TRANSFER ARTIFACTS (ANCHORED DIRECTLY ON LIVE `origin/main` = `c8e5a15`)
+------------------------------------------------------------------------------------------------
+  Artifact                           | Bytes  | SHA-256
+  -----------------------------------+--------+------------------------------------------------------------------
+  KS_RELEASE_04_FROM_C8E5A15.patch   | 56,033 | 18244cb04cae915a55602ec264d50184aa92c90ce8439cf3126d5ff44d0aabc8
+  KS_RELEASE_04_FROM_C8E5A15.bundle  | 11,950 | 9046a0f9d217bfee6aefc2cdec96e15d3630c1e9f7fcf56f8fdaf6341fc1a091
+
+  Independent Fresh-Clone Verification Results (at `c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6`):
+  - `git apply --check KS_RELEASE_04_FROM_C8E5A15.patch`   : PASS
+  - `git bundle verify KS_RELEASE_04_FROM_C8E5A15.bundle`  : PASS
+    (`The bundle contains this ref: e4e868020de7f43cfb22122a14c88ef380be32ae refs/heads/release/ks-release-04`)
+    (`The bundle requires this ref: c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6`)
+  - Fetched commit SHA match check                         : `e4e868020de7f43cfb22122a14c88ef380be32ae` == EXACT MATCH
+  - Preserved Prior Git Transfer Artifacts (Untouched):
+    * `KS_RELEASE_02_FROM_DA87C0D.patch` & `.bundle`
+    * `KS_RELEASE_03_FROM_2FC7A23.patch` & `.bundle`
+
+------------------------------------------------------------------------------------------------
+4. SAFE NON-FORCE-PUSH OWNER TRANSFER PROCEDURE (ONLY AFTER GPT G2 + OWNER G3 APPROVAL)
+------------------------------------------------------------------------------------------------
+  Option A — Recommended (Git Bundle — preserves exact commit SHA `e4e868020de7f43cfb22122a14c88ef380be32ae`):
+    1. git fetch origin main
+    2. git checkout main && git pull --ff-only origin main
+       # Verify HEAD == c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6
+    3. git bundle verify KS_RELEASE_04_FROM_C8E5A15.bundle
+    4. git fetch KS_RELEASE_04_FROM_C8E5A15.bundle release/ks-release-04:release/ks-release-04
+    5. git checkout release/ks-release-04
+    6. git log -n 2 --stat
+    7. git push -u origin release/ks-release-04
+       # Open Pull Request `release/ks-release-04 -> main` (NO force-push required).
+
+  Option B — Alternative (Unified Diff Patch):
+    1. git checkout -b release/ks-release-04 c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6
+    2. git apply --check KS_RELEASE_04_FROM_C8E5A15.patch
+    3. git apply KS_RELEASE_04_FROM_C8E5A15.patch
+    4. git commit -am "security(bridge,tests): harden KS-RELEASE-04 incomplete audit quarantine, duplicate/malformed actor checks, sci-float readback parity, and full security matrix suite"
+    5. git push -u origin release/ks-release-04
+
+================================================================================================
+END OF KS_RELEASE_04_GIT_TRACEABILITY_REPORT.txt
+================================================================================================

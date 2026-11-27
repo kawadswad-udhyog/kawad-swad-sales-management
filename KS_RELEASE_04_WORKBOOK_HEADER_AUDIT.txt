@@ -1,0 +1,453 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+STAGE C LIVE WORKBOOK PHYSICAL ROW-1 HEADER AUDIT & OWNER READ-ONLY EXPORT SPECIFICATION
+================================================================================================
+Generated At (UTC)         : 2026-11-27T06:41:30Z
+Mission ID                 : KS-RELEASE-04
+Live Physical Verification : BLOCKED (No live Google Sheets credentials / Spreadsheet ID in sandbox;
+                             Section 15 Hard Stop strictly prohibits live workbook reads/writes)
+Fabricated Live Headers    : ZERO (Every Actual Header field below is honestly marked BLOCKED)
+Fail-Closed Guard Status   : ACTIVE (Backend schema_registry.py blocks writes to all 36 unverified tabs
+                             until physical Row-1 headers are confirmed by Owner)
+
+------------------------------------------------------------------------------------------------
+1. SANDBOX ENVIRONMENT & CREDENTIAL CHECK (ZERO SECRETS LOGGED)
+------------------------------------------------------------------------------------------------
+  SALES_GOOGLE_SPREADSHEET_ID                     : NOT_SET
+  SALES_GOOGLE_SERVICE_ACCOUNT_FILE               : /etc/secrets/sales-service-account.json (exists=False)
+  SALES_GOOGLE_SERVICE_ACCOUNT_JSON               : NOT_SET
+  SALES_APPS_SCRIPT_WEBAPP_URL                    : NOT_SET
+  SALES_APPS_SCRIPT_SHARED_SECRET                 : NOT_SET
+  SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON : NOT_SET
+  Live Google Sheets API calls attempted          : 0 (Strictly prohibited under Section 15 Hard Stop)
+
+------------------------------------------------------------------------------------------------
+2. PART A — 12 CONFLICTING_CORE_SCHEMA_TABS (EXACT EXPECTED HEADERS, ORDER, REQUIRED, TYPES)
+------------------------------------------------------------------------------------------------
+[01/12] PHYSICAL TAB NAME : CustomRoles
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..7 exact positional sequence (REQUIRED_TABS):
+    role_id, role_name, description, permissions_json, created_by, created_at, updated_at
+  Blueprint v2.0 Headers : (8 cols) role_id, role_name, description, permissions_json, created_by, created_at, updated_at, updated_by
+  Required Fields        : role_id, created_by, created_at
+  Field Types            : role_id:TEXT, role_name:TEXT, description:TEXT, permissions_json:JSON_TEXT, created_by:TEXT, created_at:DATETIME, updated_at:DATETIME
+  Repo Internal Diffs    : BP_only=[updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : users.py DELETE_CUSTOM_ROLE transmits soft-delete flags deleted/active which are omitted from REQUIRED_TABS['CustomRoles'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[02/12] PHYSICAL TAB NAME : Customers
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..13 exact positional sequence (REQUIRED_TABS):
+    customer_id, customer_type, shop_name, shopkeeper_name, mobile, alternate_mobile, address, locality_area, city, gstin, map_location, active, created_at
+  Blueprint v2.0 Headers : (16 cols) customer_id, customer_type, shop_name, shopkeeper_name, mobile, alternate_mobile, address, locality_area, city, gstin, map_location, active, created_at, created_by, updated_at, updated_by
+  Required Fields        : customer_id, created_at
+  Field Types            : customer_id:TEXT, customer_type:TEXT, shop_name:TEXT, shopkeeper_name:TEXT, mobile:TEXT, alternate_mobile:TEXT, address:TEXT, locality_area:TEXT, city:TEXT, gstin:TEXT, map_location:TEXT, active:BOOLEAN, created_at:DATETIME
+  Repo Internal Diffs    : BP_only=[created_by, updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : customers.py reads/writes notes which is omitted from REQUIRED_TABS['Customers'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[03/12] PHYSICAL TAB NAME : Expenses
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..19 exact positional sequence (REQUIRED_TABS):
+    expense_id, expense_datetime, salesman_user_id, submitted_by_user_id, category, amount, payment_mode, description, receipt_image_url, receipt_link_or_file_ref, approval_status, approved_by_user_id, approval_datetime, approved_datetime, cash_reducing_expense, related_closing_id, rejection_reason, created_at, notes
+  Blueprint v2.0 Headers : (22 cols) expense_id, expense_datetime, salesman_user_id, submitted_by_user_id, category, amount, payment_mode, description, receipt_image_url, receipt_link_or_file_ref, approval_status, approved_by_user_id, approval_datetime, approved_datetime, cash_reducing_expense, related_closing_id, rejection_reason, created_at, notes, created_by, updated_at, updated_by
+  Required Fields        : expense_id, salesman_user_id, submitted_by_user_id, approved_by_user_id, related_closing_id, created_at
+  Field Types            : expense_id:TEXT, expense_datetime:DATETIME, salesman_user_id:TEXT, submitted_by_user_id:TEXT, category:TEXT, amount:DECIMAL, payment_mode:DECIMAL, description:TEXT, receipt_image_url:TEXT, receipt_link_or_file_ref:TEXT, approval_status:TEXT, approved_by_user_id:TEXT, approval_datetime:DATETIME, approved_datetime:DATETIME, cash_reducing_expense:BOOLEAN, related_closing_id:TEXT, rejection_reason:TEXT, created_at:DATETIME, notes:TEXT
+  Repo Internal Diffs    : BP_only=[created_by, updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : expenses.py passes governance flag post_accounting_journal inside REVIEW_EXPENSE update payload.
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[04/12] PHYSICAL TAB NAME : PackagingBatches
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..30 exact positional sequence (REQUIRED_TABS):
+    packaging_id, packaging_date, product_id, product_name_snapshot, bulk_kg_used, packets_200g, packets_500g, packets_1000g, total_packets, expected_kg, difference_kg, difference_status, status, notes, created_at, created_by, batch_allocations_json, bulk_cost, bulk_cost_per_kg, packaging_material_cost, packaging_labor_cost, total_finished_cost, packing_loss_kg, loss_reason, discrepancy_approved, discrepancy_explanation, discrepancy_approved_by, discrepancy_approved_at, reference, cost_status
+  Blueprint v2.0 Headers : (32 cols) packaging_id, packaging_date, product_id, product_name_snapshot, bulk_kg_used, packets_200g, packets_500g, packets_1000g, total_packets, expected_kg, difference_kg, difference_status, status, notes, created_at, created_by, batch_allocations_json, bulk_cost, bulk_cost_per_kg, packaging_material_cost, packaging_labor_cost, total_finished_cost, packing_loss_kg, loss_reason, discrepancy_approved, discrepancy_explanation, discrepancy_approved_by, discrepancy_approved_at, reference, cost_status, updated_at, updated_by
+  Required Fields        : packaging_id, product_id, created_at, created_by
+  Field Types            : packaging_id:TEXT, packaging_date:DATE, product_id:TEXT, product_name_snapshot:TEXT, bulk_kg_used:DECIMAL, packets_200g:TEXT, packets_500g:TEXT, packets_1000g:TEXT, total_packets:DECIMAL, expected_kg:DECIMAL, difference_kg:DECIMAL, difference_status:TEXT, status:TEXT, notes:TEXT, created_at:DATETIME, created_by:TEXT, batch_allocations_json:JSON_TEXT, bulk_cost:DECIMAL, bulk_cost_per_kg:DECIMAL, packaging_material_cost:DECIMAL, packaging_labor_cost:DECIMAL, total_finished_cost:DECIMAL, packing_loss_kg:DECIMAL, loss_reason:TEXT, discrepancy_approved:TEXT, discrepancy_explanation:TEXT, discrepancy_approved_by:TEXT, discrepancy_approved_at:DATETIME, reference:TEXT, cost_status:DECIMAL
+  Repo Internal Diffs    : BP_only=[updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : production.py RECORD_PACKAGING_BATCH writes recipe/bulk linkage fields omitted from REQUIRED_TABS['PackagingBatches'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[05/12] PHYSICAL TAB NAME : ProductionBatches
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..22 exact positional sequence (REQUIRED_TABS):
+    production_id, production_date, product_id, product_name_snapshot, quantity_kg, wastage_kg, net_quantity_kg, flour_base_used_kg, benchmark_yield_kg, actual_yield_ratio, yield_variance_kg, recipe_id, status, notes, created_at, created_by, approved_by, approved_at, approval_notes, materials_issued, material_issue_txn_id, recipe_version
+  Blueprint v2.0 Headers : (24 cols) production_id, production_date, product_id, product_name_snapshot, quantity_kg, wastage_kg, net_quantity_kg, flour_base_used_kg, benchmark_yield_kg, actual_yield_ratio, yield_variance_kg, recipe_id, status, notes, created_at, created_by, approved_by, approved_at, approval_notes, materials_issued, material_issue_txn_id, recipe_version, updated_at, updated_by
+  Required Fields        : production_id
+  Field Types            : production_id:TEXT, production_date:DATE, product_id:TEXT, product_name_snapshot:TEXT, quantity_kg:DECIMAL, wastage_kg:DECIMAL, net_quantity_kg:DECIMAL, flour_base_used_kg:DECIMAL, benchmark_yield_kg:DECIMAL, actual_yield_ratio:DECIMAL, yield_variance_kg:DECIMAL, recipe_id:TEXT, status:TEXT, notes:TEXT, created_at:DATETIME, created_by:TEXT, approved_by:TEXT, approved_at:DATETIME, approval_notes:TEXT, materials_issued:BOOLEAN, material_issue_txn_id:TEXT, recipe_version:TEXT
+  Repo Internal Diffs    : BP_only=[updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : production.py CREATE_PRODUCTION_BATCH includes extended reconciliation & ingredient columns omitted from REQUIRED_TABS['ProductionBatches'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[06/12] PHYSICAL TAB NAME : Products
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..10 exact positional sequence (REQUIRED_TABS):
+    product_id, sku, product_name, category, variant, pack_weight_g, selling_unit, retail_pack_only, active, notes
+  Blueprint v2.0 Headers : (14 cols) product_id, sku, product_name, category, variant, pack_weight_g, selling_unit, retail_pack_only, active, notes, created_at, created_by, updated_at, updated_by
+  Required Fields        : product_id
+  Field Types            : product_id:TEXT, sku:TEXT, product_name:TEXT, category:TEXT, variant:TEXT, pack_weight_g:DECIMAL, selling_unit:TEXT, retail_pack_only:BOOLEAN, active:BOOLEAN, notes:TEXT
+  Repo Internal Diffs    : BP_only=[created_at, created_by, updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : products.py accepts/writes optional recipe_id linkage omitted from REQUIRED_TABS['Products'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[07/12] PHYSICAL TAB NAME : RawMaterials
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..9 exact positional sequence (REQUIRED_TABS):
+    raw_material_id, material_name, current_stock, unit, rate_per_unit, rate_status, category, created_at, created_by
+  Blueprint v2.0 Headers : (11 cols) raw_material_id, material_name, current_stock, unit, rate_per_unit, rate_status, category, created_at, created_by, updated_at, updated_by
+  Required Fields        : raw_material_id, created_at, created_by
+  Field Types            : raw_material_id:TEXT, material_name:TEXT, current_stock:DECIMAL, unit:TEXT, rate_per_unit:DECIMAL, rate_status:TEXT, category:TEXT, created_at:DATETIME, created_by:TEXT
+  Repo Internal Diffs    : BP_only=[updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : production.py writes active/notes and opening-stock verification metadata beyond the 9 columns in REQUIRED_TABS['RawMaterials'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[08/12] PHYSICAL TAB NAME : SalaryIncentives
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..12 exact positional sequence (REQUIRED_TABS):
+    incentive_id, period_month, salesman_user_id, salesman_name, qualifying_kg_sold, base_rate_per_kg, incentive_amount, approved_by_user_id, status, paid_at, notes, created_at
+  Blueprint v2.0 Headers : (15 cols) incentive_id, period_month, salesman_user_id, salesman_name, qualifying_kg_sold, base_rate_per_kg, incentive_amount, approved_by_user_id, status, paid_at, notes, created_at, created_by, updated_at, updated_by
+  Required Fields        : incentive_id, salesman_user_id, approved_by_user_id, created_at
+  Field Types            : incentive_id:TEXT, period_month:TEXT, salesman_user_id:TEXT, salesman_name:TEXT, qualifying_kg_sold:DECIMAL, base_rate_per_kg:DECIMAL, incentive_amount:DECIMAL, approved_by_user_id:TEXT, status:TEXT, paid_at:DATETIME, notes:TEXT, created_at:DATETIME
+  Repo Internal Diffs    : BP_only=[created_by, updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : salary.py reads/writes record_id, period_start/period_end, calculated_amount/approved_amount whereas REQUIRED_TABS['SalaryIncentives'] lists legacy columns (incentive_id, period_month, incentive_amount).
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[09/12] PHYSICAL TAB NAME : Sales
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..23 exact positional sequence (REQUIRED_TABS):
+    sale_id, bill_number, idempotency_key, txn_status, sale_datetime, sales_type, customer_id, customer_name_snapshot, customer_mobile, customer_gstin, entered_by_user_id, salesman_user_id, delivery_status, payment_status, payment_method, payment_reference, subtotal, discount_amount, tax_amount, bill_total, bill_status, created_at, notes
+  Blueprint v2.0 Headers : NOT IN KS_SCHEMA_JSON (Operational Extension Tab)
+  Required Fields        : sale_id
+  Field Types            : sale_id:TEXT_ID, bill_number:TEXT_ID, idempotency_key:TEXT_ID, txn_status:TEXT, sale_datetime:DATETIME_OR_DATE, sales_type:TEXT, customer_id:TEXT_ID, customer_name_snapshot:TEXT, customer_mobile:TEXT, customer_gstin:TEXT, entered_by_user_id:TEXT_ID, salesman_user_id:TEXT_ID, delivery_status:TEXT, payment_status:TEXT, payment_method:TEXT, payment_reference:TEXT, subtotal:DECIMAL, discount_amount:DECIMAL, tax_amount:DECIMAL, bill_total:DECIMAL, bill_status:TEXT, created_at:DATETIME_OR_DATE, notes:TEXT
+  Repo Internal Diffs    : BP_only=[NONE] | REQ_only=[NONE]
+  Router Variance Notes  : sales.py writes cash_collected, credit_amount, and owner_credit_approval_id beyond REQUIRED_TABS['Sales'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[10/12] PHYSICAL TAB NAME : ShopVisits
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..9 exact positional sequence (REQUIRED_TABS):
+    visit_id, visit_datetime, salesman_user_id, customer_id, customer_name_snapshot, purpose, outcome, notes, created_at
+  Blueprint v2.0 Headers : NOT IN KS_SCHEMA_JSON (Operational Extension Tab)
+  Required Fields        : visit_id
+  Field Types            : visit_id:TEXT_ID, visit_datetime:DATETIME_OR_DATE, salesman_user_id:TEXT_ID, customer_id:TEXT_ID, customer_name_snapshot:TEXT, purpose:TEXT, outcome:TEXT, notes:TEXT, created_at:DATETIME_OR_DATE
+  Repo Internal Diffs    : BP_only=[NONE] | REQ_only=[NONE]
+  Router Variance Notes  : visits.py uses shop_name_snapshot/visit_outcome/order_taken/follow_up_date/next_action whereas REQUIRED_TABS['ShopVisits'] lists customer_name_snapshot/purpose/outcome.
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[11/12] PHYSICAL TAB NAME : Suppliers
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..12 exact positional sequence (REQUIRED_TABS):
+    supplier_id, supplier_name, contact_person, mobile, email, address, city, gstin, active, created_at, created_by, notes
+  Blueprint v2.0 Headers : (14 cols) supplier_id, supplier_name, contact_person, mobile, email, address, city, gstin, active, created_at, created_by, notes, updated_at, updated_by
+  Required Fields        : supplier_id, created_at, created_by
+  Field Types            : supplier_id:TEXT, supplier_name:TEXT, contact_person:TEXT, mobile:TEXT, email:TEXT, address:TEXT, city:TEXT, gstin:TEXT, active:BOOLEAN, created_at:DATETIME, created_by:TEXT, notes:TEXT
+  Repo Internal Diffs    : BP_only=[updated_at, updated_by] | REQ_only=[NONE]
+  Router Variance Notes  : purchasing.py create/update supplier writes 14 logical fields including payment_terms and opening_balance whereas REQUIRED_TABS['Suppliers'] has 12 columns. Reconcile physical Row-1 headers against workbook before strict header pruning.
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[12/12] PHYSICAL TAB NAME : Workers
+  Status                 : BLOCKED (Awaiting Owner live Row-1 header export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Order  : 1..7 exact positional sequence (REQUIRED_TABS):
+    worker_id, worker_name, mobile, daily_wage, active, notes, created_at
+  Blueprint v2.0 Headers : NOT IN KS_SCHEMA_JSON (Operational Extension Tab)
+  Required Fields        : worker_id
+  Field Types            : worker_id:TEXT_ID, worker_name:TEXT, mobile:TEXT, daily_wage:DECIMAL, active:BOOLEAN, notes:TEXT, created_at:DATETIME_OR_DATE
+  Repo Internal Diffs    : BP_only=[NONE] | REQ_only=[NONE]
+  Router Variance Notes  : production.py CREATE_WORKER records created_by which is omitted from REQUIRED_TABS['Workers'].
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+------------------------------------------------------------------------------------------------
+3. PART B — 24 PENDING_OWNER_MAPPING_TABS (EXACT EXPECTED HEADERS, ORDER, REQUIRED, TYPES)
+------------------------------------------------------------------------------------------------
+[01/24] PHYSICAL TAB NAME : AssetsMaintenance
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=RECORD_ASSET_MAINTENANCE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[02/24] PHYSICAL TAB NAME : ComplianceRecords
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=RECORD_COMPLIANCE_ITEM
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[03/24] PHYSICAL TAB NAME : DBV5_FIELD_DICTIONARY_3074
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[04/24] PHYSICAL TAB NAME : DistributionDispatches
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[05/24] PHYSICAL TAB NAME : EmployeeAdvances
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (14 columns)
+  Expected Header Order  : 1..14: employee_advance_id, employee_id, period_start, period_end, record_date, quantity_or_days, amount, approval_status, approved_by, payment_status, created_at, created_by, updated_at, updated_by
+  Required Fields        : employee_advance_id, employee_id, created_at, created_by
+  Field Types            : employee_advance_id:TEXT, employee_id:TEXT, period_start:DATE, period_end:DATE, record_date:DATE, quantity_or_days:DECIMAL, amount:DECIMAL, approval_status:TEXT, approved_by:TEXT, payment_status:DECIMAL, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=DISBURSE_APPROVED_ADVANCE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[06/24] PHYSICAL TAB NAME : Employees
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (20 columns)
+  Expected Header Order  : 1..20: employee_id, employee_code, full_name, mobile, email, designation, department, employment_type, joining_date, exit_date, employment_status, reporting_manager_id, address, emergency_contact, bank_details_reference, active, created_at, created_by, updated_at, updated_by
+  Required Fields        : employee_id, reporting_manager_id, created_at, created_by
+  Field Types            : employee_id:TEXT, employee_code:TEXT, full_name:TEXT, mobile:TEXT, email:TEXT, designation:TEXT, department:TEXT, employment_type:TEXT, joining_date:DATE, exit_date:DATE, employment_status:TEXT, reporting_manager_id:TEXT, address:TEXT, emergency_contact:TEXT, bank_details_reference:TEXT, active:BOOLEAN, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[07/24] PHYSICAL TAB NAME : ExceptionRegister
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Apps Script SafeWriter/AuditAndExceptions.js canonical 14-column schema
+  Expected Header Order  : 1..14: exception_id, created_at, severity, source_function, tab_name, reference_id, error_message, payload_json, assigned_owner, due_date, status, resolution_notes, resolved_by, resolved_at
+  Required Fields        : exception_id
+  Field Types            : exception_id:TEXT_ID, created_at:DATETIME_OR_DATE, severity:TEXT, source_function:TEXT, tab_name:TEXT, reference_id:TEXT_ID, error_message:TEXT, payload_json:JSON_TEXT, assigned_owner:TEXT, due_date:DATETIME_OR_DATE, status:TEXT, resolution_notes:TEXT, resolved_by:TEXT, resolved_at:DATETIME_OR_DATE
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[08/24] PHYSICAL TAB NAME : MarketplaceSettlements
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (18 columns)
+  Expected Header Order  : 1..18: settlement_id, channel_id, settlement_reference, period_start, period_end, gross_sales, fees, refunds, deductions, net_settlement, bank_reference, settlement_date, reconciled_by, status, created_at, created_by, updated_at, updated_by
+  Required Fields        : settlement_id, channel_id, created_at, created_by
+  Field Types            : settlement_id:TEXT, channel_id:TEXT, settlement_reference:TEXT, period_start:DATE, period_end:DATE, gross_sales:TEXT, fees:TEXT, refunds:TEXT, deductions:TEXT, net_settlement:TEXT, bank_reference:TEXT, settlement_date:DATE, reconciled_by:TEXT, status:TEXT, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=RECORD_MARKETPLACE_SETTLEMENT
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[09/24] PHYSICAL TAB NAME : MaterialConsumptions
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[10/24] PHYSICAL TAB NAME : PackagingMaterials
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (13 columns)
+  Expected Header Order  : 1..13: packaging_material_id, material_name, material_type, unit, specification, supplier_id, rate_per_unit, minimum_stock, active, created_at, created_by, updated_at, updated_by
+  Required Fields        : packaging_material_id, created_at, created_by
+  Field Types            : packaging_material_id:TEXT, material_name:TEXT, material_type:TEXT, unit:TEXT, specification:TEXT, supplier_id:TEXT, rate_per_unit:DECIMAL, minimum_stock:DECIMAL, active:BOOLEAN, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[11/24] PHYSICAL TAB NAME : PackagingOutputs
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (13 columns)
+  Expected Header Order  : 1..13: packaging_output_id, packaging_batch_id, product_id, sku, product_lot_id, pack_weight_g, packet_count, net_weight_kg, recorded_by, created_at, created_by, updated_at, updated_by
+  Required Fields        : packaging_output_id, packaging_batch_id, product_id, product_lot_id, created_at, created_by
+  Field Types            : packaging_output_id:TEXT, packaging_batch_id:TEXT, product_id:TEXT, sku:TEXT, product_lot_id:TEXT, pack_weight_g:DECIMAL, packet_count:DECIMAL, net_weight_kg:DECIMAL, recorded_by:TEXT, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=RECORD_PACKAGING_BATCH
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[12/24] PHYSICAL TAB NAME : PaymentAllocations
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (11 columns)
+  Expected Header Order  : 1..11: allocation_id, payment_id, supplier_bill_id, allocated_amount, allocation_date, allocated_by, notes, created_at, created_by, updated_at, updated_by
+  Required Fields        : allocation_id
+  Field Types            : allocation_id:TEXT, payment_id:TEXT, supplier_bill_id:TEXT, allocated_amount:DECIMAL, allocation_date:DATE, allocated_by:TEXT, notes:TEXT, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[13/24] PHYSICAL TAB NAME : ProductSKUs
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[14/24] PHYSICAL TAB NAME : ProductionLosses
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[15/24] PHYSICAL TAB NAME : ProductionOutputs
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (13 columns)
+  Expected Header Order  : 1..13: production_output_id, production_batch_id, product_id, output_lot_id, output_type, quantity, unit, quality_status, recorded_by, created_at, created_by, updated_at, updated_by
+  Required Fields        : production_output_id
+  Field Types            : production_output_id:TEXT, production_batch_id:TEXT, product_id:TEXT, output_lot_id:TEXT, output_type:DECIMAL, quantity:DECIMAL, unit:TEXT, quality_status:TEXT, recorded_by:TEXT, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=RECORD_PRODUCTION_OUTPUT
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[16/24] PHYSICAL TAB NAME : ProductionWorkEntries
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[17/24] PHYSICAL TAB NAME : QualityChecks_FGQC
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[18/24] PHYSICAL TAB NAME : QualityChecks_IPQC
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[19/24] PHYSICAL TAB NAME : RPT_SalesAndReceivables
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[20/24] PHYSICAL TAB NAME : RPT_StockStatus
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[21/24] PHYSICAL TAB NAME : RPT_TrialBalance
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : System/Report or Extended v2 consolidated/variant contract — confirm physical existence & Row-1 headers with Owner
+  Expected Header Order  : UNMAPPED — Owner must confirm whether physical tab exists or maps to a Blueprint table
+  Required Fields        : PENDING_OWNER_CONFIRMATION
+  Field Types            : PENDING_OWNER_CONFIRMATION
+  Bridge Allowlist/Acts  : Allowlisted=NO | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[22/24] PHYSICAL TAB NAME : SalaryPayments
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (15 columns)
+  Expected Header Order  : 1..15: salary_payment_id, party_type, party_id, reference_type, reference_id, transaction_date, payment_method, amount, reference_number, status, recorded_by, created_at, created_by, updated_at, updated_by
+  Required Fields        : salary_payment_id, party_id, reference_id, created_at, created_by
+  Field Types            : salary_payment_id:TEXT, party_type:TEXT, party_id:TEXT, reference_type:TEXT, reference_id:TEXT, transaction_date:DATE, payment_method:DECIMAL, amount:DECIMAL, reference_number:TEXT, status:TEXT, recorded_by:TEXT, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[23/24] PHYSICAL TAB NAME : SalesOrderItems
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (16 columns)
+  Expected Header Order  : 1..16: sales_order_item_id, sales_order_id, product_id, sku, product_name_snapshot, pack_weight_g, quantity, unit_price, discount_amount, tax_rate, line_total, inventory_lot_id, created_at, created_by, updated_at, updated_by
+  Required Fields        : sales_order_item_id, sales_order_id, product_id, inventory_lot_id, created_at, created_by
+  Field Types            : sales_order_item_id:TEXT, sales_order_id:TEXT, product_id:TEXT, sku:TEXT, product_name_snapshot:TEXT, pack_weight_g:DECIMAL, quantity:DECIMAL, unit_price:DECIMAL, discount_amount:DECIMAL, tax_rate:DECIMAL, line_total:DECIMAL, inventory_lot_id:TEXT, created_at:DATETIME, created_by:TEXT, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=NONE
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+[24/24] PHYSICAL TAB NAME : SalesOrders
+  Status                 : BLOCKED (HARD-BLOCKED in PENDING_OWNER_MAPPING_TABS; awaiting Owner export)
+  Actual Live Headers    : BLOCKED (Live Google Sheets access unavailable / Section 15 Hard Stop)
+  Expected Header Source : Blueprint v2.0 KS_SCHEMA_JSON (21 columns)
+  Expected Header Order  : 1..21: sales_order_id, order_number, order_datetime, channel_id, customer_id, customer_name_snapshot, customer_phone_snapshot, billing_address_json, shipping_address_json, subtotal, discount_amount, tax_amount, shipping_amount, grand_total, payment_status, fulfilment_status, external_order_id, created_by, created_at, updated_at, updated_by
+  Required Fields        : sales_order_id, channel_id, customer_id, external_order_id, created_by, created_at
+  Field Types            : sales_order_id:TEXT, order_number:TEXT, order_datetime:DATETIME, channel_id:TEXT, customer_id:TEXT, customer_name_snapshot:TEXT, customer_phone_snapshot:TEXT, billing_address_json:JSON_TEXT, shipping_address_json:JSON_TEXT, subtotal:DECIMAL, discount_amount:DECIMAL, tax_amount:DECIMAL, shipping_amount:DECIMAL, grand_total:DECIMAL, payment_status:DECIMAL, fulfilment_status:TEXT, external_order_id:TEXT, created_by:TEXT, created_at:DATETIME, updated_at:DATETIME, updated_by:TEXT
+  Bridge Allowlist/Acts  : Allowlisted=YES | BoundActions=CREATE_SALES_ORDER
+  Live-vs-Expected Diff  : BLOCKED (Cannot compute until Owner provides Row-1 export)
+
+------------------------------------------------------------------------------------------------
+4. STRICTLY READ-ONLY OWNER APPS SCRIPT EXPORT PROCEDURE (ZERO WRITES, ZERO BUSINESS DATA)
+------------------------------------------------------------------------------------------------
+STEP-BY-STEP INSTRUCTIONS FOR THE OWNER:
+  1. Open the production Kawad Swad Master Google Spreadsheet in Google Sheets.
+  2. Click Extensions -> Apps Script.
+  3. Paste ONLY `ksExportReadOnlyWorkbookHeadersForAudit()` below into a temporary read-only file.
+  4. Select `ksExportReadOnlyWorkbookHeadersForAudit` and click Run.
+  5. Copy the JSON output from Execution Log and share ONLY that header JSON for reconciliation.
+  6. Delete the temporary function afterward. Zero cells, properties, or business data are touched.
+
+```javascript
+function ksExportReadOnlyWorkbookHeadersForAudit() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var out = {
+    schema_export_version: 'ks-release-04-readonly-v1',
+    exported_at_utc: new Date().toISOString(),
+    tab_count: sheets.length,
+    tabs: []
+  };
+  for (var i = 0; i < sheets.length; i++) {
+    var sh = sheets[i];
+    var lastCol = sh.getLastColumn();
+    var row1 = lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function(v) { return String(v).trim(); }) : [];
+    out.tabs.push({
+      index: i + 1,
+      name: sh.getName(),
+      row_count: sh.getLastRow(),
+      col_count: lastCol,
+      row1_headers: row1
+    });
+  }
+  Logger.log(JSON.stringify(out));
+}
+```
+
+================================================================================================
+END OF KS_RELEASE_04_WORKBOOK_HEADER_AUDIT.txt
+================================================================================================

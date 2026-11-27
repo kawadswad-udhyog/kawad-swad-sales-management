@@ -1,0 +1,94 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+STAGE K COMPLETE REGRESSION & VERIFICATION TEST REPORT
+================================================================================================
+Generated At (UTC)   : 2026-11-27T06:33:00Z
+Mission ID           : KS-RELEASE-04
+Target Revision      : release/ks-release-04 (commit e4e868020de7f43cfb22122a14c88ef380be32ae)
+Execution Scope      : 100% isolated against final frozen RC4 source code (zero live external mutations)
+
+------------------------------------------------------------------------------------------------
+1. EXECUTIVE TEST SUMMARY TABLE (ZERO HIDDEN FAILURES OR SKIPS)
+------------------------------------------------------------------------------------------------
+Layer / Suite                                         | Command Executed                                                   | Total | Pass | Fail | Skip | Blocked
+------------------------------------------------------+--------------------------------------------------------------------+-------+------+------+------+--------
+1. Apps Script 42-File Syntax & Integrated Collisions | node inline vm.Script + function collision audit (apps_script/*.js)|    42 |   42 |    0 |    0 |       0
+2. Apps Script First-Owner Bootstrap VM Suite         | node backend/tests/test_apps_script_bootstrap_vm.mjs               |     7 |    7 |    0 |    0 |       0
+3. Python + NodeVM Cross-Language HMAC & RC4 Matrix   | PYTHONPATH=backend SALES_TESTING=1 python3.11 -m unittest ... (2)  |    32 |   32 |    0 |    0 |       0
+4. Full Python Backend Unittest Discovery (all tests) | PYTHONPATH=backend SALES_TESTING=1 python3.11 -m unittest discover |   741 |  740 |    0 |    1 |       0
+5. Bun Frontend Safety & Contract Suites (5 files)    | bun scripts/test_*.ts (5 scripts)                                  |    85 |   85 |    0 |    0 |       0
+6. Playwright Browser Suite 1: Role Acceptance Audit  | node scripts/run_frontend_acceptance_audit.cjs                     |    12 |   12 |    0 |    0 |       0
+7. Playwright Browser Suite 2: Login Page Upgrade     | node scripts/test_login_page_upgrade.cjs                           |     9 |    9 |    0 |    0 |       0
+8. Playwright Browser Suite 3: Usability & Workforce  | node scripts/verify_usability_workforce_upgrade.cjs                |     6 |    6 |    0 |    0 |       0
+9. Frontend Production Build & TypeScript Lint        | compile_applet (`npm run build`) + lint_applet (`npm run lint`)    |     2 |    2 |    0 |    0 |       0
+10. Static Security & Dependency Audit                | npm audit + MongoDB / secret / aistudio hygiene scans              |     4 |    4 |    0 |    0 |       0
+11. Git Patch & Bundle Clean-Clone Verification       | git apply --check + git bundle verify at origin/main c8e5a15       |     2 |    2 |    0 |    0 |       0
+12. Live Workbook Header & Remote Push Verification   | Prohibited by Section 15 Hard Stop + absent live credentials       |     2 |    0 |    0 |    0 |       2
+------------------------------------------------------+--------------------------------------------------------------------+-------+------+------+------+--------
+GRAND TOTAL EXECUTED (excl. duplicate sub-run #3)     |                                                                    |   912 |  909 |    0 |    1 |       2
+
+Note: Suite #3 (32 tests = 8 in `test_ks_release_04_security_matrix.py` + 24 in
+`test_cross_language_hmac.py`) is also included inside Suite #4's 741 full discovery total, so
+it is not double-counted in the Grand Total row (42+7+741+85+12+9+6+2+4+2+2 = 912).
+
+------------------------------------------------------------------------------------------------
+2. DETAILED BREAKDOWN BY TEST LAYER
+------------------------------------------------------------------------------------------------
+
+A. APPS SCRIPT VERIFICATION:
+   - 42/42 `.js` files in `apps_script/` parsed cleanly via `new vm.Script(src)` (0 syntax errors).
+   - 340 top-level function declarations audited:
+     * 0 declaration collisions introduced by or touching any of the 6 integrated First-Owner /
+       WebAppBridge files (`Config.js`, `IdAllocator.js`, `AuditAndExceptions.js`, `WebAppBridge.js`,
+       `BootstrapOwnerHandler.js`, `WebAppBridge_BootstrapIntegration.js`).
+     * 7 pre-existing legacy phase-script overlaps (`onOpen` in legacy menu/phase utilities and
+       `ksP3V13*` between v1.3 and v1.4) remain preserved verbatim from the original bound export.
+   - `node backend/tests/test_apps_script_bootstrap_vm.mjs`: 7/7 PASSED
+     (Frozen Config, mandatory HMAC/±300s skew, happy path + replay + B3, Step 8 flush B1 quarantine,
+      Step 10 completion-latch B1 quarantine, abrupt timeout IN_PROGRESS + B4 fallback, concurrent lock).
+
+B. PYTHON BACKEND FULL UNITTEST DISCOVERY:
+   - Command: `PYTHONPATH=backend SALES_TESTING=1 /usr/bin/python3.11 -m unittest discover -s backend/tests -p 'test_*.py' -v`
+   - Result : `Ran 741 tests in 45.498s — OK (skipped=1)`
+   - Includes all 8 new Stage D/E/F/G tests in `backend/tests/test_ks_release_04_security_matrix.py`
+     (with 11 `subTest` cases for `Users.active` + 27 decimal parity vectors + all 7 fault-injection stages)
+     and all 24 tests in `backend/tests/test_cross_language_hmac.py` (up from 733 in RC3 to 741 in RC4).
+   - HONEST DISCLOSURE OF THE 1 SKIPPED TEST:
+     Test: `Real uvicorn subprocess must bind 0.0.0.0:$PORT and answer /health <3s even if Sheets hangs >5s.`
+     Skip Reason: `Requires real ASGI runtime packages (uvicorn, fastapi, pydantic, starlette, jwt); install backend/requirements.txt to execute full Uvicorn ASGI subprocess check`
+     (`uvicorn` is not installed in the sandbox Python 3.11 environment; Render installs `backend/requirements.txt` during build).
+
+C. FRONTEND BUN SAFETY & CONTRACT TESTS (85/85 PASSED):
+   - `scripts/test_mission51b1_frontend_transaction_safety.ts`        :  5/5  PASSED
+   - `scripts/test_mission51b1rf2_transaction_identity_closure.ts`    : 39/39 PASSED
+   - `scripts/test_mission51b1rf_persistence_and_fingerprint.ts`      : 18/18 PASSED
+   - `scripts/test_phase1_6_frontend_contracts.ts`                    : 17/17 PASSED
+   - `scripts/test_tx_final_04_frontend_unknown_safety.ts`            :  6/6  PASSED
+
+D. PLAYWRIGHT LIVE BROWSER VERIFICATION AGAINST `http://localhost:3000` (27/27 PASSED, 0 CONSOLE ERRORS):
+   - `scripts/run_frontend_acceptance_audit.cjs`:
+     * 7/7 role workspaces PASS (OWNER, PA, MANAGER, SALESMAN, FACTORY, ACCOUNTANT, EMPLOYEE)
+     * 4/4 frontend security checks PASS (sessionStorage unauthorized redirect, unknown role fallback,
+       Owner preview exit without elevation leak, logout credential purge)
+     * 1/1 tablet responsive check PASS; `consoleErrors: []`
+   - `scripts/test_login_page_upgrade.cjs`:
+     * 7/7 functional scenarios PASS + Desktop (1440x900), Tablet (768x1024), Mobile (390x844) PASS
+     * Zero password leakage to localStorage; zero mobile horizontal overflow
+   - `scripts/verify_usability_workforce_upgrade.cjs`:
+     * 6/6 checks PASS (workspace launch, nav labels, owner switcher, Our Team directory,
+       7-step employee registration wizard, mobile viewport)
+   - Temporary Playwright JSON artifacts (`audit_results.json`, `login_audit_results.json`) deleted cleanly.
+
+E. DEPENDENCY & STATIC HYGIENE AUDITS:
+   - `npm audit`: `{"info": 0, "low": 0, "moderate": 0, "high": 0, "critical": 0, "total": 0}`
+   - MongoDB driver/import scan across `backend/app`, `src`, `apps_script`: 0 hits
+   - Hardcoded secret/key pattern scan (`AIza*`, `BEGIN PRIVATE KEY`, `ghp_*`): 0 hits
+   - `public/assets/aistudio` scan: 0 files
+
+F. BLOCKED ITEMS (EXPLICITLY DISCLOSED — NEVER FABRICATED):
+   1. Live Google Spreadsheet Row-1 Header & 255-vs-256 Tab-List Audit: BLOCKED (no live credentials + Section 15 Hard Stop).
+   2. Live GitHub Remote Push (`release/ks-release-04`): BLOCKED (no push credentials + Owner G3 authorization required).
+
+================================================================================================
+END OF KS_RELEASE_04_TEST_REPORT.txt
+================================================================================================

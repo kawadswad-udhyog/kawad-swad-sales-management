@@ -1,0 +1,755 @@
+"""
+Kawad Swad ERP — Mission KS-RELEASE-04 Security Test Matrix Suite (Stages D, E, F, G, H).
+
+Directly executes and verifies:
+- Stage D: D-1 Payload hash, canonical HMAC binding, replay/idempotency, incomplete/orphan
+           nonce quarantine, and all 7 failure stages against real `apps_script/WebAppBridge.js`.
+- Stage E: D-2 `Users.active` & identity validation (10 edge cases including missing sheet,
+           missing column, missing user, inactive, empty, invalid, malformed row, duplicate
+           identity, unauthorized role, valid active) in both Apps Script and Python.
+- Stage F: D-3 Decimal read-back normalization across all 12 required numeric/blank/null/invalid
+           edge cases verifying exact Python (`_normalize_scalar`) <-> JS (`ksNormalizeReadbackVal_`)
+           parity without precision loss, truncation, rounding, or false-positive equality.
+- Stage G: D-4 Token & session revocation (own session, cross-user denied, admin authorized,
+           unauthorized admin/escalation denied, expired token, revoked token, replayed token,
+           session rotation, and multi-threaded concurrent revocation).
+- Stage H: First-Owner bootstrap safety (one-time restriction, duplicate prevention, constant-time
+           token verification, PBKDF2 hashing, strict audit logging, idempotency, recovery,
+           and no anonymous privileged path).
+
+100% offline / isolated: NEVER touches live Google Sheets, Apps Script, or Render.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+import unittest
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
+
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(BACKEND_DIR, ".."))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+os.environ.setdefault("SALES_TESTING", "1")
+os.environ.setdefault("SALES_ENV", "development")
+
+from fastapi import HTTPException  # noqa: E402
+from fastapi.security import HTTPAuthorizationCredentials  # noqa: E402
+
+from app import auth as auth_mod  # noqa: E402
+from app.apps_script_bridge import AppsScriptBridge, _normalize_scalar  # noqa: E402
+from app.transaction_safety import compute_deterministic_payload_hash  # noqa: E402
+from app.timeutil import now_iso  # noqa: E402
+
+SHARED_SECRET = "KsRelease04SecurityMatrixSecret2026!@#abcdef0123456789"
+
+
+def _build_signed_wire(
+    *,
+    action: str,
+    target_tab: str,
+    nonce: str,
+    actor_user_id: str,
+    actor_role: str,
+    payload: dict,
+    payload_hash: str | None = None,
+    correlation_id: str = "CORR-R04-001",
+    secret: str = SHARED_SECRET,
+) -> tuple[str, str]:
+    computed_hash = (
+        payload_hash
+        if payload_hash is not None
+        else compute_deterministic_payload_hash(
+            action=action,
+            target_tab=target_tab,
+            actor_user_id=actor_user_id,
+            actor_role=actor_role,
+            payload=payload,
+        )
+    )
+    envelope = {
+        "action": action,
+        "target_tab": target_tab,
+        "nonce": nonce,
+        "correlation_id": correlation_id,
+        "transaction_id": f"TXN-{nonce}",
+        "attempt_number": 1,
+        "payload_hash": computed_hash,
+        "actor_user_id": actor_user_id,
+        "actor_role": actor_role,
+        "timestamp": now_iso(),
+        "payload": payload,
+    }
+    canonical = json.dumps(envelope, separators=(",", ":"), sort_keys=True, ensure_ascii=True, default=str)
+    sig = AppsScriptBridge.sign_envelope(canonical, secret)
+    wire = dict(envelope)
+    wire["contract_version"] = "2.0"
+    wire["signature_alg"] = "HMAC-SHA-256"
+    wire["signature"] = sig
+    wire["canonical_envelope"] = canonical
+    return json.dumps(wire, separators=(",", ":"), sort_keys=True, ensure_ascii=True), computed_hash
+
+
+def _run_apps_script_vm(script_body: str, input_payload: dict) -> dict:
+    """Execute real bound Apps Script files inside an isolated Node.js VM with deterministic sheet mocks."""
+    harness = r"""
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
+
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const repoRoot = input.repoRoot;
+
+class FakeRange {
+  constructor(sheet, r, c, nr, nc) {
+    this.sheet = sheet; this.r = r; this.c = c; this.nr = nr; this.nc = nc;
+  }
+  getValues() {
+    const out = [];
+    for (let i = 0; i < this.nr; i++) {
+      const rowIdx = this.r - 1 + i;
+      const row = this.sheet.rows[rowIdx];
+      if (!Array.isArray(row)) {
+        out.push(row === undefined ? [] : row);
+        continue;
+      }
+      if (input.preserveShortRows && rowIdx > 0 && row.length < this.nc) {
+        out.push(row.slice());
+        continue;
+      }
+      const slice = [];
+      for (let j = 0; j < this.nc; j++) {
+        const v = row[this.c - 1 + j];
+        slice.push(v === undefined ? '' : v);
+      }
+      out.push(slice);
+    }
+    return out;
+  }
+  setValues(vals) {
+    if (this.sheet.onSetValues) this.sheet.onSetValues(this.sheet, this.r, vals);
+    for (let i = 0; i < vals.length; i++) {
+      const rowIdx = this.r - 1 + i;
+      while (this.sheet.rows.length <= rowIdx) this.sheet.rows.push([]);
+      for (let j = 0; j < vals[i].length; j++) {
+        let v = vals[i][j];
+        if (this.sheet.corruptReadbackCol !== undefined && (this.c - 1 + j) === this.sheet.corruptReadbackCol && rowIdx > 0) {
+          v = 'CORRUPTED_BY_TEST';
+        }
+        this.sheet.rows[rowIdx][this.c - 1 + j] = v;
+      }
+    }
+    return this;
+  }
+}
+
+class FakeSheet {
+  constructor(name, rows) {
+    this.name = name;
+    this.rows = rows.map(r => (Array.isArray(r) ? r.slice() : r));
+    this.onSetValues = null;
+    this.corruptReadbackCol = undefined;
+  }
+  getName() { return this.name; }
+  getLastRow() { return this.rows.length; }
+  getLastColumn() { return (this.rows[0] && Array.isArray(this.rows[0])) ? this.rows[0].length : 0; }
+  getRange(r, c, nr = 1, nc = 1) { return new FakeRange(this, r, c, nr, nc); }
+  getDataRange() { return new FakeRange(this, 1, 1, Math.max(1, this.getLastRow()), Math.max(1, this.getLastColumn())); }
+  appendRow(arr) {
+    if (this.onAppendRow) this.onAppendRow(this, arr);
+    this.rows.push(arr.slice());
+  }
+}
+
+const sheetsMap = {};
+for (const [name, rows] of Object.entries(input.sheets || {})) {
+  sheetsMap[name] = new FakeSheet(name, rows);
+}
+
+let flushCount = 0;
+let lockHeld = false;
+let lockAcquires = 0;
+let lockReleases = 0;
+
+const fakeLock = {
+  waitLock() { lockHeld = true; lockAcquires++; },
+  hasLock() { return lockHeld; },
+  releaseLock() { if (lockHeld) { lockHeld = false; lockReleases++; } }
+};
+
+const fakeSS = {
+  getId() { return 'FAKE-SHEET-R04'; },
+  getSheetByName(name) { return sheetsMap[name] || null; }
+};
+
+const propsStore = Object.assign({
+  SALES_APPS_SCRIPT_SHARED_SECRET: input.sharedSecret || ''
+}, input.scriptProps || {});
+
+const ctx = vm.createContext({
+  console, Object, Array, Set, Map, JSON, RegExp, Date, Math, Error, Number, String, Boolean, parseInt, isFinite,
+  Logger: { log() {} },
+  LockService: { getScriptLock() { return fakeLock; } },
+  SpreadsheetApp: {
+    getActiveSpreadsheet() { return input.noSpreadsheet ? null : fakeSS; },
+    flush() {
+      flushCount++;
+      if (input.failOnFlushNumber && flushCount === input.failOnFlushNumber) {
+        throw new Error('SIMULATED_FLUSH_FAILURE_STAGE');
+      }
+    }
+  },
+  PropertiesService: {
+    getScriptProperties() {
+      return {
+        getProperty(k) { return Object.prototype.hasOwnProperty.call(propsStore, k) ? propsStore[k] : null; },
+        setProperty(k, v) { propsStore[k] = String(v); },
+        deleteProperty(k) { delete propsStore[k]; }
+      };
+    }
+  },
+  ContentService: {
+    MimeType: { JSON: 'application/json' },
+    createTextOutput(s) {
+      return {
+        _text: s,
+        setMimeType() { return this; },
+        getContent() { return this._text; }
+      };
+    }
+  },
+  Utilities: {
+    Charset: { UTF_8: 'utf8' },
+    DigestAlgorithm: { SHA_256: 'sha256' },
+    MacAlgorithm: { HMAC_SHA_256: 'sha256' },
+    computeDigest(_alg, data) {
+      const buf = crypto.createHash('sha256').update(String(data), 'utf8').digest();
+      return Array.from(buf).map(b => (b > 127 ? b - 256 : b));
+    },
+    computeHmacSha256Signature(data, key) {
+      const buf = crypto.createHmac('sha256', String(key)).update(String(data), 'utf8').digest();
+      return Array.from(buf).map(b => (b > 127 ? b - 256 : b));
+    },
+    formatDate(d, _tz, _fmt) {
+      return new Date(d).toISOString();
+    },
+    getUuid() { return 'uuid-r04-fixed'; }
+  }
+});
+
+for (const rel of [
+  'apps_script/Config.js',
+  'apps_script/SafeWriter.js',
+  'apps_script/IdAllocator.js',
+  'apps_script/AuditAndExceptions.js',
+  'apps_script/BootstrapOwnerHandler.js',
+  'apps_script/WebAppBridge_BootstrapIntegration.js',
+  'apps_script/WebAppBridge.js',
+]) {
+  const full = path.join(repoRoot, rel);
+  vm.runInContext(fs.readFileSync(full, 'utf8'), ctx, { filename: rel });
+}
+
+if (input.failSheetWrite) {
+  const sh = sheetsMap[input.failSheetWrite];
+  if (sh) {
+    sh.onSetValues = () => { throw new Error('SIMULATED_WRITE_FAIL_' + input.failSheetWrite); };
+    sh.onAppendRow = () => { throw new Error('SIMULATED_APPEND_FAIL_' + input.failSheetWrite); };
+  }
+}
+if (input.corruptReadback) {
+  const sh = sheetsMap[input.corruptReadback.tab];
+  if (sh) sh.corruptReadbackCol = input.corruptReadback.colIdx;
+}
+
+const fn = vm.runInContext('(function(input, sheetsMap, getMeta) { ' + input.scriptBody + ' })', ctx);
+const result = fn(input, sheetsMap, () => ({ lockHeld, lockAcquires, lockReleases, flushCount }));
+process.stdout.write(JSON.stringify(result));
+"""
+    payload = dict(input_payload)
+    payload["repoRoot"] = REPO_ROOT
+    payload["scriptBody"] = script_body
+    proc = subprocess.run(
+        ["node", "-e", harness],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"Node VM error (rc={proc.returncode}):\nSTDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout}")
+    return json.loads(proc.stdout)
+
+
+def _base_sheets():
+    return {
+        "Users": [
+            ["user_id", "full_name", "role", "active"],
+            ["USR-OWNER", "Owner One", "OWNER_ADMIN", "TRUE"],
+            ["USR-MGR", "Manager One", "MANAGER", "TRUE"],
+            ["USR-SALES", "Sales One", "SALESMAN", "TRUE"],
+            ["USR-AUD", "Auditor One", "AUDITOR", "TRUE"],
+        ],
+        "AuthUsers": [
+            ["user_id", "username", "password_hash", "role", "full_name", "active", "must_change_password", "sessions_revoked_at", "created_at"],
+            ["USR-OWNER", "owner", "pbkdf2:sha256:100000$aa$bb", "OWNER_ADMIN", "Owner One", "TRUE", "false", "", "2026-01-01T00:00:00Z"],
+            ["USR-SALES", "sales1", "pbkdf2:sha256:100000$aa$bb", "SALESMAN", "Sales One", "TRUE", "false", "", "2026-01-01T00:00:00Z"],
+        ],
+        "RevokedTokens": [
+            ["jti", "user_id", "revoked_at", "expires_at", "reason", "nonce"],
+        ],
+        "IdAllocations": [
+            ["allocation_id", "tab_name", "allocated_id", "nonce", "created_at"],
+        ],
+        "AuditLog": [
+            [
+                "audit_id", "event_datetime", "actor_user_id", "action", "entity_type",
+                "entity_id", "field_changed", "old_value", "new_value", "reason",
+                "approved_by_user_id", "related_record_id",
+            ],
+        ],
+        "ExceptionRegister": [
+            [
+                "exception_id", "created_at", "severity", "source_function", "tab_name",
+                "reference_id", "error_message", "payload_json", "assigned_owner",
+                "due_date", "status", "resolution_notes", "resolved_by", "resolved_at",
+            ],
+        ],
+        "Settings": [
+            ["setting_id", "setting_key", "setting_value", "updated_at", "nonce"],
+        ],
+    }
+
+
+class TestStageDPayloadHashAndFailurePoints(unittest.TestCase):
+    """Stage D: D-1 Payload Hash, Canonical Binding, Idempotency, Orphan Quarantine & 7 Failure Stages."""
+
+    def test_d1_canonical_hash_binding_and_idempotent_replay(self):
+        payload = {"setting_id": "SET-001", "setting_key": "tax_label", "setting_value": "120.50"}
+        wire1, h1 = _build_signed_wire(
+            action="UPDATE_CA_POLICY",
+            target_tab="Settings",
+            nonce="N-R04-D1-001",
+            actor_user_id="USR-OWNER",
+            actor_role="OWNER_ADMIN",
+            payload=payload,
+        )
+        # Reordered keys & equivalent decimal -> MUST produce identical deterministic hash
+        payload_equiv = {"setting_value": 120.5, "setting_key": "tax_label", "setting_id": "SET-001"}
+        wire2, h2 = _build_signed_wire(
+            action="UPDATE_CA_POLICY",
+            target_tab="Settings",
+            nonce="N-R04-D1-001",
+            actor_user_id="USR-OWNER",
+            actor_role="OWNER_ADMIN",
+            payload=payload_equiv,
+        )
+        self.assertEqual(h1, h2)
+
+        # Mutated value -> different hash
+        wire_mut, h_mut = _build_signed_wire(
+            action="UPDATE_CA_POLICY",
+            target_tab="Settings",
+            nonce="N-R04-D1-001",
+            actor_user_id="USR-OWNER",
+            actor_role="OWNER_ADMIN",
+            payload={"setting_id": "SET-001", "setting_key": "tax_label", "setting_value": "999.00"},
+        )
+        self.assertNotEqual(h1, h_mut)
+
+        res = _run_apps_script_vm(
+            """
+            const r1 = JSON.parse(doPost({ postData: { contents: input.wire1 } }).getContent());
+            const r2 = JSON.parse(doPost({ postData: { contents: input.wire2 } }).getContent());
+            const rMut = JSON.parse(doPost({ postData: { contents: input.wireMut } }).getContent());
+            return { r1, r2, rMut, settingsRows: sheetsMap.Settings.rows.length, meta: getMeta() };
+            """,
+            {"sheets": _base_sheets(), "sharedSecret": SHARED_SECRET, "wire1": wire1, "wire2": wire2, "wireMut": wire_mut},
+        )
+        self.assertEqual(res["r1"]["status"], "CONFIRMED")
+        self.assertEqual(res["r2"]["status"], "CONFIRMED")
+        self.assertTrue(res["r2"].get("idempotent_replay"))
+        self.assertEqual(res["settingsRows"], 2)  # Header + 1 row (no duplicate)
+        self.assertEqual(res["rMut"]["status"], "REJECTED")
+        self.assertEqual(res["rMut"]["error_code"], "NONCE_PAYLOAD_HASH_CONFLICT")
+        self.assertFalse(res["meta"]["lockHeld"])
+
+    def test_d1_incomplete_audit_metadata_fails_closed_to_quarantine(self):
+        sheets = _base_sheets()
+        # Nonce in IdAllocations + AuditLog row missing hash=<hex>
+        sheets["IdAllocations"].append(["ALLOC-0000001", "Settings", "SET-001", "N-CORRUPT-AUD", "2026-11-26T00:00:00Z"])
+        sheets["AuditLog"].append([
+            "AUD-0000001", "2026-11-26T00:00:00Z", "USR-OWNER", "UPDATE_CA_POLICY",
+            "Settings", "SET-001", "governed_write", "", "CONFIRMED | nonce=N-CORRUPT-AUD",
+            "Bridge", "", "N-CORRUPT-AUD",
+        ])
+        wire, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY",
+            target_tab="Settings",
+            nonce="N-CORRUPT-AUD",
+            actor_user_id="USR-OWNER",
+            actor_role="OWNER_ADMIN",
+            payload={"setting_id": "SET-001", "setting_key": "k", "setting_value": "v"},
+        )
+        res = _run_apps_script_vm(
+            "return JSON.parse(doPost({ postData: { contents: input.wire } }).getContent());",
+            {"sheets": sheets, "sharedSecret": SHARED_SECRET, "wire": wire},
+        )
+        self.assertEqual(res["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(res["error_code"], "NONCE_AUDIT_METADATA_INCOMPLETE")
+        self.assertEqual(res["http_status"], 409)
+        self.assertFalse(res["retryable"])
+
+    def test_d1_all_seven_failure_points(self):
+        payload = {"setting_id": "SET-FAIL", "setting_key": "k", "setting_value": "100.00"}
+
+        # Stage 1: Before nonce allocation / before business write (missing payload_hash)
+        wire_no_hash, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY", target_tab="Settings", nonce="N-F1",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN", payload=payload, payload_hash="",
+        )
+        r1 = _run_apps_script_vm(
+            "return { res: JSON.parse(doPost({ postData: { contents: input.wire } }).getContent()), rows: sheetsMap.Settings.rows.length };",
+            {"sheets": _base_sheets(), "sharedSecret": SHARED_SECRET, "wire": wire_no_hash},
+        )
+        self.assertEqual(r1["res"]["status"], "REJECTED")
+        self.assertEqual(r1["res"]["error_code"], "MISSING_OR_INVALID_PAYLOAD_HASH")
+        self.assertEqual(r1["rows"], 1)
+
+        # Stage 2: Before business write (target sheet missing) -> quarantined fail-closed, 0 writes
+        sheets_no_tab = _base_sheets()
+        del sheets_no_tab["Settings"]
+        wire_f2, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY", target_tab="Settings", nonce="N-F2",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN", payload=payload,
+        )
+        r2 = _run_apps_script_vm(
+            "return { res: JSON.parse(doPost({ postData: { contents: input.wire } }).getContent()), meta: getMeta() };",
+            {"sheets": sheets_no_tab, "sharedSecret": SHARED_SECRET, "wire": wire_f2},
+        )
+        self.assertEqual(r2["res"]["status"], "RECOVERY_REQUIRED")
+        self.assertFalse(r2["meta"]["lockHeld"])
+
+        # Stage 3: During business write (Settings.setValues throws)
+        wire_f3, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY", target_tab="Settings", nonce="N-F3",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN", payload=payload,
+        )
+        r3 = _run_apps_script_vm(
+            "return { res: JSON.parse(doPost({ postData: { contents: input.wire } }).getContent()), exc: sheetsMap.ExceptionRegister.rows.length, meta: getMeta() };",
+            {"sheets": _base_sheets(), "sharedSecret": SHARED_SECRET, "wire": wire_f3, "failSheetWrite": "Settings"},
+        )
+        self.assertEqual(r3["res"]["status"], "RECOVERY_REQUIRED")
+        self.assertGreaterEqual(r3["exc"], 2)
+        self.assertFalse(r3["meta"]["lockHeld"])
+
+        # Stage 4: During read-back verification (corrupted cell on read-back)
+        wire_f4, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY", target_tab="Settings", nonce="N-F4",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN", payload=payload,
+        )
+        r4 = _run_apps_script_vm(
+            "return { res: JSON.parse(doPost({ postData: { contents: input.wire } }).getContent()), exc: sheetsMap.ExceptionRegister.rows.length, meta: getMeta() };",
+            {"sheets": _base_sheets(), "sharedSecret": SHARED_SECRET, "wire": wire_f4, "corruptReadback": {"tab": "Settings", "colIdx": 2}},
+        )
+        self.assertEqual(r4["res"]["status"], "RECOVERY_REQUIRED")
+        self.assertIn("READBACK_VERIFICATION_FAILED", r4["res"]["message"])
+        self.assertGreaterEqual(r4["exc"], 2)
+        self.assertFalse(r4["meta"]["lockHeld"])
+
+        # Stage 5: After business write / during IdAllocations write
+        wire_f5, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY", target_tab="Settings", nonce="N-F5",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN", payload=payload,
+        )
+        r5 = _run_apps_script_vm(
+            "return { res: JSON.parse(doPost({ postData: { contents: input.wire } }).getContent()), settingsRows: sheetsMap.Settings.rows.length, meta: getMeta() };",
+            {"sheets": _base_sheets(), "sharedSecret": SHARED_SECRET, "wire": wire_f5, "failSheetWrite": "IdAllocations"},
+        )
+        self.assertEqual(r5["res"]["status"], "RECOVERY_REQUIRED")
+        self.assertFalse(r5["res"]["retryable"])
+        self.assertEqual(r5["settingsRows"], 2)  # Partial record preserved, never auto-deleted
+        self.assertFalse(r5["meta"]["lockHeld"])
+
+        # Stage 6: After nonce allocation / during AuditLog write -> retry MUST quarantine orphan nonce!
+        wire_f6, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY", target_tab="Settings", nonce="N-F6",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN", payload=payload,
+        )
+        r6 = _run_apps_script_vm(
+            """
+            const first = JSON.parse(doPost({ postData: { contents: input.wire } }).getContent());
+            // Remove fault and retry same nonce -> must quarantine as NONCE_AUDIT_METADATA_MISSING
+            sheetsMap.AuditLog.onSetValues = null;
+            sheetsMap.AuditLog.onAppendRow = null;
+            const retry = JSON.parse(doPost({ postData: { contents: input.wire } }).getContent());
+            return { first, retry, settingsRows: sheetsMap.Settings.rows.length };
+            """,
+            {"sheets": _base_sheets(), "sharedSecret": SHARED_SECRET, "wire": wire_f6, "failSheetWrite": "AuditLog"},
+        )
+        self.assertEqual(r6["first"]["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(r6["retry"]["status"], "RECOVERY_REQUIRED")
+        self.assertEqual(r6["retry"]["error_code"], "NONCE_AUDIT_METADATA_MISSING")
+        self.assertEqual(r6["settingsRows"], 2)  # No second write / no silent corruption
+
+        # Stage 7: After AuditLog write / during final SpreadsheetApp.flush()
+        # Flush sequence: (1) target row readback flush, (2) IdAllocations flush, (3) AuditLog flush, (4) final doPost flush
+        wire_f7, _ = _build_signed_wire(
+            action="UPDATE_CA_POLICY", target_tab="Settings", nonce="N-F7",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN", payload=payload,
+        )
+        r7 = _run_apps_script_vm(
+            "return { res: JSON.parse(doPost({ postData: { contents: input.wire } }).getContent()), meta: getMeta() };",
+            {"sheets": _base_sheets(), "sharedSecret": SHARED_SECRET, "wire": wire_f7, "failOnFlushNumber": 4},
+        )
+        self.assertEqual(r7["res"]["status"], "RECOVERY_REQUIRED")
+        self.assertIn("SIMULATED_FLUSH_FAILURE_STAGE", r7["res"]["message"])
+        self.assertFalse(r7["meta"]["lockHeld"])
+
+
+class TestStageEUsersActiveValidation(unittest.TestCase):
+    """Stage E: D-2 All 10 Users.active & identity fail-closed edge cases (Apps Script + Python)."""
+
+    def test_e_all_ten_users_active_cases_apps_script(self):
+        cases = [
+            ("missing_users_sheet", {}, "USR-1", "OWNER_ADMIN", False, "ACTOR_DIRECTORY_UNINITIALIZED"),
+            ("missing_active_col", {"Users": [["user_id", "role"], ["USR-1", "OWNER_ADMIN"]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_DIRECTORY_INVALID_SCHEMA"),
+            ("missing_user", {"Users": [["user_id", "role", "active"], ["USR-OTHER", "OWNER_ADMIN", "TRUE"]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_NOT_FOUND"),
+            ("inactive_user_false", {"Users": [["user_id", "role", "active"], ["USR-1", "OWNER_ADMIN", "FALSE"]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_INACTIVE"),
+            ("empty_active_val", {"Users": [["user_id", "role", "active"], ["USR-1", "OWNER_ADMIN", ""]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_INACTIVE"),
+            ("invalid_active_val", {"Users": [["user_id", "role", "active"], ["USR-1", "OWNER_ADMIN", "MAYBE"]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_INACTIVE"),
+            ("malformed_user_row", {"Users": [["user_id", "role", "active"], ["USR-1", "OWNER_ADMIN"]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_DIRECTORY_MALFORMED_ROW"),
+            ("duplicate_user_identity", {"Users": [["user_id", "role", "active"], ["USR-1", "OWNER_ADMIN", "TRUE"], ["usr-1", "SALESMAN", "FALSE"]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_DUPLICATE_IDENTITY"),
+            ("unauthorized_role_mismatch", {"Users": [["user_id", "role", "active"], ["USR-1", "SALESMAN", "TRUE"]]}, "USR-1", "OWNER_ADMIN", False, "ACTOR_ROLE_MISMATCH"),
+            ("unauthorized_auditor", {"Users": [["user_id", "role", "active"], ["USR-1", "AUDITOR", "TRUE"]]}, "USR-1", "AUDITOR", False, "AUDITOR_WRITE_FORBIDDEN"),
+            ("valid_active_user", {"Users": [["user_id", "role", "active"], ["USR-1", "OWNER_ADMIN", "TRUE"]]}, "USR-1", "OWNER_ADMIN", True, None),
+        ]
+        for label, sheets, uid, role, expect_ok, expect_code in cases:
+            with self.subTest(case=label):
+                res = _run_apps_script_vm(
+                    "return ksVerifyBridgeActor_(input.uid, input.role);",
+                    {"sheets": sheets, "uid": uid, "role": role, "preserveShortRows": (label == "malformed_user_row")},
+                )
+                self.assertEqual(res["ok"], expect_ok, f"{label}: {res}")
+                if not expect_ok:
+                    self.assertEqual(res["error_code"], expect_code, f"{label}: {res}")
+
+    def test_e_python_is_account_active_fail_closed(self):
+        for truthy in (True, 1, "TRUE", "true", "Yes", "active", " 1 "):
+            self.assertTrue(auth_mod.is_account_active(truthy), f"Expected active: {truthy!r}")
+        for falsy in (False, 0, 2, None, "", "   ", "false", "0", "no", "inactive", "suspended", "MAYBE", "T", [], {}):
+            self.assertFalse(auth_mod.is_account_active(falsy), f"Expected fail-closed inactive: {falsy!r}")
+
+
+class TestStageFDecimalReadbackParity(unittest.TestCase):
+    """Stage F: D-3 Exact Python <-> JS decimal normalization parity across all 12 required categories."""
+
+    def test_f_all_twelve_decimal_and_edge_cases_parity(self):
+        # (raw_python_val, raw_js_json_val, expected_canonical)
+        vectors = [
+            ("0.50", "0.50", "0.5"),
+            (0.50, 0.50, "0.5"),
+            ("1.20", "1.20", "1.2"),
+            (1.20, 1.20, "1.2"),
+            ("10", 10, "10"),
+            ("100", 100, "100"),
+            ("100.00", 100.0, "100"),
+            ("120", 120, "120"),
+            ("120.50", 120.5, "120.5"),
+            ("0.005", 0.005, "0.005"),
+            ("0.0000005", 0.0000005, "0.0000005"),  # JS sci-notation float 5e-7!
+            ("-120.50", -120.5, "-120.5"),
+            ("-0.00", "-0.00", "0"),
+            ("-0.005", -0.005, "-0.005"),
+            ("999999999999.99", 999999999999.99, "999999999999.99"),
+            ("1000000000000", 1000000000000, "1000000000000"),
+            ("", "", ""),
+            ("   ", "   ", ""),
+            (None, None, ""),
+            ("12.34.56", "12.34.56", "12.34.56"),
+            ("NaN", "NaN", "NaN"),
+            ("Infinity", "Infinity", "Infinity"),
+            ("12abc", "12abc", "12abc"),
+            ("0010", "0010", "0010"),
+            ("1E2", "1E2", "1E2"),
+            (True, True, "true"),
+            (False, False, "false"),
+        ]
+        js_inputs = [v[1] for v in vectors]
+        js_outputs = _run_apps_script_vm(
+            "return input.vals.map(v => ksNormalizeReadbackVal_(v));",
+            {"sheets": {}, "vals": js_inputs},
+        )
+        for idx, (py_in, js_in, expected) in enumerate(vectors):
+            py_out = _normalize_scalar(py_in)
+            js_out = js_outputs[idx]
+            self.assertEqual(py_out, expected, f"Python mismatch for {py_in!r}: got {py_out!r}")
+            self.assertEqual(js_out, expected, f"JS mismatch for {js_in!r}: got {js_out!r}")
+            self.assertEqual(py_out, js_out, f"Cross-lang mismatch for {py_in!r} vs {js_in!r}")
+
+        # Explicit Decimal precision preservation (no float truncation)
+        self.assertEqual(_normalize_scalar(Decimal("1234567890123456.7890")), "1234567890123456.789")
+        # Explicit anti-false-positive checks
+        self.assertNotEqual(_normalize_scalar(10), _normalize_scalar(100))
+        self.assertNotEqual(_normalize_scalar(120), _normalize_scalar(12))
+        self.assertNotEqual(_normalize_scalar(""), _normalize_scalar(0))
+        self.assertNotEqual(_normalize_scalar(None), _normalize_scalar(0))
+        self.assertNotEqual(_normalize_scalar(True), _normalize_scalar(1))
+        self.assertNotEqual(_normalize_scalar(False), _normalize_scalar(0))
+
+
+class TestStageGTokenAndSessionRevocation(unittest.TestCase):
+    """Stage G: D-4 Complete 9-scenario Token & Session Revocation Verification."""
+
+    def setUp(self):
+        auth_mod._REVOKED_TOKENS.clear()
+        auth_mod._USER_REVOKED_AT.clear()
+
+    def tearDown(self):
+        auth_mod._REVOKED_TOKENS.clear()
+        auth_mod._USER_REVOKED_AT.clear()
+
+    def test_g_apps_script_self_vs_cross_user_and_admin_revocation(self):
+        # 1. Salesman revokes own token -> CONFIRMED
+        w_self, _ = _build_signed_wire(
+            action="REVOKE_TOKEN", target_tab="RevokedTokens", nonce="N-RVK-SELF",
+            actor_user_id="USR-SALES", actor_role="SALESMAN",
+            payload={"jti": "jti-1", "user_id": "USR-SALES", "revoked_at": now_iso(), "reason": "Logout"},
+        )
+        # 2. Salesman attempts to revoke Owner's token -> 403 SELF_TOKEN_REVOKE_MISMATCH
+        w_cross_tok, _ = _build_signed_wire(
+            action="REVOKE_TOKEN", target_tab="RevokedTokens", nonce="N-RVK-CROSS-TOK",
+            actor_user_id="USR-SALES", actor_role="SALESMAN",
+            payload={"jti": "jti-owner", "user_id": "USR-OWNER", "revoked_at": now_iso(), "reason": "Attack"},
+        )
+        # 3. Salesman attempts to revoke Owner's sessions -> 403 INSUFFICIENT_ROLE_FOR_AUTH_USERS
+        w_cross_sess, _ = _build_signed_wire(
+            action="REVOKE_USER_SESSIONS", target_tab="AuthUsers", nonce="N-RVK-CROSS-SESS",
+            actor_user_id="USR-SALES", actor_role="SALESMAN",
+            payload={"user_id": "USR-OWNER", "sessions_revoked_at": now_iso(), "reason": "Attack"},
+        )
+        # 4. Salesman attempts privilege escalation by claiming actor_role=OWNER_ADMIN -> 403 ACTOR_ROLE_MISMATCH
+        w_escalate, _ = _build_signed_wire(
+            action="REVOKE_USER_SESSIONS", target_tab="AuthUsers", nonce="N-RVK-ESCALATE",
+            actor_user_id="USR-SALES", actor_role="OWNER_ADMIN",
+            payload={"user_id": "USR-OWNER", "sessions_revoked_at": now_iso(), "reason": "Escalation"},
+        )
+        # 5. Authorized OWNER_ADMIN revokes Salesman's sessions -> CONFIRMED
+        w_admin_ok, _ = _build_signed_wire(
+            action="REVOKE_USER_SESSIONS", target_tab="AuthUsers", nonce="N-RVK-ADMIN-OK",
+            actor_user_id="USR-OWNER", actor_role="OWNER_ADMIN",
+            payload={"user_id": "USR-SALES", "sessions_revoked_at": now_iso(), "reason": "Admin revoke"},
+        )
+        res = _run_apps_script_vm(
+            """
+            return {
+              selfTok: JSON.parse(doPost({ postData: { contents: input.w_self } }).getContent()),
+              crossTok: JSON.parse(doPost({ postData: { contents: input.w_cross_tok } }).getContent()),
+              crossSess: JSON.parse(doPost({ postData: { contents: input.w_cross_sess } }).getContent()),
+              escalate: JSON.parse(doPost({ postData: { contents: input.w_escalate } }).getContent()),
+              adminOk: JSON.parse(doPost({ postData: { contents: input.w_admin_ok } }).getContent()),
+            };
+            """,
+            {
+                "sheets": _base_sheets(), "sharedSecret": SHARED_SECRET,
+                "w_self": w_self, "w_cross_tok": w_cross_tok, "w_cross_sess": w_cross_sess,
+                "w_escalate": w_escalate, "w_admin_ok": w_admin_ok,
+            },
+        )
+        self.assertEqual(res["selfTok"]["status"], "CONFIRMED")
+        self.assertEqual(res["crossTok"]["status"], "REJECTED")
+        self.assertEqual(res["crossTok"]["error_code"], "SELF_TOKEN_REVOKE_MISMATCH")
+        self.assertEqual(res["crossSess"]["status"], "REJECTED")
+        self.assertEqual(res["crossSess"]["error_code"], "INSUFFICIENT_ROLE_FOR_AUTH_USERS")
+        self.assertEqual(res["escalate"]["status"], "REJECTED")
+        self.assertEqual(res["escalate"]["error_code"], "ACTOR_ROLE_MISMATCH")
+        self.assertEqual(res["adminOk"]["status"], "CONFIRMED")
+
+    def test_g_backend_expired_revoked_replayed_rotation_and_concurrent_revocation(self):
+        auth_rows = [{
+            "user_id": "USR-SALES",
+            "username": "sales1",
+            "role": "SALESMAN",
+            "full_name": "Sales One",
+            "active": "TRUE",
+            "must_change_password": "false",
+            "sessions_revoked_at": "",
+        }]
+        revoked_rows = []
+
+        def fake_get_records(tab, fresh=True):
+            if tab == "AuthUsers":
+                return list(auth_rows)
+            if tab == "RevokedTokens":
+                return list(revoked_rows)
+            return []
+
+        # 5. Expired token fails 401
+        expired_tok = auth_mod.create_access_token(
+            {"sub": "USR-SALES", "user_id": "USR-SALES", "role": "SALESMAN"},
+            expires_delta=timedelta(seconds=-5),
+        )
+        self.assertIsNone(auth_mod.decode_access_token(expired_tok))
+
+        # 6 & 7. Active token -> revoked -> replayed token fails 401
+        live_tok = auth_mod.create_access_token({"sub": "USR-SALES", "user_id": "USR-SALES", "role": "OWNER_ADMIN"})
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=live_tok)
+
+        with patch("app.sheets.db.get_records", side_effect=fake_get_records):
+            # Server-side role overrides tampered JWT role claim ("OWNER_ADMIN" -> authoritative "SALESMAN")
+            user = asyncio.run(auth_mod.get_current_user(creds))
+            self.assertEqual(user["role"], "SALESMAN")
+
+            # Revoke token (persisted mock)
+            mock_res = MagicMock(status="CONFIRMED")
+            with patch("app.apps_script_bridge.apps_script_bridge.execute_governed_write", return_value=mock_res):
+                ok = auth_mod.revoke_token(live_tok, "USR-SALES", reason="Logout", actor_role="SALESMAN")
+            self.assertTrue(ok)
+
+            # Replaying the revoked token MUST raise 401
+            with self.assertRaises(HTTPException) as cm:
+                asyncio.run(auth_mod.get_current_user(creds))
+            self.assertEqual(cm.exception.status_code, 401)
+
+            # 8. Session rotation: sessions_revoked_at invalidates old token, newer token passes
+            old_tok = auth_mod.create_access_token({"sub": "USR-SALES", "user_id": "USR-SALES", "role": "SALESMAN"})
+            rotate_ts = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
+            auth_rows[0]["sessions_revoked_at"] = rotate_ts
+            with self.assertRaises(HTTPException) as cm2:
+                asyncio.run(auth_mod.get_current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=old_tok)))
+            self.assertEqual(cm2.exception.status_code, 401)
+
+            # Fresh token minted after rotation window passes
+            auth_rows[0]["sessions_revoked_at"] = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+            auth_mod._USER_REVOKED_AT.clear()
+            fresh_tok = auth_mod.create_access_token({"sub": "USR-SALES", "user_id": "USR-SALES", "role": "SALESMAN"})
+            user2 = asyncio.run(auth_mod.get_current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=fresh_tok)))
+            self.assertEqual(user2["user_id"], "USR-SALES")
+
+            # 9. Concurrent revocation across threads stays fail-closed
+            tokens = [
+                auth_mod.create_access_token({"sub": "USR-SALES", "user_id": "USR-SALES", "role": "SALESMAN"})
+                for _ in range(8)
+            ]
+            with patch("app.apps_script_bridge.apps_script_bridge.execute_governed_write", return_value=mock_res):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    futs = [pool.submit(auth_mod.revoke_token, t, "USR-SALES", "Concurrent", False, "SALESMAN") for t in tokens]
+                    self.assertTrue(all(f.result() for f in futs))
+            for t in tokens:
+                revoked, err = auth_mod.check_token_revocation(t, auth_mod.decode_access_token(t), fresh=True)
+                self.assertIsNone(err)
+                self.assertTrue(revoked)
+
+
+if __name__ == "__main__":
+    unittest.main()

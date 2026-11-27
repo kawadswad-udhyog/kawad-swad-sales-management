@@ -1,0 +1,79 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+COMPLETE CHANGELOG (RC3 -> RC4 DELTA + FULL RELEASE HISTORY RC1 -> RC4)
+================================================================================================
+Generated At (UTC)   : 2026-11-27T06:34:00Z
+Release Candidate    : KS-RELEASE-04 (`release/ks-release-04`, commit `e4e868020de7f43cfb22122a14c88ef380be32ae`)
+Base Commit          : `c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6` (live GitHub `origin/main`)
+
+------------------------------------------------------------------------------------------------
+1. KS-RELEASE-04 DELTA (RC3 / origin/main `c8e5a15` -> RC4 `e4e86802`)
+------------------------------------------------------------------------------------------------
+Exact 5 Audited Code, Test & Manifest Files Changed (+985 insertions / -96 deletions):
+
+  1. `apps_script/WebAppBridge.js` (SHA-256 `776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6`)
+     - [Stage D / H1] Hardened idempotent replay verification in `doPost` so any `AuditLog` record
+       missing `action`, `actor_user_id`, or valid 64-hex `hash=<payload_hash>` fails closed to
+       `status: 'RECOVERY_REQUIRED'`, `error_code: 'NONCE_AUDIT_METADATA_INCOMPLETE'`, HTTP 409,
+       `retryable: false` (eliminates silent replay confirmation on corrupted/truncated audit rows).
+     - [Stage E / H2] Hardened `ksVerifyBridgeActor_` to scan ALL rows in `Users` (not stop at first
+       match), fail closed on truncated/malformed rows (`ACTOR_DIRECTORY_MALFORMED_ROW`, HTTP 503),
+       and reject case-insensitive duplicate `user_id` rows (`ACTOR_DUPLICATE_IDENTITY`, HTTP 403),
+       matching Python's `AMBIGUOUS_IDENTITY` security contract.
+     - [Stage F / H3] Added `ksExpandSciNumber_(num)` inside `ksNormalizeReadbackVal_` strictly for
+       finite JS `number` values that stringify in scientific notation (e.g., `0.0000005` -> `"5e-7"`
+       -> `"0.0000005"`), guaranteeing 100% cross-language read-back parity with Python's
+       `_normalize_scalar` (`Decimal` `format(dec, "f")`) while leaving string literals (`"1E2"`,
+       `"0010"`) untouched.
+
+  2. `apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js`
+     - Synchronized byte-identically with `apps_script/WebAppBridge.js` (`776bd3690842501f...`, 48,176 B).
+
+  3. `apps_script/SOURCE_INVENTORY_AND_SHA256.txt`
+     - Updated recorded SHA-256 hash and byte size for `WebAppBridge.js` (`24b4806e...`).
+
+  4. `apps_script_patch/first_owner_bootstrap/merged_bound_files/MERGED_SHA256_MANIFEST.md`
+     - Updated recorded SHA-256 hash and byte size for `WebAppBridge.js` (`9cfa4a0f...`).
+
+  5. `backend/tests/test_ks_release_04_security_matrix.py` (NEW — 755 lines)
+     - Added comprehensive automated Stage D/E/F/G security test matrix verifying:
+       * D-1 canonical payload hash binding, idempotent replay, incomplete audit metadata quarantine,
+         and all 7 fault-injection failure points against real `apps_script/WebAppBridge.js` in Node VM.
+       * D-2 all 11 `Users.active` & identity edge cases (Apps Script + Python).
+       * D-3 all 27 Python <-> Apps Script decimal/blank/null/invalid/negative/large/sci-float vectors.
+       * D-4 self vs cross-user revocation, admin revocation, role escalation blocking, expired/revoked/
+         replayed tokens, session rotation, and multi-threaded concurrent revocation.
+
+  KS-RELEASE-04 Governance & Audit Deliverables Added (11 Required + Git Transfer Patch/Bundle):
+  - `KS_RELEASE_04_PREFLIGHT_REPORT.txt`
+  - `KS_RELEASE_04_DATABASE_RECONCILIATION.txt`
+  - `KS_RELEASE_04_WORKBOOK_HEADER_AUDIT.txt`
+  - `KS_RELEASE_04_SECURITY_TEST_MATRIX.txt`
+  - `KS_RELEASE_04_TEST_REPORT.txt`
+  - `KS_RELEASE_04_GIT_TRACEABILITY_REPORT.txt`
+  - `KS_RELEASE_04_OWNER_INPUT_REQUIREMENTS.txt`
+  - `KS_RELEASE_04_DEPLOYMENT_READINESS_REPORT.txt`
+  - `KS_RELEASE_04_CHANGELOG.txt`
+  - `KS_RELEASE_04_FROM_C8E5A15.patch` & `KS_RELEASE_04_FROM_C8E5A15.bundle`
+  - `KS_RELEASE_04_SHA256_MANIFEST.txt`
+  - `KS_RELEASE_04_RELEASE_CANDIDATE.zip`
+
+------------------------------------------------------------------------------------------------
+2. PRIOR RELEASE HISTORY SUMMARY (PRESERVED UNTOUCHED)
+------------------------------------------------------------------------------------------------
+  - KS-RELEASE-03 (`13d7cb05` -> merged into `origin/main` as `c8e5a15`):
+    Hardened D-1 missing payload_hash & orphan nonce quarantine, D-2 missing `Users.active` column
+    fail-closed, D-3 plain decimal read-back normalization parity, D-4 self vs cross-user token &
+    session revocation role resolution in `backend/app/auth.py` and `routers/auth.py`, plus full
+    255-vs-265 reconciliation and 36-tab header audit specification.
+  - KS-RELEASE-02 (`452d6dc4` -> merged into `origin/main` as `2fc7a23`):
+    Resolved deterministic environment CORS resolution (`dev`/`staging`/`production`), closed W1–W5
+    bridge security hardening, added cross-language HMAC & E2E bridge tests, and fixed package hygiene.
+  - KS-RELEASE-01:
+    Reconciled complete 42-file bound Apps Script project + First-Owner secure initialization package
+    (ScriptLock ownership, B1 post-mutation quarantine, B2 allowlisted HTTP 302 GET redirect, mandatory
+    HMAC-SHA256 envelope verification) with backend & frontend.
+
+================================================================================================
+END OF KS_RELEASE_04_CHANGELOG.txt
+================================================================================================

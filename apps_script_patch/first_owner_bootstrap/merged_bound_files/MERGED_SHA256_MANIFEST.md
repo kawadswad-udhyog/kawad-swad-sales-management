@@ -5,4 +5,4 @@
 - `AuditAndExceptions.js` | bytes=10341 | sha256=`04350e26bfe571d538347d6b32393f1ce2cc323177884ef6551cff55bbc76394`
 - `BootstrapOwnerHandler.js` | bytes=45474 | sha256=`15e9026762a86855778928dbcb69686e72c4f6c86b657094e8d79708366084af`
 - `WebAppBridge_BootstrapIntegration.js` | bytes=17760 | sha256=`9a70528eca8ab5a2f1c1fb63acb26863f033103dd818a0875bc8ec4955e1e51f`
-- `WebAppBridge.js` | bytes=45799 | sha256=`4966b600234a3119a22d115e6fc4b4aa492149b5eadc9b396aa2c40b7a7f1145`
+- `WebAppBridge.js` | bytes=48176 | sha256=`776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6`

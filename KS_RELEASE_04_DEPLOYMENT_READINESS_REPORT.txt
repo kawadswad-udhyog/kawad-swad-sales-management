@@ -1,0 +1,97 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+DEPLOYMENT READINESS, GATE STATUS, ROLLBACK PLAN & HARD STOP ATTESTATION
+================================================================================================
+Generated At (UTC)   : 2026-11-27T06:34:00Z
+Mission ID           : KS-RELEASE-04
+Release Candidate    : KS_RELEASE_04_RELEASE_CANDIDATE.zip (branch `release/ks-release-04`, commit `e4e868020de7f43cfb22122a14c88ef380be32ae`)
+Parent Commit        : `c8e5a15b4a196129a9b52dde7e7f9c30daeac4b6` (live GitHub `origin/main`)
+
+------------------------------------------------------------------------------------------------
+1. GOVERNANCE GATE STATUS (NO SELF-APPROVAL)
+------------------------------------------------------------------------------------------------
+  Gate G1 — Engineering Verification & Evidence Package (Gemini) : READY FOR INDEPENDENT AUDIT (NOT SELF-APPROVED)
+  Gate G2 — Independent Technical & Security Acceptance (GPT)    : PENDING INDEPENDENT GPT REVIEW
+  Gate G3 — Production Authorization & Owner Inputs (Owner)      : BLOCKED ON REQUIRED OWNER INPUTS & EXPLICIT G3 SIGN-OFF
+
+  AUTHORITY STATEMENT:
+  - Gemini has NOT approved G1, G2, or G3.
+  - Passing tests are technical evidence ONLY — never production deployment authorization.
+
+------------------------------------------------------------------------------------------------
+2. CLOSED vs REMAINING BLOCKERS SUMMARY
+------------------------------------------------------------------------------------------------
+  CLOSED TECHNICALLY IN KS-RELEASE-04:
+  [CLOSED] Stage A — KS_RELEASE_03_RELEASE_CANDIDATE.zip verified intact (413/413 members, 0 mismatches, PASS hygiene).
+  [CLOSED] Stage B — 255 vs 256 vs 265 mathematically reconciled from live source; all 10 questions answered without guessing.
+  [CLOSED] Stage D — D-1 payload hash, canonical HMAC binding, replay/idempotency, orphan nonce & incomplete audit quarantine,
+                     plus all 7 failure points verified against real `WebAppBridge.js` (new hardening H1 closed).
+  [CLOSED] Stage E — D-2 all 10+ `Users.active` & identity edge cases verified (new hardening H2 closed: duplicate & malformed row).
+  [CLOSED] Stage F — D-3 all 12 decimal normalization categories / 27 cross-language vectors verified (new hardening H3 closed: sci-float).
+  [CLOSED] Stage G — D-4 all 9 token/session revocation, escalation, rotation, and concurrent revocation scenarios verified.
+  [CLOSED] Stage H — First-Owner bootstrap safety verified end-to-end in isolated Apps Script VM (7/7) & FastAPI tests.
+  [CLOSED] Stage J — Exact Git provenance anchored directly on live `origin/main` (`c8e5a15`); verified `.patch` & `.bundle` exported.
+  [CLOSED] Stage K — 909/912 checks passed, 0 failed, 1 honest `uvicorn` skip, 2 honest Section 15 blocked live checks.
+
+  REMAINING NON-SANDBOX BLOCKERS REQUIRING OWNER INPUT / G3 AUTHORIZATION:
+  [BLOCKED — OWNER INPUT] 1. Production Render Backend URL & service name (`render.yaml` & `public/_redirects` still reference `-dev`).
+  [BLOCKED — OWNER INPUT] 2. Live Master Google Spreadsheet Row-1 Header Export (closes Stage B 255-vs-256 1-tab delta & Stage C 36 tabs).
+  [BLOCKED — OWNER INPUT] 3. Production Secrets Provisioning (`SALES_GOOGLE_SPREADSHEET_ID`, Service Account JSON, `SALES_JWT_SECRET`,
+                             `SALES_APPS_SCRIPT_WEBAPP_URL`, `SALES_APPS_SCRIPT_SHARED_SECRET`, temporary First-Owner bootstrap secret/hash).
+  [BLOCKED — G2 + G3]     4. GitHub push of `release/ks-release-04` (`e4e86802...`) and PR merge into `main`.
+  [BLOCKED — G2 + G3]     5. Bound Google Apps Script deployment, Render production deployment, and controlled one-time First-Owner bootstrap.
+
+------------------------------------------------------------------------------------------------
+3. ORDERED PRODUCTION CUTOVER RUNBOOK (EXECUTE ONLY AFTER GPT G2 + OWNER G3 APPROVAL)
+------------------------------------------------------------------------------------------------
+  Phase 1 — Owner Pre-Cutover Closure:
+    1. Owner runs `ksExportReadOnlyWorkbookHeadersForAudit()` (read-only) and supplies Row-1 JSON.
+    2. Owner confirms production Render backend URL; update `render.yaml` & `public/_redirects`.
+    3. Reconcile any header deltas into `SALES_APPROVED_CORE_SCHEMA_RECONCILIATIONS_JSON`.
+
+  Phase 2 — GitHub Merge & Apps Script Bound Deployment:
+    4. Owner verifies & pushes `KS_RELEASE_04_FROM_C8E5A15.bundle` -> PR `release/ks-release-04 -> main`.
+    5. Deploy the 6 verified bound Apps Script files (`apps_script/*.js`) matching SHA-256 manifest.
+    6. Configure Apps Script Property `SALES_APPS_SCRIPT_SHARED_SECRET` (>= 32 chars, unique).
+
+  Phase 3 — Render Production Deployment:
+    7. Confirm Render persistent disk mounted at `/var/data/kawad_swad` (`WEB_CONCURRENCY=1`, `SALES_INSTANCE_COUNT=1`).
+    8. Set `SALES_ENV=production` (ensure `SALES_TESTING` is unset), `SALES_CORS_ORIGINS` (HTTPS prod only),
+       `SALES_GOOGLE_SPREADSHEET_ID`, Service Account secret file, `SALES_JWT_SECRET`,
+       `SALES_APPS_SCRIPT_ENABLED=true`, `SALES_APPS_SCRIPT_WEBAPP_URL`, `SALES_APPS_SCRIPT_SHARED_SECRET`.
+    9. Deploy backend & frontend; verify `GET /health` returns HTTP 200 and live `uvicorn` worker binds `$PORT`.
+
+  Phase 4 — Controlled One-Time First-Owner Bootstrap:
+    10. Verify `Users` and `AuthUsers` tabs contain Row-1 headers only (0 data rows).
+    11. Temporarily set unique `SALES_OWNER_BOOTSTRAP_ENABLED=true`, `SALES_OWNER_BOOTSTRAP_SECRET`,
+        and short UTC `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` on Render + matching `KS_OWNER_BOOTSTRAP_TOKEN_HASH`
+        & `KS_OWNER_BOOTSTRAP_EXPIRES_AT` in Apps Script Properties.
+    12. Execute First-Owner bootstrap -> confirm `status: "CONFIRMED"`, verify `Users`, `AuthUsers`, `AuditLog`,
+        verify Owner login succeeds.
+    13. IMMEDIATELY set `SALES_OWNER_BOOTSTRAP_ENABLED=false` and remove bootstrap secret/expiry env vars.
+
+------------------------------------------------------------------------------------------------
+4. ROLLBACK & SAFETY-PRESERVATION PLAN
+------------------------------------------------------------------------------------------------
+  - Frontend / Backend Rollback: Revert Render deployment to prior healthy build (`c8e5a15`) via
+    Render dashboard; persistent SQLite WAL at `/var/data/kawad_swad` retains transaction state.
+  - Apps Script Rollback: Re-point Web App deployment version to previous verified Apps Script version.
+  - Data Preservation Rule: NEVER auto-delete partial Google Sheets rows on `RECOVERY_REQUIRED`;
+    quarantine, inspect `AuditLog`, `IdAllocations`, and `ExceptionRegister`, and reconcile under Owner sign-off.
+  - Dev-vs-Prod Isolation: Production MUST NEVER share Spreadsheet ID, JWT secret, Bridge HMAC secret,
+    Bootstrap secret, or Render backend hostname with any `-dev` service.
+
+------------------------------------------------------------------------------------------------
+5. SECTION 15 HARD STOP ATTESTATION
+------------------------------------------------------------------------------------------------
+  I attest that during Mission KS-RELEASE-04:
+  - ZERO production deployments were performed.
+  - ZERO live Render configurations or services were modified.
+  - ZERO live Google Sheets reads or writes were performed.
+  - ZERO live Apps Script deployments or Script Properties changes were performed.
+  - ZERO production First-Owner accounts were created and ZERO historical data was restored.
+  - ZERO prior release artifacts (`KS_RELEASE_01_*`, `KS_RELEASE_02_*`, `KS_RELEASE_03_*`) were altered or deleted.
+
+================================================================================================
+END OF KS_RELEASE_04_DEPLOYMENT_READINESS_REPORT.txt
+================================================================================================

@@ -549,58 +549,90 @@ function ksVerifyBridgeActor_(actorUserId, actorRole) {
     };
   }
 
+  const cleanActorId = String(actorUserId || '').trim();
+  const cleanActorIdLower = cleanActorId.toLowerCase();
   const claimedRole = ksCanonicalizeBridgeRole_(actorRole);
+  const maxRequiredIdx = Math.max(uidIdx, roleIdx, activeIdx);
+  const matchedRows = [];
+
   for (let i = 1; i < data.length; i++) {
-    const rowUid = String(data[i][uidIdx] || '').trim();
-    if (rowUid === actorUserId) {
-      const rawActive = String(data[i][activeIdx] === null || data[i][activeIdx] === undefined ? '' : data[i][activeIdx]).trim().toUpperCase();
-      const isActive = (rawActive === 'TRUE' || rawActive === 'YES' || rawActive === 'ACTIVE' || rawActive === '1');
-      if (!isActive) {
-        return {
-          ok: false,
-          error_code: 'ACTOR_INACTIVE',
-          http_status: 403,
-          message: 'Actor "' + actorUserId + '" is inactive/deactivated in Users directory.'
-        };
-      }
-      const authoritativeRole = ksCanonicalizeBridgeRole_(data[i][roleIdx]);
-      if (!authoritativeRole) {
-        return {
-          ok: false,
-          error_code: 'ACTOR_ROLE_MISSING',
-          http_status: 403,
-          message: 'Authoritative role is missing for actor "' + actorUserId + '" in Users directory.'
-        };
-      }
-      if (authoritativeRole === 'AUDITOR') {
-        return {
-          ok: false,
-          error_code: 'AUDITOR_WRITE_FORBIDDEN',
-          http_status: 403,
-          message: 'Actor "' + actorUserId + '" holds read-only AUDITOR role in Users directory.'
-        };
-      }
-      if (authoritativeRole !== claimedRole) {
-        return {
-          ok: false,
-          error_code: 'ACTOR_ROLE_MISMATCH',
-          http_status: 403,
-          message: 'Claimed actor_role "' + claimedRole + '" does not match authoritative Users role "' + authoritativeRole + '" for "' + actorUserId + '".'
-        };
-      }
+    const row = data[i];
+    if (!Array.isArray(row) || row.length <= maxRequiredIdx) {
       return {
-        ok: true,
-        user_id: actorUserId,
-        canonical_role: authoritativeRole
+        ok: false,
+        error_code: 'ACTOR_DIRECTORY_MALFORMED_ROW',
+        http_status: 503,
+        message: 'Users directory contains a malformed row at sheet row ' + (i + 1) + '; access denied fail-closed.'
       };
+    }
+    const rowUid = String(row[uidIdx] === null || row[uidIdx] === undefined ? '' : row[uidIdx]).trim();
+    if (rowUid && rowUid.toLowerCase() === cleanActorIdLower) {
+      matchedRows.push(row);
     }
   }
 
+  if (matchedRows.length === 0) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_NOT_FOUND',
+      http_status: 403,
+      message: 'Actor "' + actorUserId + '" does not exist in authoritative Users directory.'
+    };
+  }
+
+  if (matchedRows.length > 1) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_DUPLICATE_IDENTITY',
+      http_status: 403,
+      message: 'Duplicate user_id records (' + matchedRows.length + ') detected for "' + actorUserId + '" in Users directory; access denied fail-closed.'
+    };
+  }
+
+  const matchedRow = matchedRows[0];
+  const rawActiveVal = matchedRow[activeIdx];
+  const rawActive = (typeof rawActiveVal === 'boolean')
+    ? (rawActiveVal ? 'TRUE' : 'FALSE')
+    : String(rawActiveVal === null || rawActiveVal === undefined ? '' : rawActiveVal).trim().toUpperCase();
+  const isActive = (rawActive === 'TRUE' || rawActive === 'YES' || rawActive === 'ACTIVE' || rawActive === '1');
+  if (!isActive) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_INACTIVE',
+      http_status: 403,
+      message: 'Actor "' + actorUserId + '" is inactive, deactivated, or has invalid active status in Users directory.'
+    };
+  }
+
+  const authoritativeRole = ksCanonicalizeBridgeRole_(matchedRow[roleIdx]);
+  if (!authoritativeRole) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_ROLE_MISSING',
+      http_status: 403,
+      message: 'Authoritative role is missing for actor "' + actorUserId + '" in Users directory.'
+    };
+  }
+  if (authoritativeRole === 'AUDITOR') {
+    return {
+      ok: false,
+      error_code: 'AUDITOR_WRITE_FORBIDDEN',
+      http_status: 403,
+      message: 'Actor "' + actorUserId + '" holds read-only AUDITOR role in Users directory.'
+    };
+  }
+  if (authoritativeRole !== claimedRole) {
+    return {
+      ok: false,
+      error_code: 'ACTOR_ROLE_MISMATCH',
+      http_status: 403,
+      message: 'Claimed actor_role "' + claimedRole + '" does not match authoritative Users role "' + authoritativeRole + '" for "' + actorUserId + '".'
+    };
+  }
   return {
-    ok: false,
-    error_code: 'ACTOR_NOT_FOUND',
-    http_status: 403,
-    message: 'Actor "' + actorUserId + '" does not exist in authoritative Users directory.'
+    ok: true,
+    user_id: actorUserId,
+    canonical_role: authoritativeRole
   };
 }
 
@@ -625,6 +657,24 @@ function ksFormatPlainDecimal_(rawStr) {
   return sign + s;
 }
 
+function ksExpandSciNumber_(numStr) {
+  const m = String(numStr || '').match(/^([+-]?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/);
+  if (!m) return String(numStr || '');
+  const sign = m[1] === '-' ? '-' : '';
+  const intPart = m[2];
+  const fracPart = m[3] || '';
+  const exp = parseInt(m[4], 10);
+  const digits = intPart + fracPart;
+  const decimalPos = intPart.length + exp;
+  if (decimalPos <= 0) {
+    return ksFormatPlainDecimal_(sign + '0.' + '0'.repeat(-decimalPos) + digits);
+  }
+  if (decimalPos >= digits.length) {
+    return ksFormatPlainDecimal_(sign + digits + '0'.repeat(decimalPos - digits.length));
+  }
+  return ksFormatPlainDecimal_(sign + digits.slice(0, decimalPos) + '.' + digits.slice(decimalPos));
+}
+
 function ksNormalizeReadbackVal_(val) {
   if (typeof val === 'boolean') return val ? 'true' : 'false';
   if (val === undefined || val === null) return '';
@@ -634,6 +684,9 @@ function ksNormalizeReadbackVal_(val) {
       const numStr = String(val);
       if (KS_PLAIN_DECIMAL_RE.test(numStr)) {
         return ksFormatPlainDecimal_(numStr);
+      }
+      if (/^[+-]?\d+(?:\.\d+)?[eE][+-]?\d+$/.test(numStr)) {
+        return ksExpandSciNumber_(numStr);
       }
       return numStr;
     }
@@ -849,7 +902,21 @@ function doPost(e) {
           retryable: false
         });
       }
-      if (auditMeta.action && auditMeta.action !== action) {
+      if (!auditMeta.action || !auditMeta.actor_user_id || !auditMeta.payload_hash) {
+        return ksBridgeJson_({
+          status: 'RECOVERY_REQUIRED',
+          correlation_id: correlationId,
+          nonce: nonce,
+          action: action,
+          target_tab: targetTab,
+          allocated_id: existing.allocated_id,
+          error_code: 'NONCE_AUDIT_METADATA_INCOMPLETE',
+          message: 'AuditLog metadata for nonce "' + nonce + '" is missing mandatory action, actor_user_id, or payload_hash; quarantined fail-closed.',
+          http_status: 409,
+          retryable: false
+        });
+      }
+      if (auditMeta.action !== action) {
         return ksBridgeJson_({
           status: 'REJECTED',
           correlation_id: correlationId,
@@ -862,7 +929,7 @@ function doPost(e) {
           retryable: false
         });
       }
-      if (auditMeta.actor_user_id && auditMeta.actor_user_id !== actorUserId) {
+      if (auditMeta.actor_user_id !== actorUserId) {
         return ksBridgeJson_({
           status: 'REJECTED',
           correlation_id: correlationId,
@@ -875,7 +942,7 @@ function doPost(e) {
           retryable: false
         });
       }
-      if (auditMeta.payload_hash && (!payloadHash || auditMeta.payload_hash !== payloadHash)) {
+      if (!payloadHash || auditMeta.payload_hash !== payloadHash) {
         return ksBridgeJson_({
           status: 'REJECTED',
           correlation_id: correlationId,

@@ -1,0 +1,186 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+STAGES D, E, F, G, H — COMPREHENSIVE SECURITY TEST MATRIX & VERIFICATION REPORT
+================================================================================================
+Generated At (UTC)   : 2026-11-27T06:33:00Z
+Mission ID           : KS-RELEASE-04
+Automated Test Files :
+  - backend/tests/test_ks_release_04_security_matrix.py  (8 comprehensive test methods, 100% PASS)
+  - backend/tests/test_cross_language_hmac.py            (24 cross-language tests, 100% PASS)
+  - backend/tests/test_first_owner_bootstrap.py          (full FastAPI bootstrap suite, 100% PASS)
+  - backend/tests/test_apps_script_bootstrap_vm.mjs      (7 isolated Apps Script VM suites, 100% PASS)
+Hard Stop Compliance : 100% offline/isolated execution against real source code; ZERO live writes.
+
+------------------------------------------------------------------------------------------------
+0. NEW SECURITY HARDENINGS DISCOVERED & CLOSED DURING KS-RELEASE-04 AUDIT
+------------------------------------------------------------------------------------------------
+During Stage D, E, and F adversarial testing against `apps_script/WebAppBridge.js`, three subtle
+fail-closed edge cases were uncovered and fixed immediately (synced byte-identically to both
+`apps_script/WebAppBridge.js` and `apps_script_patch/first_owner_bootstrap/merged_bound_files/WebAppBridge.js`,
+SHA-256 `776bd3690842501f97d4967c19c62966a5da974e6f555686abdf145f4109eff6`):
+
+  [H1 — Stage D] Incomplete AuditLog Replay Metadata Fail-Closed Quarantine:
+    - Root cause: In `doPost` replay path, `if (auditMeta.payload_hash && ...)` only compared
+      payload_hash when `hash=<64hex>` was present in `AuditLog.new_value`, allowing a corrupted or
+      truncated `AuditLog` row missing `hash=<hex>`, `action`, or `actor_user_id` to pass replay.
+    - Fix: Explicitly require non-empty `auditMeta.action`, `auditMeta.actor_user_id`, AND
+      64-hex `auditMeta.payload_hash`; any omission fails closed to `status: 'RECOVERY_REQUIRED'`,
+      `error_code: 'NONCE_AUDIT_METADATA_INCOMPLETE'`, `http_status: 409`, `retryable: false`.
+
+  [H2 — Stage E] Duplicate User Identity & Malformed Row Fail-Closed in `ksVerifyBridgeActor_`:
+    - Root cause: `ksVerifyBridgeActor_` previously returned on the first matching `user_id` row
+      without checking for duplicate rows or truncated/malformed row arrays.
+    - Fix: Scan ALL data rows in `Users`, fail closed on short/non-array rows
+      (`ACTOR_DIRECTORY_MALFORMED_ROW`, HTTP 503), collect all case-insensitive trimmed `user_id`
+      matches, and reject duplicates (`ACTOR_DUPLICATE_IDENTITY`, HTTP 403) matching Python's
+      `AMBIGUOUS_IDENTITY` guard.
+
+  [H3 — Stage F] Scientific-Notation JS Number Read-Back Normalization Parity:
+    - Root cause: JavaScript `String(0.0000005)` formats as `"5e-7"`, whereas Python's `Decimal`
+      formats `"0.0000005"` (`format(dec, "f")`), causing false read-back mismatches for tiny
+      decimal quantities/rates.
+    - Fix: Added `ksExpandSciNumber_(num)` inside `ksNormalizeReadbackVal_` strictly for finite JS
+      `typeof val === 'number'` values whose string contains `e`/`E`, expanding exact decimal
+      digits while preserving string literals (`"1E2"`, `"0010"`) completely uncoerced.
+
+================================================================================================
+STAGE D: D-1 PAYLOAD HASH, CANONICAL HMAC BINDING & 7 FAILURE-POINT VERIFICATION
+================================================================================================
+
+ARCHITECTURAL CLARIFICATION ON CHECK #3 (PYTHON <-> APPS SCRIPT HASH & HMAC BINDING):
+  - Python (`backend/app/transaction_safety.py::compute_deterministic_payload_hash`) computes
+    the deterministic canonical SHA-256 `payload_hash` and embeds it inside `canonical_envelope`.
+  - Python (`AppsScriptBridge.sign_envelope`) then computes HMAC-SHA256 over the exact UTF-8
+    bytes of `canonical_envelope` (`sort_keys=True, separators=(',',':'), ensure_ascii=True`).
+  - Apps Script (`WebAppBridge_BootstrapIntegration.js::ksVerifySignedBridgeEnvelope_`) independently
+    recomputes HMAC-SHA256 over `canonical_envelope` (verified byte-identical to Python for ASCII
+    and Unicode in `test_cross_language_hmac.py` #01 & #02), verifies constant-time equality,
+    verifies outer wire fields match signed fields (binding actor, target_tab, action, nonce,
+    payload_hash, timestamp), validates `payload_hash` is mandatory valid hex (`^[0-9a-f]{16,128}$`),
+    and persists/enforces `hash=<payload_hash>` in `AuditLog` on replay (failing closed to
+    RECOVERY_REQUIRED if missing or incomplete). Apps Script relies on the HMAC-authenticated
+    `payload_hash` from `canonical_envelope` rather than re-hashing `req.payload` independently.
+
+D-1A. 12 Required Payload Hash & Replay/Idempotency Checks:
+------------------------------------------------------------------------------------------------
+#  | Security Check                                       | Expected Result                       | Verified Outcome
+---+------------------------------------------------------+---------------------------------------+-------------------
+01 | Deterministic canonical JSON hash (key reorder)      | Identical SHA-256 hash                | PASS (h1 == h2)
+02 | Equivalent numeric representation ("120.50" vs 120.5)| Identical SHA-256 hash                | PASS (h1 == h2)
+03 | Mutated field value on same nonce                    | Different hash -> HTTP 409/REJECTED   | PASS (NONCE_PAYLOAD_HASH_CONFLICT)
+04 | Missing or malformed payload_hash (<64 hex / empty)  | REJECTED before any write/allocation  | PASS (MISSING_OR_INVALID_PAYLOAD_HASH)
+05 | Signed HMAC-SHA256 binds payload_hash in canonical   | Tampered outer field -> 401 REJECTED  | PASS (OUTER_ENVELOPE_TAMPER_DETECTED)
+06 | Exact idempotent replay (same nonce, hash, actor)    | CONFIRMED + idempotent_replay=true, 0 extra rows | PASS (Settings rows=2)
+07 | Cross-table nonce reuse (same nonce, diff target_tab)| REJECTED (cross-table collision)      | PASS (test_cross_language_hmac #12)
+08 | Same nonce + different action                        | REJECTED (NONCE_ACTION_CONFLICT)      | PASS (test_cross_language_hmac #17)
+09 | Same nonce + different actor_user_id                 | REJECTED (NONCE_ACTOR_CONFLICT)       | PASS (test_cross_language_hmac #17)
+10 | Orphan nonce in IdAllocations with NO AuditLog row   | RECOVERY_REQUIRED (HTTP 409, retry=F) | PASS (NONCE_AUDIT_METADATA_MISSING)
+11 | Nonce in IdAllocations with INCOMPLETE AuditLog row  | RECOVERY_REQUIRED (HTTP 409, retry=F) | PASS (NONCE_AUDIT_METADATA_INCOMPLETE)
+12 | ScriptLock released cleanly on every path            | lockHeld === false                    | PASS (verified across all 7 stages)
+
+D-1B. 7 Failure-Point Fault Injection Matrix (`test_d1_all_seven_failure_points`):
+------------------------------------------------------------------------------------------------
+Stage | Fault Injection Point                          | Sheet / Lock State After Fault                | Returned Status & Result
+------+------------------------------------------------+-----------------------------------------------+-------------------------------
+  1   | Before nonce allocation / before business write| 0 rows written; lock released                 | REJECTED (MISSING_OR_INVALID_PAYLOAD_HASH) -> PASS
+  2   | Target sheet missing before write              | 0 rows written; lock released                 | RECOVERY_REQUIRED; lockHeld=false -> PASS
+  3   | Exception during business sheet write          | ExceptionRegister logged; lock released       | RECOVERY_REQUIRED; exc>=2; lockHeld=false -> PASS
+  4   | Corrupted cell during read-back verification   | ExceptionRegister logged; lock released       | RECOVERY_REQUIRED (READBACK_VERIFICATION_FAILED) -> PASS
+  5   | Exception during IdAllocations write           | Partial business row preserved (never deleted); lock released | RECOVERY_REQUIRED; retryable=false; lockHeld=false -> PASS
+  6   | Exception during AuditLog write + same-nonce retry | Business row & IdAllocations preserved; retry quarantined | 1st: RECOVERY_REQUIRED; Retry: RECOVERY_REQUIRED (NONCE_AUDIT_METADATA_MISSING); 0 duplicate rows -> PASS
+  7   | Exception during final SpreadsheetApp.flush()  | All prior writes preserved; lock released     | RECOVERY_REQUIRED (SIMULATED_FLUSH_FAILURE_STAGE); lockHeld=false -> PASS
+
+  CRITICAL NOTE ON STAGE 5: When `IdAllocations` itself is failing, `ksLogException_` cannot
+  allocate an `EXC-*` ID via `IdAllocations`; `doPost` catches the secondary logging error safely,
+  NEVER masks the failure as CONFIRMED, preserves partial records, releases ScriptLock, and returns
+  `status: "RECOVERY_REQUIRED", retryable: false`.
+
+================================================================================================
+STAGE E: D-2 `Users.active` & IDENTITY FAIL-CLOSED VALIDATION (ALL 10+ EDGE CASES)
+================================================================================================
+Verified directly against `apps_script/WebAppBridge.js::ksVerifyBridgeActor_` AND Python
+`backend/app/auth.py::is_account_active`:
+
+#  | Edge Case Tested                     | Input State                                     | Expected Code / Result             | Verified
+---+--------------------------------------+-------------------------------------------------+------------------------------------+---------
+01 | Missing `Users` sheet                | `{}` (no Users tab)                             | ACTOR_DIRECTORY_UNINITIALIZED (503)| PASS
+02 | Missing `active` column in `Users`   | `["user_id", "role"]`                           | ACTOR_DIRECTORY_INVALID_SCHEMA(503)| PASS
+03 | Missing `user_id` (unknown actor)    | `USR-1` not present in Users                    | ACTOR_NOT_FOUND (403)              | PASS
+04 | Inactive user (`"FALSE"`)            | `active = "FALSE"`                              | ACTOR_INACTIVE (403)               | PASS
+05 | Empty `active` cell (`""`)           | `active = ""`                                   | ACTOR_INACTIVE (403)               | PASS
+06 | Invalid `active` token (`"MAYBE"`)   | `active = "MAYBE"`                              | ACTOR_INACTIVE (403)               | PASS
+07 | Malformed / truncated `Users` row    | Row length < required column index              | ACTOR_DIRECTORY_MALFORMED_ROW (503)| PASS
+08 | Duplicate `user_id` (case-insensitive)| Both `USR-1` and `usr-1` present               | ACTOR_DUPLICATE_IDENTITY (403)     | PASS
+09 | Unauthorized role escalation claim   | Sheet=`SALESMAN`, Envelope claims=`OWNER_ADMIN` | ACTOR_ROLE_MISMATCH (403)          | PASS
+10 | Read-only AUDITOR attempting write   | Sheet=`AUDITOR`, Envelope=`AUDITOR`             | AUDITOR_WRITE_FORBIDDEN (403)      | PASS
+11 | Valid active authorized user         | `USR-1`, `OWNER_ADMIN`, `active = "TRUE"`       | `ok: true`                         | PASS
+12 | Python `is_account_active` strictness| 7 truthy accepted; 15 falsy/blank/invalid/null rejected | 100% fail-closed           | PASS
+
+================================================================================================
+STAGE F: D-3 DECIMAL READ-BACK NORMALIZATION PARITY (PYTHON <-> APPS SCRIPT)
+================================================================================================
+Verified exact output equality across 27 vectors covering all 12 required categories between
+Python `backend/app/apps_script_bridge.py::_normalize_scalar` and Apps Script
+`apps_script/WebAppBridge.js::ksNormalizeReadbackVal_`:
+
+Category | Test Vectors (Python & JS)                    | Canonical Output | Precision / False-Positive Guard | Verified
+---------+-----------------------------------------------+------------------+----------------------------------+---------
+01       | `"0.50"`, `0.50`                              | `"0.5"`          | Leading zero preserved           | PASS
+02       | `"1.20"`, `1.20`                              | `"1.2"`          | Trailing fractional zero trimmed | PASS
+03       | `"10"`, `10`, `"100"`, `100`, `"100.00"`, `100.0` | `"10"`, `"100"`, `"100"` | `10 != 100` (integer zeros preserved!) | PASS
+04       | `"120"`, `120`, `"120.50"`, `120.5`           | `"120"`, `"120.5"`| `120 != 12`                     | PASS
+05       | `"0.005"`, `0.005`, `"0.0000005"`, `0.0000005`| `"0.005"`, `"0.0000005"` | JS `5e-7` expanded cleanly | PASS
+06       | `"-120.50"`, `-120.5`, `"-0.00"`, `"-0.005"`  | `"-120.5"`, `"0"`, `"-0.005"` | Negative zero normalized to `"0"` | PASS
+07       | `"999999999999.99"`, `"1000000000000"`, `Decimal("1234567890123456.7890")` | Exact decimal string | Zero float rounding/truncation | PASS
+08       | `""`, `"   "`                                 | `""`             | `"" != "0"` (blank never zero)   | PASS
+09       | `None` / `null`                               | `""`             | `null != "0"`                    | PASS
+10       | `"12.34.56"`, `"NaN"`, `"Infinity"`, `"12abc"`| Unchanged string | Invalid numbers never coerced    | PASS
+11       | `"0010"`, `"1E2"`                             | `"0010"`, `"1E2"`| Leading-zero codes & sci-strings uncoerced | PASS
+12       | `True`/`true`, `False`/`false`                | `"true"`, `"false"`| `true != 1`, `false != 0`      | PASS
+
+================================================================================================
+STAGE G: D-4 TOKEN & SESSION REVOCATION VERIFICATION (ALL 9 SCENARIOS)
+================================================================================================
+#  | Scenario                                      | Layer Verified         | Expected Behavior                      | Verified
+---+-----------------------------------------------+------------------------+----------------------------------------+---------
+01 | User revokes own token (`REVOKE_TOKEN`)       | Apps Script + Python   | CONFIRMED; persisted to RevokedTokens  | PASS
+02 | Cross-user token revocation attempt           | Apps Script            | HTTP 403 `SELF_TOKEN_REVOKE_MISMATCH`  | PASS
+03 | Non-admin cross-user session revocation       | Apps Script + routers/users.py | HTTP 403 `INSUFFICIENT_ROLE_FOR_AUTH_USERS` / `require_owner` | PASS
+04 | Privilege escalation via forged `actor_role`  | Apps Script + Python   | HTTP 403 `ACTOR_ROLE_MISMATCH` (Apps Script) + authoritative server-side role override (Python) | PASS
+05 | Authorized `OWNER_ADMIN` admin revocation     | Apps Script + users.py | CONFIRMED (`REVOKE_USER_SESSIONS` -> AuthUsers) | PASS
+06 | Expired JWT token                             | Python `auth.py`       | `decode_access_token` returns `None` -> HTTP 401 | PASS
+07 | Revoked & replayed JWT token                  | Python `auth.py`       | Rejected fail-closed with HTTP 401     | PASS
+08 | Session rotation (`sessions_revoked_at`)      | Python `auth.py`       | Pre-rotation token -> 401; post-rotation token -> 200 | PASS
+09 | Multi-threaded concurrent revocation (8x4)    | Python `auth.py`       | All 8 tokens revoked deterministically, 0 race leaks | PASS
+
+================================================================================================
+STAGE H: FIRST-OWNER BOOTSTRAP SAFETY VERIFICATION (ISOLATED — ZERO LIVE EXECUTION)
+================================================================================================
+Verified via `node backend/tests/test_apps_script_bootstrap_vm.mjs` (7/7 PASS) and
+`backend/tests/test_first_owner_bootstrap.py` (100% PASS):
+
+#  | Bootstrap Safety Requirement                  | Implementation Mechanism Verified                         | Verified
+---+-----------------------------------------------+-----------------------------------------------------------+---------
+01 | Strictly one-time restriction                 | `KS_OWNER_BOOTSTRAP_COMPLETED="true"` permanent latch + Users/AuthUsers empty check | PASS
+02 | Duplicate Owner creation prevented            | Single uninterrupted `ScriptLock.tryLock(30000)` + Users/AuthUsers existence check | PASS
+03 | Constant-time bootstrap token verification    | `ksSafeEqual_` / `hmac.compare_digest` over SHA-256 hex digest (no short-circuit) | PASS
+04 | Separate bootstrap secret (no secret reuse)   | `config.py::get_owner_bootstrap_config` rejects reuse of JWT or Bridge HMAC secrets | PASS
+05 | Strong PBKDF2 password hashing                | PBKDF2-HMAC-SHA256 salted hash stored in `AuthUsers.password_hash` (never plaintext) | PASS
+06 | Strict mandatory audit logging under lock     | `ksLogAuditStrictLocked_` allocates `AUD-*` via `ksAllocateIdLocked_` without releasing lock | PASS
+07 | Idempotent retry vs mutated-payload conflict  | Same nonce+hash after completion -> safe replay; mutated payload/nonce -> REJECTED | PASS
+08 | Mid-transaction exception & timeout recovery  | Durable `KS_OWNER_BOOTSTRAP_IN_PROGRESS` marker -> promotes to `RECOVERY_REQUIRED` (HTTP 409, retry=false); preserves partial rows | PASS
+09 | Safe Apps Script HTTP 302 redirect handling   | Python bridge follows ONLY allowlisted `script.googleusercontent.com/macros/echo` via GET without forwarding POST body/token/HMAC headers | PASS
+10 | No anonymous privileged route                 | Pre-lock `ksVerifySignedBridgeEnvelope_` mandatory HMAC + timestamp ±300s + backend `SALES_OWNER_BOOTSTRAP_ENABLED=false` default | PASS
+
+REQUIRED PRE-BOOTSTRAP PRODUCTION CONDITIONS (DO NOT EXECUTE UNTIL G2 + G3 APPROVED):
+  1. `Users` and `AuthUsers` tabs confirmed physically empty (Row 1 headers only, 0 data rows).
+  2. `SALES_OWNER_BOOTSTRAP_ENABLED=true`, unique >=32-char `SALES_OWNER_BOOTSTRAP_SECRET`, and
+     short UTC expiry `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` set temporarily ONLY for the controlled window.
+  3. Matching `KS_OWNER_BOOTSTRAP_TOKEN_HASH` (SHA-256 hex of bootstrap secret) and
+     `KS_OWNER_BOOTSTRAP_EXPIRES_AT` set in Apps Script Properties.
+  4. Immediately after `CONFIRMED` + Owner login verification: set `SALES_OWNER_BOOTSTRAP_ENABLED=false`
+     and delete `SALES_OWNER_BOOTSTRAP_SECRET` / `SALES_OWNER_BOOTSTRAP_EXPIRES_AT` on Render.
+
+================================================================================================
+END OF KS_RELEASE_04_SECURITY_TEST_MATRIX.txt
+================================================================================================

@@ -1,0 +1,428 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+STAGE B: COMPLETE DATABASE INVENTORY RECONCILIATION (255 vs 256 vs 265)
+================================================================================================
+Generated At (UTC)       : 2026-11-27T07:01:50Z
+Mission ID               : KS-RELEASE-04
+Authoritative Database   : Google Sheets (Apps Script = Controlled Write/Posting Layer; MongoDB FORBIDDEN)
+Actual Workbook Presence : UNVERIFIED_LIVE_BLOCKED (Live workbook inspection blocked; Section 15 Hard Stop)
+Policy Compliance        : Zero forced totals; aliases NOT counted as independent physical tabs;
+                           zero claims of physical workbook existence based on source-code references.
+
+================================================================================================
+SECTION 1: EXPLICIT ANSWERS TO ALL 10 REQUIRED STAGE B QUESTIONS (VERBATIM)
+================================================================================================
+
+Q1. Why are there 218 Blueprint tables rather than 255?
+    ANSWER: `apps_script/Code.js::KS_SCHEMA_JSON` contains the 218 formal Blueprint v2.0 business,
+    control, and domain tables (3,074 fields across 15 domain groups, 9 open decisions). The 255-tab
+    cleaned workbook baseline documented in `kawad_swad_erp_master_manual_source_of_truth.md`,
+    `schema_registry.py::WORKBOOK_TARGET_TAB_COUNT = 255`, and `LiveCutoverGate.js` includes NOT ONLY
+    the 218 Blueprint tables, but ALSO non-Blueprint system/report tabs created by Apps Script and
+    non-Blueprint operational/workforce tabs used by the FastAPI backend.
+
+Q2. What exactly accounts for the difference?
+    ANSWER: Programmatic set subtraction across every code registry proves the exact decomposition:
+      - [A] Blueprint v2.0 Dictionary (`KS_SCHEMA_JSON`)                      : 218 tables
+      - [B] Non-Blueprint System / Control / Report tabs (`LiveCutoverGate`)  :   9 tabs
+            (BackupRegister, DBV5_FIELD_DICTIONARY_3074, ExceptionRegister, RPT_PhaseH_ReleaseGate,
+             RPT_SalesAndReceivables, RPT_Section17_OpenDecisions, RPT_StockStatus, RPT_TrialBalance, SystemConfig)
+      - [C] Non-Blueprint Backend Operational / Workforce (`REQUIRED_TABS`)   :  29 tabs
+            (AccountingPeriods, ComplaintsRecalls, CustomerReturnItems, CustomerReturns, DailyClosing,
+             FreelancerMilestones, FreelancerProjects, JournalHeaders, JournalLines, LabourAttendance,
+             LabourMaster, LabourWageRecords, LabourWorkEntries, LotMovements, Payments, ProductionDispatches,
+             ProductionStockLedger, QualityChecks, RawMaterialLedger, SalaryReceipts, SaleItems, Sales,
+             SalesmanStockLedger, ShopVisits, VanLoadingPasses, WorkerAttendance, Workers,
+             WorkforceAuditLogs, WorkforcePayments)
+      => First Arithmetic: 218 + 9 + 29 = 256 canonical repository tabs (+1 vs 255 cleaned workbook baseline).
+      - [D] Extended v2 Pending-Mapping Entries (`schema_registry.py`/bridge) :   9 entries
+      => Second Arithmetic: 256 + 9 = 265 total unique entries referenced across codebases.
+
+Q3. Which entry accounts for 256 rather than 255?
+    ANSWER: HONESTLY UNVERIFIABLE WITHOUT LIVE WORKBOOK ACCESS (DO NOT GUESS).
+    Because live Google Sheets inspection is unavailable and prohibited under Section 15 Hard Stop,
+    we CANNOT name with certainty which single tab among the 256 canonical repository entries is absent
+    from the 255-tab cleaned physical workbook. Source-code evidence narrows the exact candidates to:
+      (a) One of the on-demand Apps Script Phase H report tabs (`RPT_PhaseH_ReleaseGate` or
+          `RPT_Section17_OpenDecisions`), which are generated on demand by report utilities and may
+          not have been materialized at the time of the 255-tab baseline snapshot; OR
+      (b) One of the 29 non-Blueprint backend operational/workforce tabs not yet physically created
+          in the 255-tab workbook (see also Open Decision OD05 on runtime-only tabs).
+    Owner execution of the strictly read-only script in `KS_RELEASE_04_WORKBOOK_HEADER_AUDIT.txt`
+    returns the exact physical tab list and closes this 1-tab delta with 100% certainty.
+
+Q4. What are the nine extended v2 entries?
+    ANSWER: The exact 9 entries outside `[A] U [B] U [C]` (accounting for 256 -> 265) are:
+      1. AssetsMaintenance      (BridgeAllow=YES via RECORD_ASSET_MAINTENANCE; consolidated contract)
+      2. ComplianceRecords      (BridgeAllow=YES via RECORD_COMPLIANCE_ITEM; consolidated contract)
+      3. DistributionDispatches (BridgeAllow=NO; naming variant of Shipments / ProductionDispatches)
+      4. MaterialConsumptions   (BridgeAllow=NO; plural alias of Blueprint MaterialConsumption; prefix MCON)
+      5. ProductSKUs            (BridgeAllow=NO; overlap alias of Blueprint Products / Products_SKU; prefix SKU)
+      6. ProductionLosses       (BridgeAllow=NO; naming variant of Blueprint ProcessLosses / PackagingLosses; prefix PLOSS)
+      7. ProductionWorkEntries  (BridgeAllow=NO; naming variant of ProductionWorkerEntries / LabourWorkEntries; prefix PWE)
+      8. QualityChecks_FGQC     (BridgeAllow=NO; alias of Blueprint FinishedGoodsQualityChecks; prefix FGQC)
+      9. QualityChecks_IPQC     (BridgeAllow=NO; alias of Blueprint InProcessQualityChecks; prefix IPQC)
+
+Q5. Are the nine extended entries approved, pending or merely proposed?
+    ANSWER: PENDING / PROPOSED ONLY — NONE ARE APPROVED INDEPENDENT PHYSICAL TABS.
+    All 9 are explicitly hard-blocked for backend writes in `backend/app/schema_registry.py::PENDING_OWNER_MAPPING_TABS`.
+    Seven are naming variants/aliases of existing Blueprint v2.0 tables (`MaterialConsumptions`, `ProductSKUs`,
+    `ProductionLosses`, `ProductionWorkEntries`, `QualityChecks_FGQC`, `QualityChecks_IPQC`, `DistributionDispatches`),
+    and two (`AssetsMaintenance`, `ComplianceRecords`) are proposed consolidated contracts that overlap existing
+    Blueprint tables (`AssetRegister`+`MaintenanceRecords`, `ComplianceRegister`+`ComplianceFilings`+`ComplianceTasks`).
+    They must NEVER be created as independent physical tabs without explicit Owner G3 schema sign-off.
+
+Q6. Are there duplicate aliases?
+    ANSWER: YES — 8 alias/overlap pairs exist in code registries and MUST NOT be counted as independent physical tabs:
+      1. `ExceptionLogs` -> deprecated legacy alias of canonical `ExceptionRegister` (excluded from 265 total).
+      2. `MaterialConsumptions` -> plural alias of Blueprint `MaterialConsumption`.
+      3. `ProductSKUs` -> overlap alias of Blueprint `Products` / `Products_SKU`.
+      4. `QualityChecks_FGQC` -> alias of Blueprint `FinishedGoodsQualityChecks`.
+      5. `QualityChecks_IPQC` -> alias of Blueprint `InProcessQualityChecks`.
+      6. `ProductionWorkEntries` -> naming alias overlapping Blueprint `ProductionWorkerEntries` & operational `LabourWorkEntries`.
+      7. `ProductionLosses` -> naming variant overlapping Blueprint `ProcessLosses` & `PackagingLosses`.
+      8. `DistributionDispatches` -> naming variant overlapping Blueprint `Shipments` & operational `ProductionDispatches`.
+      (Plus 2 proposed consolidations: `AssetsMaintenance` and `ComplianceRecords`, and 3 ID-prefix overlaps:
+       `PKG`/`PKB`, `RCPT`/`PAY`, `SAL` tracked in `schema_registry.py::TAB_RECONCILIATION_CONFLICTS`.)
+
+Q7. Are there deprecated tables still referenced by code?
+    ANSWER: YES — ONE deprecated legacy alias (`ExceptionLogs`) is still referenced strictly in metadata/documentation/UI
+    reconciliation notices (ZERO active write paths target `ExceptionLogs`):
+      - `backend/app/schema_registry.py:114-131` (`DEPRECATED_TAB_ALIASES = {'ExceptionLogs': 'ExceptionRegister'}`
+        and `TAB_RECONCILIATION_CONFLICTS['EXC']` documenting deprecation).
+      - `src/views/ErpOperationsHubView.tsx:1679` (UI banner explaining `ExceptionLogs` is deprecated in favor of `ExceptionRegister`).
+      - `backend/tests/*` (regression tests asserting `ExceptionLogs` resolves/deprecates cleanly to `ExceptionRegister`).
+    Additionally, forbidden legacy scratch prefixes (`KS_P1_`, `KS_P2_`, `KS_P3_`, `DBV5_` except `DBV5_FIELD_DICTIONARY_3074`, `DB_`)
+    are explicitly referenced ONLY in deny-list guards (`schema_registry.py:53-70` & `WebAppBridge.js:30`) to block recreation.
+
+Q8. Are backend operational tables actually physical Google Sheets tabs?
+    ANSWER: UNVERIFIED_LIVE_BLOCKED — CANNOT BE CLAIMED FROM SOURCE CODE ALONE.
+    All 29 non-Blueprint backend operational/workforce tables (`Sales`, `SaleItems`, `Payments`, `DailyClosing`,
+    `JournalHeaders`, `JournalLines`, `Workers`, `LabourMaster`, etc.) are declared in `backend/app/sheets.py::REQUIRED_TABS`
+    and referenced by FastAPI routers and `WebAppBridge.js`, and Blueprint Open Decision OD01/OD03/OD05 notes
+    operational legacy tables exist in the operational model. However, because live Google Sheets inspection is
+    blocked in this sandbox, physical existence of every one of the 29 tabs is honestly marked `UNVERIFIED_LIVE_BLOCKED`
+    until confirmed by the Owner's read-only header export (`KS_RELEASE_04_WORKBOOK_HEADER_AUDIT.txt`).
+
+Q9. Which tables are canonical business records?
+    ANSWER: 238 tables across Blueprint v2.0 business domains ([A] minus control/governance/auth tabs)
+    and active backend operational/workforce tables ([C]), including:
+      - Core Master Data: Customers, Suppliers, Products, RawMaterials, PackagingMaterials, Warehouses, ChartOfAccounts, etc.
+      - Procurement & Inventory: PurchaseOrders, GoodsReceipts, GoodsReceiptItems, SupplierBills, SupplierPayments,
+        InventoryLots, InventoryBalances, InventoryMovements, ProductLots, LotMovements, RawMaterialLedger, ProductionStockLedger, etc.
+      - Manufacturing, Packaging & QC: MillingBatches, ProductionBatches, ProductionOutputs, PackagingBatches,
+        PackagingOutputs, IncomingQualityChecks, InProcessQualityChecks, FinishedGoodsQualityChecks, QualityChecks, etc.
+      - Sales, Distribution & Finance: Sales, SaleItems, SalesOrders, SalesOrderItems, Payments, CustomerPayments,
+        CustomerReturns, CustomerReturnItems, Expenses, DailyClosing, JournalHeaders, JournalLines, JournalEntries,
+        JournalEntryLines, AccountingPeriods, FinancialPeriods, CashLedger, VanLoadingPasses, ShopVisits, etc.
+      - Workforce & Payroll: Workers, WorkerAttendance, Employees, EmployeeAttendance, EmployeeAdvances, PayrollRuns,
+        PayrollItems, SalaryPayments, SalaryIncentives, SalaryReceipts, LabourMaster, LabourAttendance, LabourWorkEntries,
+        LabourWageRecords, FreelancerProjects, FreelancerMilestones, WorkforcePayments, etc.
+    (Every individual table is explicitly classified in the 266-row table in Section 2 below.)
+
+Q10. Which tables are control or governance records?
+    ANSWER: 18 control, governance, security-auth, and read-only report tables:
+      - Internal Governance Only (HTTP 403 on direct bridge writes — 3 tabs):
+          AuditLog, ExceptionRegister, IdAllocations
+      - Protected Control / Metadata Tables (HTTP 403 on direct bridge writes — 4 tabs):
+          BackupRegister, DBV5_FIELD_DICTIONARY_3074, START_HERE, SystemConfig
+      - Security & Auth Control Tables (NO-CACHE; strictly role/self-gated — 4 tabs):
+          AuthUsers, RevokedTokens, CustomRoles, Users
+      - Runtime Configuration & Transaction Control Tables (2 tabs):
+          Settings, IncompleteTransactions
+      - Read-Only Generated Report Views (NEVER bridge-writable — 5 tabs):
+          RPT_PhaseH_ReleaseGate, RPT_SalesAndReceivables, RPT_Section17_OpenDecisions, RPT_StockStatus, RPT_TrialBalance
+      (Plus governance-domain Blueprint tables such as ApprovalRequests, ApprovalLimits, ApprovalSteps, AccessReviews,
+       PolicyRegister, ComplianceRegister, ComplianceCalendar, DocumentRegister, LoginHistory, WorkforceAuditLogs.)
+
+================================================================================================
+SECTION 2: COMPLETE 265 CANONICAL ENTRIES + 1 DEPRECATED ALIAS (EXACT 12 REQUIRED COLUMNS)
+================================================================================================
+Exact Required Columns:
+  1. Canonical name | 2. Physical tab name, if known | 3. Blueprint membership | 4. System/report membership |
+  5. Backend operational membership | 6. Extended v2 membership | 7. Deprecated status | 8. Alias status |
+  9. Runtime-only status | 10. Actual workbook presence | 11. Classification | 12. Explanation
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+AccessReviews | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+AccountingPeriods | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (7 cols; bridge_actions=1; guard=ALIGNED).
+AccountsPayable | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+AccountsReceivable | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+AdvertisingSpend | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ApprovalLimits | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ApprovalRequests | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '00_Control & Setup' (17 cols; req=YES; bridge_actions=7; guard=ALIGNED).
+ApprovalSteps | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+AssetRegister | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+AssetsMaintenance | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Consolidated contract overlapping AssetRegister + MaintenanceRecords) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_CONSOLIDATED | BridgeAllow=YES via RECORD_ASSET_MAINTENANCE; hard-blocked in PENDING_OWNER_MAPPING_TABS; overlaps BP AssetRegister & MaintenanceRecords.
+AuditLog | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_GOVERNANCE) | UNVERIFIED_LIVE_BLOCKED | GOVERNANCE_CONTROL_RECORD | Internal governance table; direct bridge writes denied (HTTP 403); written only by Apps Script governance helpers.
+AuthUsers | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_AUTH_CONTROL) | UNVERIFIED_LIVE_BLOCKED | SECURITY_AUTH_CONTROL_RECORD | Security/identity control table (no_cache=YES; bridge_actions=3; guard=ALIGNED).
+BackupRegister | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (RUNTIME_CONTROL) | UNVERIFIED_LIVE_BLOCKED | CONTROL_METADATA_RECORD | Protected control/metadata tab; direct bridge writes denied (HTTP 403).
+BankReconciliation | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+BankTransactions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+BatchAllocations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Budgets | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+BusinessContinuityPlans | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+BusinessRegistrations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CalibrationRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CampaignCreatives | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CashFlowForecasts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CashLedger | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (17 cols; req=YES; bridge_actions=0; guard=ALIGNED).
+ChannelPriceLists | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ChannelReconciliation | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ChartOfAccounts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (12 cols; req=YES; bridge_actions=0; guard=ALIGNED).
+CompanyProfile | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ComplaintsRecalls | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (17 cols; bridge_actions=2; guard=ALIGNED).
+ComplianceCalendar | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '00_Control & Setup' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ComplianceFilings | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ComplianceRecords | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Consolidated contract overlapping ComplianceRegister + ComplianceFilings + ComplianceTasks) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_CONSOLIDATED | BridgeAllow=YES via RECORD_COMPLIANCE_ITEM; hard-blocked in PENDING_OWNER_MAPPING_TABS; overlaps BP ComplianceRegister/Filings/Tasks.
+ComplianceRegister | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '00_Control & Setup' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ComplianceTasks | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ConflictOfInterest | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CorrectiveActions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CreditNotes | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (16 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CustomRoles | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_AUTH_CONTROL) | UNVERIFIED_LIVE_BLOCKED | SECURITY_AUTH_CONTROL_RECORD | Security/identity control table (no_cache=YES; bridge_actions=3; guard=CONFLICTING_12).
+CustomerAddresses | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CustomerComplaints | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (16 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CustomerCreditLimits | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CustomerInteractions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CustomerOutstanding | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CustomerPaymentAllocations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+CustomerPayments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (15 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+CustomerReturnItems | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (13 cols; bridge_actions=0; guard=ALIGNED).
+CustomerReturns | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (15 cols; bridge_actions=1; guard=ALIGNED).
+Customers | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (16 cols; req=YES; bridge_actions=2; guard=CONFLICTING_12).
+DBV5_FIELD_DICTIONARY_3074 | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (RUNTIME_CONTROL) | UNVERIFIED_LIVE_BLOCKED | CONTROL_METADATA_RECORD | Protected control/metadata tab; direct bridge writes denied (HTTP 403).
+DailyClosing | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (19 cols; bridge_actions=2; guard=ALIGNED).
+DamagedStock | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+DeliveryProof | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+DeliveryTracking | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (11 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+DemandPlans | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+DepreciationRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+DisputeRegister | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+DistributionDispatches | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Naming variant of Blueprint Shipments / ProductionDispatches) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_VARIANT | BridgeAllow=NO; hard-blocked in PENDING_OWNER_MAPPING_TABS; naming variant not in Blueprint 218.
+DocumentRegister | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '00_Control & Setup' (17 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+EWayBills | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+EmployeeAdvances | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=NO; bridge_actions=1; guard=PENDING_24).
+EmployeeAttendance | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=YES; bridge_actions=2; guard=ALIGNED).
+EmployeeDocuments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=YES; bridge_actions=0; guard=ALIGNED).
+EmployeeGrievances | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Employees | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (20 cols; req=NO; bridge_actions=0; guard=PENDING_24).
+EnergyLogs | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+EquipmentCleaningLogs | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+EquipmentDowntime | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ExceptionRegister | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (RUNTIME_GOVERNANCE) | UNVERIFIED_LIVE_BLOCKED | GOVERNANCE_CONTROL_RECORD | Internal governance table; direct bridge writes denied (HTTP 403); written only by Apps Script governance helpers.
+ExpenseCategories | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (11 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Expenses | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (22 cols; req=YES; bridge_actions=2; guard=CONFLICTING_12).
+ExpiredStock | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+FactoryLocations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+FailedDeliveries | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+FinancialClosings | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+FinancialPeriods | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (11 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+FinishedGoodsQualityChecks | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (14 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+FixedAssets | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+FreelancerMilestones | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (13 cols; bridge_actions=3; guard=ALIGNED).
+FreelancerProjects | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (13 cols; bridge_actions=1; guard=ALIGNED).
+FreightCharges | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+GSTTransactions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (18 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+GatewayFees | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+GatewayTransactions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+GeneralLedger | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+GoodsReceiptItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (17 cols; req=YES; bridge_actions=0; guard=ALIGNED).
+GoodsReceipts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (18 cols; req=YES; bridge_actions=2; guard=ALIGNED).
+HoldReleaseRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+HygieneChecklists | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+IdAllocations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_GOVERNANCE) | UNVERIFIED_LIVE_BLOCKED | GOVERNANCE_CONTROL_RECORD | Internal governance table; direct bridge writes denied (HTTP 403); written only by Apps Script governance helpers.
+InProcessQualityChecks | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (14 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+IncentiveRules | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+IncidentRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+IncomingQualityChecks | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (15 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+IncompleteTransactions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_CONTROL) | UNVERIFIED_LIVE_BLOCKED | SYSTEM_CONFIG_TXN_CONTROL_RECORD | Blueprint control table for settings/transaction recovery (bridge_actions=0).
+InfluencerAgreements | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+InspectionRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (16 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+InsuranceClaims | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+InsurancePolicies | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+InventoryBalances | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+InventoryLots | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (19 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+InventoryMovements | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (19 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+InventoryValuation | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+JournalEntries | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (14 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+JournalEntryLines | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+JournalHeaders | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (12 cols; bridge_actions=2; guard=ALIGNED).
+JournalLines | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (10 cols; bridge_actions=0; guard=ALIGNED).
+KPIRegister | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+LabelVersions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+LabourAttendance | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (13 cols; bridge_actions=1; guard=ALIGNED).
+LabourMaster | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (14 cols; bridge_actions=2; guard=ALIGNED).
+LabourWageRecords | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (19 cols; bridge_actions=0; guard=ALIGNED).
+LabourWorkEntries | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (15 cols; bridge_actions=4; guard=ALIGNED).
+Leads | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+LeaveRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+LoanRepayments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Loans | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+LoginHistory | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+LotMovements | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (11 cols; bridge_actions=0; guard=ALIGNED).
+MaintenanceRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ManagementReports | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MarketingAttribution | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MarketingCampaigns | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MarketplaceAccounts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MarketplaceFeeStatements | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MarketplaceOrders | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MarketplaceSettlements | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (18 cols; req=NO; bridge_actions=1; guard=PENDING_24).
+MaterialConsumption | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (14 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+MaterialConsumptions | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Plural alias of Blueprint MaterialConsumption) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_ALIAS | BridgeAllow=NO; LOCKED_32 prefix MCON; plural naming alias of Blueprint MaterialConsumption; write-blocked.
+MaterialIssues | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MillingBatches | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (20 cols; req=YES; bridge_actions=1; guard=ALIGNED).
+MillingCosts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+MockRecallExercises | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+NonConformanceRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+OrderCancellations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+OrderStatusHistory | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+OvertimeRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PackagingBatches | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (32 cols; req=YES; bridge_actions=5; guard=CONFLICTING_12).
+PackagingCostRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PackagingLosses | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PackagingMaterialConsumption | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PackagingMaterialIssues | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PackagingMaterials | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (13 cols; req=NO; bridge_actions=0; guard=PENDING_24).
+PackagingOutputs | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (13 cols; req=NO; bridge_actions=1; guard=PENDING_24).
+PackagingPlans | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PackagingQualityChecks | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '06_Packaging & Finished Goods' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PaymentAllocations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (11 cols; req=NO; bridge_actions=0; guard=PENDING_24).
+PaymentMethods | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (10 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Payments | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (9 cols; bridge_actions=2; guard=ALIGNED).
+PayrollItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (23 cols; req=YES; bridge_actions=1; guard=ALIGNED).
+PayrollRuns | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=YES; bridge_actions=2; guard=ALIGNED).
+PestControlRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PolicyAcknowledgements | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PolicyRegister | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '00_Control & Setup' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PolicyVersions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProcessLosses | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductLots | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (19 cols; req=YES; bridge_actions=2; guard=ALIGNED).
+ProductPrices | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductSKUs | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Overlap alias of Blueprint Products / Products_SKU) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_ALIAS | BridgeAllow=NO; LOCKED_32 prefix SKU; alias overlapping Blueprint Products & Products_SKU; write-blocked.
+ProductTaxRules | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductVariants | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (10 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductionApprovals | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductionBatches | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (24 cols; req=YES; bridge_actions=5; guard=CONFLICTING_12).
+ProductionCostRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductionDispatches | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (11 cols; bridge_actions=3; guard=ALIGNED).
+ProductionForecasts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductionLosses | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Naming variant of Blueprint ProcessLosses / PackagingLosses) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_VARIANT | BridgeAllow=NO; LOCKED_32 prefix PLOSS; naming variant of Blueprint ProcessLosses/PackagingLosses; write-blocked.
+ProductionOrders | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (17 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+ProductionOutputs | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (13 cols; req=NO; bridge_actions=1; guard=PENDING_24).
+ProductionPlans | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ProductionStockLedger | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (18 cols; bridge_actions=2; guard=ALIGNED).
+ProductionWorkEntries | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Naming variant of Blueprint ProductionWorkerEntries / LabourWorkEntries) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_VARIANT | BridgeAllow=NO; LOCKED_32 prefix PWE; naming variant of Blueprint ProductionWorkerEntries & operational LabourWorkEntries; write-blocked.
+ProductionWorkerEntries | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Products | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (14 cols; req=YES; bridge_actions=2; guard=CONFLICTING_12).
+Products_SKU | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PurchaseForecasts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+PurchaseOrderItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (15 cols; req=YES; bridge_actions=0; guard=ALIGNED).
+PurchaseOrders | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (15 cols; req=YES; bridge_actions=2; guard=ALIGNED).
+PurchaseRequisitions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+QualityChecks | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (15 cols; bridge_actions=2; guard=ALIGNED).
+QualityChecks_FGQC | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Alias of Blueprint FinishedGoodsQualityChecks) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_ALIAS | BridgeAllow=NO; LOCKED_32 prefix FGQC; shorthand alias of Blueprint FinishedGoodsQualityChecks; write-blocked.
+QualityChecks_IPQC | UNKNOWN (LIVE_BLOCKED) | NO | NO | NO | YES | NO | YES (Alias of Blueprint InProcessQualityChecks) | NO (PROPOSED_CONTRACT_ONLY) | UNVERIFIED_LIVE_BLOCKED | PROPOSED_PENDING_ALIAS | BridgeAllow=NO; LOCKED_32 prefix IPQC; shorthand alias of Blueprint InProcessQualityChecks; write-blocked.
+QualityStandards | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+QuarantineStock | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (16 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+RPT_PhaseH_ReleaseGate | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (ON_DEMAND_REPORT) | UNVERIFIED_LIVE_BLOCKED | READ_ONLY_REPORT_VIEW | Apps Script generated read-only report tab (protected in LiveCutoverGate; never bridge-writable).
+RPT_SalesAndReceivables | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (ON_DEMAND_REPORT) | UNVERIFIED_LIVE_BLOCKED | READ_ONLY_REPORT_VIEW | Apps Script generated read-only report tab (protected in LiveCutoverGate; never bridge-writable).
+RPT_Section17_OpenDecisions | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (ON_DEMAND_REPORT) | UNVERIFIED_LIVE_BLOCKED | READ_ONLY_REPORT_VIEW | Apps Script generated read-only report tab (protected in LiveCutoverGate; never bridge-writable).
+RPT_StockStatus | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (ON_DEMAND_REPORT) | UNVERIFIED_LIVE_BLOCKED | READ_ONLY_REPORT_VIEW | Apps Script generated read-only report tab (protected in LiveCutoverGate; never bridge-writable).
+RPT_TrialBalance | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (ON_DEMAND_REPORT) | UNVERIFIED_LIVE_BLOCKED | READ_ONLY_REPORT_VIEW | Apps Script generated read-only report tab (protected in LiveCutoverGate; never bridge-writable).
+RawMaterialLedger | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (12 cols; bridge_actions=5; guard=ALIGNED).
+RawMaterials | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (11 cols; req=YES; bridge_actions=2; guard=CONFLICTING_12).
+RecallRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+RecipeIngredients | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+RecipeVersions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Recipes | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '04_Milling & Production' (15 cols; req=YES; bridge_actions=2; guard=ALIGNED).
+RefundRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ReturnInspections | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (16 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ReturnShipments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+RevokedTokens | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_AUTH_CONTROL) | UNVERIFIED_LIVE_BLOCKED | SECURITY_AUTH_CONTROL_RECORD | Security/identity control table (no_cache=YES; bridge_actions=1; guard=ALIGNED).
+RiskRegister | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '00_Control & Setup' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+START_HERE | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_CONTROL) | UNVERIFIED_LIVE_BLOCKED | CONTROL_METADATA_RECORD | Protected control/metadata tab; direct bridge writes denied (HTTP 403).
+SalaryIncentives | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (15 cols; req=YES; bridge_actions=3; guard=CONFLICTING_12).
+SalaryPayments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (15 cols; req=NO; bridge_actions=0; guard=PENDING_24).
+SalaryReceipts | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (17 cols; bridge_actions=0; guard=ALIGNED).
+SalaryStructures | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (17 cols; req=YES; bridge_actions=1; guard=ALIGNED).
+SaleItems | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (14 cols; bridge_actions=0; guard=ALIGNED).
+Sales | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (23 cols; bridge_actions=7; guard=CONFLICTING_12).
+SalesChannels | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (10 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesCommissions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesDiscounts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesForecasts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesInvoiceItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesInvoices | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (20 cols; req=NO; bridge_actions=1; guard=ALIGNED).
+SalesOrderItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (16 cols; req=NO; bridge_actions=0; guard=PENDING_24).
+SalesOrders | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (21 cols; req=NO; bridge_actions=1; guard=PENDING_24).
+SalesReturnItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesReturns | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '07_Sales & Customer' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesTargets | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '14_Reports & Planning' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SalesmanStockLedger | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (15 cols; bridge_actions=3; guard=ALIGNED).
+Settings | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_CONTROL) | UNVERIFIED_LIVE_BLOCKED | SYSTEM_CONFIG_TXN_CONTROL_RECORD | Blueprint control table for settings/transaction recovery (bridge_actions=1).
+SettlementDeductions | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '08_Channel, Marketplace & Marketing' (11 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ShelfLifeRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ShiftSchedules | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ShipmentItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Shipments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ShopVisits | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (9 cols; bridge_actions=1; guard=CONFLICTING_12).
+SpareParts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+StockAdjustments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+StockCountLines | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+StockCounts | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+StockDiscrepancies | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '00_Control & Setup' (17 cols; req=YES; bridge_actions=3; guard=ALIGNED).
+StockReservations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+StockTransferItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+StockTransfers | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '03_Inventory & Warehousing' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+StorageLocations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SupplierAdvances | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SupplierBillItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (15 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SupplierBills | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (20 cols; req=YES; bridge_actions=1; guard=ALIGNED).
+SupplierCreditNotes | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SupplierDocuments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SupplierPayments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (20 cols; req=YES; bridge_actions=2; guard=ALIGNED).
+SupplierPerformance | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SupplierQuotations | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (16 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+SupplierReturnItems | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (15 cols; req=YES; bridge_actions=0; guard=ALIGNED).
+SupplierReturns | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '02_Procurement & Supplier' (14 cols; req=YES; bridge_actions=1; guard=ALIGNED).
+Suppliers | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (14 cols; req=YES; bridge_actions=2; guard=CONFLICTING_12).
+SystemConfig | UNKNOWN (LIVE_BLOCKED) | NO | YES | NO | NO | NO | NO | YES (RUNTIME_CONTROL) | UNVERIFIED_LIVE_BLOCKED | CONTROL_METADATA_RECORD | Protected control/metadata tab; direct bridge writes denied (HTTP 403).
+TaxFilings | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '10_Finance & Accounting' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+TrainingRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+TransportDocuments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Transporters | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '09_Distribution & Logistics' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+UnitsOfMeasurement | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (11 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+Users | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_AUTH_CONTROL) | UNVERIFIED_LIVE_BLOCKED | SECURITY_AUTH_CONTROL_RECORD | Security/identity control table (no_cache=NO; bridge_actions=7; guard=ALIGNED).
+VanLoadingPasses | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (19 cols; bridge_actions=4; guard=ALIGNED).
+Warehouses | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '01_Business & Master Data' (12 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+WasteDisposalRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+WasteRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (13 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+WaterQualityRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '05_Quality & Food Safety' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+WaterUsageLogs | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '13_Assets, Environment & Risk' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+WhistleblowerReports | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '12_Governance, Compliance & Audit' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+WorkActivityLogs | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (11 cols; req=YES; bridge_actions=0; guard=ALIGNED).
+WorkAssignments | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (17 cols; req=YES; bridge_actions=4; guard=ALIGNED).
+WorkerAttendance | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (10 cols; bridge_actions=4; guard=ALIGNED).
+Workers | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (7 cols; bridge_actions=1; guard=CONFLICTING_12).
+WorkforceAuditLogs | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (7 cols; bridge_actions=0; guard=ALIGNED).
+WorkforcePayments | UNKNOWN (LIVE_BLOCKED) | NO | NO | YES | NO | NO | NO | YES (OPERATIONAL_EXTENSION_OD05) | UNVERIFIED_LIVE_BLOCKED | BACKEND_OPERATIONAL_BUSINESS_RECORD | Non-Blueprint backend operational/workforce tab in REQUIRED_TABS (14 cols; bridge_actions=1; guard=ALIGNED).
+WorkplaceSafetyRecords | UNKNOWN (LIVE_BLOCKED) | YES | NO | NO | NO | NO | NO | NO (BLUEPRINT_218) | UNVERIFIED_LIVE_BLOCKED | CANONICAL_BLUEPRINT_BUSINESS_RECORD | Blueprint v2.0 domain '11_Workforce & Payroll' (14 cols; req=NO; bridge_actions=0; guard=ALIGNED).
+ExceptionLogs | N/A (DO NOT CREATE; canonical=ExceptionRegister) | NO | NO | NO | NO | YES (DEPRECATED) | YES (Alias of ExceptionRegister) | NO | UNVERIFIED_LIVE_BLOCKED | DEPRECATED_LEGACY_ALIAS_EXCLUDED_FROM_265 | Deprecated draft alias in schema_registry.py::DEPRECATED_TAB_ALIASES and ErpOperationsHubView.tsx:1679; excluded from 265 count.
+
+================================================================================================
+SECTION 3: EXACT ARITHMETIC VERIFICATION
+================================================================================================
+  Blueprint v2.0 Tables (`KS_SCHEMA_JSON`)                    : 218
+  Non-Blueprint System / Report (`LiveCutoverGate.js`)        :   9
+  Non-Blueprint Backend Operational / Workforce (`sheets.py`) :  29
+  ------------------------------------------------------------+----
+  First Arithmetic (Canonical Repository Union)               : 256  (variance vs 255 cleaned baseline = +1; UNVERIFIED_LIVE_BLOCKED)
+  Extended v2 Pending-Mapping Entries (Write-Blocked)         :   9
+  ------------------------------------------------------------+----
+  Second Arithmetic (Total Unique Canonical Entries)          : 265
+  Deprecated Aliases Listed Separately (NOT Counted in 265)   :   1  (ExceptionLogs -> ExceptionRegister)
+
+================================================================================================
+END OF KS_RELEASE_04_DATABASE_RECONCILIATION.txt
+================================================================================================

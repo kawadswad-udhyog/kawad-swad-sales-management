@@ -1,0 +1,65 @@
+================================================================================================
+KAWAD SWAD ERP — MISSION KS-RELEASE-04
+STAGE I — OWNER INPUT REQUIREMENTS & PRODUCTION CONFIGURATION MATRIX
+================================================================================================
+Generated At (UTC)   : 2026-11-27T06:34:00Z
+Mission ID           : KS-RELEASE-04
+Policy               : ZERO guessed production URLs, IDs, or secrets. Every unverified value
+                       is explicitly marked OWNER INPUT REQUIRED.
+
+------------------------------------------------------------------------------------------------
+1. COMPLETE 11-ROW PRODUCTION CONFIGURATION MATRIX
+------------------------------------------------------------------------------------------------
+#  | Setting                              | Current Value in Repo                               | Source File(s)                                | Verified | Owner Confirmation Required
+---+--------------------------------------+-----------------------------------------------------+-----------------------------------------------+----------+----------------------------
+01 | Production Frontend Render URL       | https://kawad-swad-sales-frontend.onrender.com      | render.yaml:44, config.py:205, .env.example:15| PARTIAL  | YES — Confirm live production static site URL (or custom domain)
+02 | Production Backend Render URL        | DEV ONLY: https://kawad-swad-sales-dev.onrender.com | render.yaml:9,12,15,24; public/_redirects:2-4 | NO (DEV) | YES — CRITICAL: Provide real production backend URL & service name! Do NOT route prod frontend to `-dev`!
+03 | Frontend API Base URL (`VITE_API_URL`)| Blank (same-origin rewrites) / example placeholder | src/services/api.ts:68, render.yaml:20, .env.example:8 | PARTIAL | YES — Confirm same-origin Render rewrite vs explicit prod API URL
+04 | Backend Health Endpoint              | GET /health (proxied via render.yaml:10-12 & _redirects:3) | backend/main.py, render.yaml:11, _redirects:3 | YES      | YES — Confirm healthcheck target on real production Render service
+05 | Production CORS Origins              | https://kawad-swad-sales-frontend.onrender.com      | render.yaml:43-44, backend/app/config.py:186-238 | YES (code)| YES — Confirm exact production HTTPS origin(s); localhost/wildcard fail closed when SALES_ENV=production
+06 | Auth Callback / Proxy Routes         | /auth/* & /api/* rewritten to backend (JWT Bearer, no OAuth redirect) | render.yaml:6-15, public/_redirects:2-4 | YES (code)| YES — Confirm rewrite destinations once real prod backend URL is set
+07 | Production Environment Mode          | SALES_ENV=production (SALES_TESTING unset/false; WEB_CONCURRENCY=1; SALES_INSTANCE_COUNT=1) | render.yaml:45-52, config.py:115-146 | YES (code)| YES — Confirm Render persistent disk mounted at /var/data/kawad_swad (1 GB+)
+08 | Production Google Spreadsheet ID     | NOT SET (`sync: false` in render.yaml:37-38)        | render.yaml:37-38, config.py:8                | NO       | YES — Provide production Master Workbook ID in Render secret env only
+09 | Google Service Account Credentials   | /etc/secrets/sales-service-account.json (missing locally) | render.yaml:39-40, config.py:9-12       | NO       | YES — Confirm Render Secret File uploaded & shared read-only with workbook
+10 | Apps Script Web App Deployment URL   | NOT SET (`sync: false` in render.yaml:63-64)        | render.yaml:61-64, config.py:21-22            | NO       | YES — Provide deployed production Apps Script `/exec` URL after G3 deploy
+11 | Apps Script Properties & Shared Keys | Required Script Property names verified in code:    | WebAppBridge_BootstrapIntegration.js:53,      | YES (names)| YES — Provision unique >=32-char secrets (NEVER reuse across boundaries)
+   |                                      |  - `SALES_APPS_SCRIPT_SHARED_SECRET` (>=32 chars; MUST match Render env `SALES_APPS_SCRIPT_SHARED_SECRET`) | BootstrapOwnerHandler.js:50-62, config.py:52-66 | |
+   |                                      |  - `KS_OWNER_BOOTSTRAP_TOKEN_HASH` (SHA-256 hex of temporary `SALES_OWNER_BOOTSTRAP_SECRET`) | | |
+   |                                      |  - `KS_OWNER_BOOTSTRAP_EXPIRES_AT` (ISO-8601 UTC expiry matching `SALES_OWNER_BOOTSTRAP_EXPIRES_AT`) | | |
+   |                                      |  - Runtime latch keys managed automatically by Apps Script: `KS_OWNER_BOOTSTRAP_IN_PROGRESS`, `KS_OWNER_BOOTSTRAP_COMPLETED`, `KS_OWNER_BOOTSTRAP_RECOVERY_REQUIRED` | | |
+
+------------------------------------------------------------------------------------------------
+2. CRITICAL DEV-VS-PRODUCTION ISOLATION DEFECT FLAGGED FOR OWNER ACTION
+------------------------------------------------------------------------------------------------
+  - Both `render.yaml` (lines 9, 12, 15, 24) and `public/_redirects` (lines 2-4) currently point
+    frontend proxy rewrites (`/api/*`, `/health`, `/auth/*`) to the DEV service
+    `https://kawad-swad-sales-dev.onrender.com` and declare the web service name `kawad-swad-sales-dev`.
+  - Per governance rules, we DID NOT invent or guess a production backend URL.
+  - Before production deployment (Gate G3), the Owner MUST supply the authoritative production
+    Render backend service name & HTTPS URL so `render.yaml` and `public/_redirects` can be
+    updated cleanly with zero risk of routing production traffic to a dev backend.
+
+------------------------------------------------------------------------------------------------
+3. STAGE B & STAGE C WORKBOOK CLOSURE INPUT REQUIRED FROM OWNER
+------------------------------------------------------------------------------------------------
+  1. Run the strictly read-only function `ksExportReadOnlyWorkbookHeadersForAudit()` from
+     `KS_RELEASE_04_WORKBOOK_HEADER_AUDIT.txt` on the Master Google Spreadsheet.
+  2. Return ONLY the resulting Row-1 header JSON (zero business data / zero PII).
+  3. Confirm disposition of:
+     - The exact 1-tab variance between 256 repo canonical tabs and the 255 cleaned workbook baseline.
+     - Physical Row-1 headers for the 12 `CONFLICTING_CORE_SCHEMA_TABS` and 24 `PENDING_OWNER_MAPPING_TABS`.
+     - ID prefix cutover policy for the 3 prefix collisions (`PKG`/`PKB`, `RCPT`/`PAY`, `SAL`).
+  4. Approve CA-governed policy JSON (`SALES_CA_POLICY_CONFIG_JSON`) if any default tax/valuation
+     overrides are required for go-live.
+
+------------------------------------------------------------------------------------------------
+4. OWNER GIT TRANSFER APPROVAL REQUIRED (STAGE J)
+------------------------------------------------------------------------------------------------
+  - Sandbox has no GitHub write credentials and Section 15 forbids pushing without G2 + G3 approval.
+  - After GPT G2 acceptance and Owner G3 authorization, the Owner applies
+    `KS_RELEASE_04_FROM_C8E5A15.bundle` (or `.patch`) onto `origin/main` (`c8e5a15b...`) and pushes
+    branch `release/ks-release-04` (`e4e86802...`) via standard PR (no force-push).
+
+================================================================================================
+END OF KS_RELEASE_04_OWNER_INPUT_REQUIREMENTS.txt
+================================================================================================
